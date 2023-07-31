@@ -21,9 +21,6 @@ import java.util.concurrent.CopyOnWriteArraySet;
 
 /**
  * 描述：websocket 服务端
- *
- * @author https:www.unfbx.com
- * @date 2023-03-23
  */
 @Slf4j
 @Component

@@ -7,8 +7,6 @@ import java.util.List;
 /**
  * 描述：
  *
- * @author https:www.unfbx.com
- * @date 2023-04-10
  */
 @Data
 public class Chat {
