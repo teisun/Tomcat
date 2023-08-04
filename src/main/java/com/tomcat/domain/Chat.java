@@ -1,4 +1,4 @@
-package com.tomcat.entity;
+package com.tomcat.domain;
 
 import com.unfbx.chatgpt.entity.chat.Message;
 import lombok.Data;
