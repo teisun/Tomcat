@@ -19,4 +19,12 @@ public class AuthenticationRequest {
     public String phoneNum;
 
     public String deviceId;
+
+    public AuthenticationRequest(String username, String password, String email, String phoneNum, String deviceId) {
+        this.username = username;
+        this.password = password;
+        this.email = email;
+        this.phoneNum = phoneNum;
+        this.deviceId = deviceId;
+    }
 }

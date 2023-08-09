@@ -1,11 +1,15 @@
 package com.tomcat.domain;
 
+import lombok.Data;
+
 import javax.persistence.*;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+@Data
 @Entity
+@Table(name = "user")
 public class User {
 
   @Id
