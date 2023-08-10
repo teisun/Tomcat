@@ -54,7 +54,7 @@ public class SecurityConfig extends  WebSecurityConfigurerAdapter{
         // 对登录注册要允许匿名访问
         http.cors().and()
                 .authorizeRequests()
-                .antMatchers("/registerOrLogin").permitAll()
+                .antMatchers("/auth/registerOrLogin").permitAll()
                 .anyRequest().authenticated();
 
         // 禁用缓存

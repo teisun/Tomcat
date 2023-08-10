@@ -15,6 +15,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Optional;
 
 @Service
@@ -53,7 +54,7 @@ public class UserServiceImpl implements UserService {
     user.setPassword(encodedPassword);
     user.setEmail(request.email);
     user.setPhoneNum(request.phoneNum);
-    user.addDeviceId(request.deviceId);
+    user.setDeviceId(request.deviceId);
 
     User userSaved = userRepository.save(user);
     String jwtToken = jwtUtil.generateToken(userSaved.getId(), userSaved.getUsername());
@@ -72,6 +73,12 @@ public class UserServiceImpl implements UserService {
       throw new BadCredentialsException("密码不正确");
     }
 
+    // 设备ID不一致时更新User数据
+    if(request.deviceId != user.getDeviceId()){
+      user.setDeviceId(request.deviceId);
+      userRepository.save(user);
+    }
+
     JwtUser userDetails = new JwtUser(user);
     UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
     SecurityContextHolder.getContext().setAuthentication(authentication);
@@ -84,6 +91,11 @@ public class UserServiceImpl implements UserService {
   @Override
   public Optional<User> findByUsername(String username) {
     return userRepository.findByUsername(username);
+  }
+
+  @Override
+  public List<User> findByDeviceId(String deviceId) {
+    return userRepository.findByDeviceId(deviceId);
   }
 
   @Override

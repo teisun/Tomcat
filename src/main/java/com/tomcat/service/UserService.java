@@ -3,9 +3,8 @@ package com.tomcat.service;
 import com.tomcat.controller.request.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
 import com.tomcat.domain.User;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.RequestBody;
 
+import java.util.List;
 import java.util.Optional;
 
 public interface UserService {
@@ -14,6 +13,8 @@ public interface UserService {
   AuthenticationResponse login(AuthenticationRequest request);
 
   Optional<User> findByUsername(String username);
+
+  List<User> findByDeviceId(String deviceId);
 
   AuthenticationResponse registerOrLogin(AuthenticationRequest request);
 }

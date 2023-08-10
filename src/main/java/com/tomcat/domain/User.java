@@ -1,11 +1,10 @@
 package com.tomcat.domain;
 
+import cn.hutool.core.lang.hash.Hash;
 import lombok.Data;
 
 import javax.persistence.*;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
 
 @Data
 @Entity
@@ -24,8 +23,8 @@ public class User {
   private String email;
   @Column(unique=true)
   private String phoneNum;
-  @ElementCollection
-  private List<String> deviceIds = new ArrayList<>();
+
+  private String deviceId;
 
   public User(Long id, String username, String password, String email, String phoneNum, String deviceId) {
     this.id = id;
@@ -33,11 +32,19 @@ public class User {
     this.password = password;
     this.email = email;
     this.phoneNum = phoneNum;
-    this.deviceIds.add(deviceId);
+    this.deviceId = deviceId;
   }
 
   public User() {
 
+  }
+
+  public String getDeviceId() {
+    return deviceId;
+  }
+
+  public void setDeviceId(String deviceId) {
+    this.deviceId = deviceId;
   }
 
   public String getPhoneNum() {
@@ -46,18 +53,6 @@ public class User {
 
   public void setPhoneNum(String phoneNum) {
     this.phoneNum = phoneNum;
-  }
-
-  public void addDeviceId(String deviceId) {
-    this.deviceIds.add(deviceId);
-  }
-
-  public void removeDeviceId(String deviceId) {
-    this.deviceIds.remove(deviceId);
-  }
-
-  public List<String> getDeviceIds() {
-    return Collections.unmodifiableList(deviceIds);
   }
 
   public Long getId() {
@@ -92,5 +87,4 @@ public class User {
     this.email = email;
   }
 
-  // 省略getter/setter
 }

@@ -10,5 +10,7 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
   Optional<User> findByPhoneNumOrEmail(String phoneNum, String email);
 
-  List<User> findByDeviceIdsContains(String deviceId);
+  // 通过设备ID查询用户
+  List<User> findByDeviceId(String deviceId);
+
 }
