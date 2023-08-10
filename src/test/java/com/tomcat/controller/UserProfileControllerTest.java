@@ -17,10 +17,12 @@ import org.springframework.test.web.servlet.ResultHandler;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
 
+import static org.junit.jupiter.api.Assertions.*;
+
 @SpringBootTest
 @RunWith(SpringRunner.class)
 @AutoConfigureMockMvc
-class AuthControllerTest {
+class UserProfileControllerTest {
 
     @Autowired
     private MockMvc mockMvc;
@@ -36,57 +38,23 @@ class AuthControllerTest {
     @Value("${jwt.tokenHead}")
     private String tokenHead;
 
+    @Test
+    void getByUserId() {
+    }
 
     @Test
-    void findByDeviceIdSuccess() throws Exception{
+    void updateProfile() throws Exception{
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
         String token = jwtUtil.generateToken(1, request.username);
         String json = jsonUtil.toJson(request);
+
         mockMvc.perform(MockMvcRequestBuilders
-                        .post("/auth/findByDeviceId")
+                        .post("/profile/update")
                         .content(json.getBytes())
                         .accept(MediaType.APPLICATION_JSON)
                         .contentType(MediaType.APPLICATION_JSON_VALUE)
                         .header(tokenHeader,tokenHead+token)
                 ).andExpect(MockMvcResultMatchers.status().isOk())
-                .andDo(new ResultHandler() {
-                    @Override
-                    public void handle(MvcResult result) throws Exception {
-                        System.out.println("Response body: " + result.getResponse().getContentAsString());
-                    }
-                });
-    }
-
-
-    @Test
-    void findByDeviceIdFail() throws Exception{
-        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String json = jsonUtil.toJson(request);
-        mockMvc.perform(MockMvcRequestBuilders
-                .post("/auth/findByDeviceId")
-                .content(json.getBytes())
-                .accept(MediaType.APPLICATION_JSON)
-                .contentType(MediaType.APPLICATION_JSON_VALUE)
-        ).andExpect(MockMvcResultMatchers.status().is(403))
-                .andDo(new ResultHandler() {
-            @Override
-            public void handle(MvcResult result) throws Exception {
-                System.out.println("Response body: " + result.getResponse().getContentAsString());
-            }
-        });
-    }
-
-
-    @Test
-    void registerOrLogin() throws Exception{
-        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String json = jsonUtil.toJson(request);
-        mockMvc.perform(MockMvcRequestBuilders
-                .post("/auth/registerOrLogin")
-                .content(json.getBytes())
-                .accept(MediaType.APPLICATION_JSON)
-                .contentType(MediaType.APPLICATION_JSON_VALUE)
-        ).andExpect(MockMvcResultMatchers.status().isOk())
                 .andDo(new ResultHandler() {
                     @Override
                     public void handle(MvcResult result) throws Exception {
