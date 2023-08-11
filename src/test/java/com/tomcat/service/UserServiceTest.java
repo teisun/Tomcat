@@ -1,6 +1,6 @@
 package com.tomcat.service;
 
-import com.tomcat.controller.request.AuthenticationRequest;
+import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
 import org.hamcrest.Matchers;
 import org.junit.Assert;
@@ -10,8 +10,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.junit4.SpringRunner;
 
 import javax.annotation.Resource;
-
-import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest
 @RunWith(SpringRunner.class)

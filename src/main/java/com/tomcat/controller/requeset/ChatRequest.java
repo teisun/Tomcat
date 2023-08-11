@@ -1,4 +1,4 @@
-package com.tomcat.controller.request;
+package com.tomcat.controller.requeset;
 
 import lombok.Data;
 

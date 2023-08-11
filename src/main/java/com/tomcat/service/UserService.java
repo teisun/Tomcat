@@ -1,6 +1,6 @@
 package com.tomcat.service;
 
-import com.tomcat.controller.request.AuthenticationRequest;
+import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
 import com.tomcat.domain.User;
 

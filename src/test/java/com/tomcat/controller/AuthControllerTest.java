@@ -1,6 +1,6 @@
 package com.tomcat.controller;
 
-import com.tomcat.controller.request.AuthenticationRequest;
+import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.utils.JsonUtil;
 import com.tomcat.utils.JwtUtil;
 import org.junit.jupiter.api.Test;
@@ -40,7 +40,7 @@ class AuthControllerTest {
     @Test
     void findByDeviceIdSuccess() throws Exception{
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String token = jwtUtil.generateToken(1, request.username);
+        String token = jwtUtil.generateToken(2L, request.username);
         String json = jsonUtil.toJson(request);
         mockMvc.perform(MockMvcRequestBuilders
                         .post("/auth/findByDeviceId")

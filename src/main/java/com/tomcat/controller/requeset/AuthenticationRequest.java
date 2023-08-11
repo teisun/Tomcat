@@ -1,8 +1,6 @@
-package com.tomcat.controller.request;
+package com.tomcat.controller.requeset;
 
 import lombok.Data;
-
-import javax.persistence.Column;
 
 /**
  * 登录请求参数DTO类

@@ -1,10 +1,9 @@
 package com.tomcat.domain;
 
-import cn.hutool.core.lang.hash.Hash;
 import lombok.Data;
+import org.hibernate.annotations.GenericGenerator;
 
 import javax.persistence.*;
-import java.util.*;
 
 @Data
 @Entity

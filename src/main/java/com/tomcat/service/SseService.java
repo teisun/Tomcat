@@ -1,6 +1,6 @@
 package com.tomcat.service;
 
-import com.tomcat.controller.request.ChatRequest;
+import com.tomcat.controller.requeset.ChatRequest;
 import com.tomcat.controller.response.ChatResponse;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 

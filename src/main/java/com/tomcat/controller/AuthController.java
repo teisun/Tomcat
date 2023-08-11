@@ -1,7 +1,7 @@
 package com.tomcat.controller;
 
 import cn.hutool.core.util.StrUtil;
-import com.tomcat.controller.request.AuthenticationRequest;
+import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
 import com.tomcat.domain.User;
 import com.tomcat.service.UserService;
@@ -37,6 +37,7 @@ public class AuthController {
 
   @PostMapping("/findByDeviceId")
   public ResponseEntity<List<User>> findByDeviceId(@RequestBody AuthenticationRequest request) {
+    // TODO
     if(request == null || StrUtil.isBlank(request.deviceId)){
       ResponseEntity.badRequest().build();
     }

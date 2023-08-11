@@ -26,7 +26,7 @@ public class JwtUtil {
      * @param username
      * @return
      */
-    public String generateToken(long userId, String username) {
+    public String generateToken(Long userId, String username) {
         return Jwts.builder().setSubject(username)
                 .claim("userId", userId)
                 .claim("username", username)

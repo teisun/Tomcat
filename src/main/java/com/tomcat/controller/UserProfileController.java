@@ -1,6 +1,7 @@
 package com.tomcat.controller;
 
-import com.tomcat.domain.UserProfile;
+import com.tomcat.controller.requeset.ProfileResquest;
+import com.tomcat.controller.response.ProfileResponse;
 import com.tomcat.service.UserProfileService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -13,16 +14,16 @@ public class UserProfileController {
   @Autowired
   private UserProfileService userProfileService;
 
-  @GetMapping("/get/{userId}")
-  public ResponseEntity<UserProfile> getByUserId(@PathVariable Long userId) {
-    UserProfile profile = userProfileService.getByUserId(userId);
+  @GetMapping("/getProfile")
+  public ResponseEntity<ProfileResponse> getByUserId(@RequestParam Long userId) {
+    ProfileResponse profile = userProfileService.getByUserId(userId);
     return ResponseEntity.ok(profile); 
   }  
 
   @PutMapping("/update")
-  public ResponseEntity<UserProfile> updateProfile(@RequestBody UserProfile profile) {
-    UserProfile updatedProfile = userProfileService.update(profile);
-    return ResponseEntity.ok(updatedProfile);
+  public ResponseEntity<ProfileResponse> updateProfile(@RequestBody ProfileResquest profileDTO) {
+    ProfileResponse profile = userProfileService.update(profileDTO);
+    return ResponseEntity.ok(profile);
   }
 
 }

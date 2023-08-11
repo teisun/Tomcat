@@ -1,5 +1,6 @@
 package com.tomcat;
 
+import com.sun.xml.bind.v2.TODO;
 import com.tomcat.config.DataSourceConfig;
 import com.tomcat.config.SecurityConfig;
 import com.tomcat.service.impl.UserServiceImpl;
@@ -40,6 +41,11 @@ public class TomcatApplication {
 
 
     }
+
+    //TODO
+    // 1. 支持存储中文
+    // 2. findByDeviceId改造
+
 
 
 }
