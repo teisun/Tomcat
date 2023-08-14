@@ -40,12 +40,12 @@ class AuthControllerTest {
     @Test
     void findByDeviceIdSuccess() throws Exception{
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
+        String deviceId = "8888888";
         String token = jwtUtil.generateToken("", request.username);
         String json = jsonUtil.toJson(request);
         mockMvc.perform(MockMvcRequestBuilders
-                        .post("/auth/findByDeviceId")
+                        .get("/auth/findByDeviceId?deviceId="+deviceId)
                         .content(json.getBytes())
-                        .accept(MediaType.APPLICATION_JSON)
                         .contentType(MediaType.APPLICATION_JSON_VALUE)
                         .header(tokenHeader,tokenHead+token)
                 ).andExpect(MockMvcResultMatchers.status().isOk())

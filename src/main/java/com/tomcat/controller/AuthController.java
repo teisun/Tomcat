@@ -3,15 +3,13 @@ package com.tomcat.controller;
 import cn.hutool.core.util.StrUtil;
 import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
+import com.tomcat.controller.response.UserDTO;
 import com.tomcat.domain.User;
 import com.tomcat.service.UserService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
@@ -35,13 +33,13 @@ public class AuthController {
     }
   }
 
-  @PostMapping("/findByDeviceId")
-  public ResponseEntity<List<User>> findByDeviceId(@RequestBody AuthenticationRequest request) {
+  @GetMapping("/findByDeviceId")
+  public ResponseEntity<List<UserDTO>> findByDeviceId(@RequestParam String deviceId) {
     // TODO
-    if(request == null || StrUtil.isBlank(request.deviceId)){
+    if(StrUtil.isBlank(deviceId)){
       ResponseEntity.badRequest().build();
     }
-    List<User> response = userService.findByDeviceId(request.deviceId);
+    List<UserDTO> response = userService.findByDeviceId(deviceId);
     if(response != null){
       return ResponseEntity.ok(response);
     }else {

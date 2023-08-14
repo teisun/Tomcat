@@ -1,5 +1,6 @@
 package com.tomcat.domain;
 
+import com.tomcat.controller.response.UserDTO;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;

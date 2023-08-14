@@ -2,12 +2,14 @@ package com.tomcat.service.impl;
 
 import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
+import com.tomcat.controller.response.UserDTO;
 import com.tomcat.domain.JwtUser;
 import com.tomcat.domain.User;
 import com.tomcat.domain.UserRepository;
 import com.tomcat.service.UserService;
 import com.tomcat.utils.JwtUtil;
 import com.tomcat.utils.SecurityUtils;
+import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -17,6 +19,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 @Service
 public class UserServiceImpl implements UserService {
@@ -33,6 +36,8 @@ public class UserServiceImpl implements UserService {
   @Autowired
   UserDetailsService userDetailsService;
 
+  @Autowired
+  private ModelMapper modelMapper;
 
 
 //  @Bean
@@ -94,8 +99,11 @@ public class UserServiceImpl implements UserService {
   }
 
   @Override
-  public List<User> findByDeviceId(String deviceId) {
-    return userRepository.findByDeviceId(deviceId);
+  public List<UserDTO> findByDeviceId(String deviceId) {
+    List<User> userList = userRepository.findByDeviceId(deviceId);
+    return userList.stream()
+            .map(user -> modelMapper.map(user, UserDTO.class))
+            .collect(Collectors.toList());
   }
 
   @Override

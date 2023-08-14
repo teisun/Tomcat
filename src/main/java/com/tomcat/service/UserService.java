@@ -2,6 +2,7 @@ package com.tomcat.service;
 
 import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
+import com.tomcat.controller.response.UserDTO;
 import com.tomcat.domain.User;
 
 import java.util.List;
@@ -14,7 +15,7 @@ public interface UserService {
 
   Optional<User> findByUsername(String username);
 
-  List<User> findByDeviceId(String deviceId);
+  List<UserDTO> findByDeviceId(String deviceId);
 
   AuthenticationResponse registerOrLogin(AuthenticationRequest request);
 }
