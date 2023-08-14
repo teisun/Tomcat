@@ -40,7 +40,7 @@ class AuthControllerTest {
     @Test
     void findByDeviceIdSuccess() throws Exception{
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String token = jwtUtil.generateToken(2L, request.username);
+        String token = jwtUtil.generateToken("", request.username);
         String json = jsonUtil.toJson(request);
         mockMvc.perform(MockMvcRequestBuilders
                         .post("/auth/findByDeviceId")
@@ -60,6 +60,7 @@ class AuthControllerTest {
 
     @Test
     void findByDeviceIdFail() throws Exception{
+        // 模拟没有token的请求
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
         String json = jsonUtil.toJson(request);
         mockMvc.perform(MockMvcRequestBuilders
@@ -79,7 +80,7 @@ class AuthControllerTest {
 
     @Test
     void registerOrLogin() throws Exception{
-        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
+        AuthenticationRequest request = new AuthenticationRequest("tom1", "1234", "431@qq.com", "13823232231", "8888887");
         String json = jsonUtil.toJson(request);
         mockMvc.perform(MockMvcRequestBuilders
                 .post("/auth/registerOrLogin")

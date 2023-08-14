@@ -20,9 +20,15 @@ public class UserProfileServiceImpl implements UserProfileService {
   UserRepository userRepository;
 
   @Override
-  public ProfileResponse getByUserId(Long userId) {
+  public ProfileResponse getByUserId(String userId) {
     UserProfile userProfile = userProfileRepository.findByUserId(userId);
-    ProfileResponse response = ProfileResponse.build(userProfile);
+    ProfileResponse response;
+    if(userProfile != null) response = ProfileResponse.build(userProfile);
+    else {
+      response = new ProfileResponse();
+      response.setUserId(userId);
+
+    }
     return response;
   }
 

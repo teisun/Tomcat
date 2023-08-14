@@ -40,12 +40,13 @@ class UserProfileControllerTest {
 
     @Test
     void getByUserId() throws Exception{
+//        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String token = jwtUtil.generateToken(2L, request.username);
-        Long userId = 2L;
+        String token = jwtUtil.generateToken("", request.username);
+        String userId = "81ebeec9-fb3c-4a90-9548-6a26d48017bf";
 
         mockMvc.perform(MockMvcRequestBuilders
-                        .get("/profile/getProfile?userId="+userId.toString())
+                        .get("/profile/getProfile?userId="+userId)
                         .contentType(MediaType.APPLICATION_JSON_VALUE)
                         .header(tokenHeader,tokenHead+token)
                 ).andExpect(MockMvcResultMatchers.status().isOk())
@@ -60,7 +61,7 @@ class UserProfileControllerTest {
     @Test
     void updateProfile() throws Exception{
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String token = jwtUtil.generateToken(2L, request.username);
+        String token = jwtUtil.generateToken("", request.username);
         ProfileResquest profileResquest = new ProfileResquest(2L,
                 "Chinese",
                 "high School",

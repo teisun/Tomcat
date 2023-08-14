@@ -45,7 +45,8 @@ public class TomcatApplication {
     //TODO
     // 1. 支持存储中文
     // 2. findByDeviceId改造
-    // 3. 修改userId
+    // 3. done 修改userId 
+    // 4. 服务端错误处理
 
 
 

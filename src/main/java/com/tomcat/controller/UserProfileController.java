@@ -15,7 +15,7 @@ public class UserProfileController {
   private UserProfileService userProfileService;
 
   @GetMapping("/getProfile")
-  public ResponseEntity<ProfileResponse> getByUserId(@RequestParam Long userId) {
+  public ResponseEntity<ProfileResponse> getByUserId(@RequestParam String userId) {
     ProfileResponse profile = userProfileService.getByUserId(userId);
     return ResponseEntity.ok(profile); 
   }  

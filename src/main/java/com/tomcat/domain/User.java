@@ -11,8 +11,9 @@ import javax.persistence.*;
 public class User {
 
   @Id
-  @GeneratedValue
-  private Long id;
+  @GeneratedValue(generator = "uuid")
+  @GenericGenerator(name = "uuid", strategy = "uuid2")
+  private String id;
 
   @Column(unique=true)
   private String username;
@@ -25,7 +26,7 @@ public class User {
 
   private String deviceId;
 
-  public User(Long id, String username, String password, String email, String phoneNum, String deviceId) {
+  public User(String id, String username, String password, String email, String phoneNum, String deviceId) {
     this.id = id;
     this.username = username;
     this.password = password;
@@ -54,11 +55,11 @@ public class User {
     this.phoneNum = phoneNum;
   }
 
-  public Long getId() {
+  public String getId() {
     return id;
   }
 
-  public void setId(Long id) {
+  public void setId(String id) {
     this.id = id;
   }
 

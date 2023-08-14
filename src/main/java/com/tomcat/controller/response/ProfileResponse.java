@@ -12,7 +12,7 @@ public class ProfileResponse {
 
     private Long id;
 
-    private Long userId;
+    private String userId;
 
     private String motherTongue;
 
