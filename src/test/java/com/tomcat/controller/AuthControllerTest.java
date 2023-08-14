@@ -1,9 +1,14 @@
 package com.tomcat.controller;
 
 import com.tomcat.controller.requeset.AuthenticationRequest;
+import com.tomcat.domain.User;
+import com.tomcat.domain.UserRepository;
 import com.tomcat.utils.JsonUtil;
 import com.tomcat.utils.JwtUtil;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.runner.RunWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -20,6 +25,7 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
 @SpringBootTest
 @RunWith(SpringRunner.class)
 @AutoConfigureMockMvc
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class AuthControllerTest {
 
     @Autowired
@@ -36,15 +42,19 @@ class AuthControllerTest {
     @Value("${jwt.tokenHead}")
     private String tokenHead;
 
+    @Autowired
+    UserRepository userRepository;
+
 
     @Test
+    @Order(2)
     void findByDeviceIdSuccess() throws Exception{
-        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String deviceId = "8888888";
-        String token = jwtUtil.generateToken("", request.username);
+        User user = userRepository.findByUsername("汤姆猫").orElseThrow(() -> new RuntimeException("用户不存在"));
+        AuthenticationRequest request = new AuthenticationRequest(user.getUsername(), "", user.getEmail(), user.getPhoneNum(), user.getDeviceId());
+        String token = jwtUtil.generateToken(user.getId(), request.username);
         String json = jsonUtil.toJson(request);
         mockMvc.perform(MockMvcRequestBuilders
-                        .get("/auth/findByDeviceId?deviceId="+deviceId)
+                        .get("/auth/findByDeviceId?deviceId="+request.deviceId)
                         .content(json.getBytes())
                         .contentType(MediaType.APPLICATION_JSON_VALUE)
                         .header(tokenHeader,tokenHead+token)
@@ -59,6 +69,7 @@ class AuthControllerTest {
 
 
     @Test
+    @Order(3)
     void findByDeviceIdFail() throws Exception{
         // 模拟没有token的请求
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
@@ -79,6 +90,7 @@ class AuthControllerTest {
 
 
     @Test
+    @Order(1)
     void registerOrLogin() throws Exception{
 //        AuthenticationRequest request = new AuthenticationRequest("tom1", "1234", "431@qq.com", "13823232231", "8888887");
         AuthenticationRequest request = new AuthenticationRequest("汤姆猫", "1234", "431@qq.com", "13823232231", "8888887");

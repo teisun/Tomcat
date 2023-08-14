@@ -6,7 +6,10 @@ import com.tomcat.domain.User;
 import com.tomcat.domain.UserRepository;
 import com.tomcat.utils.JsonUtil;
 import com.tomcat.utils.JwtUtil;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.runner.RunWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,6 +29,7 @@ import java.util.Optional;
 @SpringBootTest
 @RunWith(SpringRunner.class)
 @AutoConfigureMockMvc
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class UserProfileControllerTest {
 
     @Autowired
@@ -46,11 +50,12 @@ class UserProfileControllerTest {
     UserRepository userRepository;
 
     @Test
+    @Order(2)
     void getByUserId() throws Exception{
 //        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String token = jwtUtil.generateToken("", request.username);
-        String userId = "81ebeec9-fb3c-4a90-9548-6a26d48017bf";
+        User user = userRepository.findByUsername("汤姆猫").orElseThrow(() -> new RuntimeException("用户不存在"));
+        String token = jwtUtil.generateToken(user.getId(), user.getUsername());
+        String userId = user.getId();
 
         mockMvc.perform(MockMvcRequestBuilders
                         .get("/profile/getProfile?userId="+userId)
@@ -66,6 +71,7 @@ class UserProfileControllerTest {
     }
 
     @Test
+    @Order(1)
     void updateProfile() throws Exception{
 //        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
         User user = userRepository.findByUsername("汤姆猫").orElseThrow(() -> new RuntimeException("用户不存在"));

@@ -10,11 +10,10 @@ import javax.persistence.*;
 public class UserProfile {
 
   @Id
-  @GeneratedValue(strategy = GenerationType.AUTO)
-  private Long id;
+  private String id;
 
   @OneToOne
-  @JoinColumn(name="userId")
+  @JoinColumn(name="userId", unique = true)
   private User user;
 
   @Column(columnDefinition = "varchar(255) CHARACTER SET utf8mb4")
@@ -32,4 +31,8 @@ public class UserProfile {
   // constructor, getter and setter
 
 
+  public void setUser(User user) {
+    this.user = user;
+    this.id = user.getId();
+  }
 }

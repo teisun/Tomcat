@@ -10,7 +10,7 @@ public class ProfileResponse {
 
     public ProfileResponse(){}
 
-    private Long id;
+    private String id;
 
     private String userId;
 

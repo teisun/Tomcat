@@ -1,4 +1,5 @@
 package com.tomcat.utils;
+import cn.hutool.core.util.StrUtil;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
@@ -19,6 +20,9 @@ public class JwtUtil {
     private long EXPIRE_TIME = 365 * 24 * 60 * 60 * 1000;
     // 秘钥
     private String TOKEN_SECRET_KEY = "jxxxooo9999";
+
+    private final String KEY_USER_ID = "userId";
+    private final String KEY_USER_NAME = "username";
     /**
      * 创建token
      *
@@ -28,8 +32,8 @@ public class JwtUtil {
      */
     public String generateToken(String userId, String username) {
         return Jwts.builder().setSubject(username)
-                .claim("userId", userId)
-                .claim("username", username)
+                .claim(KEY_USER_ID, userId)
+                .claim(KEY_USER_NAME, username)
                 .setIssuedAt(new Date())
                 .setExpiration(generateExpirationDate())
                 .signWith(SignatureAlgorithm.HS256, TOKEN_SECRET_KEY)
@@ -66,24 +70,43 @@ public class JwtUtil {
     }
 
     /**
-     * 从token中获取登录用户名
+     * 从token中获取key对应的值
+     */
+    public String getFieldFromToken(String key, String token) {
+        String field;
+        try {
+            Claims claims = getClaims(token);
+            field = (String) claims.get(key);
+        } catch (Exception e) {
+            field = null;
+        }
+        return field;
+    }
+
+    /**
+     *
+     *
+     *  从token中获取登录用户名
+     *
      */
     public String getUserNameFromToken(String token) {
         String username;
         try {
             Claims claims = getClaims(token);
-            username =  claims.getSubject();
+            username = claims.getSubject();
         } catch (Exception e) {
             username = null;
         }
         return username;
     }
+
     /**
      * 校验token
      */
     public boolean validateToken(String token, UserDetails userDetails) {
         String username = getUserNameFromToken(token);
-        return username.equals(userDetails.getUsername()) && !isTokenExpired(token);
+        String id = getFieldFromToken(KEY_USER_ID, token);
+        return !StrUtil.isBlank(id) && username.equals(userDetails.getUsername()) && !isTokenExpired(token);
     }
 
     /**
