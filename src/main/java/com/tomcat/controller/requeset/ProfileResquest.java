@@ -7,7 +7,7 @@ import lombok.Data;
 @AllArgsConstructor
 public class ProfileResquest {
 
-    private Long userId;
+    private String userId;
 
     private String motherTongue;
 

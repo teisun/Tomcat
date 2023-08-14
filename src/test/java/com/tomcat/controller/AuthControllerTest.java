@@ -80,7 +80,8 @@ class AuthControllerTest {
 
     @Test
     void registerOrLogin() throws Exception{
-        AuthenticationRequest request = new AuthenticationRequest("tom1", "1234", "431@qq.com", "13823232231", "8888887");
+//        AuthenticationRequest request = new AuthenticationRequest("tom1", "1234", "431@qq.com", "13823232231", "8888887");
+        AuthenticationRequest request = new AuthenticationRequest("汤姆猫", "1234", "431@qq.com", "13823232231", "8888887");
         String json = jsonUtil.toJson(request);
         mockMvc.perform(MockMvcRequestBuilders
                 .post("/auth/registerOrLogin")

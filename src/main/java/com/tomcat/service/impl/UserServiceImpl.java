@@ -116,10 +116,10 @@ public class UserServiceImpl implements UserService {
           request.username = request.deviceId;
         }
         response = register(request);
-      }else {
+    }else {
         response = login(request);
-      }
-      return response;
+    }
+    return response;
   }
 
 }

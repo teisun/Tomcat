@@ -2,6 +2,8 @@ package com.tomcat.controller;
 
 import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.requeset.ProfileResquest;
+import com.tomcat.domain.User;
+import com.tomcat.domain.UserRepository;
 import com.tomcat.utils.JsonUtil;
 import com.tomcat.utils.JwtUtil;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,8 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultHandler;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
+
+import java.util.Optional;
 
 @SpringBootTest
 @RunWith(SpringRunner.class)
@@ -37,6 +41,9 @@ class UserProfileControllerTest {
     private String tokenHeader;
     @Value("${jwt.tokenHead}")
     private String tokenHead;
+
+    @Autowired
+    UserRepository userRepository;
 
     @Test
     void getByUserId() throws Exception{
@@ -60,12 +67,18 @@ class UserProfileControllerTest {
 
     @Test
     void updateProfile() throws Exception{
-        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String token = jwtUtil.generateToken("", request.username);
-        ProfileResquest profileResquest = new ProfileResquest(2L,
-                "Chinese",
-                "high School",
-                "humor",
+//        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
+        User user = userRepository.findByUsername("汤姆猫").orElseThrow(() -> new RuntimeException("用户不存在"));
+        String token = jwtUtil.generateToken(user.getId(), user.getUsername());
+//        ProfileResquest profileResquest = new ProfileResquest(2L,
+//                "Chinese",
+//                "high School",
+//                "humor",
+//                "English");
+        ProfileResquest profileResquest = new ProfileResquest(user.getId(),
+                "中文",
+                "高中",
+                "幽默",
                 "English");
         String requestJson = jsonUtil.toJson(profileResquest);
 

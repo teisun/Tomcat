@@ -15,7 +15,7 @@ public class User {
   @GenericGenerator(name = "uuid", strategy = "uuid2")
   private String id;
 
-  @Column(unique=true)
+  @Column(unique=true, columnDefinition = "varchar(255) CHARACTER SET utf8mb4")
   private String username;
 
   private String password;

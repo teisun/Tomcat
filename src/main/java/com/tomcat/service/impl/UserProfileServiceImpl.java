@@ -36,7 +36,7 @@ public class UserProfileServiceImpl implements UserProfileService {
   public ProfileResponse update(ProfileResquest profileRequest) {
 
     User user = userRepository.findById(profileRequest.getUserId())
-            .orElseThrow(() -> new RuntimeException("用户不存在"));;
+            .orElseThrow(() -> new RuntimeException("用户不存在"));
 
     UserProfile profile = new UserProfile();
     profile.setUser(user);
