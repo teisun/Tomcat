@@ -19,7 +19,8 @@ public class JwtUtil {
     @Value("${jwt.expiration}")
     private long EXPIRE_TIME = 365 * 24 * 60 * 60 * 1000;
     // 秘钥
-    private String TOKEN_SECRET_KEY = "jxxxooo9999";
+    @Value("${jwt.SECRET_KEY}")
+    private String TOKEN_SECRET_KEY;
 
     private final String KEY_USER_ID = "userId";
     private final String KEY_USER_NAME = "username";

@@ -22,16 +22,15 @@ public class TomcatApplication {
         System.out.println("Hello Tomcat!");
         SpringApplication.run(TomcatApplication.class, args);
 
-
     }
 
     //TODO
     // 1. done 支持存储中文
     // 2. done findByDeviceId改造
     // 3. done 修改userId
-    // 4. 服务端错误处理
-    // 5. 单元测试规范化
-    // 6. 密钥改造
+    // 4. done 服务端错误处理
+    // 5. done 单元测试规范化
+    // 6. .. 密钥改造
 
 
 }
