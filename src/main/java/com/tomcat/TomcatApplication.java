@@ -7,9 +7,6 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import java.util.List;
 
 @SpringBootApplication
-//@ComponentScan(basePackages = {"com.tomcat.utils", "com.tomcat.service", "com.tomcat.domain", "com.tomcat.config"})
-//@EnableJpaRepositories(basePackages = "com.tomcat.domain")
-//@Import({DataSourceConfig.class})
 public class TomcatApplication {
 
     @Value("${chatgpt.apiKey}")
