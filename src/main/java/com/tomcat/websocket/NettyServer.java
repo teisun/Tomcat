@@ -12,15 +12,34 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.stream.ChunkedWriteHandler;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import javax.annotation.PostConstruct;
 
 /**
  * NettyServer Netty服务器配置
  */
+@Component
 public class NettyServer {
-    private final int port;
 
-    public NettyServer(int port) {
-        this.port = port;
+    @Value("${ws.port}")
+    private int port;
+
+    @Value("${ws.websocketPath}")
+    private String websocketPath;
+
+    @Value("${ws.SO_BACKLOG}")
+    private int SO_BACKLOG;
+
+    @Value("${ws.HttpObjectAggregator.maxContentLength}")
+    private int maxContentLength;
+
+    @Value("${ws.WebSocketServerProtocolHandler.maxFrameSize}")
+    private int maxFrameSize;
+
+
+    public NettyServer() {
     }
 
     public void start() throws Exception {
@@ -30,7 +49,7 @@ public class NettyServer {
         EventLoopGroup group = new NioEventLoopGroup();
         try {
             ServerBootstrap sb = new ServerBootstrap();
-            sb.option(ChannelOption.SO_BACKLOG, 1024);
+            sb.option(ChannelOption.SO_BACKLOG, SO_BACKLOG);
             sb.group(group, bossGroup) // 绑定线程池
                     .channel(NioServerSocketChannel.class) // 指定使用的channel
                     .localAddress(this.port)// 绑定监听端口
@@ -43,8 +62,8 @@ public class NettyServer {
                             ch.pipeline().addLast(new HttpServerCodec());
                             //以块的方式来写的处理器
                             ch.pipeline().addLast(new ChunkedWriteHandler());
-                            ch.pipeline().addLast(new HttpObjectAggregator(8192));
-                            ch.pipeline().addLast(new WebSocketServerProtocolHandler("/ws", null, true, 65536 * 10));
+                            ch.pipeline().addLast(new HttpObjectAggregator(maxContentLength));
+                            ch.pipeline().addLast(new WebSocketServerProtocolHandler(websocketPath, null, true, maxFrameSize));
                             ch.pipeline().addLast(new WebSocketHandler());
 
                         }
@@ -53,7 +72,7 @@ public class NettyServer {
             System.out.println(NettyServer.class + " 启动正在监听： " + cf.channel().localAddress());
             System.out.println("tomcat websocket start");
             System.out.println("http://localhost:8000/test/websocket");
-            System.out.println("ws://localhost:6688/ws");
+            System.out.println("ws://localhost:"+port+websocketPath);
             cf.channel().closeFuture().sync(); // 关闭服务器通道
         } finally {
             group.shutdownGracefully().sync(); // 释放线程池资源
@@ -61,12 +80,20 @@ public class NettyServer {
         }
     }
 
-    public static void asynStar(){
+    @PostConstruct
+    private void asynStart(){
+        System.out.println("NettyServer asynStart()");
+        System.out.println("${ws.port}: "+ port);
+        System.out.println("${ws.websocketPath}: "+ websocketPath);
+        System.out.println("${ws.SO_BACKLOG}: "+ SO_BACKLOG);
+        System.out.println("maxContentLength: "+ maxContentLength);
+        System.out.println("maxFrameSize: "+ maxFrameSize);
+
         Thread wsThread = new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    new NettyServer(6688).start();
+                    NettyServer.this.start();
 
                 } catch (Exception e) {
                     System.out.println("NettyServerError:" + e.getMessage());
@@ -75,7 +102,7 @@ public class NettyServer {
         });
         wsThread.setName("websocket");
         wsThread.start();
-
-
     }
+
+
 }

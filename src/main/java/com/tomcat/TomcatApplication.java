@@ -4,6 +4,8 @@ import com.tomcat.config.TaskConfig;
 import com.tomcat.websocket.NettyServer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Import;
@@ -24,9 +26,9 @@ public class TomcatApplication {
     public static void main(String[] args) {
         System.out.println("Hello Tomcat!");
         SpringApplication.run(TomcatApplication.class, args);
-        NettyServer.asynStar();
 
     }
+
 
     //TODO
     // 1. done 支持存储中文
@@ -35,7 +37,7 @@ public class TomcatApplication {
     // 4. done 服务端错误处理
     // 5. done 单元测试规范化
     // 6. .. 密钥改造
-    // 7. 整理websocket的配置项
+    // 7. done 整理websocket的配置项
 
 
 }
