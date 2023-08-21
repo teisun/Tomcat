@@ -24,6 +24,15 @@ public class ApiErrorResponse {
         return error_code;
     }
 
+    @Override
+    public String toString() {
+        return "ApiErrorResponse{" +
+                "status=" + status +
+                ", error_code='" + error_code + '\'' +
+                ", message='" + message + '\'' +
+                ", detail='" + detail + '\'' +
+                '}';
+    }
 
     //Builder
     public static final class ApiErrorResponseBuilder {

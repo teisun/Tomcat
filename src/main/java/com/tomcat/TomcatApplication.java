@@ -1,12 +1,18 @@
 package com.tomcat;
 
+import com.tomcat.config.TaskConfig;
+import com.tomcat.websocket.NettyServer;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Import;
+import org.springframework.core.task.TaskExecutor;
 
 import java.util.List;
 
 @SpringBootApplication
+@Import(TaskConfig.class)
 public class TomcatApplication {
 
     @Value("${chatgpt.apiKey}")
@@ -18,6 +24,7 @@ public class TomcatApplication {
     public static void main(String[] args) {
         System.out.println("Hello Tomcat!");
         SpringApplication.run(TomcatApplication.class, args);
+        NettyServer.asynStar();
 
     }
 
@@ -28,6 +35,7 @@ public class TomcatApplication {
     // 4. done 服务端错误处理
     // 5. done 单元测试规范化
     // 6. .. 密钥改造
+    // 7. 整理websocket的配置项
 
 
 }

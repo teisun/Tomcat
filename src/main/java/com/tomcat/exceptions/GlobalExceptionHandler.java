@@ -1,5 +1,6 @@
 package com.tomcat.exceptions;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -16,6 +17,7 @@ import java.security.InvalidParameterException;
 import java.util.NoSuchElementException;
 
 @ControllerAdvice
+@Slf4j
 public class GlobalExceptionHandler {
 
   @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -58,28 +60,20 @@ public class GlobalExceptionHandler {
     ApiErrorResponse response = new ApiErrorResponse.ApiErrorResponseBuilder()
             .withStatus(HttpStatus.INTERNAL_SERVER_ERROR)
             .withErrorCode(ex.getErrorCode())
-            .withMessage(ex.getMessage())
+            .withMessage(ex.toString())
             .build();
-
+    log.error("!exception!: " + response.toString());
     return ResponseEntity.status(response.getStatus()).body(response);
   }
 
   @ExceptionHandler({MethodArgumentTypeMismatchException.class})
   protected ResponseEntity<ApiErrorResponse> handleMethodArgumentNotValid(MethodArgumentNotValidException ex){
-    ApiErrorResponse response =new ApiErrorResponse.ApiErrorResponseBuilder()
-            .withStatus(HttpStatus.BAD_REQUEST)
-            .withErrorCode(HttpStatus.BAD_REQUEST.name())
-            .withMessage(ex.getLocalizedMessage()).build();
-    return ResponseEntity.status(response.getStatus()).body(response);
+    return buildResponseEntity(ex, HttpStatus.BAD_REQUEST, HttpStatus.BAD_REQUEST.name());
   }
 
   @ExceptionHandler(InvalidParameterException.class)
   public ResponseEntity<ApiErrorResponse> handleInvalidParameter(InvalidParameterException ex) {
-    ApiErrorResponse response =new ApiErrorResponse.ApiErrorResponseBuilder()
-            .withStatus(HttpStatus.BAD_REQUEST)
-            .withErrorCode(HttpStatus.BAD_REQUEST.name())
-            .withMessage(ex.getLocalizedMessage()).build();
-    return ResponseEntity.status(response.getStatus()).body(response);
+    return buildResponseEntity(ex, HttpStatus.BAD_REQUEST, HttpStatus.BAD_REQUEST.name());
   }
 
   @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
@@ -87,29 +81,41 @@ public class GlobalExceptionHandler {
     ApiErrorResponse response =new ApiErrorResponse.ApiErrorResponseBuilder()
             .withStatus(HttpStatus.METHOD_NOT_ALLOWED)
             .withErrorCode(HttpStatus.METHOD_NOT_ALLOWED.name())
-            .withMessage(ex.getLocalizedMessage()).build();
-    return ResponseEntity.status(response.getStatus()).body(response);
+            .withMessage(ex.getLocalizedMessage())
+            .withDetail( ex.toString()).build();
+    ResponseEntity<ApiErrorResponse> responseEntity = new ResponseEntity<>(response, response.getStatus());
+    log.error("!exception!: " + responseEntity.toString());
+    return responseEntity;
   }
 
   @ExceptionHandler({HttpMessageNotReadableException.class})
-  protected ResponseEntity<Object> handleHttpMessageNotReadable(HttpMessageNotReadableException ex, HttpHeaders headers, HttpStatus status, WebRequest request) {
+  protected ResponseEntity<ApiErrorResponse> handleHttpMessageNotReadable(HttpMessageNotReadableException ex, HttpHeaders headers, HttpStatus status, WebRequest request) {
     String error = "Malformed JSON request ";
     ApiErrorResponse response = new ApiErrorResponse.ApiErrorResponseBuilder()
             .withStatus(status)
             .withErrorCode("BAD_DATA")
             .withMessage(ex.getLocalizedMessage())
             .withDetail(error + ex.getMessage()).build();
-    return new ResponseEntity<>(response, response.getStatus());
+    ResponseEntity<ApiErrorResponse> responseEntity = new ResponseEntity<>(response, response.getStatus());
+    log.error("!exception!: " + responseEntity.toString());
+    return responseEntity;
   }
 
 
   @ExceptionHandler(Exception.class)
   public ResponseEntity<ApiErrorResponse> handleNotFound(Exception ex) {
+    return buildResponseEntity(ex, HttpStatus.INTERNAL_SERVER_ERROR, HttpStatus.INTERNAL_SERVER_ERROR.name());
+  }
+
+  private ResponseEntity buildResponseEntity(Exception ex, HttpStatus status, String error_code){
     ApiErrorResponse response =new ApiErrorResponse.ApiErrorResponseBuilder()
             .withStatus(HttpStatus.INTERNAL_SERVER_ERROR)
             .withErrorCode(HttpStatus.INTERNAL_SERVER_ERROR.name())
-            .withMessage(ex.getLocalizedMessage()).build();
-    return ResponseEntity.status(response.getStatus()).body(response);
+            .withMessage(ex.getMessage())
+            .withDetail(ex.toString()).build();
+    ResponseEntity<ApiErrorResponse> responseEntity = ResponseEntity.status(response.getStatus()).body(response);
+    log.error("!exception!: " + responseEntity.toString());
+    return responseEntity;
   }
 
 
