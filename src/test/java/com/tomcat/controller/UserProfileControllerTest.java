@@ -54,7 +54,7 @@ class UserProfileControllerTest {
     void getByUserId() throws Exception{
 //        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
         User user = userRepository.findByUsername("汤姆猫").orElseThrow(() -> new RuntimeException("用户不存在"));
-        // T-Token:BearereyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiLmsaTlp4bnjKsiLCJ1c2VySWQiOiIyYzg5ODllYy0yMzRhLTQ5M2EtOWQ4NS1hYTQ0ZmIwNDViNWYiLCJ1c2VybmFtZSI6IuaxpOWnhueMqyIsImlhdCI6MTY5Mjc3MDgyOCwiZXhwIjoxNzI0MzA2ODI4fQ.ATEPOdBcOpN_AU69LQ_2LdVn5XRGzjASBxy4W4POIAc
+        // Authorization:BearereyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiLmsaTlp4bnjKsiLCJ1c2VySWQiOiIyYzg5ODllYy0yMzRhLTQ5M2EtOWQ4NS1hYTQ0ZmIwNDViNWYiLCJ1c2VybmFtZSI6IuaxpOWnhueMqyIsImlhdCI6MTY5Mjc3MDgyOCwiZXhwIjoxNzI0MzA2ODI4fQ.ATEPOdBcOpN_AU69LQ_2LdVn5XRGzjASBxy4W4POIAc
         String token = jwtUtil.generateToken(user.getId(), user.getUsername());
         String userId = user.getId();
 

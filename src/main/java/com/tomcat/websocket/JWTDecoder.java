@@ -1,5 +1,6 @@
 package com.tomcat.websocket;
 
+import com.tomcat.utils.JwtUtil;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.SimpleChannelInboundHandler;
@@ -15,7 +16,14 @@ import java.util.Map;
 @Slf4j
 public class JWTDecoder extends ChannelInboundHandlerAdapter {
 
-  private String tokenHeader = "T-Token";
+  private String tokenHeader;
+
+  private JwtUtil jwtUtil;
+
+  public JWTDecoder(String tokenHeader, JwtUtil jwtUtil) {
+    this.tokenHeader = tokenHeader;
+    this.jwtUtil = jwtUtil;
+  }
 
   @Override
   public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
@@ -29,6 +37,7 @@ public class JWTDecoder extends ChannelInboundHandlerAdapter {
       String jwtToken = (String) urlParams.get(tokenHeader);
       log.info("tokenHeader:" +  tokenHeader);
       log.info("jwtToken:" + jwtToken);
+
 //      Boolean isValid = validateJWT(jwtToken);
 //      if (isValid) {
 //        // 存储用户信息到ChannelHandlerContext中

@@ -1,5 +1,6 @@
 package com.tomcat.websocket;
 
+import com.tomcat.utils.JwtUtil;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
@@ -13,6 +14,7 @@ import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.stream.ChunkedWriteHandler;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -39,6 +41,13 @@ public class NettyServer {
 
     @Value("${ws.WebSocketServerProtocolHandler.maxFrameSize}")
     private int maxFrameSize;
+
+    @Value("${jwt.tokenHeader}")
+    private String tokenHeader;
+
+    @Autowired
+    JwtUtil jwtUtil;
+
 
 
     public NettyServer() {
@@ -67,7 +76,7 @@ public class NettyServer {
                             ch.pipeline().addLast(new ChunkedWriteHandler());
                             ch.pipeline().addLast(new HttpObjectAggregator(maxContentLength));
                             // 添加JWT解码器
-                            ch.pipeline().addLast(new JWTDecoder());
+                            ch.pipeline().addLast(new JWTDecoder(tokenHeader, jwtUtil));
                             ch.pipeline().addLast(new WebSocketServerProtocolHandler(websocketPath, null, true, maxFrameSize));
                             ch.pipeline().addLast(new WebSocketHandler());
 
