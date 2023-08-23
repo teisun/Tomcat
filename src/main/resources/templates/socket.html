@@ -10,7 +10,9 @@
       window.WebSocket = window.MozWebSocket;
     }
     if (window.WebSocket) {
-      socket = new WebSocket("ws://localhost:6688/ws");
+      socket = new WebSocket("ws://localhost:6688/ws?T-Token=BearereyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiLmsaTlp4bnjKsiLCJ1c2VySWQiOiIyYzg5ODllYy0yMzRhLTQ5M2EtOWQ4NS1hYTQ0ZmIwNDViNWYiLCJ1c2VybmFtZSI6IuaxpOWnhueMqyIsImlhdCI6MTY5Mjc3MDgyOCwiZXhwIjoxNzI0MzA2ODI4fQ.ATEPOdBcOpN_AU69LQ_2LdVn5XRGzjASBxy4W4POIAc");
+      // socket = new WebSocket("ws://localhost:6688/ws");
+
       socket.onmessage = function(event) {
         var ta = document.getElementById('responseText');
         ta.value += event.data + "\r\n";
