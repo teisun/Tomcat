@@ -1,6 +1,5 @@
 package com.tomcat.controller;
 
-import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.requeset.ProfileResquest;
 import com.tomcat.domain.User;
 import com.tomcat.domain.UserRepository;
@@ -16,15 +15,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
-import org.springframework.security.access.method.P;
 import org.springframework.test.context.junit4.SpringRunner;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultHandler;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
-
-import java.util.Optional;
 
 @SpringBootTest
 @RunWith(SpringRunner.class)
@@ -43,7 +39,7 @@ class UserProfileControllerTest {
 
     @Value("${jwt.tokenHeader}")
     private String tokenHeader;
-    @Value("${jwt.tokenHead}")
+    @Value("${jwt.tokenPrefix}")
     private String tokenHead;
 
     @Autowired

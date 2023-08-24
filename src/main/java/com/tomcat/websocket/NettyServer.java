@@ -16,6 +16,7 @@ import io.netty.handler.stream.ChunkedWriteHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -42,13 +43,8 @@ public class NettyServer {
     @Value("${ws.WebSocketServerProtocolHandler.maxFrameSize}")
     private int maxFrameSize;
 
-    @Value("${jwt.tokenHeader}")
-    private String tokenHeader;
-
     @Autowired
-    JwtUtil jwtUtil;
-
-
+    private JWTDecoder jwtDecoder;
 
     public NettyServer() {
     }
@@ -76,7 +72,7 @@ public class NettyServer {
                             ch.pipeline().addLast(new ChunkedWriteHandler());
                             ch.pipeline().addLast(new HttpObjectAggregator(maxContentLength));
                             // 添加JWT解码器
-                            ch.pipeline().addLast(new JWTDecoder(tokenHeader, jwtUtil));
+                            ch.pipeline().addLast(jwtDecoder);
                             ch.pipeline().addLast(new WebSocketServerProtocolHandler(websocketPath, null, true, maxFrameSize));
                             ch.pipeline().addLast(new WebSocketHandler());
 

@@ -22,7 +22,7 @@ import java.io.IOException;
 public class jwtAuthenticationTokenFilter extends OncePerRequestFilter {
     @Value("${jwt.tokenHeader}")
     private String tokenHeader;
-    @Value("${jwt.tokenHead}")
+    @Value("${jwt.tokenPrefix}")
     private String tokenHead;
     @Autowired
     private JwtUtil jwtTokenUtil;

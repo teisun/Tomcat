@@ -109,8 +109,8 @@ public class GlobalExceptionHandler {
 
   private ResponseEntity buildResponseEntity(Exception ex, HttpStatus status, String error_code){
     ApiErrorResponse response =new ApiErrorResponse.ApiErrorResponseBuilder()
-            .withStatus(HttpStatus.INTERNAL_SERVER_ERROR)
-            .withErrorCode(HttpStatus.INTERNAL_SERVER_ERROR.name())
+            .withStatus(status)
+            .withErrorCode(error_code)
             .withMessage(ex.getMessage())
             .withDetail(ex.toString()).build();
     ResponseEntity<ApiErrorResponse> responseEntity = ResponseEntity.status(response.getStatus()).body(response);

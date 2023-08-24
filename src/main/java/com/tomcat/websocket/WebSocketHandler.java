@@ -40,6 +40,30 @@ public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketF
 
         // 回复消息
         ctx.channel().writeAndFlush(new TextWebSocketFrame("服务器消息 "+ uid+"："+message));
+
+        // TODO
+//        假设我们的即时通信系统中,当一个用户发送消息时,需要做以下处理:
+//
+//        验证消息内容合法性
+//        持久化消息到数据库
+//        推送消息到订阅用户的设备上
+//        异步生成消息摘要用于搜索
+
+//        如果直接在WebSocket的消息回调中顺序处理以上逻辑,会有以下问题:
+//
+//        客户端需要等待所有处理完成才能收到响应,延迟大
+//        数据库和搜索服务的问题会直接导致发送失败
+//        程序逻辑复杂,不易维护
+//        这个时候我们可以做以下优化:
+//
+//        在WebSocket中只处理验证消息、写入消息队列这些必须的逻辑
+//        消息进入队列后异步进行其他处理,不阻塞WebSocket线程
+//        消息处理错误不会影响消息发送的响应
+//        客户端可以快速收到发送确认,提升用户体验
+//        解耦不同业务逻辑,变更时只需要修改消费消息的服务
+//        通过这种方式,我们可以利用消息队列实现异步处理与解耦,优化即时通信系统的性能、稳定性和扩展性。
+//
+//        具体技术上可以使用RabbitMQ、Kafka等成熟的消息队列,也可以自己实现一个简单的队列。
     }
 
     @Override
@@ -66,6 +90,7 @@ public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketF
         AttributeKey<String> key = AttributeKey.valueOf("userId");
         String userId = ctx.channel().attr(key).get();
         ChannelHandlerPool.getChannelMap().remove(userId);
+
     }
 }
 
