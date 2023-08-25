@@ -6,10 +6,17 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.util.AttributeKey;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
+@Component
 @ChannelHandler.Sharable
 @Slf4j
 public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketFrame> {
+
+
+    @Autowired
+    private MessageProcessor messageProcessor;
 
     /**
      * 一旦连接，第一个被执行
@@ -39,9 +46,10 @@ public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketF
         ctx.channel().attr(key).setIfAbsent(uid);
 
         // 回复消息
-        ctx.channel().writeAndFlush(new TextWebSocketFrame("服务器消息 "+ uid+"："+message));
+//        ctx.channel().writeAndFlush(new TextWebSocketFrame("服务器消息 "+ uid+"："+message));
 
         // TODO
+        messageProcessor.processor(msg.text());
 //        假设我们的即时通信系统中,当一个用户发送消息时,需要做以下处理:
 //
 //        验证消息内容合法性

@@ -1,9 +1,9 @@
 package com.tomcat.controller;
 
+import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.domain.User;
 import com.tomcat.domain.UserRepository;
-import com.tomcat.utils.JsonUtil;
 import com.tomcat.utils.JwtUtil;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -34,9 +34,6 @@ class AuthControllerTest {
     @Autowired
     private JwtUtil jwtUtil;
 
-    @Autowired
-    private JsonUtil jsonUtil;
-
     @Value("${jwt.tokenHeader}")
     private String tokenHeader;
     @Value("${jwt.tokenPrefix}")
@@ -52,7 +49,7 @@ class AuthControllerTest {
         User user = userRepository.findByUsername("汤姆猫").orElseThrow(() -> new RuntimeException("用户不存在"));
         AuthenticationRequest request = new AuthenticationRequest(user.getUsername(), "", user.getEmail(), user.getPhoneNum(), user.getDeviceId());
         String token = jwtUtil.generateToken(user.getId(), request.username);
-        String json = jsonUtil.toJson(request);
+        String json = JSONUtil.toJsonStr(request);
         mockMvc.perform(MockMvcRequestBuilders
                         .get("/auth/findByDeviceId?deviceId="+request.deviceId)
                         .content(json.getBytes())
@@ -73,7 +70,7 @@ class AuthControllerTest {
     void findByDeviceIdFail() throws Exception{
         // 模拟没有token的请求
         AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        String json = jsonUtil.toJson(request);
+        String json = JSONUtil.toJsonStr(request);
         mockMvc.perform(MockMvcRequestBuilders
                 .post("/auth/findByDeviceId")
                 .content(json.getBytes())
@@ -94,7 +91,7 @@ class AuthControllerTest {
     void registerOrLogin() throws Exception{
 //        AuthenticationRequest request = new AuthenticationRequest("tom1", "1234", "431@qq.com", "13823232231", "8888887");
         AuthenticationRequest request = new AuthenticationRequest("汤姆猫", "1234", "431@qq.com", "13823232231", "8888887");
-        String json = jsonUtil.toJson(request);
+        String json = JSONUtil.toJsonStr(request);
         mockMvc.perform(MockMvcRequestBuilders
                 .post("/auth/registerOrLogin")
                 .content(json.getBytes())

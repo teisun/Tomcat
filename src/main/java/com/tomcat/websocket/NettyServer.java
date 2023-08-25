@@ -1,6 +1,5 @@
 package com.tomcat.websocket;
 
-import com.tomcat.utils.JwtUtil;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
@@ -16,7 +15,6 @@ import io.netty.handler.stream.ChunkedWriteHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -46,6 +44,9 @@ public class NettyServer {
     @Autowired
     private JWTDecoder jwtDecoder;
 
+    @Autowired
+    private WebSocketHandler webSocketHandler;
+
     public NettyServer() {
     }
 
@@ -74,7 +75,7 @@ public class NettyServer {
                             // 添加JWT解码器
                             ch.pipeline().addLast(jwtDecoder);
                             ch.pipeline().addLast(new WebSocketServerProtocolHandler(websocketPath, null, true, maxFrameSize));
-                            ch.pipeline().addLast(new WebSocketHandler());
+                            ch.pipeline().addLast(webSocketHandler);
 
                         }
                     });
@@ -113,6 +114,8 @@ public class NettyServer {
         wsThread.setName("websocket");
         wsThread.start();
     }
+
+
 
 
 }

@@ -1,9 +1,9 @@
 package com.tomcat.controller;
 
+import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ProfileResquest;
 import com.tomcat.domain.User;
 import com.tomcat.domain.UserRepository;
-import com.tomcat.utils.JsonUtil;
 import com.tomcat.utils.JwtUtil;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -33,9 +33,6 @@ class UserProfileControllerTest {
 
     @Autowired
     private JwtUtil jwtUtil;
-
-    @Autowired
-    private JsonUtil jsonUtil;
 
     @Value("${jwt.tokenHeader}")
     private String tokenHeader;
@@ -83,7 +80,7 @@ class UserProfileControllerTest {
                 "高中",
                 "幽默",
                 "English");
-        String requestJson = jsonUtil.toJson(profileResquest);
+        String requestJson = JSONUtil.toJsonStr(profileResquest);
 
 
         mockMvc.perform(MockMvcRequestBuilders

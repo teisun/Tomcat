@@ -1,26 +1,15 @@
 package com.tomcat;
 
 import com.tomcat.config.TaskConfig;
-import com.tomcat.websocket.NettyServer;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Import;
-import org.springframework.core.task.TaskExecutor;
-
-import java.util.List;
 
 @SpringBootApplication
 @Import(TaskConfig.class)
 public class TomcatApplication {
 
-    @Value("${chatgpt.apiKey}")
-    private List<String> apiKey;
-    @Value("${chatgpt.apiHost}")
-    private String apiHost;
+
 
 
     public static void main(String[] args) {
@@ -38,6 +27,7 @@ public class TomcatApplication {
     // 5. done 单元测试规范化
     // 6. .. 密钥改造
     // 7. done 整理websocket的配置项
+    // websocket 单元测试
 
 
 }
