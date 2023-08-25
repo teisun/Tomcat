@@ -1,5 +1,7 @@
 package com.tomcat.service.impl;
 
+import cn.hutool.core.convert.Convert;
+import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
 import com.tomcat.controller.response.UserDTO;
@@ -35,17 +37,6 @@ public class UserServiceImpl implements UserService {
 
   @Autowired
   UserDetailsService userDetailsService;
-
-  @Autowired
-  private ModelMapper modelMapper;
-
-
-//  @Bean
-//  public LocalSessionFactoryBean entityManagerFactory() {
-//    LocalSessionFactoryBean sessionFactory = new LocalSessionFactoryBean();
-//
-//    return sessionFactory;
-//  }
 
 
   @Override
@@ -102,7 +93,7 @@ public class UserServiceImpl implements UserService {
   public List<UserDTO> findByDeviceId(String deviceId) {
     List<User> userList = userRepository.findByDeviceId(deviceId);
     return userList.stream()
-            .map(user -> modelMapper.map(user, UserDTO.class))
+            .map(user -> Convert.convert(UserDTO.class, user))
             .collect(Collectors.toList());
   }
 
