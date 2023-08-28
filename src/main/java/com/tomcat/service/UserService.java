@@ -13,7 +13,7 @@ public interface UserService {
   
   AuthenticationResponse login(AuthenticationRequest request);
 
-  Optional<User> findByUsername(String username);
+  User findByUsername(String username);
 
   List<UserDTO> findByDeviceId(String deviceId);
 

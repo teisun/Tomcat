@@ -75,7 +75,7 @@ public class SecurityConfig extends  WebSecurityConfigurerAdapter{
     @Override
     public UserDetailsService  userDetailsService(){
             return username -> {
-                User user = userService.findByUsername(username).orElseThrow(() -> new UsernameNotFoundException("User not found with username: " + username));;
+                User user = userService.findByUsername(username);
                 return new JwtUser(user);
         };
     }

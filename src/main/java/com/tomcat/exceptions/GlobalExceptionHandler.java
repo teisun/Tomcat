@@ -114,7 +114,7 @@ public class GlobalExceptionHandler {
             .withMessage(ex.getMessage())
             .withDetail(ex.toString()).build();
     ResponseEntity<ApiErrorResponse> responseEntity = ResponseEntity.status(response.getStatus()).body(response);
-    log.error("!exception!: " + responseEntity.toString());
+    log.error("!exception!: " + response.toString());
     return responseEntity;
   }
 

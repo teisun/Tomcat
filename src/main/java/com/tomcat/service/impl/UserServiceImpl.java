@@ -1,6 +1,7 @@
 package com.tomcat.service.impl;
 
 import cn.hutool.core.convert.Convert;
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.AuthenticationRequest;
 import com.tomcat.controller.response.AuthenticationResponse;
@@ -16,8 +17,10 @@ import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
 
+import java.security.InvalidParameterException;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -60,8 +63,12 @@ public class UserServiceImpl implements UserService {
 
   @Override
   public AuthenticationResponse login(AuthenticationRequest request) {
-    User user = userRepository.findByPhoneNumOrEmail(request.phoneNum, request.email)
+    if(StrUtil.isBlank(request.username) || StrUtil.isBlank(request.phoneNum) || StrUtil.isBlank(request.email) || StrUtil.isBlank(request.password) || StrUtil.isBlank(request.deviceId)){
+      throw new InvalidParameterException("user info must be not empty, you can set any string, like 'default' ");
+    }
+    User user = userRepository.findByUsernameOrPhoneNumOrEmail(request.username, request.phoneNum, request.email)
         .orElseThrow(() -> new RuntimeException("用户不存在"));
+
 
     // 校验密码
     if (!securityUtils.matches(request.password, user.getPassword())) {
@@ -69,7 +76,7 @@ public class UserServiceImpl implements UserService {
     }
 
     // 设备ID不一致时更新User数据
-    if(request.deviceId != user.getDeviceId()){
+    if(!request.deviceId.equals(user.getDeviceId())){
       user.setDeviceId(request.deviceId);
       userRepository.save(user);
     }
@@ -84,8 +91,8 @@ public class UserServiceImpl implements UserService {
   }
 
   @Override
-  public Optional<User> findByUsername(String username) {
-    return userRepository.findByUsername(username);
+  public User findByUsername(String username) {
+    return userRepository.findByUsername(username).orElseThrow(() -> new UsernameNotFoundException("User not found with username: " + username));
   }
 
   @Override
@@ -99,7 +106,9 @@ public class UserServiceImpl implements UserService {
   @Override
   public AuthenticationResponse registerOrLogin(AuthenticationRequest request) {
       AuthenticationResponse response;
-    Optional<User> userOptional = userRepository.findByUsername(request.username);
+
+//    Optional<User> userOptional = userRepository.findByUsername(request.username);
+    Optional<User> userOptional = userRepository.findByUsernameOrPhoneNumOrEmail(request.username, request.phoneNum, request.email);
 
     if(!userOptional.isPresent()){
         if (request.username == null){

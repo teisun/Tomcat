@@ -22,8 +22,8 @@ public class JwtUtil {
     @Value("${jwt.SECRET_KEY}")
     private String TOKEN_SECRET_KEY;
 
-    private final String KEY_USER_ID = "userId";
-    private final String KEY_USER_NAME = "username";
+    public static final String KEY_USER_ID = "userId";
+    private static final String KEY_USER_NAME = "username";
     /**
      * 创建token
      *
