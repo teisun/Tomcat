@@ -66,41 +66,40 @@ public class NettyWebSocketServer {
     public void handshake(Session session, HttpHeaders headers, @RequestParam String req, @RequestParam MultiValueMap reqMap, @PathVariable String arg, @PathVariable Map pathMap){
         log.info("NettyWebSocketServer handshake");
         log.info("reqMap.toString():" + reqMap.toString());
-        String userName = tokenCheck(reqMap);
-        if(StrUtil.isBlank(userName)){
+        if(!tokenCheck(reqMap)){
             tokenCheckFail(session);
         }
     }
 
-    private String tokenCheck(MultiValueMap reqMap){
+    private boolean tokenCheck(MultiValueMap reqMap){
         log.info("tokenHeader:" + tokenHeader);
         List reqList = (List) reqMap.get(tokenHeader);
         if (reqList == null || reqList.isEmpty()){
-            return null;
+            return false;
         }
         String _jwtToken = (String) reqList.get(0);
         log.info("_jwtToken:" + _jwtToken);
         if (StringUtils.isBlank(_jwtToken) || !_jwtToken.startsWith(this.tokenPrefix)) {
-            return null;
+            return false;
         }
         String authToken = _jwtToken.substring(this.tokenPrefix.length());
         String username = jwtUtil.getUserNameFromToken(authToken);
         log.info("checking authentication " + username);
         if (StringUtils.isBlank(username) ) {
-            return null;
+            return false;
         }
         UserDetails userDetails = this.userDetailsService.loadUserByUsername(username);
         // 校验token
         if (!jwtUtil.validateToken(authToken, userDetails)) {
-            return null;
+            return false;
         }
 
         uid = jwtUtil.getFieldFromToken(JwtUtil.KEY_USER_ID, authToken);
-        if (StrUtil.isBlank(uid)) return null;
+        if (StrUtil.isBlank(uid)) return false;
         // jwt token 校验通过
         log.info("websocket checking authentication pass!! username:" + username);
 
-        return username;
+        return true;
     }
 
     private void tokenCheckFail(Session session) {
