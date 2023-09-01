@@ -1,24 +1,19 @@
 package com.tomcat.websocket;
 
 import cn.hutool.core.util.StrUtil;
-import com.tomcat.domain.User;
-import com.tomcat.domain.UserRepository;
 import com.tomcat.nettyws.annotation.*;
 import com.tomcat.nettyws.pojo.Session;
+import com.tomcat.service.AiCTutor;
 import com.tomcat.service.UserService;
 import com.tomcat.utils.JwtUtil;
-import com.unfbx.chatgpt.OpenAiClient;
-import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.timeout.IdleStateEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.util.MultiValueMap;
 
 import javax.annotation.PreDestroy;
@@ -47,7 +42,7 @@ public class NettyWebSocketServer {
     private UserService userService;
 
     @Autowired
-    private OpenAiClient aiClient;
+    private AiCTutor aiClient;
 
     String uid;
     MessageProcessor messageProcessor;
@@ -69,6 +64,7 @@ public class NettyWebSocketServer {
         if(!tokenCheck(reqMap)){
             tokenCheckFail(session);
         }
+
     }
 
     private boolean tokenCheck(MultiValueMap reqMap){
@@ -122,7 +118,7 @@ public class NettyWebSocketServer {
                 " Thread.currentThread().getName():" + Thread.currentThread().getName());
         log.info("onOpen userId:" + uid);
         session.setAttribute(JwtUtil.KEY_USER_ID, uid);
-        messageProcessor = new MessageProcessor(aiClient, session);
+        messageProcessor = new MessageProcessor(aiClient, session, uid);
         WsSessionManager.add(uid, session);
 
     }

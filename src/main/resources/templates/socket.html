@@ -40,14 +40,22 @@
       }
 
     }
+    var req = {}
+    function send_(){
+      req.command = document.getElementById("command").value;
+      req.data = document.getElementById("data").value;
+      send(JSON.stringify(req));
+    }
+
+
   </script>
 </head>
 
 <body>
 <form onSubmit="return false;">
-  <label>ID</label><input type="text" name="uid" value="${uid!!}" /> <br />
-  <label>TEXT</label><input type="text" name="message" value="这里输入消息" /> <br />
-  <br /> <input type="button" value="发送ws消息" onClick="send(this.form.uid.value+':'+this.form.message.value)" />
+  <label>command</label><input type="text" id="command" value="" /> <br />
+  <label>data</label><input type="text" id="data" value="这里输入消息" /> <br />
+  <br /> <input type="button" value="发送ws消息" onClick="send_()" />
   <hr color="black" />
   <h3>服务端返回的应答消息</h3>
   <textarea id="responseText" style="width: 1024px;height: 300px;"></textarea>

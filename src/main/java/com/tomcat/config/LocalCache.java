@@ -12,11 +12,11 @@ public class LocalCache {
     /**
      * 缓存时长
      */
-    public static final long TIMEOUT = 5 * DateUnit.MINUTE.getMillis();
+    public static final long TIMEOUT = 30 * DateUnit.MINUTE.getMillis();
     /**
      * 清理间隔
      */
-    private static final long CLEAN_TIMEOUT = 5 * DateUnit.MINUTE.getMillis();
+    private static final long CLEAN_TIMEOUT = 30 * DateUnit.MINUTE.getMillis();
     /**
      * 缓存对象
      */

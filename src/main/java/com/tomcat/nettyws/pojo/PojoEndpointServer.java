@@ -12,7 +12,10 @@ import io.netty.util.AttributeKey;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.springframework.beans.TypeMismatchException;
+import retrofit2.HttpException;
 
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
 
@@ -149,7 +152,7 @@ public class PojoEndpointServer {
                 Method method = methodMapping.getOnError();
                 Object[] args = methodMapping.getOnErrorArgs(channel, throwable);
                 method.invoke(implement, args);
-            } catch (Throwable t) {
+            }catch (Throwable t) {
                 logger.error(t);
             }
         }
@@ -169,6 +172,18 @@ public class PojoEndpointServer {
             Object implement = channel.attr(POJO_KEY).get();
             try {
                 methodMapping.getOnMessage().invoke(implement, methodMapping.getOnMessageArgs(channel, textFrame));
+            } catch (InvocationTargetException e){
+                Throwable exception = e.getTargetException();
+                if (exception instanceof HttpException){
+                    HttpException httpException = (HttpException) exception;
+                    try {
+                        logger.error("HttpException: " + httpException.response().errorBody().string());
+                    } catch (IOException ex) {
+                        throw new RuntimeException(ex);
+                    }
+                }
+
+
             } catch (Throwable t) {
                 logger.error(t);
             }
