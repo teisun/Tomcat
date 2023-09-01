@@ -5,7 +5,7 @@ import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.Lesson;
+import com.tomcat.controller.response.Topic;
 import com.tomcat.service.AiCTutor;
 import com.tomcat.websocket.Command;
 import com.unfbx.chatgpt.OpenAiClient;
@@ -84,11 +84,11 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<List<Lesson>> curriculumPlan(ChatReq req) {
+    public ChatResp<List<Topic>> curriculumPlan(ChatReq req) {
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
         log.info("AiCTutorImpl messageContext: " + messageContext);
-        ChatResp<List<Lesson>> resp = new ChatResp<>();
+        ChatResp<List<Topic>> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             List<Message> messages = new ArrayList<>();
             messages = JSONUtil.toList(messageContext, Message.class);
@@ -107,9 +107,9 @@ public class AiTutorImpl implements AiCTutor {
             messages.add(responseMag);
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
-            List<Lesson> lessons = JSONUtil.toList(responseMag.getContent(), Lesson.class);
+            List<Topic> topics = JSONUtil.toList(responseMag.getContent(), Topic.class);
             resp.setCode(200);
-            resp.setData(lessons);
+            resp.setData(topics);
             resp.setUsage(response.getUsage());
         }else {
             resp.setCode(404);

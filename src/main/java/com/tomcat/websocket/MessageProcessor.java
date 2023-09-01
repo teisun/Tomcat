@@ -1,21 +1,14 @@
 package com.tomcat.websocket;
 
-import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
-import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.Lesson;
+import com.tomcat.controller.response.Topic;
 import com.tomcat.nettyws.pojo.Session;
 import com.tomcat.service.AiCTutor;
-import com.tomcat.utils.JwtUtil;
-import com.unfbx.chatgpt.entity.chat.ChatCompletion;
-import com.unfbx.chatgpt.entity.chat.ChatCompletionResponse;
-import com.unfbx.chatgpt.entity.chat.Message;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -41,7 +34,7 @@ public class MessageProcessor {
     }
 
     private void curriculumPlan(ChatReq req){
-        ChatResp<List<Lesson>> resp = aiClient.curriculumPlan(req);
+        ChatResp<List<Topic>> resp = aiClient.curriculumPlan(req);
         session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
 
     }
