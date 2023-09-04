@@ -3,6 +3,7 @@ package com.tomcat.websocket;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
+import com.tomcat.controller.response.ConversationData;
 import com.tomcat.controller.response.Topic;
 import com.tomcat.nettyws.pojo.Session;
 import com.tomcat.service.AiCTutor;
@@ -39,6 +40,11 @@ public class MessageProcessor {
 
     }
 
+    private void startTopic(ChatReq req){
+        ChatResp<ConversationData> resp = aiClient.startTopic(req);
+        session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
+    }
+
 
     public void processor(String msg) {
 
@@ -71,6 +77,9 @@ public class MessageProcessor {
                 break;
             case Command.CURRICULUM_PLAN:
                 this.curriculumPlan(chatReq);
+                break;
+            case Command.START_TOPIC:
+                this.startTopic(chatReq);
                 break;
             default:
                 break;

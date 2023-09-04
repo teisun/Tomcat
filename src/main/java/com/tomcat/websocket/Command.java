@@ -12,4 +12,6 @@ package com.tomcat.websocket;
 public class Command {
     public static final String CHAT_INIT = "CHAT_INIT";
     public static final String CURRICULUM_PLAN = "/PLAN";
+
+    public static final String START_TOPIC = "/START_TOPIC";
 }

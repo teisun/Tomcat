@@ -5,6 +5,7 @@ import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
+import com.tomcat.controller.response.ConversationData;
 import com.tomcat.controller.response.Topic;
 import com.tomcat.service.AiCTutor;
 import com.tomcat.websocket.Command;
@@ -110,6 +111,46 @@ public class AiTutorImpl implements AiCTutor {
             List<Topic> topics = JSONUtil.toList(responseMag.getContent(), Topic.class);
             resp.setCode(200);
             resp.setData(topics);
+            resp.setUsage(response.getUsage());
+        }else {
+            resp.setCode(404);
+            resp.setDescribe("chat context not found!");
+        }
+        return resp;
+    }
+
+    @Override
+    public ChatResp<ConversationData> startTopic(ChatReq req) {
+        // 获取chat上下文
+        String messageContext = (String) LocalCache.CACHE.get(req.getUid());
+        log.info("startTopic messageContext: " + messageContext);
+        ChatResp<ConversationData> resp = new ChatResp<>();
+        if (StrUtil.isNotBlank(messageContext)) {
+            // 上下文list
+            List<Message> messages = JSONUtil.toList(messageContext, Message.class);
+
+            // 编辑prompt加入到上下文中
+            String content;
+            if(StrUtil.isNotBlank(req.getData())){
+                content = Command.START_TOPIC + " "+ req.getData();
+            }else {
+                content = Command.START_TOPIC + " random";
+            }
+            Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
+            messages.add(currentMessage);
+            // 发送上下文到AI 获取返回的响应数据
+            ChatCompletionResponse response = this.chatCompletion(messages);
+            Message responseMag = response.getChoices().get(0).getMessage();
+            log.info("startTopic curriculumPlan content: " + responseMag.getContent());
+
+            // 将响应数据加入到上下文缓存中
+            messages.add(responseMag);
+            LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
+
+            // 将响应数据格式化成java bean返回请求端
+            ConversationData conversationData = JSONUtil.toBean(responseMag.getContent(), ConversationData.class);
+            resp.setCode(200);
+            resp.setData(conversationData);
             resp.setUsage(response.getUsage());
         }else {
             resp.setCode(404);

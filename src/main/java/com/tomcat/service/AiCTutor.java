@@ -2,7 +2,9 @@ package com.tomcat.service;
 
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
+import com.tomcat.controller.response.ConversationData;
 import com.tomcat.controller.response.Topic;
+import com.tomcat.domain.Chat;
 import com.unfbx.chatgpt.entity.chat.ChatCompletion;
 import com.unfbx.chatgpt.entity.chat.ChatCompletionResponse;
 import com.unfbx.chatgpt.entity.chat.Message;
@@ -48,5 +50,18 @@ public interface AiCTutor {
      * @date 2023/8/30 4:15 PM
      */
     ChatResp<List<Topic>> curriculumPlan(ChatReq req);
+
+
+    /**
+     * @description 开启指定topic对话
+     * @param req:
+     * @return ChatResp<ConversationData>
+     * @author tomcat
+     * @date 2023/9/4 3:05 PM
+     */
+    ChatResp<ConversationData> startTopic(ChatReq req);
+
+
+
 
 }
