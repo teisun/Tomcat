@@ -62,6 +62,16 @@ public interface AiCTutor {
     ChatResp<ConversationData> startTopic(ChatReq req);
 
 
+    /**
+     * @description 聊天
+     * @param req:
+     * @return ChatResp<ConversationData>
+     * @author tomcat
+     * @date 2023/9/4 3:36 PM
+     */
+    ChatResp<ConversationData> chat(ChatReq req);
+
+
 
 
 }

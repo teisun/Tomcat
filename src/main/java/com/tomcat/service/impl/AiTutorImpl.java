@@ -88,7 +88,7 @@ public class AiTutorImpl implements AiCTutor {
     public ChatResp<List<Topic>> curriculumPlan(ChatReq req) {
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
-        log.info("AiCTutorImpl messageContext: " + messageContext);
+        log.info(Command.CURRICULUM_PLAN + " messageContext: " + messageContext);
         ChatResp<List<Topic>> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             List<Message> messages = new ArrayList<>();
@@ -104,7 +104,7 @@ public class AiTutorImpl implements AiCTutor {
             messages.add(currentMessage);
             ChatCompletionResponse response = this.chatCompletion(messages);
             Message responseMag = response.getChoices().get(0).getMessage();
-            log.info("AiCTutorImpl curriculumPlan content: " + responseMag.getContent());
+            log.info(Command.CURRICULUM_PLAN + " content: " + responseMag.getContent());
             messages.add(responseMag);
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
@@ -123,7 +123,7 @@ public class AiTutorImpl implements AiCTutor {
     public ChatResp<ConversationData> startTopic(ChatReq req) {
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
-        log.info("startTopic messageContext: " + messageContext);
+        log.info(Command.START_TOPIC + " messageContext: " + messageContext);
         ChatResp<ConversationData> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             // 上下文list
@@ -141,8 +141,48 @@ public class AiTutorImpl implements AiCTutor {
             // 发送上下文到AI 获取返回的响应数据
             ChatCompletionResponse response = this.chatCompletion(messages);
             Message responseMag = response.getChoices().get(0).getMessage();
-            log.info("startTopic curriculumPlan content: " + responseMag.getContent());
+            log.info(Command.START_TOPIC + "  content: " + responseMag.getContent());
 
+            // 将响应数据加入到上下文缓存中
+            messages.add(responseMag);
+            LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
+
+            // 将响应数据格式化成java bean返回请求端
+            ConversationData conversationData = JSONUtil.toBean(responseMag.getContent(), ConversationData.class);
+            resp.setCode(200);
+            resp.setData(conversationData);
+            resp.setUsage(response.getUsage());
+        }else {
+            resp.setCode(404);
+            resp.setDescribe("chat context not found!");
+        }
+        return resp;
+    }
+
+    @Override
+    public ChatResp<ConversationData> chat(ChatReq req) {
+
+        // 获取chat上下文
+        String messageContext = (String) LocalCache.CACHE.get(req.getUid());
+        log.info(Command.CHAT +" messageContext: " + messageContext);
+        ChatResp<ConversationData> resp = new ChatResp<>();
+        if(StrUtil.isBlank(req.getData())){
+            resp.setCode(404);
+            resp.setDescribe("chat data must be not null!");
+            return resp;
+        }
+        if (StrUtil.isNotBlank(messageContext)) {
+            // 上下文list
+            List<Message> messages = JSONUtil.toList(messageContext, Message.class);
+
+            // 编辑prompt加入到上下文中
+            String content = req.getData();
+            Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
+            messages.add(currentMessage);
+            // 发送上下文到AI 获取返回的响应数据
+            ChatCompletionResponse response = this.chatCompletion(messages);
+            Message responseMag = response.getChoices().get(0).getMessage();
+            log.info(Command.CHAT + " curriculumPlan content: " + responseMag.getContent());
             // 将响应数据加入到上下文缓存中
             messages.add(responseMag);
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);

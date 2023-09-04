@@ -28,6 +28,8 @@ public class TomcatApplication {
     // 6. .. 密钥改造
     // 7. done 整理websocket的配置项
     // websocket 单元测试
+    // 处理websocket断线重连逻辑
+    // 处理Ai的聊天返回
 
 
 }

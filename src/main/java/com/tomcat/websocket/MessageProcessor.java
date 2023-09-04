@@ -45,6 +45,11 @@ public class MessageProcessor {
         session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
     }
 
+    private void chat(ChatReq req){
+        ChatResp<ConversationData> resp = aiClient.startTopic(req);
+        session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
+    }
+
 
     public void processor(String msg) {
 
@@ -80,6 +85,9 @@ public class MessageProcessor {
                 break;
             case Command.START_TOPIC:
                 this.startTopic(chatReq);
+                break;
+            case Command.CHAT:
+                this.chat(chatReq);
                 break;
             default:
                 break;
