@@ -49,6 +49,9 @@ public class AiTutorImpl implements AiCTutor {
     @Value("${ai.prompt.chat.limiter}")
     private String promptChatLimiter;
 
+    @Value("${ai.prompt.chat.sentence_checker}")
+    private String promptSentenceChecker;
+
     @Override
     public ChatCompletionResponse chatCompletion(List<Message> messages) {
         ChatCompletion completion = ChatCompletion
@@ -179,6 +182,15 @@ public class AiTutorImpl implements AiCTutor {
         if (StrUtil.isNotBlank(messageContext)) {
             // 上下文list
             List<Message> messages = JSONUtil.toList(messageContext, Message.class);
+            // 检查user_sentence语法
+            Message messageCheckSentence = Message.builder().content("sentence:"+ req.getData()+ " \n"+promptSentenceChecker).role(Message.Role.USER).build();
+            List<Message> messagesCheckSentence = new ArrayList<>();
+            messagesCheckSentence.add(messageCheckSentence);
+            ChatCompletionResponse checkSentenceResponse = this.chatCompletion(messagesCheckSentence);
+            String checkSentenceResponseStr = checkSentenceResponse.getChoices().get(0).getMessage().getContent();
+            ChatAssistantData.Suggestion suggestion = JSONUtil.toBean(checkSentenceResponseStr, ChatAssistantData.Suggestion.class);
+            log.info(Command.CHAT + " checkSentenceResponse content: " + checkSentenceResponseStr);
+            log.info(Command.CHAT + " checkSentenceResponse usage: " + checkSentenceResponse.getUsage());
 
             // 编辑prompt加入到上下文中
             ChatUserData chatUserData = new ChatUserData();
@@ -198,6 +210,7 @@ public class AiTutorImpl implements AiCTutor {
 
             // 将响应数据格式化成java bean返回请求端
             ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
+            chatAssistantData.setSuggestion(suggestion);
             resp.setCode(200);
             resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
