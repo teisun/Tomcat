@@ -7,7 +7,7 @@ import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.requeset.ChatUserData;
 import com.tomcat.controller.response.ChatResp;
 import com.tomcat.controller.response.ChatAssistantData;
-import com.tomcat.controller.response.Topic;
+import com.tomcat.controller.response.Topics;
 import com.tomcat.service.AiCTutor;
 import com.tomcat.websocket.Command;
 import com.unfbx.chatgpt.OpenAiClient;
@@ -86,16 +86,16 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<List<Topic>> curriculumPlan(ChatReq req) {
+    public ChatResp<Topics> curriculumPlan(ChatReq req) {
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
         log.info(Command.CURRICULUM_PLAN + " messageContext: " + messageContext);
-        ChatResp<List<Topic>> resp = new ChatResp<>();
+        ChatResp<Topics> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             List<Message> messages = new ArrayList<>();
             messages = JSONUtil.toList(messageContext, Message.class);
             String content;
-            String prompt_limit = promptCurriculumLimiter; // 限时模型返回topic obj的数量
+            String prompt_limit = " " + promptCurriculumLimiter; // 限时模型返回topic obj的数量
             if(StrUtil.isNotBlank(req.getData())){
                 content = Command.CURRICULUM_PLAN + " "+ req.getData() + prompt_limit;
             }else {
@@ -110,7 +110,7 @@ public class AiTutorImpl implements AiCTutor {
             messages.add(responseMag);
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
-            List<Topic> topics = JSONUtil.toList(responseMag.getContent(), Topic.class);
+            Topics topics = JSONUtil.toBean(responseMag.getContent(), Topics.class);
             resp.setCode(200);
             resp.setData(topics);
             resp.setUsage(response.getUsage());
@@ -125,7 +125,7 @@ public class AiTutorImpl implements AiCTutor {
     public ChatResp<ChatAssistantData> startTopic(ChatReq req) {
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
-//        log.info(Command.START_TOPIC + " messageContext: " + messageContext);
+        log.info(Command.START_TOPIC + " messageContext: " + messageContext);
         ChatResp<ChatAssistantData> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             // 上下文list
@@ -169,7 +169,7 @@ public class AiTutorImpl implements AiCTutor {
 
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
-//        log.info(Command.CHAT +" messageContext: " + messageContext);
+        log.info(Command.CHAT +" messageContext: " + messageContext);
         ChatResp<ChatAssistantData> resp = new ChatResp<>();
         if(StrUtil.isBlank(req.getData())){
             resp.setCode(404);

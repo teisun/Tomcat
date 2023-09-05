@@ -4,7 +4,7 @@ import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
 import com.tomcat.controller.response.ChatAssistantData;
-import com.tomcat.controller.response.Topic;
+import com.tomcat.controller.response.Topics;
 import com.tomcat.nettyws.pojo.Session;
 import com.tomcat.service.AiCTutor;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
@@ -35,7 +35,7 @@ public class MessageProcessor {
     }
 
     private void curriculumPlan(ChatReq req){
-        ChatResp<List<Topic>> resp = aiClient.curriculumPlan(req);
+        ChatResp<Topics> resp = aiClient.curriculumPlan(req);
         session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
 
     }
