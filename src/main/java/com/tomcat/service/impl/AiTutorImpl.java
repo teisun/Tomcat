@@ -5,7 +5,7 @@ import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.ConversationData;
+import com.tomcat.controller.response.ChatAssistantResponse;
 import com.tomcat.controller.response.Topic;
 import com.tomcat.service.AiCTutor;
 import com.tomcat.websocket.Command;
@@ -120,11 +120,11 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<ConversationData> startTopic(ChatReq req) {
+    public ChatResp<ChatAssistantResponse> startTopic(ChatReq req) {
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
         log.info(Command.START_TOPIC + " messageContext: " + messageContext);
-        ChatResp<ConversationData> resp = new ChatResp<>();
+        ChatResp<ChatAssistantResponse> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             // 上下文list
             List<Message> messages = JSONUtil.toList(messageContext, Message.class);
@@ -148,9 +148,9 @@ public class AiTutorImpl implements AiCTutor {
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
             // 将响应数据格式化成java bean返回请求端
-            ConversationData conversationData = JSONUtil.toBean(responseMag.getContent(), ConversationData.class);
+            ChatAssistantResponse chatAssistantResponse = JSONUtil.toBean(responseMag.getContent(), ChatAssistantResponse.class);
             resp.setCode(200);
-            resp.setData(conversationData);
+            resp.setData(chatAssistantResponse);
             resp.setUsage(response.getUsage());
         }else {
             resp.setCode(404);
@@ -160,12 +160,14 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<ConversationData> chat(ChatReq req) {
+    public ChatResp<ChatAssistantResponse> chat(ChatReq req) {
+
+        log.info(Command.CHAT +" req data: " + req.getData());
 
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
         log.info(Command.CHAT +" messageContext: " + messageContext);
-        ChatResp<ConversationData> resp = new ChatResp<>();
+        ChatResp<ChatAssistantResponse> resp = new ChatResp<>();
         if(StrUtil.isBlank(req.getData())){
             resp.setCode(404);
             resp.setDescribe("chat data must be not null!");
@@ -188,9 +190,9 @@ public class AiTutorImpl implements AiCTutor {
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
             // 将响应数据格式化成java bean返回请求端
-            ConversationData conversationData = JSONUtil.toBean(responseMag.getContent(), ConversationData.class);
+            ChatAssistantResponse chatAssistantResponse = JSONUtil.toBean(responseMag.getContent(), ChatAssistantResponse.class);
             resp.setCode(200);
-            resp.setData(conversationData);
+            resp.setData(chatAssistantResponse);
             resp.setUsage(response.getUsage());
         }else {
             resp.setCode(404);

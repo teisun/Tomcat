@@ -43,8 +43,8 @@ public class AIConfig {
 //                .proxy(proxy)
                 .addInterceptor(httpLoggingInterceptor)
                 .connectTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(600, TimeUnit.SECONDS)
-                .readTimeout(600, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
                 .build();
         return OpenAiClient
                 .builder()
