@@ -4,8 +4,9 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
+import com.tomcat.controller.requeset.ChatUserData;
 import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.ChatAssistantResponse;
+import com.tomcat.controller.response.ChatAssistantData;
 import com.tomcat.controller.response.Topic;
 import com.tomcat.service.AiCTutor;
 import com.tomcat.websocket.Command;
@@ -43,8 +44,10 @@ public class AiTutorImpl implements AiCTutor {
     private String promptAitutor;
     @Value("${ai.prompt.version}")
     private String promptVersion;
-    @Value("${ai.prompt.curriculum.limit}")
-    private String promptCurriculumLimit;
+    @Value("${ai.prompt.curriculum.limiter}")
+    private String promptCurriculumLimiter;
+    @Value("${ai.prompt.chat.limiter}")
+    private String promptChatLimiter;
 
     @Override
     public ChatCompletionResponse chatCompletion(List<Message> messages) {
@@ -72,12 +75,10 @@ public class AiTutorImpl implements AiCTutor {
         Message firstMsg = Message.builder().content(promptAitutor).role(Message.Role.USER).build();
         List<Message> messages = new ArrayList<>();
         messages.add(firstMsg);
-//        ChatCompletionResponse response = this.chatCompletion(messages);
-//        Message responseMag = response.getChoices().get(0).getMessage();
         Message secondMsg = Message.builder().content(promptVersion).role(Message.Role.ASSISTANT).build();
         messages.add(secondMsg);
         LocalCache.CACHE.put(uid, JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
-        log.info("AiCTutorImpl chatInit: " + secondMsg.getContent());
+        log.info("chatInit: " + secondMsg.getContent());
         ChatResp<String> resp = new ChatResp<>();
         resp.setCode(200);
         resp.setData(uid);
@@ -94,17 +95,18 @@ public class AiTutorImpl implements AiCTutor {
             List<Message> messages = new ArrayList<>();
             messages = JSONUtil.toList(messageContext, Message.class);
             String content;
-            String prompt_limit = promptCurriculumLimit; // 限时模型返回topic obj的数量
+            String prompt_limit = promptCurriculumLimiter; // 限时模型返回topic obj的数量
             if(StrUtil.isNotBlank(req.getData())){
                 content = Command.CURRICULUM_PLAN + " "+ req.getData() + prompt_limit;
             }else {
                 content = Command.CURRICULUM_PLAN + prompt_limit;
             }
+            log.info(Command.CURRICULUM_PLAN + " currentMessage content: " + content);
             Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
             messages.add(currentMessage);
             ChatCompletionResponse response = this.chatCompletion(messages);
             Message responseMag = response.getChoices().get(0).getMessage();
-            log.info(Command.CURRICULUM_PLAN + " content: " + responseMag.getContent());
+            log.info(Command.CURRICULUM_PLAN + " responseMag content: " + responseMag.getContent());
             messages.add(responseMag);
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
@@ -120,11 +122,11 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<ChatAssistantResponse> startTopic(ChatReq req) {
+    public ChatResp<ChatAssistantData> startTopic(ChatReq req) {
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
-        log.info(Command.START_TOPIC + " messageContext: " + messageContext);
-        ChatResp<ChatAssistantResponse> resp = new ChatResp<>();
+//        log.info(Command.START_TOPIC + " messageContext: " + messageContext);
+        ChatResp<ChatAssistantData> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             // 上下文list
             List<Message> messages = JSONUtil.toList(messageContext, Message.class);
@@ -136,21 +138,22 @@ public class AiTutorImpl implements AiCTutor {
             }else {
                 content = Command.START_TOPIC + " random";
             }
+            log.info(Command.START_TOPIC + " currentMessage content: " + content);
             Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
             messages.add(currentMessage);
             // 发送上下文到AI 获取返回的响应数据
             ChatCompletionResponse response = this.chatCompletion(messages);
             Message responseMag = response.getChoices().get(0).getMessage();
-            log.info(Command.START_TOPIC + "  content: " + responseMag.getContent());
+            log.info(Command.START_TOPIC + "  responseMag content: " + responseMag.getContent());
 
             // 将响应数据加入到上下文缓存中
             messages.add(responseMag);
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
             // 将响应数据格式化成java bean返回请求端
-            ChatAssistantResponse chatAssistantResponse = JSONUtil.toBean(responseMag.getContent(), ChatAssistantResponse.class);
+            ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
             resp.setCode(200);
-            resp.setData(chatAssistantResponse);
+            resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
         }else {
             resp.setCode(404);
@@ -160,14 +163,14 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<ChatAssistantResponse> chat(ChatReq req) {
+    public ChatResp<ChatAssistantData> chat(ChatReq req) {
 
         log.info(Command.CHAT +" req data: " + req.getData());
 
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(req.getUid());
-        log.info(Command.CHAT +" messageContext: " + messageContext);
-        ChatResp<ChatAssistantResponse> resp = new ChatResp<>();
+//        log.info(Command.CHAT +" messageContext: " + messageContext);
+        ChatResp<ChatAssistantData> resp = new ChatResp<>();
         if(StrUtil.isBlank(req.getData())){
             resp.setCode(404);
             resp.setDescribe("chat data must be not null!");
@@ -178,21 +181,25 @@ public class AiTutorImpl implements AiCTutor {
             List<Message> messages = JSONUtil.toList(messageContext, Message.class);
 
             // 编辑prompt加入到上下文中
-            String content = req.getData();
+            ChatUserData chatUserData = new ChatUserData();
+            chatUserData.setUser_sentence(req.getData());
+            chatUserData.setPrompt(promptChatLimiter);
+            String content = JSONUtil.toJsonStr(chatUserData);
+            log.info(Command.CHAT + " currentMessage content: " + content);
             Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
             messages.add(currentMessage);
             // 发送上下文到AI 获取返回的响应数据
             ChatCompletionResponse response = this.chatCompletion(messages);
             Message responseMag = response.getChoices().get(0).getMessage();
-            log.info(Command.CHAT + " curriculumPlan content: " + responseMag.getContent());
+            log.info(Command.CHAT + " responseMag content: " + responseMag.getContent());
             // 将响应数据加入到上下文缓存中
             messages.add(responseMag);
             LocalCache.CACHE.put(req.getUid(), JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
             // 将响应数据格式化成java bean返回请求端
-            ChatAssistantResponse chatAssistantResponse = JSONUtil.toBean(responseMag.getContent(), ChatAssistantResponse.class);
+            ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
             resp.setCode(200);
-            resp.setData(chatAssistantResponse);
+            resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
         }else {
             resp.setCode(404);

@@ -6,8 +6,8 @@ import java.util.List;
 
 
 @Data
-public class ChatAssistantResponse {
-    private String sentence;
+public class ChatAssistantData {
+    private String assistant_sentence;
     private String translate;
     private List<String> tips;
     private List<Mission> missions;
@@ -26,7 +26,7 @@ public class ChatAssistantResponse {
 
     @Data
     public static class Suggestion {
-        private String correct_answer;
+        private String better_answer;
         private List<String> points;
 
         // 构造函数、getter 和 setter 方法

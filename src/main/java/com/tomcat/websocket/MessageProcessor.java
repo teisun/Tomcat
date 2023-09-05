@@ -3,7 +3,7 @@ package com.tomcat.websocket;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.ChatAssistantResponse;
+import com.tomcat.controller.response.ChatAssistantData;
 import com.tomcat.controller.response.Topic;
 import com.tomcat.nettyws.pojo.Session;
 import com.tomcat.service.AiCTutor;
@@ -41,12 +41,12 @@ public class MessageProcessor {
     }
 
     private void startTopic(ChatReq req){
-        ChatResp<ChatAssistantResponse> resp = aiClient.startTopic(req);
+        ChatResp<ChatAssistantData> resp = aiClient.startTopic(req);
         session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
     }
 
     private void chat(ChatReq req){
-        ChatResp<ChatAssistantResponse> resp = aiClient.chat(req);
+        ChatResp<ChatAssistantData> resp = aiClient.chat(req);
         session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
     }
 

@@ -2,7 +2,7 @@ package com.tomcat.service;
 
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.ChatAssistantResponse;
+import com.tomcat.controller.response.ChatAssistantData;
 import com.tomcat.controller.response.Topic;
 import com.unfbx.chatgpt.entity.chat.ChatCompletion;
 import com.unfbx.chatgpt.entity.chat.ChatCompletionResponse;
@@ -58,7 +58,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/4 3:05 PM
      */
-    ChatResp<ChatAssistantResponse> startTopic(ChatReq req);
+    ChatResp<ChatAssistantData> startTopic(ChatReq req);
 
 
     /**
@@ -68,7 +68,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/4 3:36 PM
      */
-    ChatResp<ChatAssistantResponse> chat(ChatReq req);
+    ChatResp<ChatAssistantData> chat(ChatReq req);
 
 
 

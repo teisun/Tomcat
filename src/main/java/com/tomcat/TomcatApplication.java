@@ -30,6 +30,8 @@ public class TomcatApplication {
     // websocket 单元测试
     // 处理websocket断线重连逻辑
     // 处理Ai的聊天返回
+    // 异常指令处理
+    // prompt添加用户配置
 
 
 }
