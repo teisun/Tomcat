@@ -27,13 +27,13 @@ public class TomcatApplication {
     // 5. done 单元测试规范化
     // 6. .. 密钥改造
     // 7. done 整理websocket的配置项
-    // websocket 单元测试
+    // done websocket 单元测试
     // 处理websocket断线重连逻辑
     // 处理Ai的聊天返回
     // 异常指令处理
     // prompt添加用户配置
     // 离线消息
     // 压缩prompt字数
-    // tips bug
+    // done tips bug
 
 }

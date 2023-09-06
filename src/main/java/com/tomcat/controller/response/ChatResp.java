@@ -16,6 +16,7 @@ import lombok.Data;
 @Data
 public class ChatResp<T> {
     int code;
+    String command;
     String describe;
     T data;
     Usage usage;

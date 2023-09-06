@@ -84,6 +84,7 @@ public class AiTutorImpl implements AiCTutor {
         log.info("chatInit: " + secondMsg.getContent());
         ChatResp<String> resp = new ChatResp<>();
         resp.setCode(200);
+        resp.setCommand(Command.CHAT_INIT);
         resp.setData(uid);
         return resp;
     }
@@ -115,6 +116,7 @@ public class AiTutorImpl implements AiCTutor {
 
             Topics topics = JSONUtil.toBean(responseMag.getContent(), Topics.class);
             resp.setCode(200);
+            resp.setCommand(Command.CURRICULUM_PLAN);
             resp.setData(topics);
             resp.setUsage(response.getUsage());
         }else {
@@ -156,6 +158,7 @@ public class AiTutorImpl implements AiCTutor {
             // 将响应数据格式化成java bean返回请求端
             ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
             resp.setCode(200);
+            resp.setCommand(Command.START_TOPIC);
             resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
         }else {
@@ -212,6 +215,7 @@ public class AiTutorImpl implements AiCTutor {
             ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
             chatAssistantData.setSuggestion(suggestion);
             resp.setCode(200);
+            resp.setCommand(Command.CHAT);
             resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
         }else {
