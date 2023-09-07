@@ -4,6 +4,7 @@ import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
 import com.tomcat.controller.response.ChatAssistantData;
+import com.tomcat.controller.response.TipsResp;
 import com.tomcat.controller.response.Topics;
 import com.tomcat.nettyws.pojo.Session;
 import com.tomcat.service.AiCTutor;
@@ -36,23 +37,32 @@ public class MessageProcessor {
 
     private void curriculumPlan(ChatReq req){
         ChatResp<Topics> resp = aiClient.curriculumPlan(req);
-        session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
-
+        sendText(resp);
     }
 
     private void startTopic(ChatReq req){
         ChatResp<ChatAssistantData> resp = aiClient.startTopic(req);
-        session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
+        sendText(resp);
     }
 
     private void chat(ChatReq req){
         ChatResp<ChatAssistantData> resp = aiClient.chat(req);
-        session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
+        sendText(resp);
+    }
+
+    private void generateTips(ChatReq req){
+        ChatResp<TipsResp> resp = aiClient.generateTips(req);
+        sendText(resp);
+    }
+
+    private void sendText(ChatResp resp){
+        String jsonStr = JSONUtil.toJsonStr(resp);
+        log.info("MessageProcessor sendText:\n" + jsonStr);
+        session.sendText(new TextWebSocketFrame(jsonStr));
     }
 
 
     public void processor(String msg) {
-
 
         ChatReq chatReq = JSONUtil.toBean(msg, ChatReq.class);
         chatReq.setUid(uid);
@@ -68,6 +78,9 @@ public class MessageProcessor {
                 break;
             case Command.CHAT:
                 this.chat(chatReq);
+                break;
+            case Command.TIPS:
+                this.generateTips(chatReq);
                 break;
             default:
                 break;

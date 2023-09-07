@@ -35,5 +35,8 @@ public class TomcatApplication {
     // 离线消息
     // 压缩prompt字数
     // done tips bug
+    // 结束对话
+    // uid与对话是否1对多
+    // json反射转换bug
 
 }

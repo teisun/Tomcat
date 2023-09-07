@@ -12,10 +12,6 @@ import io.netty.util.AttributeKey;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.springframework.beans.TypeMismatchException;
-import retrofit2.HttpException;
-
-import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
 
@@ -23,6 +19,7 @@ import java.util.*;
  * @author Yeauty
  * @version 1.0
  */
+
 public class PojoEndpointServer {
 
     private static final AttributeKey<Object> POJO_KEY = AttributeKey.valueOf("WEBSOCKET_IMPLEMENT");
@@ -172,18 +169,6 @@ public class PojoEndpointServer {
             Object implement = channel.attr(POJO_KEY).get();
             try {
                 methodMapping.getOnMessage().invoke(implement, methodMapping.getOnMessageArgs(channel, textFrame));
-            } catch (InvocationTargetException e){
-                Throwable exception = e.getTargetException();
-                if (exception instanceof HttpException){
-                    HttpException httpException = (HttpException) exception;
-                    try {
-                        logger.error("HttpException: " + httpException.response().errorBody().string());
-                    } catch (IOException ex) {
-                        throw new RuntimeException(ex);
-                    }
-                }
-
-
             } catch (Throwable t) {
                 logger.error(t);
             }

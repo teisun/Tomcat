@@ -16,4 +16,6 @@ public class Command {
     public static final String START_TOPIC = "/START_TOPIC";
 
     public static final String CHAT = "/CHAT";
+
+    public static final String TIPS = "/TIPS";
 }

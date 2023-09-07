@@ -1,6 +1,7 @@
 package com.tomcat.websocket;
 
 import cn.hutool.core.util.StrUtil;
+import com.tomcat.exceptions.GlobalExceptionHandler;
 import com.tomcat.nettyws.annotation.*;
 import com.tomcat.nettyws.pojo.Session;
 import com.tomcat.service.AiCTutor;
@@ -43,6 +44,9 @@ public class NettyWebSocketServer {
 
     @Autowired
     private AiCTutor aiClient;
+
+    @Autowired
+    GlobalExceptionHandler globalExceptionHandler;
 
     String uid;
     MessageProcessor messageProcessor;
@@ -141,7 +145,12 @@ public class NettyWebSocketServer {
         log.info("NettyWebSocketServer onMessage");
         log.info("msg：" + message);
 //        session.sendText("Hello Netty!");
-        messageProcessor.processor(message);
+        try {
+            messageProcessor.processor(message);
+        }catch (Exception e){
+            globalExceptionHandler.handleUnKnow(e);
+        }
+
     }
 
     @OnBinary

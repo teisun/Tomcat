@@ -11,7 +11,10 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.context.request.WebRequest;
+import retrofit2.HttpException;
 
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.file.AccessDeniedException;
 import java.security.InvalidParameterException;
 import java.util.NoSuchElementException;
@@ -99,6 +102,23 @@ public class GlobalExceptionHandler {
     ResponseEntity<ApiErrorResponse> responseEntity = new ResponseEntity<>(response, response.getStatus());
     log.error("!exception!: " + responseEntity.toString());
     return responseEntity;
+  }
+
+  public ResponseEntity<ApiErrorResponse> handleUnKnow(Exception e){
+    e.printStackTrace();
+    if(e instanceof InvocationTargetException){
+      InvocationTargetException invocationTargetException = (InvocationTargetException) e;
+      Throwable exception = invocationTargetException.getTargetException();
+      if (exception instanceof HttpException){
+        HttpException httpException = (HttpException) exception;
+        try {
+          log.error("HttpException: " + httpException.response().errorBody().string());
+        } catch (IOException ex) {
+          throw new RuntimeException(ex);
+        }
+      }
+    }
+    return buildResponseEntity(e, HttpStatus.INTERNAL_SERVER_ERROR, HttpStatus.INTERNAL_SERVER_ERROR.name());
   }
 
 

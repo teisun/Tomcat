@@ -20,4 +20,10 @@ public class ChatResp<T> {
     String describe;
     T data;
     Usage usage;
+
+    public void addUsage(Usage usageOther){
+        usage.setPromptTokens(usage.getPromptTokens()+usageOther.getPromptTokens());
+        usage.setCompletionTokens(usage.getCompletionTokens()+usageOther.getCompletionTokens());
+        usage.setTotalTokens(usage.getTotalTokens() + usageOther.getTotalTokens());
+    }
 }

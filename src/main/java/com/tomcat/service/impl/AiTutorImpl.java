@@ -5,8 +5,10 @@ import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.requeset.ChatUserData;
+import com.tomcat.controller.requeset.TipsReq;
 import com.tomcat.controller.response.ChatResp;
 import com.tomcat.controller.response.ChatAssistantData;
+import com.tomcat.controller.response.TipsResp;
 import com.tomcat.controller.response.Topics;
 import com.tomcat.service.AiCTutor;
 import com.tomcat.websocket.Command;
@@ -51,6 +53,9 @@ public class AiTutorImpl implements AiCTutor {
 
     @Value("${ai.prompt.chat.sentence_checker}")
     private String promptSentenceChecker;
+
+    @Value("${ai.prompt.chat.generateTips}")
+    private String promptChatGenerateTips;
 
     @Override
     public ChatCompletionResponse chatCompletion(List<Message> messages) {
@@ -157,10 +162,19 @@ public class AiTutorImpl implements AiCTutor {
 
             // 将响应数据格式化成java bean返回请求端
             ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
+
+            // 生成tips
+            TipsReq tipsReq = new TipsReq();
+            tipsReq.setTopic(chatAssistantData.getTopic());
+            tipsReq.setQuestion(chatAssistantData.getAssistant_sentence());
+            TipsResp tipsResp = generateTips(JSONUtil.toJsonStr(tipsReq));
+            chatAssistantData.setTips(tipsResp.getTips());
+
             resp.setCode(200);
             resp.setCommand(Command.START_TOPIC);
             resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
+            resp.addUsage(tipsResp.getUsage());
         }else {
             resp.setCode(404);
             resp.setDescribe("chat context not found!");
@@ -213,16 +227,56 @@ public class AiTutorImpl implements AiCTutor {
 
             // 将响应数据格式化成java bean返回请求端
             ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
+
+            // 生成tips
+            TipsReq tipsReq = new TipsReq();
+            tipsReq.setTopic(chatAssistantData.getTopic());
+            tipsReq.setQuestion(chatAssistantData.getAssistant_sentence());
+            TipsResp tipsResp = generateTips(JSONUtil.toJsonStr(tipsReq));
+
+            chatAssistantData.setTips(tipsResp.getTips());
             chatAssistantData.setSuggestion(suggestion);
             resp.setCode(200);
             resp.setCommand(Command.CHAT);
             resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
+            resp.addUsage(tipsResp.getUsage());
         }else {
             resp.setCode(404);
             resp.setDescribe("chat context not found!");
         }
         return resp;
+    }
+
+    @Override
+    public ChatResp<TipsResp> generateTips(ChatReq req) {
+        ChatResp<TipsResp> resp = new ChatResp<>();
+        if(StrUtil.isBlank(req.getData())){
+            resp.setCode(404);
+            resp.setDescribe("Req data must be not null!");
+            return resp;
+        }
+        TipsResp tipsResp = generateTips(req.getData());
+        resp.setCode(200);
+        resp.setCommand(Command.TIPS);
+        resp.setData(tipsResp);
+        resp.setUsage(tipsResp.getUsage());
+
+        return resp;
+    }
+
+    private TipsResp generateTips(String tipsReq){
+        Message messageGenerateTips = Message.builder().content(tipsReq+ "\n"+promptChatGenerateTips).role(Message.Role.USER).build();
+        List<Message> messages = new ArrayList<>();
+        messages.add(messageGenerateTips);
+        ChatCompletionResponse response = this.chatCompletion(messages);
+        String responseStr = response.getChoices().get(0).getMessage().getContent();
+        TipsResp tipsResp = JSONUtil.toBean(responseStr, TipsResp.class);
+        tipsResp.setUsage(response.getUsage());
+        log.info(Command.TIPS + " generateTips content: " + responseStr);
+        log.info(Command.TIPS + " generateTips usage: " + response.getUsage());
+        return tipsResp;
+
     }
 
 

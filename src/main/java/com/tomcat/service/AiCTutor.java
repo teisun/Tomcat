@@ -1,8 +1,10 @@
 package com.tomcat.service;
 
 import com.tomcat.controller.requeset.ChatReq;
+import com.tomcat.controller.requeset.TipsReq;
 import com.tomcat.controller.response.ChatResp;
 import com.tomcat.controller.response.ChatAssistantData;
+import com.tomcat.controller.response.TipsResp;
 import com.tomcat.controller.response.Topics;
 import com.unfbx.chatgpt.entity.chat.ChatCompletion;
 import com.unfbx.chatgpt.entity.chat.ChatCompletionResponse;
@@ -69,6 +71,15 @@ public interface AiCTutor {
      * @date 2023/9/4 3:36 PM
      */
     ChatResp<ChatAssistantData> chat(ChatReq req);
+
+    /**
+     * @description 根据topic和sentence生成tips
+     * @param req:
+     * @return ChatResp<TipsResp>
+     * @author tomcat
+     * @date 2023/9/7 4:09 PM
+     */
+    ChatResp<TipsResp> generateTips(ChatReq req);
 
 
 
