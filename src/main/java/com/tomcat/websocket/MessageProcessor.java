@@ -1,5 +1,6 @@
 package com.tomcat.websocket;
 
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.ChatResp;
@@ -61,6 +62,14 @@ public class MessageProcessor {
         session.sendText(new TextWebSocketFrame(jsonStr));
     }
 
+    private void commandNotFound(String command){
+        ChatResp<TipsResp> resp = new ChatResp<>();
+        resp.setCode(404);
+        resp.setDescribe("Command " + command + " not found!");
+        String jsonStr = JSONUtil.toJsonStr(resp);
+        session.sendText(new TextWebSocketFrame(jsonStr));
+    }
+
 
     public void processor(String msg) {
 
@@ -83,6 +92,7 @@ public class MessageProcessor {
                 this.generateTips(chatReq);
                 break;
             default:
+                commandNotFound(chatReq.getCommand());
                 break;
         }
 

@@ -273,10 +273,10 @@ public class AiTutorImpl implements AiCTutor {
         String responseStr = response.getChoices().get(0).getMessage().getContent();
         TipsResp tipsResp = JSONUtil.toBean(responseStr, TipsResp.class);
         tipsResp.setUsage(response.getUsage());
+        log.info(Command.TIPS + " " + tipsReq);
         log.info(Command.TIPS + " generateTips content: " + responseStr);
         log.info(Command.TIPS + " generateTips usage: " + response.getUsage());
         return tipsResp;
-
     }
 
 
