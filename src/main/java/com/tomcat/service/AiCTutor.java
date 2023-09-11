@@ -2,10 +2,7 @@ package com.tomcat.service;
 
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.requeset.TipsReq;
-import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.ChatAssistantData;
-import com.tomcat.controller.response.TipsResp;
-import com.tomcat.controller.response.Topics;
+import com.tomcat.controller.response.*;
 import com.unfbx.chatgpt.entity.chat.ChatCompletion;
 import com.unfbx.chatgpt.entity.chat.ChatCompletionResponse;
 import com.unfbx.chatgpt.entity.chat.Message;
@@ -82,6 +79,14 @@ public interface AiCTutor {
     ChatResp<TipsResp> generateTips(ChatReq req);
 
 
+    /**
+     * @description 根据chatId获取离线消息
+     * @param req:
+     * @return ChatResp<TipsResp>
+     * @author tomcat
+     * @date 2023/9/11 3:11 PM
+     */
+    ChatResp<List<OfflineMsgDTO>> offlineMsg(ChatReq req);
 
 
 }

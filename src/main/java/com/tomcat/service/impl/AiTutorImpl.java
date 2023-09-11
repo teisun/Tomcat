@@ -6,10 +6,7 @@ import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.requeset.ChatUserData;
 import com.tomcat.controller.requeset.TipsReq;
-import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.ChatAssistantData;
-import com.tomcat.controller.response.TipsResp;
-import com.tomcat.controller.response.Topics;
+import com.tomcat.controller.response.*;
 import com.tomcat.service.AiCTutor;
 import com.tomcat.utils.UniqueIdentifierGenerator;
 import com.tomcat.websocket.Command;
@@ -282,6 +279,18 @@ public class AiTutorImpl implements AiCTutor {
         resp.setData(tipsResp);
         resp.setUsage(tipsResp.getUsage());
 
+        return resp;
+    }
+
+    @Override
+    public ChatResp<List<OfflineMsgDTO>> offlineMsg(ChatReq req) {
+        ChatResp<List<OfflineMsgDTO>> resp = new ChatResp<>();
+        if(!LocalCache.MESSAGE_CACHE.containsKey(req.getUid())){
+            resp.setCode(404);
+            resp.setDescribe("Req data must be not null!");
+        }
+        List<OfflineMsgDTO> list = (List<OfflineMsgDTO>) LocalCache.MESSAGE_CACHE.get(req.getUid());
+        resp.setData(list);
         return resp;
     }
 

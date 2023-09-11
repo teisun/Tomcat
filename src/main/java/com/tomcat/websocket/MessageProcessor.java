@@ -1,17 +1,15 @@
 package com.tomcat.websocket;
 
-import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
+import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
-import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.ChatAssistantData;
-import com.tomcat.controller.response.TipsResp;
-import com.tomcat.controller.response.Topics;
+import com.tomcat.controller.response.*;
 import com.tomcat.nettyws.pojo.Session;
 import com.tomcat.service.AiCTutor;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -38,29 +36,53 @@ public class MessageProcessor {
 
     private void curriculumPlan(ChatReq req){
         ChatResp<Topics> resp = aiClient.curriculumPlan(req);
-        sendText(resp);
+        sendText(req.getChatId(), resp);
     }
 
     private void startTopic(ChatReq req){
         ChatResp<ChatAssistantData> resp = aiClient.startTopic(req);
-        sendText(resp);
+        sendText(req.getChatId(), resp);
     }
 
     private void chat(ChatReq req){
         ChatResp<ChatAssistantData> resp = aiClient.chat(req);
-        sendText(resp);
+        sendText(req.getChatId(), resp);
     }
 
     private void generateTips(ChatReq req){
         ChatResp<TipsResp> resp = aiClient.generateTips(req);
-        sendText(resp);
+        sendText(req.getChatId(), resp);
     }
 
-    private void sendText(ChatResp resp){
-        String jsonStr = JSONUtil.toJsonStr(resp);
-        log.info("MessageProcessor sendText:\n" + jsonStr);
-        session.sendText(new TextWebSocketFrame(jsonStr));
+    private void offlineMsg(ChatReq req){
+        ChatResp<List<OfflineMsgDTO>> resp = aiClient.offlineMsg(req);
+        sendText(req.getChatId(), resp);
     }
+
+    private void sendText(String chatId, ChatResp resp){
+        if(session.isOpen()){
+            String jsonStr = JSONUtil.toJsonStr(resp);
+            log.info("MessageProcessor sendText:\n" + jsonStr);
+            session.sendText(JSONUtil.toJsonStr(resp));
+        }else {
+            log.info("MessageProcessor sendText: session not open, cache the message!");
+            List<OfflineMsgDTO> msgs;
+            if(LocalCache.MESSAGE_CACHE.containsKey(uid)){
+                msgs = (List<OfflineMsgDTO>) LocalCache.MESSAGE_CACHE.get(uid);
+            }else {
+                msgs = new ArrayList<>();
+                LocalCache.MESSAGE_CACHE.put(uid, msgs);
+            }
+            OfflineMsgDTO offlineMsg = new OfflineMsgDTO();
+            offlineMsg.setChatId(chatId);
+            offlineMsg.setMsg(JSONUtil.toJsonStr(resp.getData()));
+            msgs.add(offlineMsg);
+            LocalCache.MESSAGE_CACHE.put(uid, msgs);
+        }
+
+    }
+
+
 
     private void commandNotFound(String command){
         ChatResp<TipsResp> resp = new ChatResp<>();
@@ -90,6 +112,9 @@ public class MessageProcessor {
                 break;
             case Command.TIPS:
                 this.generateTips(chatReq);
+                break;
+            case Command.OFFLINE_MSG:
+                offlineMsg(chatReq);
                 break;
             default:
                 commandNotFound(chatReq.getCommand());

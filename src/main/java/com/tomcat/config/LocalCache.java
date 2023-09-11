@@ -21,9 +21,11 @@ public class LocalCache {
      * 缓存对象
      */
     public static final TimedCache<String, Object> CACHE = CacheUtil.newTimedCache(TIMEOUT);
+    public static final TimedCache<String, Object> MESSAGE_CACHE = CacheUtil.newTimedCache(TIMEOUT);
 
     static {
         //启动定时任务
         CACHE.schedulePrune(CLEAN_TIMEOUT);
+        MESSAGE_CACHE.schedulePrune(CLEAN_TIMEOUT);
     }
 }
