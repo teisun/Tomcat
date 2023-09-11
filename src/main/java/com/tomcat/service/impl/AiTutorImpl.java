@@ -129,14 +129,17 @@ public class AiTutorImpl implements AiCTutor {
             ChatCompletionResponse response = this.chatCompletion(messages);
             Message responseMag = response.getChoices().get(0).getMessage();
             log.info(Command.CURRICULUM_PLAN + " responseMag content: " + responseMag.getContent());
-            messages.add(responseMag);
-            LocalCache.CACHE.put(chatId, JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
             Topics topics = JSONUtil.toBean(responseMag.getContent(), Topics.class);
             resp.setCode(200);
             resp.setCommand(Command.CURRICULUM_PLAN);
             resp.setData(topics);
             resp.setUsage(response.getUsage());
+
+            // 将响应数据加入到上下文缓存中
+            messages.add(responseMag);
+            LocalCache.CACHE.put(chatId, JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
+
         }else {
             resp.setCode(404);
             resp.setDescribe("chat context not found!");
@@ -170,9 +173,6 @@ public class AiTutorImpl implements AiCTutor {
             Message responseMag = response.getChoices().get(0).getMessage();
             log.info(Command.START_TOPIC + "  responseMag content: " + responseMag.getContent());
 
-            // 将响应数据加入到上下文缓存中
-            messages.add(responseMag);
-            LocalCache.CACHE.put(chatId, JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
             // 将响应数据格式化成java bean返回请求端
             ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
@@ -189,6 +189,10 @@ public class AiTutorImpl implements AiCTutor {
             resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
             resp.addUsage(tipsResp.getUsage());
+
+            // 将响应数据加入到上下文缓存中
+            messages.add(responseMag);
+            LocalCache.CACHE.put(chatId, JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
         }else {
             resp.setCode(404);
             resp.setDescribe("chat context not found!");
@@ -236,9 +240,6 @@ public class AiTutorImpl implements AiCTutor {
             ChatCompletionResponse response = this.chatCompletion(messages);
             Message responseMag = response.getChoices().get(0).getMessage();
             log.info(Command.CHAT + " responseMag content: " + responseMag.getContent());
-            // 将响应数据加入到上下文缓存中
-            messages.add(responseMag);
-            LocalCache.CACHE.put(chatId, JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
 
             // 将响应数据格式化成java bean返回请求端
             ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
@@ -256,6 +257,10 @@ public class AiTutorImpl implements AiCTutor {
             resp.setData(chatAssistantData);
             resp.setUsage(response.getUsage());
             resp.addUsage(tipsResp.getUsage());
+
+            // 将响应数据加入到上下文缓存中
+            messages.add(responseMag);
+            LocalCache.CACHE.put(chatId, JSONUtil.toJsonStr(messages), LocalCache.TIMEOUT);
         }else {
             resp.setCode(404);
             resp.setDescribe("chat context not found!");
