@@ -14,6 +14,7 @@ import lombok.Data;
 @Data
 public class ChatReq {
     String uid;
+    String chatId;
     String command;
     String data;
 

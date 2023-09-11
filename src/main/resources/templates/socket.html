@@ -44,6 +44,7 @@
     function send_(){
       req.command = document.getElementById("command").value;
       req.data = document.getElementById("data").value;
+      req.chatId = document.getElementById("chatId").value;
       send(JSON.stringify(req));
     }
 
@@ -55,6 +56,7 @@
 <form onSubmit="return false;">
   <label>command</label><input type="text" id="command" value="" /> <br />
   <label>data</label><input type="text" id="data" value="" /> <br />
+  <label>chatId</label><input type="text" id="chatId" value="" /> <br />
   <br /> <input type="button" value="发送ws消息" onClick="send_()" />
   <hr color="black" />
   <h3>服务端返回的应答消息</h3>

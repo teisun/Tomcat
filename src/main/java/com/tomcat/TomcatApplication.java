@@ -35,7 +35,7 @@ public class TomcatApplication {
     // 压缩prompt字数
     // done tips bug
     // 结束对话
-    // uid与对话是否1对多
+    // done uid与对话是否1对多
     // json反射转换bug
     // 处理websocket断线重连逻辑
 

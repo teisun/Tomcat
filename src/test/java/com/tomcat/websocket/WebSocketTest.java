@@ -38,6 +38,7 @@ import static org.awaitility.Awaitility.await;
 public class WebSocketTest {
 
     MyWebSocketClient myWebSocketClient;
+    private static String chatId;
 
     /**
      * @description 测试websocket连接
@@ -75,6 +76,7 @@ public class WebSocketTest {
         });
 
         Assert.assertNotNull(myWebSocketClient.chatInitResp.getData());
+        chatId = myWebSocketClient.chatInitResp.getData();
         myWebSocketClient.close();
     }
 
@@ -88,6 +90,7 @@ public class WebSocketTest {
         });
         ChatReq chatReq = new ChatReq();
         chatReq.setCommand(Command.CURRICULUM_PLAN);
+        chatReq.setChatId(chatId);
         myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.planResp != null && myWebSocketClient.planResp.getData() != null;
@@ -108,6 +111,7 @@ public class WebSocketTest {
         ChatReq chatReq = new ChatReq();
         chatReq.setCommand(Command.START_TOPIC);
         chatReq.setData("At the Restaurant");
+        chatReq.setChatId(chatId);
         myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.startTopicResp != null && myWebSocketClient.startTopicResp.getData() != null;
@@ -128,6 +132,7 @@ public class WebSocketTest {
         ChatReq chatReq = new ChatReq();
         chatReq.setCommand(Command.CHAT);
         chatReq.setData("Hello!Good to see you! I'm Tom!");
+        chatReq.setChatId(chatId);
         myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.chatTopicResp != null && myWebSocketClient.chatTopicResp.getData() != null;
