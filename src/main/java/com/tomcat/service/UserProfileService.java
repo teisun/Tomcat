@@ -1,12 +1,12 @@
 package com.tomcat.service;
 
-import com.tomcat.controller.requeset.ProfileResquest;
-import com.tomcat.controller.response.ProfileResponse;
+import com.tomcat.controller.requeset.ProfileReq;
+import com.tomcat.controller.response.ProfileResp;
 
 public interface UserProfileService {
 
-  ProfileResponse getByUserId(String userId);
+  ProfileResp getByUserId(String userId);
 
-  ProfileResponse update(ProfileResquest resquest);
+  ProfileResp update(ProfileReq resquest);
 
 }

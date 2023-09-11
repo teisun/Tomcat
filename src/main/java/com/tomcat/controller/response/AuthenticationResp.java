@@ -2,19 +2,19 @@ package com.tomcat.controller.response;
 
 import com.tomcat.domain.User;
 
-public class AuthenticationResponse {
+public class AuthenticationResp {
 
   private String accessToken;
   private String tokenType = "Bearer";
 
   private User user;
 
-  public AuthenticationResponse(String accessToken, User user) {
+  public AuthenticationResp(String accessToken, User user) {
     this.accessToken = accessToken;
     this.user = user;
   }
 
-  public AuthenticationResponse(String jwtToken) {
+  public AuthenticationResp(String jwtToken) {
     this.accessToken = jwtToken;
   }
 

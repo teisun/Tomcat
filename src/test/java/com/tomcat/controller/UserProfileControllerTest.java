@@ -1,7 +1,7 @@
 package com.tomcat.controller;
 
 import cn.hutool.json.JSONUtil;
-import com.tomcat.controller.requeset.ProfileResquest;
+import com.tomcat.controller.requeset.ProfileReq;
 import com.tomcat.domain.User;
 import com.tomcat.domain.UserRepository;
 import com.tomcat.utils.JwtUtil;
@@ -75,12 +75,12 @@ class UserProfileControllerTest {
 //                "high School",
 //                "humor",
 //                "English");
-        ProfileResquest profileResquest = new ProfileResquest(user.getId(),
+        ProfileReq profileReq = new ProfileReq(user.getId(),
                 "中文",
                 "高中",
                 "幽默",
                 "English");
-        String requestJson = JSONUtil.toJsonStr(profileResquest);
+        String requestJson = JSONUtil.toJsonStr(profileReq);
 
 
         mockMvc.perform(MockMvcRequestBuilders

@@ -1,7 +1,7 @@
 package com.tomcat.service.impl;
 
-import com.tomcat.controller.requeset.ProfileResquest;
-import com.tomcat.controller.response.ProfileResponse;
+import com.tomcat.controller.requeset.ProfileReq;
+import com.tomcat.controller.response.ProfileResp;
 import com.tomcat.domain.User;
 import com.tomcat.domain.UserProfile;
 import com.tomcat.domain.UserProfileRepository;
@@ -20,12 +20,12 @@ public class UserProfileServiceImpl implements UserProfileService {
   UserRepository userRepository;
 
   @Override
-  public ProfileResponse getByUserId(String userId) {
+  public ProfileResp getByUserId(String userId) {
     UserProfile userProfile = userProfileRepository.findByUserId(userId);
-    ProfileResponse response;
-    if(userProfile != null) response = ProfileResponse.build(userProfile);
+    ProfileResp response;
+    if(userProfile != null) response = ProfileResp.build(userProfile);
     else {
-      response = new ProfileResponse();
+      response = new ProfileResp();
       response.setUserId(userId);
 
     }
@@ -33,7 +33,7 @@ public class UserProfileServiceImpl implements UserProfileService {
   }
 
   @Override
-  public ProfileResponse update(ProfileResquest profileRequest) {
+  public ProfileResp update(ProfileReq profileRequest) {
 
     User user = userRepository.findById(profileRequest.getUserId())
             .orElseThrow(() -> new RuntimeException("用户不存在"));
@@ -46,7 +46,7 @@ public class UserProfileServiceImpl implements UserProfileService {
     profile.setTargetLanguage(profileRequest.getTargetLanguage());
 
     UserProfile save = userProfileRepository.save(profile);
-    ProfileResponse response = ProfileResponse.build(save);
+    ProfileResp response = ProfileResp.build(save);
 
 
     return response;

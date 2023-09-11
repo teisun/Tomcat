@@ -1,7 +1,6 @@
 package com.tomcat.service;
 
 import com.tomcat.controller.requeset.ChatReq;
-import com.tomcat.controller.requeset.TipsReq;
 import com.tomcat.controller.response.*;
 import com.unfbx.chatgpt.entity.chat.ChatCompletion;
 import com.unfbx.chatgpt.entity.chat.ChatCompletionResponse;
@@ -47,7 +46,7 @@ public interface AiCTutor {
      * @author sm0007
      * @date 2023/8/30 4:15 PM
      */
-    ChatResp<Topics> curriculumPlan(ChatReq req);
+    ChatResp<TopicsResp> curriculumPlan(ChatReq req);
 
 
     /**
@@ -57,7 +56,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/4 3:05 PM
      */
-    ChatResp<ChatAssistantData> startTopic(ChatReq req);
+    ChatResp<ChatAssistantDataResp> startTopic(ChatReq req);
 
 
     /**
@@ -67,7 +66,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/4 3:36 PM
      */
-    ChatResp<ChatAssistantData> chat(ChatReq req);
+    ChatResp<ChatAssistantDataResp> chat(ChatReq req);
 
     /**
      * @description 根据topic和sentence生成tips
@@ -86,7 +85,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/11 3:11 PM
      */
-    ChatResp<List<OfflineMsgDTO>> offlineMsg(ChatReq req);
+    ChatResp<List<OfflineMsgResp>> offlineMsg(ChatReq req);
 
 
 }

@@ -1,7 +1,7 @@
 package com.tomcat.service;
 
-import com.tomcat.controller.requeset.AuthenticationRequest;
-import com.tomcat.controller.response.AuthenticationResponse;
+import com.tomcat.controller.requeset.AuthenticationReq;
+import com.tomcat.controller.response.AuthenticationResp;
 import org.hamcrest.Matchers;
 import org.junit.Assert;
 import org.junit.jupiter.api.Test;
@@ -20,10 +20,10 @@ class UserServiceTest {
 
     @Test
     void registerOrLogin() {
-        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
-        AuthenticationResponse authenticationResponse = userService.registerOrLogin(request);
+        AuthenticationReq request = new AuthenticationReq("tom", "1234", "", "13823232232", "8888888");
+        AuthenticationResp authenticationResp = userService.registerOrLogin(request);
         System.out.println("registerOrLogin!");
-        System.out.println("AccessToken= "+ authenticationResponse.getAccessToken());
-        Assert.assertThat(authenticationResponse, Matchers.notNullValue());
+        System.out.println("AccessToken= "+ authenticationResp.getAccessToken());
+        Assert.assertThat(authenticationResp, Matchers.notNullValue());
     }
 }

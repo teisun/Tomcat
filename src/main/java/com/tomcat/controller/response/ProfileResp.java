@@ -6,9 +6,9 @@ import lombok.Data;
 
 @Data
 @AllArgsConstructor
-public class ProfileResponse {
+public class ProfileResp {
 
-    public ProfileResponse(){}
+    public ProfileResp(){}
 
     private String id;
 
@@ -22,8 +22,8 @@ public class ProfileResponse {
 
     private String targetLanguage;
 
-    public static ProfileResponse build(UserProfile profile){
-        ProfileResponse response = new ProfileResponse();
+    public static ProfileResp build(UserProfile profile){
+        ProfileResp response = new ProfileResp();
         response.setId(profile.getId());
         response.setUserId(profile.getUser().getId());
         response.setMotherTongue(profile.getMotherTongue());

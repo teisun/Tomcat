@@ -2,10 +2,9 @@ package com.tomcat.service.impl;
 
 import cn.hutool.core.convert.Convert;
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.json.JSONUtil;
-import com.tomcat.controller.requeset.AuthenticationRequest;
-import com.tomcat.controller.response.AuthenticationResponse;
-import com.tomcat.controller.response.UserDTO;
+import com.tomcat.controller.requeset.AuthenticationReq;
+import com.tomcat.controller.response.AuthenticationResp;
+import com.tomcat.controller.response.UserResp;
 import com.tomcat.domain.JwtUser;
 import com.tomcat.domain.User;
 import com.tomcat.domain.UserRepository;
@@ -42,7 +41,7 @@ public class UserServiceImpl implements UserService {
 
 
   @Override
-  public AuthenticationResponse register(AuthenticationRequest request) {
+  public AuthenticationResp register(AuthenticationReq request) {
 
     // 密码编码
     String encodedPassword = securityUtils.encode(request.password);
@@ -57,12 +56,12 @@ public class UserServiceImpl implements UserService {
     User userSaved = userRepository.save(user);
     String jwtToken = jwtUtil.generateToken(userSaved.getId(), userSaved.getUsername());
 
-    return new AuthenticationResponse(jwtToken);
+    return new AuthenticationResp(jwtToken);
 
   }
 
   @Override
-  public AuthenticationResponse login(AuthenticationRequest request) {
+  public AuthenticationResp login(AuthenticationReq request) {
     if(StrUtil.isBlank(request.username) || StrUtil.isBlank(request.phoneNum) || StrUtil.isBlank(request.email) || StrUtil.isBlank(request.password) || StrUtil.isBlank(request.deviceId)){
       throw new InvalidParameterException("user info must be not empty, you can set any string, like 'default' ");
     }
@@ -87,7 +86,7 @@ public class UserServiceImpl implements UserService {
 
     // 返回JWT令牌
     String jwtToken = jwtUtil.generateToken(user.getId(), user.getUsername());
-    return new AuthenticationResponse(jwtToken);
+    return new AuthenticationResp(jwtToken);
   }
 
   @Override
@@ -96,16 +95,16 @@ public class UserServiceImpl implements UserService {
   }
 
   @Override
-  public List<UserDTO> findByDeviceId(String deviceId) {
+  public List<UserResp> findByDeviceId(String deviceId) {
     List<User> userList = userRepository.findByDeviceId(deviceId);
     return userList.stream()
-            .map(user -> Convert.convert(UserDTO.class, user))
+            .map(user -> Convert.convert(UserResp.class, user))
             .collect(Collectors.toList());
   }
 
   @Override
-  public AuthenticationResponse registerOrLogin(AuthenticationRequest request) {
-      AuthenticationResponse response;
+  public AuthenticationResp registerOrLogin(AuthenticationReq request) {
+      AuthenticationResp response;
 
 //    Optional<User> userOptional = userRepository.findByUsername(request.username);
     Optional<User> userOptional = userRepository.findByUsernameOrPhoneNumOrEmail(request.username, request.phoneNum, request.email);

@@ -4,7 +4,7 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
-import com.tomcat.controller.requeset.ChatUserData;
+import com.tomcat.controller.requeset.ChatUserDataReq;
 import com.tomcat.controller.requeset.TipsReq;
 import com.tomcat.controller.response.*;
 import com.tomcat.service.AiCTutor;
@@ -103,13 +103,13 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<Topics> curriculumPlan(ChatReq req) {
+    public ChatResp<TopicsResp> curriculumPlan(ChatReq req) {
 
         // 获取chat上下文
         String chatId = req.getChatId();
         String messageContext = (String) LocalCache.CACHE.get(chatId);
         log.info(Command.CURRICULUM_PLAN + " messageContext: " + messageContext);
-        ChatResp<Topics> resp = new ChatResp<>();
+        ChatResp<TopicsResp> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             List<Message> messages = new ArrayList<>();
             messages = JSONUtil.toList(messageContext, Message.class);
@@ -127,10 +127,10 @@ public class AiTutorImpl implements AiCTutor {
             Message responseMag = response.getChoices().get(0).getMessage();
             log.info(Command.CURRICULUM_PLAN + " responseMag content: " + responseMag.getContent());
 
-            Topics topics = JSONUtil.toBean(responseMag.getContent(), Topics.class);
+            TopicsResp topicsResp = JSONUtil.toBean(responseMag.getContent(), TopicsResp.class);
             resp.setCode(200);
             resp.setCommand(Command.CURRICULUM_PLAN);
-            resp.setData(topics);
+            resp.setData(topicsResp);
             resp.setUsage(response.getUsage());
 
             // 将响应数据加入到上下文缓存中
@@ -145,12 +145,12 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<ChatAssistantData> startTopic(ChatReq req) {
+    public ChatResp<ChatAssistantDataResp> startTopic(ChatReq req) {
         // 获取chat上下文
         String chatId = req.getChatId();
         String messageContext = (String) LocalCache.CACHE.get(chatId);
         log.info(Command.START_TOPIC + " messageContext: " + messageContext);
-        ChatResp<ChatAssistantData> resp = new ChatResp<>();
+        ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
         if (StrUtil.isNotBlank(messageContext)) {
             // 上下文list
             List<Message> messages = JSONUtil.toList(messageContext, Message.class);
@@ -172,18 +172,18 @@ public class AiTutorImpl implements AiCTutor {
 
 
             // 将响应数据格式化成java bean返回请求端
-            ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
+            ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMag.getContent(), ChatAssistantDataResp.class);
 
             // 生成tips
             TipsReq tipsReq = new TipsReq();
-            tipsReq.setTopic(chatAssistantData.getTopic());
-            tipsReq.setQuestion(chatAssistantData.getAssistant_sentence());
+            tipsReq.setTopic(chatAssistantDataResp.getTopic());
+            tipsReq.setQuestion(chatAssistantDataResp.getAssistant_sentence());
             TipsResp tipsResp = generateTips(JSONUtil.toJsonStr(tipsReq));
-            chatAssistantData.setTips(tipsResp.getTips());
+            chatAssistantDataResp.setTips(tipsResp.getTips());
 
             resp.setCode(200);
             resp.setCommand(Command.START_TOPIC);
-            resp.setData(chatAssistantData);
+            resp.setData(chatAssistantDataResp);
             resp.setUsage(response.getUsage());
             resp.addUsage(tipsResp.getUsage());
 
@@ -198,7 +198,7 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<ChatAssistantData> chat(ChatReq req) {
+    public ChatResp<ChatAssistantDataResp> chat(ChatReq req) {
 
         log.info(Command.CHAT +" req data: " + req.getData());
         String chatId = req.getChatId();
@@ -206,7 +206,7 @@ public class AiTutorImpl implements AiCTutor {
         // 获取chat上下文
         String messageContext = (String) LocalCache.CACHE.get(chatId);
         log.info(Command.CHAT +" messageContext: " + messageContext);
-        ChatResp<ChatAssistantData> resp = new ChatResp<>();
+        ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
         if(StrUtil.isBlank(req.getData())){
             resp.setCode(404);
             resp.setDescribe("chat data must be not null!");
@@ -221,15 +221,15 @@ public class AiTutorImpl implements AiCTutor {
             messagesCheckSentence.add(messageCheckSentence);
             ChatCompletionResponse checkSentenceResponse = this.chatCompletion(messagesCheckSentence);
             String checkSentenceResponseStr = checkSentenceResponse.getChoices().get(0).getMessage().getContent();
-            ChatAssistantData.Suggestion suggestion = JSONUtil.toBean(checkSentenceResponseStr, ChatAssistantData.Suggestion.class);
+            ChatAssistantDataResp.Suggestion suggestion = JSONUtil.toBean(checkSentenceResponseStr, ChatAssistantDataResp.Suggestion.class);
             log.info(Command.CHAT + " checkSentenceResponse content: " + checkSentenceResponseStr);
             log.info(Command.CHAT + " checkSentenceResponse usage: " + checkSentenceResponse.getUsage());
 
             // 编辑prompt加入到上下文中
-            ChatUserData chatUserData = new ChatUserData();
-            chatUserData.setUser_sentence(req.getData());
-            chatUserData.setPrompt(promptChatLimiter);
-            String content = JSONUtil.toJsonStr(chatUserData);
+            ChatUserDataReq chatUserDataReq = new ChatUserDataReq();
+            chatUserDataReq.setUser_sentence(req.getData());
+            chatUserDataReq.setPrompt(promptChatLimiter);
+            String content = JSONUtil.toJsonStr(chatUserDataReq);
             log.info(Command.CHAT + " currentMessage content: " + content);
             Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
             messages.add(currentMessage);
@@ -239,19 +239,19 @@ public class AiTutorImpl implements AiCTutor {
             log.info(Command.CHAT + " responseMag content: " + responseMag.getContent());
 
             // 将响应数据格式化成java bean返回请求端
-            ChatAssistantData chatAssistantData = JSONUtil.toBean(responseMag.getContent(), ChatAssistantData.class);
+            ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMag.getContent(), ChatAssistantDataResp.class);
 
             // 生成tips
             TipsReq tipsReq = new TipsReq();
-            tipsReq.setTopic(chatAssistantData.getTopic());
-            tipsReq.setQuestion(chatAssistantData.getAssistant_sentence());
+            tipsReq.setTopic(chatAssistantDataResp.getTopic());
+            tipsReq.setQuestion(chatAssistantDataResp.getAssistant_sentence());
             TipsResp tipsResp = generateTips(JSONUtil.toJsonStr(tipsReq));
 
-            chatAssistantData.setTips(tipsResp.getTips());
-            chatAssistantData.setSuggestion(suggestion);
+            chatAssistantDataResp.setTips(tipsResp.getTips());
+            chatAssistantDataResp.setSuggestion(suggestion);
             resp.setCode(200);
             resp.setCommand(Command.CHAT);
-            resp.setData(chatAssistantData);
+            resp.setData(chatAssistantDataResp);
             resp.setUsage(response.getUsage());
             resp.addUsage(tipsResp.getUsage());
 
@@ -283,13 +283,13 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public ChatResp<List<OfflineMsgDTO>> offlineMsg(ChatReq req) {
-        ChatResp<List<OfflineMsgDTO>> resp = new ChatResp<>();
+    public ChatResp<List<OfflineMsgResp>> offlineMsg(ChatReq req) {
+        ChatResp<List<OfflineMsgResp>> resp = new ChatResp<>();
         if(!LocalCache.MESSAGE_CACHE.containsKey(req.getUid())){
             resp.setCode(404);
             resp.setDescribe("Req data must be not null!");
         }
-        List<OfflineMsgDTO> list = (List<OfflineMsgDTO>) LocalCache.MESSAGE_CACHE.get(req.getUid());
+        List<OfflineMsgResp> list = (List<OfflineMsgResp>) LocalCache.MESSAGE_CACHE.get(req.getUid());
         resp.setData(list);
         return resp;
     }

@@ -6,7 +6,7 @@ import java.util.List;
 
 
 @Data
-public class ChatAssistantData {
+public class ChatAssistantDataResp {
     private String topic;
     private String assistant_sentence;
     private String translate;

@@ -1,7 +1,7 @@
 package com.tomcat.controller;
 
 import cn.hutool.json.JSONUtil;
-import com.tomcat.controller.requeset.AuthenticationRequest;
+import com.tomcat.controller.requeset.AuthenticationReq;
 import com.tomcat.domain.User;
 import com.tomcat.domain.UserRepository;
 import com.tomcat.utils.JwtUtil;
@@ -47,7 +47,7 @@ class AuthControllerTest {
     @Order(2)
     void tokenCheckSuccess() throws Exception{
         User user = userRepository.findByUsername("汤姆猫").orElseThrow(() -> new RuntimeException("用户不存在"));
-        AuthenticationRequest request = new AuthenticationRequest(user.getUsername(), "", user.getEmail(), user.getPhoneNum(), user.getDeviceId());
+        AuthenticationReq request = new AuthenticationReq(user.getUsername(), "", user.getEmail(), user.getPhoneNum(), user.getDeviceId());
         String token = jwtUtil.generateToken(user.getId(), request.username);
         String json = JSONUtil.toJsonStr(request);
         mockMvc.perform(MockMvcRequestBuilders
@@ -69,7 +69,7 @@ class AuthControllerTest {
     @Order(3)
     void tokenCheckFail() throws Exception{
         // 模拟没有token的请求
-        AuthenticationRequest request = new AuthenticationRequest("tom", "1234", "", "13823232232", "8888888");
+        AuthenticationReq request = new AuthenticationReq("tom", "1234", "", "13823232232", "8888888");
         String json = JSONUtil.toJsonStr(request);
         mockMvc.perform(MockMvcRequestBuilders
                 .post("/auth/findByDeviceId")
@@ -91,7 +91,7 @@ class AuthControllerTest {
     void registerOrLogin() throws Exception{
 //        AuthenticationRequest request = new AuthenticationRequest("tom1", "1234", "431@qq.com", "13823232231", "8888887");
 //        AuthenticationRequest request = new AuthenticationRequest("汤姆猫", "1234", "431@qq.com", "13823232231", "8888887");
-        AuthenticationRequest request = new AuthenticationRequest("def", "1234", "def", "13823232231", "8888887");
+        AuthenticationReq request = new AuthenticationReq("def", "1234", "def", "13823232231", "8888887");
         String json = JSONUtil.toJsonStr(request);
         mockMvc.perform(MockMvcRequestBuilders
                 .post("/auth/registerOrLogin")

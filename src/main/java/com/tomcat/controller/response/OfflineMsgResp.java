@@ -12,7 +12,7 @@ import lombok.Data;
  * @version: 1.0
  */
 @Data
-public class OfflineMsgDTO {
+public class OfflineMsgResp {
     private String chatId;
     private String msg;
 }

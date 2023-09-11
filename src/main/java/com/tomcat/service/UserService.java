@@ -1,21 +1,20 @@
 package com.tomcat.service;
 
-import com.tomcat.controller.requeset.AuthenticationRequest;
-import com.tomcat.controller.response.AuthenticationResponse;
-import com.tomcat.controller.response.UserDTO;
+import com.tomcat.controller.requeset.AuthenticationReq;
+import com.tomcat.controller.response.AuthenticationResp;
+import com.tomcat.controller.response.UserResp;
 import com.tomcat.domain.User;
 
 import java.util.List;
-import java.util.Optional;
 
 public interface UserService {
-  AuthenticationResponse register(AuthenticationRequest request);
+  AuthenticationResp register(AuthenticationReq request);
   
-  AuthenticationResponse login(AuthenticationRequest request);
+  AuthenticationResp login(AuthenticationReq request);
 
   User findByUsername(String username);
 
-  List<UserDTO> findByDeviceId(String deviceId);
+  List<UserResp> findByDeviceId(String deviceId);
 
-  AuthenticationResponse registerOrLogin(AuthenticationRequest request);
+  AuthenticationResp registerOrLogin(AuthenticationReq request);
 }

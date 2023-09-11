@@ -4,7 +4,7 @@ package com.tomcat.controller.response;
 import lombok.Data;
 
 @Data
-public class UserDTO {
+public class UserResp {
 
     private String id;
 

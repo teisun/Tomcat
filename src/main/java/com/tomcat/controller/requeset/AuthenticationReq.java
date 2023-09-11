@@ -6,7 +6,7 @@ import lombok.Data;
  * 登录请求参数DTO类
  */
 @Data
-public class AuthenticationRequest {
+public class AuthenticationReq {
 
     public String username;
 
@@ -18,7 +18,7 @@ public class AuthenticationRequest {
 
     public String deviceId;
 
-    public AuthenticationRequest(String username, String password, String email, String phoneNum, String deviceId) {
+    public AuthenticationReq(String username, String password, String email, String phoneNum, String deviceId) {
         this.username = username;
         this.password = password;
         this.email = email;

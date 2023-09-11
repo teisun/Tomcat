@@ -1,11 +1,10 @@
 package com.tomcat.websocket;
 
 import cn.hutool.core.lang.TypeReference;
-import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
-import com.tomcat.controller.response.ChatAssistantData;
+import com.tomcat.controller.response.ChatAssistantDataResp;
 import com.tomcat.controller.response.ChatResp;
-import com.tomcat.controller.response.Topics;
+import com.tomcat.controller.response.TopicsResp;
 import lombok.extern.slf4j.Slf4j;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
@@ -16,11 +15,11 @@ import java.net.URI;
 public class MyWebSocketClient extends WebSocketClient {
 
     public ChatResp<String> chatInitResp;
-    public ChatResp<Topics> planResp;
+    public ChatResp<TopicsResp> planResp;
 
-    public ChatResp<ChatAssistantData> startTopicResp;
+    public ChatResp<ChatAssistantDataResp> startTopicResp;
 
-    public ChatResp<ChatAssistantData> chatTopicResp;
+    public ChatResp<ChatAssistantDataResp> chatTopicResp;
 
     public MyWebSocketClient(URI uri) {
         super(uri);
@@ -40,13 +39,13 @@ public class MyWebSocketClient extends WebSocketClient {
                 chatInitResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<String>>(){}, false);
                 break;
             case Command.CURRICULUM_PLAN:
-                planResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<Topics>>(){}, false);
+                planResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<TopicsResp>>(){}, false);
                 break;
             case Command.START_TOPIC:
-                startTopicResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<ChatAssistantData> >(){}, false);
+                startTopicResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<ChatAssistantDataResp> >(){}, false);
                 break;
             case Command.CHAT:
-                chatTopicResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<ChatAssistantData> >(){}, false);
+                chatTopicResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<ChatAssistantDataResp> >(){}, false);
                 break;
         }
 

@@ -13,7 +13,7 @@ import lombok.Data;
  */
 
 @Data
-public class ChatUserData {
+public class ChatUserDataReq {
     private String user_sentence;
     private String prompt;
 }

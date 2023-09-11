@@ -35,17 +35,17 @@ public class MessageProcessor {
     }
 
     private void curriculumPlan(ChatReq req){
-        ChatResp<Topics> resp = aiClient.curriculumPlan(req);
+        ChatResp<TopicsResp> resp = aiClient.curriculumPlan(req);
         sendText(req.getChatId(), resp);
     }
 
     private void startTopic(ChatReq req){
-        ChatResp<ChatAssistantData> resp = aiClient.startTopic(req);
+        ChatResp<ChatAssistantDataResp> resp = aiClient.startTopic(req);
         sendText(req.getChatId(), resp);
     }
 
     private void chat(ChatReq req){
-        ChatResp<ChatAssistantData> resp = aiClient.chat(req);
+        ChatResp<ChatAssistantDataResp> resp = aiClient.chat(req);
         sendText(req.getChatId(), resp);
     }
 
@@ -55,7 +55,7 @@ public class MessageProcessor {
     }
 
     private void offlineMsg(ChatReq req){
-        ChatResp<List<OfflineMsgDTO>> resp = aiClient.offlineMsg(req);
+        ChatResp<List<OfflineMsgResp>> resp = aiClient.offlineMsg(req);
         sendText(req.getChatId(), resp);
     }
 
@@ -66,14 +66,14 @@ public class MessageProcessor {
             session.sendText(JSONUtil.toJsonStr(resp));
         }else {
             log.info("MessageProcessor sendText: session not open, cache the message!");
-            List<OfflineMsgDTO> msgs;
+            List<OfflineMsgResp> msgs;
             if(LocalCache.MESSAGE_CACHE.containsKey(uid)){
-                msgs = (List<OfflineMsgDTO>) LocalCache.MESSAGE_CACHE.get(uid);
+                msgs = (List<OfflineMsgResp>) LocalCache.MESSAGE_CACHE.get(uid);
             }else {
                 msgs = new ArrayList<>();
                 LocalCache.MESSAGE_CACHE.put(uid, msgs);
             }
-            OfflineMsgDTO offlineMsg = new OfflineMsgDTO();
+            OfflineMsgResp offlineMsg = new OfflineMsgResp();
             offlineMsg.setChatId(chatId);
             offlineMsg.setMsg(JSONUtil.toJsonStr(resp.getData()));
             msgs.add(offlineMsg);

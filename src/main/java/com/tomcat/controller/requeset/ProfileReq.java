@@ -5,7 +5,7 @@ import lombok.Data;
 
 @Data
 @AllArgsConstructor
-public class ProfileResquest {
+public class ProfileReq {
 
     private String userId;
 
