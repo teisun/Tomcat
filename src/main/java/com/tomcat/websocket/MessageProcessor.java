@@ -1,5 +1,7 @@
 package com.tomcat.websocket;
 
+import cn.hutool.core.lang.TypeReference;
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
@@ -15,10 +17,13 @@ import java.util.List;
 @Slf4j
 public class MessageProcessor {
 
+    public static final String OFFLINE_MSG_KEY = "offline_msg";
+
     AiCTutor aiClient;
     Session session;
 
     String uid;
+
 
 
 
@@ -36,52 +41,48 @@ public class MessageProcessor {
 
     private void curriculumPlan(ChatReq req){
         ChatResp<TopicsResp> resp = aiClient.curriculumPlan(req);
-        sendText(req.getChatId(), resp);
+        sendText(resp);
     }
 
     private void startTopic(ChatReq req){
         ChatResp<ChatAssistantDataResp> resp = aiClient.startTopic(req);
-        sendText(req.getChatId(), resp);
+        sendText(resp);
     }
 
     private void chat(ChatReq req){
         ChatResp<ChatAssistantDataResp> resp = aiClient.chat(req);
-        sendText(req.getChatId(), resp);
+        sendText(resp);
     }
 
     private void generateTips(ChatReq req){
         ChatResp<TipsResp> resp = aiClient.generateTips(req);
-        sendText(req.getChatId(), resp);
+        sendText(resp);
     }
 
     private void offlineMsg(ChatReq req){
         ChatResp<List<OfflineMsgResp>> resp = aiClient.offlineMsg(req);
-        sendText(req.getChatId(), resp);
+        sendText(resp);
     }
 
-    private void sendText(String chatId, ChatResp resp){
-        if(session.isOpen()){
-            String jsonStr = JSONUtil.toJsonStr(resp);
-            log.info("MessageProcessor sendText:\n" + jsonStr);
-            session.sendText(JSONUtil.toJsonStr(resp));
-        }else {
-            log.info("MessageProcessor sendText: session not open, cache the message!");
-            List<OfflineMsgResp> msgs;
-            if(LocalCache.MESSAGE_CACHE.containsKey(uid)){
-                msgs = (List<OfflineMsgResp>) LocalCache.MESSAGE_CACHE.get(uid);
-            }else {
-                msgs = new ArrayList<>();
-                LocalCache.MESSAGE_CACHE.put(uid, msgs);
-            }
-            OfflineMsgResp offlineMsg = new OfflineMsgResp();
-            offlineMsg.setChatId(chatId);
-            offlineMsg.setMsg(JSONUtil.toJsonStr(resp.getData()));
-            msgs.add(offlineMsg);
-            LocalCache.MESSAGE_CACHE.put(uid, msgs);
-        }
-
+    private void msgConfirm(ChatReq req){
+        ChatResp resp = aiClient.msgConfirm(req);
+        sendText(resp);
     }
 
+    private void sendText(ChatResp resp){
+        String jsonStr = JSONUtil.toJsonStr(resp);
+        log.info("MessageProcessor sendText:\n" + jsonStr);
+        session.sendText(JSONUtil.toJsonStr(resp));
+    }
+
+
+
+    public void onError(Session session, Throwable t ){
+    }
+
+    public void onClose(Session session){
+
+    }
 
 
     private void commandNotFound(String command){
@@ -97,6 +98,7 @@ public class MessageProcessor {
 
         ChatReq chatReq = JSONUtil.toBean(msg, ChatReq.class);
         chatReq.setUid(uid);
+        log.info(msg);
         switch (chatReq.getCommand().toUpperCase()){
             case Command.CHAT_INIT:
                 this.chatInit();
@@ -115,6 +117,9 @@ public class MessageProcessor {
                 break;
             case Command.OFFLINE_MSG:
                 offlineMsg(chatReq);
+                break;
+            case Command.MSG_CONFIRM:
+                msgConfirm(chatReq);
                 break;
             default:
                 commandNotFound(chatReq.getCommand());

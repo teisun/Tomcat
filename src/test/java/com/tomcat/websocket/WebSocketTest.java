@@ -116,8 +116,15 @@ public class WebSocketTest {
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.startTopicResp != null && myWebSocketClient.startTopicResp.getData() != null;
         });
+        // msg confirm
+        ChatReq confirmReq = new ChatReq();
+        confirmReq.setCommand(Command.MSG_CONFIRM);
+        confirmReq.setData(myWebSocketClient.startTopicResp.getMsgId());
+        myWebSocketClient.send(JSONUtil.toJsonStr(confirmReq));
+        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.confirmResp != null && myWebSocketClient.confirmResp.getCode() == 200;
+        });
 
-        Assert.assertNotNull(myWebSocketClient.startTopicResp.getData() != null);
         myWebSocketClient.close();
     }
 
@@ -138,7 +145,53 @@ public class WebSocketTest {
             return myWebSocketClient.chatTopicResp != null && myWebSocketClient.chatTopicResp.getData() != null;
         });
 
-        Assert.assertNotNull(myWebSocketClient.chatTopicResp.getData() != null);
+        // msg confirm
+        ChatReq confirmReq = new ChatReq();
+        confirmReq.setCommand(Command.MSG_CONFIRM);
+        confirmReq.setData(myWebSocketClient.chatTopicResp.getMsgId());
+        myWebSocketClient.send(JSONUtil.toJsonStr(confirmReq));
+        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.confirmResp != null && myWebSocketClient.confirmResp.getCode() == 200;
+        });
+
+        myWebSocketClient.close();
+    }
+
+    @Order(6)
+    @Test
+    public void _6offlineMsgTest() throws Exception{
+        myWebSocketClient = new MyWebSocketClient(new URI("ws://localhost:6688/ws?Authorization=BearereyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiLmsaTlp4bnjKsiLCJ1c2VySWQiOiIyYzg5ODllYy0yMzRhLTQ5M2EtOWQ4NS1hYTQ0ZmIwNDViNWYiLCJ1c2VybmFtZSI6IuaxpOWnhueMqyIsImlhdCI6MTY5Mjc3MDgyOCwiZXhwIjoxNzI0MzA2ODI4fQ.ATEPOdBcOpN_AU69LQ_2LdVn5XRGzjASBxy4W4POIAc"));
+        myWebSocketClient.connect();
+        await().atMost(5, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.getReadyState().equals(WebSocket.READYSTATE.OPEN);
+        });
+        ChatReq chatReq = new ChatReq();
+        chatReq.setCommand(Command.CHAT);
+        chatReq.setData("Hello!Good to see you! I'm Tom!");
+        chatReq.setChatId(chatId);
+        myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
+        Thread.sleep(200);
+        log.info(" _6offlineMsgTest: 关闭ws链接");
+        myWebSocketClient.close();
+        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.getReadyState().equals(WebSocket.READYSTATE.CLOSED);
+        });
+        Thread.sleep(1000 * 5);
+        myWebSocketClient = new MyWebSocketClient(new URI("ws://localhost:6688/ws?Authorization=BearereyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiLmsaTlp4bnjKsiLCJ1c2VySWQiOiIyYzg5ODllYy0yMzRhLTQ5M2EtOWQ4NS1hYTQ0ZmIwNDViNWYiLCJ1c2VybmFtZSI6IuaxpOWnhueMqyIsImlhdCI6MTY5Mjc3MDgyOCwiZXhwIjoxNzI0MzA2ODI4fQ.ATEPOdBcOpN_AU69LQ_2LdVn5XRGzjASBxy4W4POIAc"));
+        myWebSocketClient.connect();
+        log.info(" _6offlineMsgTest: 重连");
+        await().atMost(5, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.getReadyState().equals(WebSocket.READYSTATE.OPEN);
+        });
+        log.info(" _6offlineMsgTest: 重连成功");
+        ChatReq chatReq1 = new ChatReq();
+        chatReq1.setCommand(Command.OFFLINE_MSG);
+        myWebSocketClient.send(JSONUtil.toJsonStr(chatReq1));
+        await().atMost(10, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.chatOffMsgResp != null && myWebSocketClient.chatOffMsgResp.getData() != null;
+        });
+        log.info(" _6offlineMsgTest offline msg: " + JSONUtil.toJsonStr(myWebSocketClient.chatOffMsgResp.getData()));
+        Assert.assertNotNull(myWebSocketClient.chatOffMsgResp.getData() != null);
         myWebSocketClient.close();
     }
 

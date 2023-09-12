@@ -20,4 +20,6 @@ public class Command {
     public static final String TIPS = "/TIPS";
 
     public static final String OFFLINE_MSG = "/OFFLINE_MSG";
+
+    public static final String MSG_CONFIRM = "/MSG_CONFIRM";
 }

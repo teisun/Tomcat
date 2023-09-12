@@ -20,6 +20,8 @@ public class ChatResp<T> {
     String describe;
     T data;
     Usage usage;
+    String chatId;
+    String msgId;
 
     public void addUsage(Usage usageOther){
         usage.setPromptTokens(usage.getPromptTokens()+usageOther.getPromptTokens());

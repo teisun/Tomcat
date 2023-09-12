@@ -87,5 +87,15 @@ public interface AiCTutor {
      */
     ChatResp<List<OfflineMsgResp>> offlineMsg(ChatReq req);
 
+    /**
+     * @description 客户端在收到消息后的回执
+     * @param req:
+     * @return ChatResp
+     * @author tomcat
+     * @date 2023/9/12 4:04 PM
+     */
+    ChatResp msgConfirm(ChatReq req);
+
+
 
 }

@@ -4,12 +4,14 @@ import cn.hutool.core.lang.TypeReference;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.response.ChatAssistantDataResp;
 import com.tomcat.controller.response.ChatResp;
+import com.tomcat.controller.response.OfflineMsgResp;
 import com.tomcat.controller.response.TopicsResp;
 import lombok.extern.slf4j.Slf4j;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 
 import java.net.URI;
+import java.util.List;
 
 @Slf4j
 public class MyWebSocketClient extends WebSocketClient {
@@ -20,6 +22,10 @@ public class MyWebSocketClient extends WebSocketClient {
     public ChatResp<ChatAssistantDataResp> startTopicResp;
 
     public ChatResp<ChatAssistantDataResp> chatTopicResp;
+
+    public ChatResp<List<OfflineMsgResp>> chatOffMsgResp;
+
+    public ChatResp confirmResp;
 
     public MyWebSocketClient(URI uri) {
         super(uri);
@@ -46,6 +52,12 @@ public class MyWebSocketClient extends WebSocketClient {
                 break;
             case Command.CHAT:
                 chatTopicResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<ChatAssistantDataResp> >(){}, false);
+                break;
+            case Command.OFFLINE_MSG:
+                chatOffMsgResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<List<OfflineMsgResp>> >(){}, false);
+                break;
+            case Command.MSG_CONFIRM:
+                confirmResp = JSONUtil.toBean(msg, ChatResp.class);
                 break;
         }
 

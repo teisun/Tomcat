@@ -18,4 +18,5 @@ public class ChatReq {
     String command;
     String data;
 
+
 }

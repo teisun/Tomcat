@@ -6,6 +6,7 @@
   <title>Netty-Websocket</title>
   <script type="text/javascript">
     var socket;
+    var jsonObj;
     if (!window.WebSocket) {
       window.WebSocket = window.MozWebSocket;
     }
@@ -16,6 +17,12 @@
       socket.onmessage = function(event) {
         var ta = document.getElementById('responseText');
         ta.value += event.data + "\r\n";
+        jsonObj = JSON.parse(event.data);
+        if(jsonObj.command == '/START_TOPIC' || jsonObj.command == '/CHAT'){
+          req.command = '/MSG_CONFIRM';
+          req.data = jsonObj.msgId;
+          send(JSON.stringify(req))
+        }
       };
       socket.onopen = function(event) {
         var ta = document.getElementById('responseText');
@@ -28,6 +35,7 @@
     } else {
       alert("您的浏览器不支持WebSocket协议！");
     }
+
 
     function send(message) {
       if (!window.WebSocket) {

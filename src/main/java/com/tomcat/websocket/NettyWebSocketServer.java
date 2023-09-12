@@ -1,6 +1,10 @@
 package com.tomcat.websocket;
 
+import cn.hutool.core.lang.TypeReference;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
+import com.tomcat.controller.response.ChatAssistantDataResp;
+import com.tomcat.controller.response.ChatResp;
 import com.tomcat.exceptions.GlobalExceptionHandler;
 import com.tomcat.nettyws.annotation.*;
 import com.tomcat.nettyws.pojo.Session;
@@ -131,6 +135,7 @@ public class NettyWebSocketServer {
     public void onClose(Session session) throws IOException {
         log.info("NettyWebSocketServer onClose");
         WsSessionManager.remove(uid);
+        messageProcessor.onClose(session);
     }
 
     @OnError
@@ -138,6 +143,8 @@ public class NettyWebSocketServer {
         log.info("NettyWebSocketServer onError");
         throwable.printStackTrace();
         WsSessionManager.remove(uid);
+        messageProcessor.onError(session, throwable);
+
     }
 
     @OnMessage
