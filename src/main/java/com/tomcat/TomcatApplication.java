@@ -31,13 +31,13 @@ public class TomcatApplication {
     // done 处理Ai的聊天返回
     // done 异常指令处理
     // prompt添加用户配置
-    // 离线消息
-    // 压缩prompt字数
+    // done 离线消息
+    // done 压缩prompt字数
     // done tips bug？
     // 结束对话
     // done uid与对话是否1对多
     // json反射转换bug
-    // 处理websocket断线重连逻辑
+    // done 处理websocket断线重连逻辑
     // 修改uid与chatid的bug，有些命令不需要chatId, chatId应该放到对话的bean里
 
 }

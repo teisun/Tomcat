@@ -115,7 +115,7 @@ public class AiTutorImpl implements AiCTutor {
             return resp;
         }
 
-        log.debug(Command.CURRICULUM_PLAN + " messageContext: " + JSONUtil.toJsonStr(messages));
+        log.info(Command.CURRICULUM_PLAN + " messageContext: " + JSONUtil.toJsonStr(messages));
         String content;
         String prompt_limit = " " + promptCurriculumLimiter; // 限时模型返回topic obj的数量
         if (StrUtil.isNotBlank(req.getData())) {
@@ -123,12 +123,12 @@ public class AiTutorImpl implements AiCTutor {
         } else {
             content = Command.CURRICULUM_PLAN + prompt_limit;
         }
-        log.debug(Command.CURRICULUM_PLAN + " currentMessage content: " + content);
+        log.info(Command.CURRICULUM_PLAN + " currentMessage content: " + content);
         Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
         messages.add(currentMessage);
         ChatCompletionResponse response = this.chatCompletion(messages);
         Message responseMag = response.getChoices().get(0).getMessage();
-        log.debug(Command.CURRICULUM_PLAN + " responseMag content: " + responseMag.getContent());
+        log.info(Command.CURRICULUM_PLAN + " responseMag content: " + responseMag.getContent());
 
         TopicsResp topicsResp = JSONUtil.toBean(responseMag.getContent(), TopicsResp.class);
         resp.setCode(200);
@@ -156,7 +156,7 @@ public class AiTutorImpl implements AiCTutor {
             return resp;
         }
 
-        log.debug(Command.START_TOPIC + " messageContext: " + JSONUtil.toJsonStr(messages));
+        log.info(Command.START_TOPIC + " messageContext: " + JSONUtil.toJsonStr(messages));
         // 编辑prompt加入到上下文中
         String content;
         if (StrUtil.isNotBlank(req.getData())) {
@@ -164,13 +164,13 @@ public class AiTutorImpl implements AiCTutor {
         } else {
             content = Command.START_TOPIC + " random";
         }
-        log.debug(Command.START_TOPIC + " currentMessage content: " + content);
+        log.info(Command.START_TOPIC + " currentMessage content: " + content);
         Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
         messages.add(currentMessage);
         // 发送上下文到AI 获取返回的响应数据
         ChatCompletionResponse response = this.chatCompletion(messages);
         Message responseMag = response.getChoices().get(0).getMessage();
-        log.debug(Command.START_TOPIC + "  responseMag content: " + responseMag.getContent());
+        log.info(Command.START_TOPIC + "  responseMag content: " + responseMag.getContent());
 
         // 将响应数据格式化成java bean返回请求端
         ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMag.getContent(), ChatAssistantDataResp.class);
@@ -215,7 +215,7 @@ public class AiTutorImpl implements AiCTutor {
             resp.setDescribe("chat context not found!");
             return resp;
         }
-        log.debug(Command.CHAT + " messageContext: " + JSONUtil.toJsonStr(messages));
+        log.info(Command.CHAT + " messageContext: " + JSONUtil.toJsonStr(messages));
         // 检查user_sentence语法
         Message messageCheckSentence = Message.builder().content("sentence:" + req.getData() + " \n" + promptSentenceChecker).role(Message.Role.USER).build();
         List<Message> messagesCheckSentence = new ArrayList<>();
@@ -223,21 +223,21 @@ public class AiTutorImpl implements AiCTutor {
         ChatCompletionResponse checkSentenceResponse = this.chatCompletion(messagesCheckSentence);
         String checkSentenceResponseStr = checkSentenceResponse.getChoices().get(0).getMessage().getContent();
         ChatAssistantDataResp.Suggestion suggestion = JSONUtil.toBean(checkSentenceResponseStr, ChatAssistantDataResp.Suggestion.class);
-        log.debug(Command.CHAT + " checkSentenceResponse content: " + checkSentenceResponseStr);
-        log.debug(Command.CHAT + " checkSentenceResponse usage: " + checkSentenceResponse.getUsage());
+        log.info(Command.CHAT + " checkSentenceResponse content: " + checkSentenceResponseStr);
+        log.info(Command.CHAT + " checkSentenceResponse usage: " + checkSentenceResponse.getUsage());
 
         // 编辑prompt加入到上下文中
         ChatUserDataReq chatUserDataReq = new ChatUserDataReq();
         chatUserDataReq.setUser_sentence(req.getData());
         chatUserDataReq.setPrompt(promptChatLimiter);
         String content = JSONUtil.toJsonStr(chatUserDataReq);
-        log.debug(Command.CHAT + " currentMessage content: " + content);
+        log.info(Command.CHAT + " currentMessage content: " + content);
         Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
         messages.add(currentMessage);
         // 发送上下文到AI 获取返回的响应数据
         ChatCompletionResponse response = this.chatCompletion(messages);
         Message responseMag = response.getChoices().get(0).getMessage();
-        log.debug(Command.CHAT + " responseMag content: " + responseMag.getContent());
+        log.info(Command.CHAT + " responseMag content: " + responseMag.getContent());
 
         // 将响应数据格式化成java bean返回请求端
         ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMag.getContent(), ChatAssistantDataResp.class);
@@ -284,7 +284,7 @@ public class AiTutorImpl implements AiCTutor {
 
     @Override
     public ChatResp<List<OfflineMsgResp>> offlineMsg(ChatReq req) {
-        log.debug(Command.OFFLINE_MSG + " req data: " + req.getData());
+        log.info(Command.OFFLINE_MSG + " req data: " + req.getData());
         ChatResp<List<OfflineMsgResp>> resp = new ChatResp<>();
         if (!LocalCache.MESSAGE_CACHE.containsKey(req.getUid())) {
             resp.setCode(404);
@@ -302,7 +302,7 @@ public class AiTutorImpl implements AiCTutor {
 
     @Override
     public ChatResp msgConfirm(ChatReq req) {
-        log.debug(Command.MSG_CONFIRM + " req data:" +req.getData());
+        log.info(Command.MSG_CONFIRM + " req data:" +req.getData());
         boolean completion = false;
         if(LocalCache.MESSAGE_CACHE.containsKey(req.getUid())){
             Map<String, OfflineMsgResp> map = (Map<String, OfflineMsgResp>) LocalCache.MESSAGE_CACHE.get(req.getUid());
@@ -346,9 +346,9 @@ public class AiTutorImpl implements AiCTutor {
         String responseStr = response.getChoices().get(0).getMessage().getContent();
         TipsResp tipsResp = JSONUtil.toBean(responseStr, TipsResp.class);
         tipsResp.setUsage(response.getUsage());
-        log.debug(Command.TIPS + " " + tipsReq);
-        log.debug(Command.TIPS + " generateTips content: " + responseStr);
-        log.debug(Command.TIPS + " generateTips usage: " + response.getUsage());
+        log.info(Command.TIPS + " " + tipsReq);
+        log.info(Command.TIPS + " generateTips content: " + responseStr);
+        log.info(Command.TIPS + " generateTips usage: " + response.getUsage());
         return tipsResp;
     }
 
