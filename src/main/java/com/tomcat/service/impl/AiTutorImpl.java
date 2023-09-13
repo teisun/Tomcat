@@ -78,37 +78,26 @@ public class AiTutorImpl implements AiCTutor {
     @Override
     public ChatResp<String> chatInit(String uid) {
 
-        // 保存chatId与uid的关系
-        List<String> ids = (List<String>) LocalCache.CACHE.get(uid);
-        if (ids == null) {
-            ids = new ArrayList<>();
-        }
-        String chatId = UniqueIdentifierGenerator.uniqueId();
-        ids.add(chatId);
-        LocalCache.CACHE.put(uid, ids);
-        // -----
-
         Message firstMsg = Message.builder().content(promptAitutor).role(Message.Role.USER).build();
         List<Message> messages = new ArrayList<>();
         messages.add(firstMsg);
         Message secondMsg = Message.builder().content(promptVersion).role(Message.Role.ASSISTANT).build();
         messages.add(secondMsg);
-        LocalCache.CACHE.put(chatId, messages, LocalCache.TIMEOUT);
+        LocalCache.CACHE_INIT_MSG.put(uid, messages, LocalCache.TIMEOUT);
         log.info("chatInit: " + secondMsg.getContent());
         ChatResp<String> resp = new ChatResp<>();
         resp.setCode(200);
         resp.setCommand(Command.CHAT_INIT);
-        resp.setData(chatId);
-        resp.setChatId(chatId);
+        resp.setData(uid);
         return resp;
     }
 
     @Override
     public ChatResp<TopicsResp> curriculumPlan(ChatReq req) {
+        String uid = req.getUid();
         // 获取chat上下文
-        String chatId = req.getChatId();
         ChatResp<TopicsResp> resp = new ChatResp<>();
-        List<Message> messages = (List<Message>) LocalCache.CACHE.get(chatId);
+        List<Message> messages = (List<Message>) LocalCache.CACHE_INIT_MSG.get(uid);
         if (messages == null) {
             resp.setCode(404);
             resp.setDescribe("chat context not found!");
@@ -138,25 +127,37 @@ public class AiTutorImpl implements AiCTutor {
 
         // 将响应数据加入到上下文缓存中
         messages.add(responseMag);
-        LocalCache.CACHE.put(chatId, messages, LocalCache.TIMEOUT);
+        LocalCache.CACHE_INIT_MSG.put(uid, messages, LocalCache.TIMEOUT);
 
         return resp;
     }
 
     @Override
     public ChatResp<ChatAssistantDataResp> startTopic(ChatReq req) {
-        // 获取chat上下文
-        String chatId = req.getChatId();
-        List<Message> messages = (List<Message>) LocalCache.CACHE.get(chatId);
-        ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
 
-        if (messages == null) {
+        // 保存chatId与uid的关系
+        String uid = req.getUid();
+        List<String> ids = (List<String>) LocalCache.CACHE_UID_CHATID.get(uid);
+        if (ids == null) {
+            ids = new ArrayList<>();
+        }
+        String chatId = UniqueIdentifierGenerator.uniqueId();
+        ids.add(chatId);
+        LocalCache.CACHE_UID_CHATID.put(uid, ids);
+        // ------
+
+        // 拼接聊天上下文
+        List<Message> initMessages = (List<Message>) LocalCache.CACHE_INIT_MSG.get(uid);
+        ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
+        if (initMessages == null) {
             resp.setCode(404);
             resp.setDescribe("chat context not found!");
             return resp;
         }
 
-        log.info(Command.START_TOPIC + " messageContext: " + JSONUtil.toJsonStr(messages));
+        List<Message> chatMessages = new ArrayList<>(initMessages);
+
+        log.info(Command.START_TOPIC + " messageContext: " + JSONUtil.toJsonStr(chatMessages));
         // 编辑prompt加入到上下文中
         String content;
         if (StrUtil.isNotBlank(req.getData())) {
@@ -166,9 +167,11 @@ public class AiTutorImpl implements AiCTutor {
         }
         log.info(Command.START_TOPIC + " currentMessage content: " + content);
         Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
-        messages.add(currentMessage);
+        chatMessages.add(currentMessage);
+        // ------
+
         // 发送上下文到AI 获取返回的响应数据
-        ChatCompletionResponse response = this.chatCompletion(messages);
+        ChatCompletionResponse response = this.chatCompletion(chatMessages);
         Message responseMag = response.getChoices().get(0).getMessage();
         log.info(Command.START_TOPIC + "  responseMag content: " + responseMag.getContent());
 
@@ -181,6 +184,7 @@ public class AiTutorImpl implements AiCTutor {
         tipsReq.setQuestion(chatAssistantDataResp.getAssistant_sentence());
         TipsResp tipsResp = generateTips(JSONUtil.toJsonStr(tipsReq));
         chatAssistantDataResp.setTips(tipsResp.getTips());
+        // ------
 
         resp.setCode(200);
         resp.setCommand(Command.START_TOPIC);
@@ -191,8 +195,8 @@ public class AiTutorImpl implements AiCTutor {
         resp.setMsgId(response.getId());
 
         // 将响应数据加入到上下文缓存中
-        messages.add(responseMag);
-        LocalCache.CACHE.put(chatId, messages, LocalCache.TIMEOUT);
+        chatMessages.add(responseMag);
+        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages, LocalCache.TIMEOUT);
         cacheOfflineMsg(req.getUid(), resp);
         return resp;
     }
@@ -201,21 +205,22 @@ public class AiTutorImpl implements AiCTutor {
     public ChatResp<ChatAssistantDataResp> chat(ChatReq req) {
 
         String chatId = req.getChatId();
+        String uid = req.getUid();
 
-        // 获取chat上下文
-        List<Message> messages = (List<Message>) LocalCache.CACHE.get(chatId);
+        // 获得chat上下文
+        List<Message> chatMessages = (List<Message>) LocalCache.CACHE_CHAT_MSG.get(chatId);
         ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
         if (StrUtil.isBlank(req.getData())) {
             resp.setCode(404);
             resp.setDescribe("chat data must be not null!");
             return resp;
         }
-        if (messages == null) {
+        if (chatMessages == null) {
             resp.setCode(404);
             resp.setDescribe("chat context not found!");
             return resp;
         }
-        log.info(Command.CHAT + " messageContext: " + JSONUtil.toJsonStr(messages));
+        log.info(Command.CHAT + " messageContext: " + JSONUtil.toJsonStr(chatMessages));
         // 检查user_sentence语法
         Message messageCheckSentence = Message.builder().content("sentence:" + req.getData() + " \n" + promptSentenceChecker).role(Message.Role.USER).build();
         List<Message> messagesCheckSentence = new ArrayList<>();
@@ -233,9 +238,9 @@ public class AiTutorImpl implements AiCTutor {
         String content = JSONUtil.toJsonStr(chatUserDataReq);
         log.info(Command.CHAT + " currentMessage content: " + content);
         Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
-        messages.add(currentMessage);
+        chatMessages.add(currentMessage);
         // 发送上下文到AI 获取返回的响应数据
-        ChatCompletionResponse response = this.chatCompletion(messages);
+        ChatCompletionResponse response = this.chatCompletion(chatMessages);
         Message responseMag = response.getChoices().get(0).getMessage();
         log.info(Command.CHAT + " responseMag content: " + responseMag.getContent());
 
@@ -259,8 +264,8 @@ public class AiTutorImpl implements AiCTutor {
         resp.setMsgId(response.getId());
 
         // 将响应数据加入到上下文缓存中
-        messages.add(responseMag);
-        LocalCache.CACHE.put(chatId, messages, LocalCache.TIMEOUT);
+        chatMessages.add(responseMag);
+        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages, LocalCache.TIMEOUT);
         cacheOfflineMsg(req.getUid(), resp);
         return resp;
     }
@@ -286,17 +291,17 @@ public class AiTutorImpl implements AiCTutor {
     public ChatResp<List<OfflineMsgResp>> offlineMsg(ChatReq req) {
         log.info(Command.OFFLINE_MSG + " req data: " + req.getData());
         ChatResp<List<OfflineMsgResp>> resp = new ChatResp<>();
-        if (!LocalCache.MESSAGE_CACHE.containsKey(req.getUid())) {
+        if (!LocalCache.CACHE_OFFLINE_MSG.containsKey(req.getUid())) {
             resp.setCode(404);
             resp.setDescribe("user:" + req.getUid() + " has no offline messages!");
             return resp;
         }
-        Map<String, OfflineMsgResp> map = (Map<String, OfflineMsgResp>) LocalCache.MESSAGE_CACHE.get(req.getUid());
+        Map<String, OfflineMsgResp> map = (Map<String, OfflineMsgResp>) LocalCache.CACHE_OFFLINE_MSG.get(req.getUid());
         List<OfflineMsgResp> list = new ArrayList<>(map.values());
         resp.setData(list);
         resp.setCode(200);
         resp.setCommand(Command.OFFLINE_MSG);
-        LocalCache.MESSAGE_CACHE.remove(req.getUid());
+        LocalCache.CACHE_OFFLINE_MSG.remove(req.getUid());
         return resp;
     }
 
@@ -304,8 +309,8 @@ public class AiTutorImpl implements AiCTutor {
     public ChatResp msgConfirm(ChatReq req) {
         log.info(Command.MSG_CONFIRM + " req data:" +req.getData());
         boolean completion = false;
-        if(LocalCache.MESSAGE_CACHE.containsKey(req.getUid())){
-            Map<String, OfflineMsgResp> map = (Map<String, OfflineMsgResp>) LocalCache.MESSAGE_CACHE.get(req.getUid());
+        if(LocalCache.CACHE_OFFLINE_MSG.containsKey(req.getUid())){
+            Map<String, OfflineMsgResp> map = (Map<String, OfflineMsgResp>) LocalCache.CACHE_OFFLINE_MSG.get(req.getUid());
             if(map.remove(req.getData()) != null){
                 completion = true;
             }
@@ -326,8 +331,8 @@ public class AiTutorImpl implements AiCTutor {
     private void cacheOfflineMsg(String uid, ChatResp resp) {
         log.info("MessageProcessor sendText: " + resp.getCommand() + " cache the message!");
         Map<String, OfflineMsgResp> msgMap;
-        if(LocalCache.MESSAGE_CACHE.containsKey(uid)){
-            msgMap = (Map<String, OfflineMsgResp>) LocalCache.MESSAGE_CACHE.get(uid);
+        if(LocalCache.CACHE_OFFLINE_MSG.containsKey(uid)){
+            msgMap = (Map<String, OfflineMsgResp>) LocalCache.CACHE_OFFLINE_MSG.get(uid);
         }else {
             msgMap = new HashMap<>();
         }
@@ -335,7 +340,7 @@ public class AiTutorImpl implements AiCTutor {
         offlineMsg.setChatId(resp.getChatId());
         offlineMsg.setMsg(JSONUtil.toJsonStr(resp.getData()));
         msgMap.put(resp.getMsgId(), offlineMsg);
-        LocalCache.MESSAGE_CACHE.put(uid, msgMap);
+        LocalCache.CACHE_OFFLINE_MSG.put(uid, msgMap);
     }
 
     private TipsResp generateTips(String tipsReq) {

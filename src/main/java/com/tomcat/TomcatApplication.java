@@ -38,6 +38,6 @@ public class TomcatApplication {
     // done uid与对话是否1对多
     // json反射转换bug
     // done 处理websocket断线重连逻辑
-    // 修改uid与chatid的bug，有些命令不需要chatId, chatId应该放到对话的bean里
+    // done 修改uid与chatId的使用逻辑
 
 }

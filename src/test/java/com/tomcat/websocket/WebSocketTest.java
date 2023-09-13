@@ -38,6 +38,8 @@ import static org.awaitility.Awaitility.await;
 public class WebSocketTest {
 
     MyWebSocketClient myWebSocketClient;
+
+    private static String uId;
     private static String chatId;
 
     /**
@@ -76,7 +78,7 @@ public class WebSocketTest {
         });
 
         Assert.assertNotNull(myWebSocketClient.chatInitResp.getData());
-        chatId = myWebSocketClient.chatInitResp.getData();
+        uId = myWebSocketClient.chatInitResp.getData();
         myWebSocketClient.close();
     }
 
@@ -90,7 +92,7 @@ public class WebSocketTest {
         });
         ChatReq chatReq = new ChatReq();
         chatReq.setCommand(Command.CURRICULUM_PLAN);
-        chatReq.setChatId(chatId);
+        chatReq.setUid(uId);
         myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.planResp != null && myWebSocketClient.planResp.getData() != null;
@@ -111,11 +113,11 @@ public class WebSocketTest {
         ChatReq chatReq = new ChatReq();
         chatReq.setCommand(Command.START_TOPIC);
         chatReq.setData("At the Restaurant");
-        chatReq.setChatId(chatId);
         myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.startTopicResp != null && myWebSocketClient.startTopicResp.getData() != null;
         });
+        chatId = myWebSocketClient.startTopicResp.getChatId();
         // msg confirm
         ChatReq confirmReq = new ChatReq();
         confirmReq.setCommand(Command.MSG_CONFIRM);
@@ -141,7 +143,7 @@ public class WebSocketTest {
         chatReq.setData("Hello!Good to see you! I'm Tom!");
         chatReq.setChatId(chatId);
         myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
-        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+        await().atMost(60, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.chatTopicResp != null && myWebSocketClient.chatTopicResp.getData() != null;
         });
 
