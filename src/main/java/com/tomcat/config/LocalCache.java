@@ -12,11 +12,11 @@ public class LocalCache {
     /**
      * 缓存时长
      */
-    public static final long TIMEOUT = 60 * DateUnit.MINUTE.getMillis();
+    public static final long TIMEOUT = 60 * 12 * DateUnit.MINUTE.getMillis();
     /**
      * 清理间隔
      */
-    private static final long CLEAN_TIMEOUT = 60 * DateUnit.MINUTE.getMillis();
+    private static final long CLEAN_TIMEOUT = 60 * 12 * DateUnit.MINUTE.getMillis();
 
     /**
      * 缓存用户对AI的初始化上下文，uid---- 初始化AI的prompt
