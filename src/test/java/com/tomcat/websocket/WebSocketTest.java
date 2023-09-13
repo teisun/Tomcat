@@ -2,6 +2,7 @@ package com.tomcat.websocket;
 
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
+import com.unfbx.chatgpt.entity.chat.Message;
 import lombok.extern.slf4j.Slf4j;
 import org.java_websocket.WebSocket;
 import org.junit.Assert;
@@ -10,11 +11,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.runner.RunWith;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.junit4.SpringRunner;
 
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.awaitility.Awaitility.await;
@@ -146,6 +150,7 @@ public class WebSocketTest {
         await().atMost(60, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.chatTopicResp != null && myWebSocketClient.chatTopicResp.getData() != null;
         });
+        myWebSocketClient.chatTopicResp = null;
 
         // msg confirm
         ChatReq confirmReq = new ChatReq();
@@ -155,6 +160,7 @@ public class WebSocketTest {
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.confirmResp != null && myWebSocketClient.confirmResp.getCode() == 200;
         });
+        myWebSocketClient.confirmResp = null;
 
         myWebSocketClient.close();
     }
@@ -194,6 +200,68 @@ public class WebSocketTest {
         });
         log.info(" _6offlineMsgTest offline msg: " + JSONUtil.toJsonStr(myWebSocketClient.chatOffMsgResp.getData()));
         Assert.assertNotNull(myWebSocketClient.chatOffMsgResp.getData() != null);
+        myWebSocketClient.close();
+    }
+
+
+    @Value("${ai.prompt.aitutor}")
+    private String promptAitutor;
+    @Value("${ai.prompt.version}")
+    private String promptVersion;
+
+    private static String msg3Prompt = "{\"topics\":[{\"topic\":\"Shopping\",\"objective\":[\"Learn vocabulary and expressions used in shopping\",\"Practice asking for prices, comparing products, and expressing needs\"]},{\"topic\":\"Booking Hotel\",\"objective\":[\"Learn vocabulary and expressions used in hotel booking\",\"Practice asking about room types, the booking process, and expressing preferences\"]},{\"topic\":\"At the Restaurant\",\"objective\":[\"Learn vocabulary and expressions used in ordering at a restaurant\",\"Practice reading menus, placing orders, and expressing preferences\"]},{\"topic\":\"Daily Routines\",\"objective\":[\"Learn vocabulary and expressions used in daily routines\",\"Practice discussing daily schedules and activities\"]}]},\"usage\":{\"promptTokens\":2049,\"completionTokens\":183,\"totalTokens\":2232}}";
+    private static String msg5Prompt = "{\"topic\":\"At the Restaurant\",\"assistant_sentence\":\"Good evening! Welcome to our restaurant. How many people are in your party?\",\"translate\":\"晚上好！欢迎光临我们的餐厅。您一共有几位客人？\",\"tips\":[\"There are two of us.\",\"We have a party of six.\",\"I'm dining alone.\"],\"missions\":[{\"status\":0,\"text\":\"Ask the waiter for a menu\"},{\"status\":0,\"text\":\"Inquire about the daily specials\"},{\"status\":0,\"text\":\"Order a drink\"},{\"status\":0,\"text\":\"Ask for recommendations\"},{\"status\":0,\"text\":\"Order a main course\"}]},\"usage\":{\"promptTokens\":2371,\"completionTokens\":235,\"totalTokens\":2606},\"chatId\":\"fa54f222-157a-432a-9d42-af96bf6d1573\",\"msgId\":\"chatcmpl-7yGJ6TNs3CaQgnpovLEUB7WyozZrl\"}";
+    @Order(7)
+    @Test
+    public void _7chatInitByContextTest() throws Exception{
+        myWebSocketClient = new MyWebSocketClient(new URI("ws://localhost:6688/ws?Authorization=BearereyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiLmsaTlp4bnjKsiLCJ1c2VySWQiOiIyYzg5ODllYy0yMzRhLTQ5M2EtOWQ4NS1hYTQ0ZmIwNDViNWYiLCJ1c2VybmFtZSI6IuaxpOWnhueMqyIsImlhdCI6MTY5Mjc3MDgyOCwiZXhwIjoxNzI0MzA2ODI4fQ.ATEPOdBcOpN_AU69LQ_2LdVn5XRGzjASBxy4W4POIAc"));
+        myWebSocketClient.connect();
+        await().atMost(5, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.getReadyState().equals(WebSocket.READYSTATE.OPEN);
+        });
+        // 初始化
+        List<Message> messages = new ArrayList<>();
+        Message msg0 = Message.builder().content(promptAitutor).role(Message.Role.USER).build();
+        messages.add(msg0);
+        Message msg1 = Message.builder().content(promptVersion).role(Message.Role.ASSISTANT).build();
+        messages.add(msg1);
+        Message msg2 = Message.builder().content("/PLAN Return JSON obj for 4 topics").role(Message.Role.USER).build();
+        messages.add(msg2);
+        Message msg3 = Message.builder().content(msg3Prompt).role(Message.Role.ASSISTANT).build();
+        messages.add(msg3);
+        // 开始聊天
+        Message msg4 = Message.builder().content("/START_TOPIC At the Restaurant").role(Message.Role.USER).build();
+        messages.add(msg4);
+        Message msg5 = Message.builder().content(msg5Prompt).role(Message.Role.ASSISTANT).build();
+        messages.add(msg5);
+        ChatReq chatReq = new ChatReq();
+        chatReq.setCommand(Command.CHAT_INIT_BY_CONTEXT);
+        chatReq.setData(JSONUtil.toJsonStr(messages));
+        myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
+        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.chatInitByContextResp != null && myWebSocketClient.chatInitByContextResp.getChatId() != null;
+        });
+        log.info("myWebSocketClient.chatInitByContextResp.getChatId(): " + myWebSocketClient.chatInitByContextResp.getChatId());
+
+
+        ChatReq chatReq1 = new ChatReq();
+        chatReq1.setCommand(Command.CHAT);
+        chatReq1.setData("Hello!Good to see you! I'm Tom!");
+        chatReq1.setChatId(myWebSocketClient.chatInitByContextResp.getChatId());
+        myWebSocketClient.send(JSONUtil.toJsonStr(chatReq1));
+        await().atMost(90, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.chatTopicResp != null && myWebSocketClient.chatTopicResp.getData() != null;
+        });
+
+        // msg confirm
+        ChatReq confirmReq = new ChatReq();
+        confirmReq.setCommand(Command.MSG_CONFIRM);
+        confirmReq.setData(myWebSocketClient.chatTopicResp.getMsgId());
+        myWebSocketClient.send(JSONUtil.toJsonStr(confirmReq));
+        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.confirmResp != null && myWebSocketClient.confirmResp.getCode() == 200;
+        });
+
         myWebSocketClient.close();
     }
 

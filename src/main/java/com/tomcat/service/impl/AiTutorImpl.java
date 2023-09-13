@@ -1,5 +1,6 @@
 package com.tomcat.service.impl;
 
+import cn.hutool.core.lang.TypeReference;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
@@ -89,6 +90,46 @@ public class AiTutorImpl implements AiCTutor {
         resp.setCode(200);
         resp.setCommand(Command.CHAT_INIT);
         resp.setData(uid);
+        return resp;
+    }
+
+    @Override
+    public ChatResp<String> chatInit(ChatReq req) {
+        String contextStr = req.getData();
+        String uid = req.getUid();
+        String chatId = UniqueIdentifierGenerator.uniqueId();
+        // 缓存初始化AI的上下文
+        List<Message> context = JSONUtil.toBean(contextStr, new TypeReference<List<Message>>(){}, false);
+        List<Message> initMessages = new ArrayList<>();
+        initMessages.add(context.get(0));
+        initMessages.add(context.get(1));
+        initMessages.add(context.get(2));
+        initMessages.add(context.get(3));
+        LocalCache.CACHE_INIT_MSG.put(uid, initMessages, LocalCache.TIMEOUT);
+        log.info("chatInit initMessages:" + JSONUtil.toJsonStr(initMessages));
+
+        // 缓存用户与AI的场景对话聊天记录
+        if(context.size()>=5){
+            List<Message> chatMessages = new ArrayList<>(context);
+            LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages);
+            log.info("chatInit chatMessages:" + JSONUtil.toJsonStr(chatMessages));
+        }
+
+
+        // 保存chatId与uid的关系
+        List<String> ids = (List<String>) LocalCache.CACHE_UID_CHATID.get(uid);
+        if (ids == null) {
+            ids = new ArrayList<>();
+        }
+        ids.add(chatId);
+        if(LocalCache.CACHE_CHAT_MSG.containsKey(chatId)) LocalCache.CACHE_UID_CHATID.put(uid, ids);
+        // ------
+
+        ChatResp<String> resp = new ChatResp<>();
+        resp.setCode(200);
+        resp.setCommand(Command.CHAT_INIT_BY_CONTEXT);
+        resp.setData(uid);
+        if(LocalCache.CACHE_CHAT_MSG.containsKey(chatId)) resp.setChatId(chatId);
         return resp;
     }
 
@@ -205,7 +246,6 @@ public class AiTutorImpl implements AiCTutor {
     public ChatResp<ChatAssistantDataResp> chat(ChatReq req) {
 
         String chatId = req.getChatId();
-        String uid = req.getUid();
 
         // 获得chat上下文
         List<Message> chatMessages = (List<Message>) LocalCache.CACHE_CHAT_MSG.get(chatId);

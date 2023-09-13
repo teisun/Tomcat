@@ -17,6 +17,8 @@ public class Command {
 
     public static final String CHAT = "/CHAT";
 
+    public static final String CHAT_INIT_BY_CONTEXT = "/CHAT_INIT_BY_CONTEXT";
+
     public static final String TIPS = "/TIPS";
 
     public static final String OFFLINE_MSG = "/OFFLINE_MSG";

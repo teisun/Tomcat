@@ -38,6 +38,7 @@ public interface AiCTutor {
      * @date 2023/8/29 8:18 PM
      */
     ChatResp<String> chatInit(String uid);
+    ChatResp<String> chatInit(ChatReq req);
 
     /**
      * @description 获取课程表

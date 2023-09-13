@@ -27,6 +27,8 @@ public class MyWebSocketClient extends WebSocketClient {
 
     public ChatResp confirmResp;
 
+    public ChatResp chatInitByContextResp;
+
     public MyWebSocketClient(URI uri) {
         super(uri);
     }
@@ -58,6 +60,9 @@ public class MyWebSocketClient extends WebSocketClient {
                 break;
             case Command.MSG_CONFIRM:
                 confirmResp = JSONUtil.toBean(msg, ChatResp.class);
+                break;
+            case Command.CHAT_INIT_BY_CONTEXT:
+                chatInitByContextResp = JSONUtil.toBean(msg, ChatResp.class);
                 break;
         }
 
