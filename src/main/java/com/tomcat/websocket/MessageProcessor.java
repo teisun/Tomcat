@@ -100,7 +100,7 @@ public class MessageProcessor {
             case Command.CHAT_INIT:
                 this.chatInit();
                 break;
-            case Command.CURRICULUM_PLAN:
+            case Command.PLAN:
                 this.curriculumPlan(chatReq);
                 break;
             case Command.START_TOPIC:

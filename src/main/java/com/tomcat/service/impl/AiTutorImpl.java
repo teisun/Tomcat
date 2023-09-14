@@ -89,13 +89,6 @@ public class AiTutorImpl implements AiCTutor {
         Message secondMsg = Message.builder().content(promptVersion).role(Message.Role.ASSISTANT).build();
         messages.add(secondMsg);
 
-        // 添加用户配置到上下文
-        ProfileResp profile = userProfileService.getByUserId(uid);
-        String commandConfig = Command.CONFIG + " " + JSONUtil.toJsonStr(profile.buildConfig());
-        log.info(commandConfig);
-        Message profileMsg = Message.builder().content(commandConfig).role(Message.Role.USER).build();
-        messages.add(profileMsg);
-
         LocalCache.CACHE_INIT_MSG.put(uid, messages, LocalCache.TIMEOUT);
         log.info("chatInit: " + secondMsg.getContent());
         ChatResp<String> resp = new ChatResp<>();
@@ -115,7 +108,6 @@ public class AiTutorImpl implements AiCTutor {
         List<Message> initMessages = new ArrayList<>();
         initMessages.add(context.get(0));
         initMessages.add(context.get(1));
-        initMessages.add(context.get(2));
         LocalCache.CACHE_INIT_MSG.put(uid, initMessages, LocalCache.TIMEOUT);
         log.info("chatInit initMessages:" + JSONUtil.toJsonStr(initMessages));
 
@@ -154,24 +146,31 @@ public class AiTutorImpl implements AiCTutor {
             return resp;
         }
 
-        log.info(Command.CURRICULUM_PLAN + " messageContext: " + JSONUtil.toJsonStr(messages));
+        // 添加用户配置到上下文
+        ProfileResp profile = userProfileService.getByUserId(uid);
+        String commandConfig = Command.CONFIG + " " + JSONUtil.toJsonStr(profile.buildConfig());
+        log.info(commandConfig);
+        Message profileMsg = Message.builder().content(commandConfig).role(Message.Role.USER).build();
+        messages.add(profileMsg);
+
+        log.info(Command.PLAN + " messageContext: " + JSONUtil.toJsonStr(messages));
         String content;
         String prompt_limit = " " + promptCurriculumLimiter; // 限时模型返回topic obj的数量
         if (StrUtil.isNotBlank(req.getData())) {
-            content = Command.CURRICULUM_PLAN + " " + req.getData() + prompt_limit;
+            content = Command.PLAN + " " + req.getData() + prompt_limit;
         } else {
-            content = Command.CURRICULUM_PLAN + prompt_limit;
+            content = Command.PLAN + prompt_limit;
         }
-        log.info(Command.CURRICULUM_PLAN + " currentMessage content: " + content);
+        log.info(Command.PLAN + " currentMessage content: " + content);
         Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
         messages.add(currentMessage);
         ChatCompletionResponse response = this.chatCompletion(messages);
         Message responseMag = response.getChoices().get(0).getMessage();
-        log.info(Command.CURRICULUM_PLAN + " responseMag content: " + responseMag.getContent());
+        log.info(Command.PLAN + " responseMag content: " + responseMag.getContent());
 
         TopicsResp topicsResp = JSONUtil.toBean(responseMag.getContent(), TopicsResp.class);
         resp.setCode(200);
-        resp.setCommand(Command.CURRICULUM_PLAN);
+        resp.setCommand(Command.PLAN);
         resp.setData(topicsResp);
         resp.setUsage(response.getUsage());
 

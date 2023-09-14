@@ -98,7 +98,7 @@ public class WebSocketTest {
             return myWebSocketClient.getReadyState().equals(WebSocket.READYSTATE.OPEN);
         });
         ChatReq chatReq = new ChatReq();
-        chatReq.setCommand(Command.CURRICULUM_PLAN);
+        chatReq.setCommand(Command.PLAN);
         chatReq.setUid(uId);
         myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
@@ -234,6 +234,7 @@ public class WebSocketTest {
         messages.add(msg0);
         Message msg1 = Message.builder().content(promptVersion).role(Message.Role.ASSISTANT).build();
         messages.add(msg1);
+
         // 添加用户配置到上下文
         ProfileResp profile = userProfileService.getByUserId("2c8989ec-234a-493a-9d85-aa44fb045b5f");
         String commandConfig = Command.CONFIG + " " + JSONUtil.toJsonStr(profile.buildConfig());
@@ -242,7 +243,7 @@ public class WebSocketTest {
         messages.add(msg2);
 
         // 生成topics
-        Message msg3 = Message.builder().content(Command.CURRICULUM_PLAN + promptCurriculumLimiter).role(Message.Role.USER).build();
+        Message msg3 = Message.builder().content(Command.PLAN + promptCurriculumLimiter).role(Message.Role.USER).build();
         messages.add(msg3);
         Message msg4 = Message.builder().content(contextTopics).role(Message.Role.ASSISTANT).build();
         messages.add(msg4);

@@ -46,7 +46,7 @@ public class MyWebSocketClient extends WebSocketClient {
             case Command.CHAT_INIT:
                 chatInitResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<String>>(){}, false);
                 break;
-            case Command.CURRICULUM_PLAN:
+            case Command.PLAN:
                 planResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<TopicsResp>>(){}, false);
                 break;
             case Command.START_TOPIC:
