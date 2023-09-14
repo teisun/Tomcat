@@ -17,13 +17,13 @@ public class UserProfile {
   private User user;
 
   @Column(columnDefinition = "varchar(255) CHARACTER SET utf8mb4")
-  private String motherTongue;
+  private String nativeLanguage;
 
   @Column(columnDefinition = "varchar(255) CHARACTER SET utf8mb4")
-  private String languageDepth;
+  private String depth;
 
   @Column(columnDefinition = "varchar(255) CHARACTER SET utf8mb4")
-  private String communicationStyle;
+  private String style;
 
   @Column(columnDefinition = "varchar(255) CHARACTER SET utf8mb4")
   private String targetLanguage;

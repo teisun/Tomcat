@@ -30,7 +30,7 @@ public class TomcatApplication {
     // done websocket 单元测试
     // done 处理Ai的聊天返回
     // done 异常指令处理
-    // prompt添加用户配置
+    // done 用户配置添加到上下文
     // done 离线消息
     // done 压缩prompt字数
     // done tips bug？
@@ -39,5 +39,7 @@ public class TomcatApplication {
     // json反射转换bug
     // done 处理websocket断线重连逻辑
     // done 修改uid与chatId的使用逻辑
+    // 角色扮演
+    // 自由会话
 
 }

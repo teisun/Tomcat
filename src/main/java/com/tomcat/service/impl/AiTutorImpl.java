@@ -9,6 +9,7 @@ import com.tomcat.controller.requeset.ChatUserDataReq;
 import com.tomcat.controller.requeset.TipsReq;
 import com.tomcat.controller.response.*;
 import com.tomcat.service.AiCTutor;
+import com.tomcat.service.UserProfileService;
 import com.tomcat.utils.UniqueIdentifierGenerator;
 import com.tomcat.websocket.Command;
 import com.unfbx.chatgpt.OpenAiClient;
@@ -39,6 +40,9 @@ public class AiTutorImpl implements AiCTutor {
 
     @Autowired
     private OpenAiClient aiClient;
+
+    @Autowired
+    private UserProfileService userProfileService;
 
     @Value("${ai.prompt.aitutor}")
     private String promptAitutor;
@@ -84,6 +88,14 @@ public class AiTutorImpl implements AiCTutor {
         messages.add(firstMsg);
         Message secondMsg = Message.builder().content(promptVersion).role(Message.Role.ASSISTANT).build();
         messages.add(secondMsg);
+
+        // 添加用户配置到上下文
+        ProfileResp profile = userProfileService.getByUserId(uid);
+        String commandConfig = Command.CONFIG + " " + JSONUtil.toJsonStr(profile.buildConfig());
+        log.info(commandConfig);
+        Message profileMsg = Message.builder().content(commandConfig).role(Message.Role.USER).build();
+        messages.add(profileMsg);
+
         LocalCache.CACHE_INIT_MSG.put(uid, messages, LocalCache.TIMEOUT);
         log.info("chatInit: " + secondMsg.getContent());
         ChatResp<String> resp = new ChatResp<>();
@@ -104,16 +116,13 @@ public class AiTutorImpl implements AiCTutor {
         initMessages.add(context.get(0));
         initMessages.add(context.get(1));
         initMessages.add(context.get(2));
-        initMessages.add(context.get(3));
         LocalCache.CACHE_INIT_MSG.put(uid, initMessages, LocalCache.TIMEOUT);
         log.info("chatInit initMessages:" + JSONUtil.toJsonStr(initMessages));
 
         // 缓存用户与AI的场景对话聊天记录
-        if(context.size()>=5){
-            List<Message> chatMessages = new ArrayList<>(context);
-            LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages);
-            log.info("chatInit chatMessages:" + JSONUtil.toJsonStr(chatMessages));
-        }
+        List<Message> chatMessages = new ArrayList<>(context);
+        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages);
+        log.info("chatInit chatMessages:" + JSONUtil.toJsonStr(chatMessages));
 
 
         // 保存chatId与uid的关系

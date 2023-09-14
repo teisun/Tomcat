@@ -40,9 +40,9 @@ public class UserProfileServiceImpl implements UserProfileService {
 
     UserProfile profile = new UserProfile();
     profile.setUser(user);
-    profile.setMotherTongue(profileRequest.getMotherTongue());
-    profile.setCommunicationStyle(profileRequest.getCommunicationStyle());
-    profile.setLanguageDepth(profileRequest.getLanguageDepth());
+    profile.setNativeLanguage(profileRequest.getNativeLanguage());
+    profile.setStyle(profileRequest.getStyle());
+    profile.setDepth(profileRequest.getDepth());
     profile.setTargetLanguage(profileRequest.getTargetLanguage());
 
     UserProfile save = userProfileRepository.save(profile);

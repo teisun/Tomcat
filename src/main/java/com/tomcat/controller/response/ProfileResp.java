@@ -14,11 +14,11 @@ public class ProfileResp {
 
     private String userId;
 
-    private String motherTongue;
+    private String nativeLanguage;
 
-    private String languageDepth;
+    private String depth;
 
-    private String communicationStyle;
+    private String style;
 
     private String targetLanguage;
 
@@ -26,11 +26,31 @@ public class ProfileResp {
         ProfileResp response = new ProfileResp();
         response.setId(profile.getId());
         response.setUserId(profile.getUser().getId());
-        response.setMotherTongue(profile.getMotherTongue());
-        response.setLanguageDepth(profile.getLanguageDepth());
-        response.setCommunicationStyle(profile.getCommunicationStyle());
+        response.setNativeLanguage(profile.getNativeLanguage());
+        response.setDepth(profile.getDepth());
+        response.setStyle(profile.getStyle());
         response.setTargetLanguage(profile.getTargetLanguage());
         return response;
+    }
+
+    @Data
+    public static class Config{
+        private String nativeLanguage;
+
+        private String depth;
+
+        private String style;
+
+        private String targetLanguage;
+    }
+
+    public Config buildConfig(){
+        Config config = new Config();
+        config.setDepth(this.depth);
+        config.setStyle(this.style);
+        config.setNativeLanguage(this.nativeLanguage);
+        config.setTargetLanguage(this.targetLanguage);
+        return config;
     }
 
 }

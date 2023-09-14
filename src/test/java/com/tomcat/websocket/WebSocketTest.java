@@ -2,6 +2,8 @@ package com.tomcat.websocket;
 
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
+import com.tomcat.controller.response.ProfileResp;
+import com.tomcat.service.UserProfileService;
 import com.unfbx.chatgpt.entity.chat.Message;
 import lombok.extern.slf4j.Slf4j;
 import org.java_websocket.WebSocket;
@@ -11,6 +13,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.runner.RunWith;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -204,13 +207,19 @@ public class WebSocketTest {
     }
 
 
+    @Autowired
+    private UserProfileService userProfileService;
+
     @Value("${ai.prompt.aitutor}")
     private String promptAitutor;
     @Value("${ai.prompt.version}")
     private String promptVersion;
 
-    private static String msg3Prompt = "{\"topics\":[{\"topic\":\"Shopping\",\"objective\":[\"Learn vocabulary and expressions used in shopping\",\"Practice asking for prices, comparing products, and expressing needs\"]},{\"topic\":\"Booking Hotel\",\"objective\":[\"Learn vocabulary and expressions used in hotel booking\",\"Practice asking about room types, the booking process, and expressing preferences\"]},{\"topic\":\"At the Restaurant\",\"objective\":[\"Learn vocabulary and expressions used in ordering at a restaurant\",\"Practice reading menus, placing orders, and expressing preferences\"]},{\"topic\":\"Daily Routines\",\"objective\":[\"Learn vocabulary and expressions used in daily routines\",\"Practice discussing daily schedules and activities\"]}]},\"usage\":{\"promptTokens\":2049,\"completionTokens\":183,\"totalTokens\":2232}}";
-    private static String msg5Prompt = "{\"topic\":\"At the Restaurant\",\"assistant_sentence\":\"Good evening! Welcome to our restaurant. How many people are in your party?\",\"translate\":\"晚上好！欢迎光临我们的餐厅。您一共有几位客人？\",\"tips\":[\"There are two of us.\",\"We have a party of six.\",\"I'm dining alone.\"],\"missions\":[{\"status\":0,\"text\":\"Ask the waiter for a menu\"},{\"status\":0,\"text\":\"Inquire about the daily specials\"},{\"status\":0,\"text\":\"Order a drink\"},{\"status\":0,\"text\":\"Ask for recommendations\"},{\"status\":0,\"text\":\"Order a main course\"}]},\"usage\":{\"promptTokens\":2371,\"completionTokens\":235,\"totalTokens\":2606},\"chatId\":\"fa54f222-157a-432a-9d42-af96bf6d1573\",\"msgId\":\"chatcmpl-7yGJ6TNs3CaQgnpovLEUB7WyozZrl\"}";
+    @Value("${ai.prompt.curriculum.limiter}")
+    private String promptCurriculumLimiter;
+
+    private static String contextTopics = "{\"topics\":[{\"topic\":\"Shopping\",\"objective\":[\"Learn vocabulary and expressions used in shopping\",\"Practice asking for prices, comparing products, and expressing needs\"]},{\"topic\":\"Booking Hotel\",\"objective\":[\"Learn vocabulary and expressions used in hotel booking\",\"Practice asking about room types, the booking process, and expressing preferences\"]},{\"topic\":\"At the Restaurant\",\"objective\":[\"Learn vocabulary and expressions used in ordering at a restaurant\",\"Practice reading menus, placing orders, and expressing preferences\"]},{\"topic\":\"Daily Routines\",\"objective\":[\"Learn vocabulary and expressions used in daily routines\",\"Practice discussing daily schedules and activities\"]}]},\"usage\":{\"promptTokens\":2049,\"completionTokens\":183,\"totalTokens\":2232}}";
+    private static String contextAssistantChat = "{\"topic\":\"At the Restaurant\",\"assistant_sentence\":\"Good evening! Welcome to our restaurant. How many people are in your party?\",\"translate\":\"晚上好！欢迎光临我们的餐厅。您一共有几位客人？\",\"tips\":[\"There are two of us.\",\"We have a party of six.\",\"I'm dining alone.\"],\"missions\":[{\"status\":0,\"text\":\"Ask the waiter for a menu\"},{\"status\":0,\"text\":\"Inquire about the daily specials\"},{\"status\":0,\"text\":\"Order a drink\"},{\"status\":0,\"text\":\"Ask for recommendations\"},{\"status\":0,\"text\":\"Order a main course\"}]},\"usage\":{\"promptTokens\":2371,\"completionTokens\":235,\"totalTokens\":2606},\"chatId\":\"fa54f222-157a-432a-9d42-af96bf6d1573\",\"msgId\":\"chatcmpl-7yGJ6TNs3CaQgnpovLEUB7WyozZrl\"}";
     @Order(7)
     @Test
     public void _7chatInitByContextTest() throws Exception{
@@ -225,15 +234,25 @@ public class WebSocketTest {
         messages.add(msg0);
         Message msg1 = Message.builder().content(promptVersion).role(Message.Role.ASSISTANT).build();
         messages.add(msg1);
-        Message msg2 = Message.builder().content("/PLAN Return JSON obj for 4 topics").role(Message.Role.USER).build();
+        // 添加用户配置到上下文
+        ProfileResp profile = userProfileService.getByUserId("2c8989ec-234a-493a-9d85-aa44fb045b5f");
+        String commandConfig = Command.CONFIG + " " + JSONUtil.toJsonStr(profile.buildConfig());
+        log.info(commandConfig);
+        Message msg2 = Message.builder().content(commandConfig).role(Message.Role.USER).build();
         messages.add(msg2);
-        Message msg3 = Message.builder().content(msg3Prompt).role(Message.Role.ASSISTANT).build();
+
+        // 生成topics
+        Message msg3 = Message.builder().content(Command.CURRICULUM_PLAN + promptCurriculumLimiter).role(Message.Role.USER).build();
         messages.add(msg3);
-        // 开始聊天
-        Message msg4 = Message.builder().content("/START_TOPIC At the Restaurant").role(Message.Role.USER).build();
+        Message msg4 = Message.builder().content(contextTopics).role(Message.Role.ASSISTANT).build();
         messages.add(msg4);
-        Message msg5 = Message.builder().content(msg5Prompt).role(Message.Role.ASSISTANT).build();
+
+
+        // 开始聊天
+        Message msg5 = Message.builder().content("/START_TOPIC At the Restaurant").role(Message.Role.USER).build();
         messages.add(msg5);
+        Message msg6 = Message.builder().content(contextAssistantChat).role(Message.Role.ASSISTANT).build();
+        messages.add(msg6);
         ChatReq chatReq = new ChatReq();
         chatReq.setCommand(Command.CHAT_INIT_BY_CONTEXT);
         chatReq.setData(JSONUtil.toJsonStr(messages));

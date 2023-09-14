@@ -9,11 +9,11 @@ public class ProfileReq {
 
     private String userId;
 
-    private String motherTongue;
+    private String nativeLanguage;
 
-    private String languageDepth;
+    private String depth;
 
-    private String communicationStyle;
+    private String style;
 
     private String targetLanguage;
 

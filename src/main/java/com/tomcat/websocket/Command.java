@@ -24,4 +24,6 @@ public class Command {
     public static final String OFFLINE_MSG = "/OFFLINE_MSG";
 
     public static final String MSG_CONFIRM = "/MSG_CONFIRM";
+
+    public static final String CONFIG = "/CONFIG";
 }
