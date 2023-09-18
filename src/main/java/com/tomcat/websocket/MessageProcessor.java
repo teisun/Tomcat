@@ -47,6 +47,11 @@ public class MessageProcessor {
         sendText(resp);
     }
 
+    private void customizeTopic(ChatReq req){
+        ChatResp<ChatAssistantDataResp> resp = aiClient.customizeTopic(req);
+        sendText(resp);
+    }
+
     private void chat(ChatReq req) {
         ChatResp<ChatAssistantDataResp> resp = aiClient.chat(req);
         sendText(resp);
@@ -120,6 +125,9 @@ public class MessageProcessor {
                 break;
             case Command.CHAT_INIT_BY_CONTEXT:
                 chatInitByContext(chatReq);
+                break;
+            case Command.CUSTOMIZE_TOPIC:
+                customizeTopic(chatReq);
                 break;
             default:
                 commandNotFound(chatReq.getCommand());

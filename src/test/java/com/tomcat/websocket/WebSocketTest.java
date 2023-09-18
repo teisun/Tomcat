@@ -2,6 +2,7 @@ package com.tomcat.websocket;
 
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
+import com.tomcat.controller.requeset.CustomizeTopicReq;
 import com.tomcat.controller.response.ProfileResp;
 import com.tomcat.service.UserProfileService;
 import com.unfbx.chatgpt.entity.chat.Message;
@@ -283,6 +284,51 @@ public class WebSocketTest {
         });
 
         myWebSocketClient.close();
+        myWebSocketClient.chatTopicResp = null;
+        myWebSocketClient.confirmResp = null;
+    }
+
+
+    @Order(8)
+    @Test
+    public void _8customizeTopicTest() throws Exception{
+        myWebSocketClient = new MyWebSocketClient(new URI("ws://localhost:6688/ws?Authorization=BearereyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiLmsaTlp4bnjKsiLCJ1c2VySWQiOiIyYzg5ODllYy0yMzRhLTQ5M2EtOWQ4NS1hYTQ0ZmIwNDViNWYiLCJ1c2VybmFtZSI6IuaxpOWnhueMqyIsImlhdCI6MTY5Mjc3MDgyOCwiZXhwIjoxNzI0MzA2ODI4fQ.ATEPOdBcOpN_AU69LQ_2LdVn5XRGzjASBxy4W4POIAc"));
+        myWebSocketClient.connect();
+        await().atMost(5, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.getReadyState().equals(WebSocket.READYSTATE.OPEN);
+        });
+
+        ChatReq initReq = new ChatReq();
+        initReq.setCommand(Command.CHAT_INIT);
+        myWebSocketClient.send(JSONUtil.toJsonStr(initReq));
+        await().atMost(5, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.chatInitResp.getData() != null;
+        });
+
+
+        ChatReq chatReq = new ChatReq();
+        chatReq.setCommand(Command.CUSTOMIZE_TOPIC);
+        CustomizeTopicReq cReq = new CustomizeTopicReq();
+        cReq.setTopic("租房");
+        cReq.setUser_role("租客");
+        cReq.setAssistant_role("房东");
+        chatReq.setData(JSONUtil.toJsonStr(cReq));
+        myWebSocketClient.send(JSONUtil.toJsonStr(chatReq));
+        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.cTopicResp != null && myWebSocketClient.cTopicResp.getData() != null;
+        });
+        chatId = myWebSocketClient.cTopicResp.getChatId();
+        // msg confirm
+        ChatReq confirmReq = new ChatReq();
+        confirmReq.setCommand(Command.MSG_CONFIRM);
+        confirmReq.setData(myWebSocketClient.cTopicResp.getMsgId());
+        myWebSocketClient.send(JSONUtil.toJsonStr(confirmReq));
+        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.confirmResp != null && myWebSocketClient.confirmResp.getCode() == 200;
+        });
+
+        myWebSocketClient.close();
+        myWebSocketClient.confirmResp = null;
     }
 
 

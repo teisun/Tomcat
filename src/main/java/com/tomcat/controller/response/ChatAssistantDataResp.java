@@ -8,6 +8,7 @@ import java.util.List;
 @Data
 public class ChatAssistantDataResp {
     private String topic;
+    private Roles roles;
     private String assistant_sentence;
     private String translate;
     private List<String> tips;
@@ -15,6 +16,12 @@ public class ChatAssistantDataResp {
     private Suggestion suggestion;
 
     // 构造函数、getter 和 setter 方法
+
+    @Data
+    public static class Roles{
+        private String assistant_role;
+        private String user_role;
+    }
 
     @Data
     public static class Mission {

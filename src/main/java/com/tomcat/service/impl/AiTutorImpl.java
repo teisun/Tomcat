@@ -2,10 +2,12 @@ package com.tomcat.service.impl;
 
 import cn.hutool.core.lang.TypeReference;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSON;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.requeset.ChatUserDataReq;
+import com.tomcat.controller.requeset.CustomizeTopicReq;
 import com.tomcat.controller.requeset.TipsReq;
 import com.tomcat.controller.response.*;
 import com.tomcat.service.AiCTutor;
@@ -21,6 +23,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.text.MessageFormat;
 import java.util.*;
 
 /**
@@ -58,6 +61,9 @@ public class AiTutorImpl implements AiCTutor {
 
     @Value("${ai.prompt.chat.generateTips}")
     private String promptChatGenerateTips;
+
+    @Value("${ai.prompt.chat.customize_topic}")
+    private String promptChatCustomizeTopic;
 
     @Override
     public ChatCompletionResponse chatCompletion(List<Message> messages) {
@@ -237,6 +243,81 @@ public class AiTutorImpl implements AiCTutor {
 
         resp.setCode(200);
         resp.setCommand(Command.START_TOPIC);
+        resp.setData(chatAssistantDataResp);
+        resp.setUsage(response.getUsage());
+        resp.addUsage(tipsResp.getUsage());
+        resp.setChatId(chatId);
+        resp.setMsgId(response.getId());
+
+        // 将响应数据加入到上下文缓存中
+        chatMessages.add(responseMag);
+        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages, LocalCache.TIMEOUT);
+        cacheOfflineMsg(req.getUid(), resp);
+        return resp;
+    }
+
+    @Override
+    public ChatResp<ChatAssistantDataResp> customizeTopic(ChatReq req) {
+        log.info("!customizeTopic!");
+        ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
+        if (StrUtil.isBlank(req.getData())) {
+            resp.setCode(404);
+            resp.setDescribe("req data must be not null!");
+            return resp;
+        }
+
+        // 保存chatId与uid的关系
+        String uid = req.getUid();
+        List<String> ids = (List<String>) LocalCache.CACHE_UID_CHATID.get(uid);
+        if (ids == null) {
+            ids = new ArrayList<>();
+        }
+        String chatId = UniqueIdentifierGenerator.uniqueId();
+        ids.add(chatId);
+        LocalCache.CACHE_UID_CHATID.put(uid, ids);
+        // ------
+
+        // 拼接聊天上下文
+        List<Message> initMessages = (List<Message>) LocalCache.CACHE_INIT_MSG.get(uid);
+
+        if (initMessages == null) {
+            resp.setCode(404);
+            resp.setDescribe("chat context not found!");
+            return resp;
+        }
+
+        List<Message> chatMessages = new ArrayList<>(initMessages);
+
+        log.info("messageContext: " + JSONUtil.toJsonStr(chatMessages));
+        // 编辑prompt加入到上下文中
+        CustomizeTopicReq customizeTopicReq = JSONUtil.toBean(req.getData(), CustomizeTopicReq.class);
+
+        String prompt = String.format(promptChatCustomizeTopic, customizeTopicReq.getTopic(), customizeTopicReq.getUser_role(), customizeTopicReq.getAssistant_role());
+
+        String content = Command.START_TOPIC + " " + prompt;
+        log.info(Command.START_TOPIC + " currentMessage content: " + content);
+        Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
+        chatMessages.add(currentMessage);
+        // ------
+
+        // 发送上下文到AI 获取返回的响应数据
+        ChatCompletionResponse response = this.chatCompletion(chatMessages);
+        Message responseMag = response.getChoices().get(0).getMessage();
+        log.info(Command.START_TOPIC + "  responseMag content: " + responseMag.getContent());
+
+        // 将响应数据格式化成java bean返回请求端
+        ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMag.getContent(), ChatAssistantDataResp.class);
+
+        // 生成tips
+        TipsReq tipsReq = new TipsReq();
+        tipsReq.setTopic(chatAssistantDataResp.getTopic());
+        tipsReq.setQuestion(chatAssistantDataResp.getAssistant_sentence());
+        TipsResp tipsResp = generateTips(JSONUtil.toJsonStr(tipsReq));
+        chatAssistantDataResp.setTips(tipsResp.getTips());
+        // ------
+
+        resp.setCode(200);
+        resp.setCommand(Command.CUSTOMIZE_TOPIC);
         resp.setData(chatAssistantDataResp);
         resp.setUsage(response.getUsage());
         resp.addUsage(tipsResp.getUsage());

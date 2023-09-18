@@ -29,6 +29,8 @@ public class MyWebSocketClient extends WebSocketClient {
 
     public ChatResp chatInitByContextResp;
 
+    public ChatResp<ChatAssistantDataResp> cTopicResp;
+
     public MyWebSocketClient(URI uri) {
         super(uri);
     }
@@ -63,6 +65,9 @@ public class MyWebSocketClient extends WebSocketClient {
                 break;
             case Command.CHAT_INIT_BY_CONTEXT:
                 chatInitByContextResp = JSONUtil.toBean(msg, ChatResp.class);
+                break;
+            case Command.CUSTOMIZE_TOPIC:
+                cTopicResp = JSONUtil.toBean(msg, new TypeReference<ChatResp<ChatAssistantDataResp> >(){}, false);
                 break;
         }
 

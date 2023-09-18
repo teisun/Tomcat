@@ -26,4 +26,6 @@ public class Command {
     public static final String MSG_CONFIRM = "/MSG_CONFIRM";
 
     public static final String CONFIG = "/CONFIG";
+
+    public static final String CUSTOMIZE_TOPIC = "/C_TOPIC";
 }

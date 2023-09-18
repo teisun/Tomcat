@@ -59,6 +59,15 @@ public interface AiCTutor {
      */
     ChatResp<ChatAssistantDataResp> startTopic(ChatReq req);
 
+    /**
+     * @description 自定义topic对话
+     * @param req:
+     * @return ChatResp<ChatAssistantDataResp>
+     * @author tomcat
+     * @date 2023/9/15 4:00 PM
+     */
+    ChatResp<ChatAssistantDataResp> customizeTopic(ChatReq req);
+
 
     /**
      * @description 聊天
