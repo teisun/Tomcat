@@ -135,7 +135,7 @@ public class AiTutorImpl implements AiCTutor {
     }
 
     @Override
-    public TwoTuple<TopicsResp, Usage> curriculumPlan(ChatReq req) {
+    public TwoTuple<TopicsResp, Usage> plan(ChatReq req) {
         String uid = req.getUid();
         // 获取chat上下文
         ChatResp<TopicsResp> resp = new ChatResp<>();

@@ -1,5 +1,6 @@
 package com.tomcat.websocket;
 
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.*;
@@ -8,7 +9,8 @@ import com.tomcat.utils.SpringContextUtils;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.List;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 
 @Slf4j
 public class MessageProcessor {
@@ -25,50 +27,6 @@ public class MessageProcessor {
         this.uid = uid;
     }
 
-    private void chatInit(ChatReq req) {
-        ChatResp resp = aiClient.chatInit(req);
-        session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
-    }
-
-    private void chatInitByContext(ChatReq req) {
-        ChatResp<String> resp = aiClient.chatInitByContext(req);
-        session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
-    }
-
-    private void curriculumPlan(ChatReq req) {
-        ChatResp<TopicsResp> resp = aiClient.curriculumPlan(req);
-        sendText(resp);
-    }
-
-    private void startTopic(ChatReq req) {
-        ChatResp<ChatAssistantDataResp> resp = aiClient.startTopic(req);
-        sendText(resp);
-    }
-
-    private void customizeTopic(ChatReq req){
-        ChatResp<ChatAssistantDataResp> resp = aiClient.customizeTopic(req);
-        sendText(resp);
-    }
-
-    private void chat(ChatReq req) {
-        ChatResp<ChatAssistantDataResp> resp = aiClient.chat(req);
-        sendText(resp);
-    }
-
-    private void generateTips(ChatReq req) {
-        ChatResp<TipsResp> resp = aiClient.generateTips(req);
-        sendText(resp);
-    }
-
-    private void offlineMsg(ChatReq req) {
-        ChatResp<List<OfflineMsgResp>> resp = aiClient.offlineMsg(req);
-        sendText(resp);
-    }
-
-    private void msgConfirm(ChatReq req) {
-        ChatResp resp = aiClient.msgConfirm(req);
-        sendText(resp);
-    }
 
     private void sendText(ChatResp resp) {
         String jsonStr = JSONUtil.toJsonStr(resp);
@@ -94,44 +52,30 @@ public class MessageProcessor {
     }
 
 
-    public void processor(String msg) {
+    public void processor(String msg) throws InvocationTargetException, IllegalAccessException {
 
         ChatReq chatReq = JSONUtil.toBean(msg, ChatReq.class);
         chatReq.setUid(uid);
         log.info(msg);
-        switch (chatReq.getCommand().toUpperCase()) {
-            case Command.CHAT_INIT:
-                this.chatInit(chatReq);
-                break;
-            case Command.PLAN:
-                this.curriculumPlan(chatReq);
-                break;
-            case Command.START_TOPIC:
-                this.startTopic(chatReq);
-                break;
-            case Command.CHAT:
-                this.chat(chatReq);
-                break;
-            case Command.TIPS:
-                this.generateTips(chatReq);
-                break;
-            case Command.OFFLINE_MSG:
-                offlineMsg(chatReq);
-                break;
-            case Command.MSG_CONFIRM:
-                msgConfirm(chatReq);
-                break;
-            case Command.CHAT_INIT_BY_CONTEXT:
-                chatInitByContext(chatReq);
-                break;
-            case Command.CUSTOMIZE_TOPIC:
-                customizeTopic(chatReq);
-                break;
-            default:
-                commandNotFound(chatReq.getCommand());
-                break;
+        String cmd = chatReq.getCommand();
+        Method call = null;
+        Method[] methods = aiClient.getClass().getDeclaredMethods();
+        for(Method method : methods){
+            if(method.isAnnotationPresent(CmdMapping.class)){
+                CmdMapping cmdMapping = method.getAnnotation(CmdMapping.class);
+                if(StrUtil.equals(cmdMapping.value(), cmd)){
+                    call = method;
+                    break;
+                }
+            }
+        }
+        if(call == null){
+            commandNotFound(chatReq.getCommand());
+            return;
         }
 
+        ChatResp resp = (ChatResp) call.invoke(aiClient, chatReq);
+        sendText(resp);
 
         //TODO
         //        检查缓存中是否存在上下文

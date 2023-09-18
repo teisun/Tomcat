@@ -10,7 +10,6 @@ import com.tomcat.utils.ThreeTuple;
 import com.tomcat.utils.TwoTuple;
 import com.unfbx.chatgpt.entity.chat.Message;
 import com.unfbx.chatgpt.entity.common.Usage;
-import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -36,6 +35,7 @@ public class AiTutorController {
     @Autowired
     AiCTutor aiTutor;
 
+    @CmdMapping(Command.CHAT_INIT)
     public ChatResp chatInit(ChatReq req) {
         MsgIds ids = aiTutor.chatInit(req.getUid());
         ChatResp<String> resp = new ChatResp<>();
@@ -45,6 +45,7 @@ public class AiTutorController {
         return resp;
     }
 
+    @CmdMapping(Command.CHAT_INIT_BY_CONTEXT)
     public ChatResp chatInitByContext(ChatReq req) {
 
         MsgIds ids = aiTutor.chatInit(req);
@@ -58,7 +59,8 @@ public class AiTutorController {
         return resp;
     }
 
-    public ChatResp curriculumPlan(ChatReq req) {
+    @CmdMapping(Command.PLAN)
+    public ChatResp plan(ChatReq req) {
         List<Message> messages = (List<Message>) LocalCache.CACHE_INIT_MSG.get(req.getUid());
         if (messages == null) {
             ChatResp resp = new ChatResp<>();
@@ -66,16 +68,16 @@ public class AiTutorController {
             resp.setDescribe("chat context not found!");
             return resp;
         }
-        TwoTuple<TopicsResp, Usage> twoTuple = aiTutor.curriculumPlan(req);
+        TwoTuple<TopicsResp, Usage> twoTuple = aiTutor.plan(req);
         ChatResp<TopicsResp> resp = new ChatResp<>();
         resp.setCode(200);
         resp.setCommand(Command.PLAN);
         resp.setData(twoTuple.getFirst());
         resp.setUsage(twoTuple.getSecond());
-        cacheOfflineMsg(req.getUid(), resp);
         return resp;
     }
 
+    @CmdMapping(Command.START_TOPIC)
     public ChatResp startTopic(ChatReq req) {
         ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
         List<Message> initMessages = (List<Message>) LocalCache.CACHE_INIT_MSG.get(req.getUid());
@@ -96,6 +98,7 @@ public class AiTutorController {
         return resp;
     }
 
+    @CmdMapping(Command.CUSTOMIZE_TOPIC)
     public ChatResp customizeTopic(ChatReq req){
         ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
         List<Message> initMessages = (List<Message>) LocalCache.CACHE_INIT_MSG.get(req.getUid());
@@ -124,6 +127,7 @@ public class AiTutorController {
         return resp;
     }
 
+    @CmdMapping(Command.CHAT)
     public ChatResp chat(ChatReq req) {
         List<Message> chatMessages = (List<Message>) LocalCache.CACHE_CHAT_MSG.get(req.getChatId());
         ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
@@ -149,6 +153,7 @@ public class AiTutorController {
         return resp;
     }
 
+    @CmdMapping(Command.TIPS)
     public ChatResp generateTips(ChatReq req) {
         ChatResp<TipsResp> resp = new ChatResp<>();
         if (StrUtil.isBlank(req.getData())) {
@@ -164,6 +169,7 @@ public class AiTutorController {
         return resp;
     }
 
+    @CmdMapping(Command.OFFLINE_MSG)
     public ChatResp<List<OfflineMsgResp>> offlineMsg(ChatReq req) {
         ChatResp<List<OfflineMsgResp>> resp = new ChatResp<>();
         if (!LocalCache.CACHE_OFFLINE_MSG.containsKey(req.getUid())) {
@@ -178,6 +184,7 @@ public class AiTutorController {
         return resp;
     }
 
+    @CmdMapping(Command.MSG_CONFIRM)
     public ChatResp msgConfirm(ChatReq req) {
         boolean completion = aiTutor.msgConfirm(req);
         ChatResp resp = new ChatResp();
@@ -193,7 +200,7 @@ public class AiTutorController {
     }
 
 
-    public void cacheOfflineMsg(String uid, ChatResp resp) {
+    private void cacheOfflineMsg(String uid, ChatResp resp) {
         log.info("MessageProcessor sendText: " + resp.getCommand() + " cache the message!");
         Map<String, OfflineMsgResp> msgMap;
         if(LocalCache.CACHE_OFFLINE_MSG.containsKey(uid)){

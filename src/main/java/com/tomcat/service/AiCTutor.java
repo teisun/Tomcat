@@ -1,6 +1,5 @@
 package com.tomcat.service;
 
-import cn.hutool.core.lang.Tuple;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.*;
 import com.tomcat.utils.ThreeTuple;
@@ -51,7 +50,7 @@ public interface AiCTutor {
      * @author sm0007
      * @date 2023/8/30 4:15 PM
      */
-    TwoTuple<TopicsResp, Usage> curriculumPlan(ChatReq req);
+    TwoTuple<TopicsResp, Usage> plan(ChatReq req);
 
 
     /**
