@@ -1,4 +1,4 @@
-package com.tomcat.websocket;
+package com.tomcat.controller;
 
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
@@ -8,6 +8,8 @@ import com.tomcat.controller.response.*;
 import com.tomcat.service.AiCTutor;
 import com.tomcat.utils.ThreeTuple;
 import com.tomcat.utils.TwoTuple;
+import com.tomcat.websocket.CmdMapping;
+import com.tomcat.websocket.Command;
 import com.unfbx.chatgpt.entity.chat.Message;
 import com.unfbx.chatgpt.entity.common.Usage;
 import lombok.extern.slf4j.Slf4j;

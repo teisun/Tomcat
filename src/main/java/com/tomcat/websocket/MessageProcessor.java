@@ -2,6 +2,7 @@ package com.tomcat.websocket;
 
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
+import com.tomcat.controller.AiTutorController;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.*;
 import com.tomcat.nettyws.pojo.Session;
