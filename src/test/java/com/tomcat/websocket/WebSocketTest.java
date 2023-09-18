@@ -85,7 +85,6 @@ public class WebSocketTest {
             return myWebSocketClient.chatInitResp.getData() != null;
         });
 
-        Assert.assertNotNull(myWebSocketClient.chatInitResp.getData());
         uId = myWebSocketClient.chatInitResp.getData();
         myWebSocketClient.close();
     }
@@ -118,6 +117,14 @@ public class WebSocketTest {
         await().atMost(5, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.getReadyState().equals(WebSocket.READYSTATE.OPEN);
         });
+
+        ChatReq chatReq0 = new ChatReq();
+        chatReq0.setCommand(Command.CHAT_INIT);
+        myWebSocketClient.send(JSONUtil.toJsonStr(chatReq0));
+        await().atMost(5, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.chatInitResp.getData() != null;
+        });
+
         ChatReq chatReq = new ChatReq();
         chatReq.setCommand(Command.START_TOPIC);
         chatReq.setData("At the Restaurant");
@@ -134,7 +141,9 @@ public class WebSocketTest {
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.confirmResp != null && myWebSocketClient.confirmResp.getCode() == 200;
         });
-
+        myWebSocketClient.startTopicResp = null;
+        myWebSocketClient.chatInitResp = null;
+        myWebSocketClient.confirmResp = null;
         myWebSocketClient.close();
     }
 
@@ -146,6 +155,24 @@ public class WebSocketTest {
         await().atMost(5, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.getReadyState().equals(WebSocket.READYSTATE.OPEN);
         });
+
+
+        ChatReq chatReq0 = new ChatReq();
+        chatReq0.setCommand(Command.CHAT_INIT);
+        myWebSocketClient.send(JSONUtil.toJsonStr(chatReq0));
+        await().atMost(5, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.chatInitResp.getData() != null;
+        });
+
+        ChatReq chatReq1 = new ChatReq();
+        chatReq1.setCommand(Command.START_TOPIC);
+        chatReq1.setData("At the Restaurant");
+        myWebSocketClient.send(JSONUtil.toJsonStr(chatReq1));
+        await().atMost(30, TimeUnit.SECONDS).until(()-> {
+            return myWebSocketClient.startTopicResp != null && myWebSocketClient.startTopicResp.getData() != null;
+        });
+        chatId = myWebSocketClient.startTopicResp.getChatId();
+
         ChatReq chatReq = new ChatReq();
         chatReq.setCommand(Command.CHAT);
         chatReq.setData("Hello!Good to see you! I'm Tom!");
@@ -154,7 +181,7 @@ public class WebSocketTest {
         await().atMost(60, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.chatTopicResp != null && myWebSocketClient.chatTopicResp.getData() != null;
         });
-        myWebSocketClient.chatTopicResp = null;
+
 
         // msg confirm
         ChatReq confirmReq = new ChatReq();
@@ -164,8 +191,9 @@ public class WebSocketTest {
         await().atMost(30, TimeUnit.SECONDS).until(()-> {
             return myWebSocketClient.confirmResp != null && myWebSocketClient.confirmResp.getCode() == 200;
         });
+        myWebSocketClient.startTopicResp = null;
         myWebSocketClient.confirmResp = null;
-
+        myWebSocketClient.chatTopicResp = null;
         myWebSocketClient.close();
     }
 

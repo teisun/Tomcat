@@ -18,6 +18,5 @@ import java.util.List;
 @Data
 public class TipsResp {
     private List<String> tips;
-    private Usage usage;
 
 }

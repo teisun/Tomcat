@@ -1,14 +1,9 @@
 package com.tomcat.websocket;
 
-import cn.hutool.core.lang.TypeReference;
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.json.JSONUtil;
-import com.tomcat.controller.response.ChatAssistantDataResp;
-import com.tomcat.controller.response.ChatResp;
 import com.tomcat.exceptions.GlobalExceptionHandler;
 import com.tomcat.nettyws.annotation.*;
 import com.tomcat.nettyws.pojo.Session;
-import com.tomcat.service.AiCTutor;
 import com.tomcat.service.UserService;
 import com.tomcat.utils.JwtUtil;
 import io.netty.handler.codec.http.*;
@@ -45,9 +40,6 @@ public class NettyWebSocketServer {
 
     @Autowired
     private UserService userService;
-
-    @Autowired
-    private AiCTutor aiClient;
 
     @Autowired
     GlobalExceptionHandler globalExceptionHandler;
@@ -126,7 +118,7 @@ public class NettyWebSocketServer {
                 " Thread.currentThread().getName():" + Thread.currentThread().getName());
         log.info("onOpen userId:" + uid);
         session.setAttribute(JwtUtil.KEY_USER_ID, uid);
-        messageProcessor = new MessageProcessor(aiClient, session, uid);
+        messageProcessor = new MessageProcessor(session, uid);
         WsSessionManager.add(uid, session);
 
     }

@@ -4,7 +4,7 @@ import cn.hutool.json.JSONUtil;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.*;
 import com.tomcat.nettyws.pojo.Session;
-import com.tomcat.service.AiCTutor;
+import com.tomcat.utils.SpringContextUtils;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import lombok.extern.slf4j.Slf4j;
 
@@ -13,27 +13,25 @@ import java.util.List;
 @Slf4j
 public class MessageProcessor {
 
-    public static final String OFFLINE_MSG_KEY = "offline_msg";
-
-    AiCTutor aiClient;
+    AiTutorController aiClient;
     Session session;
 
     String uid;
 
 
-    public MessageProcessor(AiCTutor aiClient, Session session, String uid) {
-        this.aiClient = aiClient;
+    public MessageProcessor(Session session, String uid) {
+        this.aiClient = SpringContextUtils.getBean(AiTutorController.class);
         this.session = session;
         this.uid = uid;
     }
 
-    private void chatInit() {
-        ChatResp<String> resp = aiClient.chatInit(uid);
+    private void chatInit(ChatReq req) {
+        ChatResp resp = aiClient.chatInit(req);
         session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
     }
 
     private void chatInitByContext(ChatReq req) {
-        ChatResp<String> resp = aiClient.chatInit(req);
+        ChatResp<String> resp = aiClient.chatInitByContext(req);
         session.sendText(new TextWebSocketFrame(JSONUtil.toJsonStr(resp)));
     }
 
@@ -103,7 +101,7 @@ public class MessageProcessor {
         log.info(msg);
         switch (chatReq.getCommand().toUpperCase()) {
             case Command.CHAT_INIT:
-                this.chatInit();
+                this.chatInit(chatReq);
                 break;
             case Command.PLAN:
                 this.curriculumPlan(chatReq);

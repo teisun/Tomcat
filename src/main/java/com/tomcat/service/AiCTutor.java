@@ -1,10 +1,14 @@
 package com.tomcat.service;
 
+import cn.hutool.core.lang.Tuple;
 import com.tomcat.controller.requeset.ChatReq;
 import com.tomcat.controller.response.*;
+import com.tomcat.utils.ThreeTuple;
+import com.tomcat.utils.TwoTuple;
 import com.unfbx.chatgpt.entity.chat.ChatCompletion;
 import com.unfbx.chatgpt.entity.chat.ChatCompletionResponse;
 import com.unfbx.chatgpt.entity.chat.Message;
+import com.unfbx.chatgpt.entity.common.Usage;
 
 import java.util.List;
 
@@ -37,8 +41,8 @@ public interface AiCTutor {
      * @author sm0007
      * @date 2023/8/29 8:18 PM
      */
-    ChatResp<String> chatInit(String uid);
-    ChatResp<String> chatInit(ChatReq req);
+    MsgIds chatInit(String uid);
+    MsgIds chatInit(ChatReq req);
 
     /**
      * @description 获取课程表
@@ -47,7 +51,7 @@ public interface AiCTutor {
      * @author sm0007
      * @date 2023/8/30 4:15 PM
      */
-    ChatResp<TopicsResp> curriculumPlan(ChatReq req);
+    TwoTuple<TopicsResp, Usage> curriculumPlan(ChatReq req);
 
 
     /**
@@ -57,7 +61,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/4 3:05 PM
      */
-    ChatResp<ChatAssistantDataResp> startTopic(ChatReq req);
+    ThreeTuple<ChatAssistantDataResp, MsgIds, Usage> startTopic(ChatReq req);
 
     /**
      * @description 自定义topic对话
@@ -66,7 +70,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/15 4:00 PM
      */
-    ChatResp<ChatAssistantDataResp> customizeTopic(ChatReq req);
+    ThreeTuple<ChatAssistantDataResp, MsgIds, Usage> customizeTopic(ChatReq req);
 
 
     /**
@@ -76,7 +80,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/4 3:36 PM
      */
-    ChatResp<ChatAssistantDataResp> chat(ChatReq req);
+    ThreeTuple<ChatAssistantDataResp, MsgIds, Usage> chat(ChatReq req);
 
     /**
      * @description 根据topic和sentence生成tips
@@ -85,7 +89,8 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/7 4:09 PM
      */
-    ChatResp<TipsResp> generateTips(ChatReq req);
+    TwoTuple<TipsResp, Usage> generateTips(ChatReq req);
+
 
 
     /**
@@ -95,7 +100,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/11 3:11 PM
      */
-    ChatResp<List<OfflineMsgResp>> offlineMsg(ChatReq req);
+    List<OfflineMsgResp> offlineMsg(ChatReq req);
 
     /**
      * @description 客户端在收到消息后的回执
@@ -104,7 +109,7 @@ public interface AiCTutor {
      * @author tomcat
      * @date 2023/9/12 4:04 PM
      */
-    ChatResp msgConfirm(ChatReq req);
+    boolean msgConfirm(ChatReq req);
 
 
 
