@@ -39,7 +39,8 @@ public class TomcatApplication {
     // json反射转换bug
     // done 处理websocket断线重连逻辑
     // done 修改uid与chatId的使用逻辑
-    // 角色扮演
+    // done 角色扮演
+    // token bug
     // 自由会话
 
 }

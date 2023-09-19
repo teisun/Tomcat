@@ -12,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.Locale;
 
 @Slf4j
 public class MessageProcessor {
@@ -58,7 +59,7 @@ public class MessageProcessor {
         ChatReq chatReq = JSONUtil.toBean(msg, ChatReq.class);
         chatReq.setUid(uid);
         log.info(msg);
-        String cmd = chatReq.getCommand();
+        String cmd = chatReq.getCommand().toUpperCase();
         Method call = null;
         Method[] methods = aiClient.getClass().getDeclaredMethods();
         for(Method method : methods){
