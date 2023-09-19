@@ -29,7 +29,6 @@ import java.util.Map;
  * @date: 2023/9/18 4:22 PM
  * @version: 1.0
  */
-
 @Component
 @Slf4j
 public class AiTutorController {

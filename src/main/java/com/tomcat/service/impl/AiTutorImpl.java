@@ -2,7 +2,6 @@ package com.tomcat.service.impl;
 
 import cn.hutool.core.lang.TypeReference;
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.json.JSON;
 import cn.hutool.json.JSONUtil;
 import com.tomcat.config.LocalCache;
 import com.tomcat.controller.requeset.ChatReq;
@@ -89,14 +88,13 @@ public class AiTutorImpl implements AiCTutor {
 
     @Override
     public MsgIds chatInit(String uid) {
-
-        Message firstMsg = Message.builder().content(promptAitutor).role(Message.Role.USER).build();
+        log.info("!chatInit(String uid)!");
+        Message firstMsg = createMessageWithRole(Message.Role.USER, promptAitutor);
+        Message secondMsg = createMessageWithRole(Message.Role.ASSISTANT, promptVersion);
         List<Message> messages = new ArrayList<>();
         messages.add(firstMsg);
-        Message secondMsg = Message.builder().content(promptVersion).role(Message.Role.ASSISTANT).build();
         messages.add(secondMsg);
-
-        LocalCache.CACHE_INIT_MSG.put(uid, messages, LocalCache.TIMEOUT);
+        cacheInitMessages(uid, messages);
         log.info("chatInit: " + secondMsg.getContent());
 
         return MsgIds.build(uid);
@@ -104,38 +102,30 @@ public class AiTutorImpl implements AiCTutor {
 
     @Override
     public MsgIds chatInit(ChatReq req) {
+        log.info("!chatInit(ChatReq req)!");
         String contextStr = req.getData();
         String uid = req.getUid();
         String chatId = UniqueIdentifierGenerator.uniqueId();
         // 缓存初始化AI的上下文
         List<Message> context = JSONUtil.toBean(contextStr, new TypeReference<List<Message>>(){}, false);
-        List<Message> initMessages = new ArrayList<>();
-        initMessages.add(context.get(0));
-        initMessages.add(context.get(1));
-        LocalCache.CACHE_INIT_MSG.put(uid, initMessages, LocalCache.TIMEOUT);
+        List<Message> initMessages = new ArrayList<>(context.subList(0, 2));
+        cacheInitMessages(uid, initMessages);
         log.info("chatInit initMessages:" + JSONUtil.toJsonStr(initMessages));
 
         // 缓存用户与AI的场景对话聊天记录
         List<Message> chatMessages = new ArrayList<>(context);
-        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages);
+        cacheChatMessages(chatId, chatMessages);
         log.info("chatInit chatMessages:" + JSONUtil.toJsonStr(chatMessages));
 
-
         // 保存chatId与uid的关系
-        List<String> ids = (List<String>) LocalCache.CACHE_UID_CHATID.get(uid);
-        if (ids == null) {
-            ids = new ArrayList<>();
-        }
-        ids.add(chatId);
-        if(LocalCache.CACHE_CHAT_MSG.containsKey(chatId)) LocalCache.CACHE_UID_CHATID.put(uid, ids);
-        // ------
-
+        updateUidChatIdRelation(uid, chatId);
 
         return MsgIds.build(uid, chatId);
     }
 
     @Override
     public TwoTuple<TopicsResp, Usage> plan(ChatReq req) {
+        log.info("!plan()!");
         String uid = req.getUid();
         // 获取chat上下文
         ChatResp<TopicsResp> resp = new ChatResp<>();
@@ -143,66 +133,41 @@ public class AiTutorImpl implements AiCTutor {
 
         // 添加用户配置到上下文
         ProfileResp profile = userProfileService.getByUserId(uid);
-        String commandConfig = Command.CONFIG + " " + JSONUtil.toJsonStr(profile.buildConfig());
-        log.info(commandConfig);
-        Message profileMsg = Message.builder().content(commandConfig).role(Message.Role.USER).build();
+        Message profileMsg = createMessageWithRole(Message.Role.USER, Command.CONFIG, JSONUtil.toJsonStr(profile.buildConfig()));
         messages.add(profileMsg);
 
-        log.info(Command.PLAN + " messageContext: " + JSONUtil.toJsonStr(messages));
-        String content;
-        String prompt_limit = " " + promptCurriculumLimiter; // 限时模型返回topic obj的数量
-        if (StrUtil.isNotBlank(req.getData())) {
-            content = Command.PLAN + " " + req.getData() + prompt_limit;
-        } else {
-            content = Command.PLAN + prompt_limit;
-        }
-        log.info(Command.PLAN + " currentMessage content: " + content);
-        Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
+        Message currentMessage = createMessageWithRole(Message.Role.USER, Command.PLAN, req.getData(), promptCurriculumLimiter);
         messages.add(currentMessage);
+
+
         ChatCompletionResponse response = this.chatCompletion(messages);
         Message responseMag = response.getChoices().get(0).getMessage();
         log.info(Command.PLAN + " responseMag content: " + responseMag.getContent());
 
         TopicsResp topicsResp = JSONUtil.toBean(responseMag.getContent(), TopicsResp.class);
 
-
         // 将响应数据加入到上下文缓存中
         messages.add(responseMag);
-        LocalCache.CACHE_INIT_MSG.put(uid, messages, LocalCache.TIMEOUT);
+        cacheInitMessages(uid, messages);
 
         return TupleUtil.tuple(topicsResp, response.getUsage());
     }
 
     @Override
     public ThreeTuple<ChatAssistantDataResp, MsgIds, Usage> startTopic(ChatReq req) {
-
+        log.info("!startTopic()!");
         // 保存chatId与uid的关系
         String uid = req.getUid();
-        List<String> ids = (List<String>) LocalCache.CACHE_UID_CHATID.get(uid);
-        if (ids == null) {
-            ids = new ArrayList<>();
-        }
-        String chatId = UniqueIdentifierGenerator.uniqueId();
-        ids.add(chatId);
-        LocalCache.CACHE_UID_CHATID.put(uid, ids);
+        String chatId = createAndCacheChatId(uid);
         // ------
 
         // 拼接聊天上下文
         List<Message> initMessages = (List<Message>) LocalCache.CACHE_INIT_MSG.get(uid);
-
-
         List<Message> chatMessages = new ArrayList<>(initMessages);
 
         log.info(Command.START_TOPIC + " messageContext: " + JSONUtil.toJsonStr(chatMessages));
         // 编辑prompt加入到上下文中
-        String content;
-        if (StrUtil.isNotBlank(req.getData())) {
-            content = Command.START_TOPIC + " " + req.getData();
-        } else {
-            content = Command.START_TOPIC + " random";
-        }
-        log.info(Command.START_TOPIC + " currentMessage content: " + content);
-        Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
+        Message currentMessage = createMessageWithRole(Message.Role.USER, Command.START_TOPIC, req.getData());
         chatMessages.add(currentMessage);
         // ------
 
@@ -226,7 +191,7 @@ public class AiTutorImpl implements AiCTutor {
 
         // 将响应数据加入到上下文缓存中
         chatMessages.add(responseMag);
-        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages, LocalCache.TIMEOUT);
+        cacheChatMessages(chatId, chatMessages);
 
         return TupleUtil.tuple(chatAssistantDataResp, MsgIds.build(uid, chatId, response.getId()), TokenUsageUtil.addUsage(response.getUsage(), tuple.getSecond()));
     }
@@ -238,13 +203,7 @@ public class AiTutorImpl implements AiCTutor {
 
         // 保存chatId与uid的关系
         String uid = req.getUid();
-        List<String> ids = (List<String>) LocalCache.CACHE_UID_CHATID.get(uid);
-        if (ids == null) {
-            ids = new ArrayList<>();
-        }
-        String chatId = UniqueIdentifierGenerator.uniqueId();
-        ids.add(chatId);
-        LocalCache.CACHE_UID_CHATID.put(uid, ids);
+        String chatId = createAndCacheChatId(uid);
         // ------
 
         // 拼接聊天上下文
@@ -258,9 +217,7 @@ public class AiTutorImpl implements AiCTutor {
 
         String prompt = String.format(promptChatCustomizeTopic, customizeTopicReq.getTopic(), customizeTopicReq.getUser_role(), customizeTopicReq.getAssistant_role());
 
-        String content = Command.START_TOPIC + " " + prompt;
-        log.info(Command.START_TOPIC + " currentMessage content: " + content);
-        Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
+        Message currentMessage = createMessageWithRole(Message.Role.USER, Command.START_TOPIC, prompt);
         chatMessages.add(currentMessage);
         // ------
 
@@ -281,25 +238,24 @@ public class AiTutorImpl implements AiCTutor {
         chatAssistantDataResp.setTips(tipsResp.getTips());
         // ------
 
-
         // 将响应数据加入到上下文缓存中
         chatMessages.add(responseMag);
-        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages, LocalCache.TIMEOUT);
+        cacheChatMessages(chatId, chatMessages);
 
         return TupleUtil.tuple(chatAssistantDataResp, MsgIds.build(uid, chatId, response.getId()), TokenUsageUtil.addUsage(response.getUsage(), tuple.getSecond()));
     }
 
     @Override
     public ThreeTuple<ChatAssistantDataResp, MsgIds, Usage> chat(ChatReq req) {
-
+        log.info("!chat()!");
         String chatId = req.getChatId();
 
         // 获得chat上下文
-        List<Message> chatMessages = (List<Message>) LocalCache.CACHE_CHAT_MSG.get(chatId);
+        List<Message> chatMessages = getChatMessagesFromCache(chatId);
         ChatResp<ChatAssistantDataResp> resp = new ChatResp<>();
         log.info(Command.CHAT + " messageContext: " + JSONUtil.toJsonStr(chatMessages));
         // 检查user_sentence语法
-        Message messageCheckSentence = Message.builder().content("sentence:" + req.getData() + " \n" + promptSentenceChecker).role(Message.Role.USER).build();
+        Message messageCheckSentence = createMessageWithRole(Message.Role.USER, "sentence:" + req.getData() + " \n" + promptSentenceChecker);
         List<Message> messagesCheckSentence = new ArrayList<>();
         messagesCheckSentence.add(messageCheckSentence);
         ChatCompletionResponse checkSentenceResponse = this.chatCompletion(messagesCheckSentence);
@@ -314,7 +270,7 @@ public class AiTutorImpl implements AiCTutor {
         chatUserDataReq.setPrompt(promptChatLimiter);
         String content = JSONUtil.toJsonStr(chatUserDataReq);
         log.info(Command.CHAT + " currentMessage content: " + content);
-        Message currentMessage = Message.builder().content(content).role(Message.Role.USER).build();
+        Message currentMessage = createMessageWithRole(Message.Role.USER, content);
         chatMessages.add(currentMessage);
         // 发送上下文到AI 获取返回的响应数据
         ChatCompletionResponse response = this.chatCompletion(chatMessages);
@@ -337,18 +293,20 @@ public class AiTutorImpl implements AiCTutor {
 
         // 将响应数据加入到上下文缓存中
         chatMessages.add(responseMag);
-        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages, LocalCache.TIMEOUT);
+        cacheChatMessages(chatId, chatMessages);
         return TupleUtil.tuple(chatAssistantDataResp, MsgIds.build(req.getUid(), chatId, response.getId()), TokenUsageUtil.addUsage(response.getUsage(), tuple.getSecond()));
     }
 
     @Override
     public TwoTuple<TipsResp, Usage> generateTips(ChatReq req) {
+        log.info("!generateTips(ChatReq req)!");
         String tipsReq = req.getData();
         return generateTips(tipsReq);
     }
 
     @Override
     public List<OfflineMsgResp> offlineMsg(ChatReq req) {
+        log.info("!offlineMsg(ChatReq req)!");
         log.info(Command.OFFLINE_MSG + " req data: " + req.getData());
         Map<String, OfflineMsgResp> map = (Map<String, OfflineMsgResp>) LocalCache.CACHE_OFFLINE_MSG.get(req.getUid());
         List<OfflineMsgResp> list = new ArrayList<>(map.values());
@@ -358,6 +316,7 @@ public class AiTutorImpl implements AiCTutor {
 
     @Override
     public boolean msgConfirm(ChatReq req) {
+        log.info("!msgConfirm()!");
         log.info(Command.MSG_CONFIRM + " req data:" +req.getData());
         boolean completion = false;
         if(LocalCache.CACHE_OFFLINE_MSG.containsKey(req.getUid())){
@@ -370,10 +329,9 @@ public class AiTutorImpl implements AiCTutor {
     }
 
 
-
-
     private TwoTuple<TipsResp, Usage> generateTips(String tipsReq) {
-        Message messageGenerateTips = Message.builder().content(tipsReq + "\n" + promptChatGenerateTips).role(Message.Role.USER).build();
+        log.info("!generateTips()!");
+        Message messageGenerateTips = createMessageWithRole(Message.Role.USER, tipsReq + "\n" + promptChatGenerateTips);
         List<Message> messages = new ArrayList<>();
         messages.add(messageGenerateTips);
         ChatCompletionResponse response = this.chatCompletion(messages);
@@ -383,6 +341,43 @@ public class AiTutorImpl implements AiCTutor {
         log.info(Command.TIPS + " generateTips content: " + responseStr);
         log.info(Command.TIPS + " generateTips usage: " + response.getUsage());
         return TupleUtil.tuple(tipsResp, response.getUsage());
+    }
+
+    private Message createMessageWithRole(Message.Role role, String... prompts) {
+        StringBuilder sb = new StringBuilder();
+        for(String prompt : prompts) {
+            sb.append(prompt).append(" ");
+        }
+        String prompt = sb.toString();
+        log.info("prompt: " + prompt);
+        return Message.builder().content(prompt).role(role).build();
+    }
+
+    private void cacheInitMessages(String uid, List<Message> messages) {
+        LocalCache.CACHE_INIT_MSG.put(uid, messages, LocalCache.TIMEOUT);
+    }
+
+    private void cacheChatMessages(String chatId, List<Message> chatMessages) {
+        LocalCache.CACHE_CHAT_MSG.put(chatId, chatMessages, LocalCache.TIMEOUT);
+    }
+
+    private String createAndCacheChatId(String uid) {
+        String chatId = UniqueIdentifierGenerator.uniqueId();
+        updateUidChatIdRelation(uid, chatId);
+        return chatId;
+    }
+
+    private List<Message> getChatMessagesFromCache(String chatId) {
+        return (List<Message>) LocalCache.CACHE_CHAT_MSG.get(chatId);
+    }
+
+    private void updateUidChatIdRelation(String uid, String chatId) {
+        List<String> ids = (List<String>) LocalCache.CACHE_UID_CHATID.get(uid);
+        if (ids == null) {
+            ids = new ArrayList<>();
+        }
+        ids.add(chatId);
+        LocalCache.CACHE_UID_CHATID.put(uid, ids);
     }
 
 
