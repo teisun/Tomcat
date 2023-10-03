@@ -141,13 +141,13 @@ public class AiTutorImpl implements AiCTutor {
 
 
         ChatCompletionResponse response = this.chatCompletion(messages);
-        Message responseMag = response.getChoices().get(0).getMessage();
-        log.info(Command.PLAN + " responseMag content: " + responseMag.getContent());
+        Message responseMsg = response.getChoices().get(0).getMessage();
+        log.info(Command.PLAN + " responseMsg content: " + responseMsg.getContent());
 
-        TopicsResp topicsResp = JSONUtil.toBean(responseMag.getContent(), TopicsResp.class);
+        TopicsResp topicsResp = JSONUtil.toBean(responseMsg.getContent(), TopicsResp.class);
 
         // 将响应数据加入到上下文缓存中
-        messages.add(responseMag);
+        messages.add(responseMsg);
         cacheInitMessages(uid, messages);
 
         return TupleUtil.tuple(topicsResp, response.getUsage());
@@ -173,11 +173,11 @@ public class AiTutorImpl implements AiCTutor {
 
         // 发送上下文到AI 获取返回的响应数据
         ChatCompletionResponse response = this.chatCompletion(chatMessages);
-        Message responseMag = response.getChoices().get(0).getMessage();
-        log.info(Command.START_TOPIC + "  responseMag content: " + responseMag.getContent());
+        Message responseMsg = response.getChoices().get(0).getMessage();
+        log.info(Command.START_TOPIC + "  responseMsg content: " + responseMsg.getContent());
 
         // 将响应数据格式化成java bean返回请求端
-        ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMag.getContent(), ChatAssistantDataResp.class);
+        ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMsg.getContent(), ChatAssistantDataResp.class);
 
         // 生成tips
         TipsReq tipsReq = new TipsReq();
@@ -190,7 +190,7 @@ public class AiTutorImpl implements AiCTutor {
 
 
         // 将响应数据加入到上下文缓存中
-        chatMessages.add(responseMag);
+        chatMessages.add(responseMsg);
         cacheChatMessages(chatId, chatMessages);
 
         return TupleUtil.tuple(chatAssistantDataResp, MsgIds.build(uid, chatId, response.getId()), TokenUsageUtil.addUsage(response.getUsage(), tuple.getSecond()));
@@ -223,11 +223,11 @@ public class AiTutorImpl implements AiCTutor {
 
         // 发送上下文到AI 获取返回的响应数据
         ChatCompletionResponse response = this.chatCompletion(chatMessages);
-        Message responseMag = response.getChoices().get(0).getMessage();
-        log.info(Command.START_TOPIC + "  responseMag content: " + responseMag.getContent());
+        Message responseMsg = response.getChoices().get(0).getMessage();
+        log.info(Command.START_TOPIC + "  responseMsg content: " + responseMsg.getContent());
 
         // 将响应数据格式化成java bean返回请求端
-        ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMag.getContent(), ChatAssistantDataResp.class);
+        ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMsg.getContent(), ChatAssistantDataResp.class);
 
         // 生成tips
         TipsReq tipsReq = new TipsReq();
@@ -239,7 +239,7 @@ public class AiTutorImpl implements AiCTutor {
         // ------
 
         // 将响应数据加入到上下文缓存中
-        chatMessages.add(responseMag);
+        chatMessages.add(responseMsg);
         cacheChatMessages(chatId, chatMessages);
 
         return TupleUtil.tuple(chatAssistantDataResp, MsgIds.build(uid, chatId, response.getId()), TokenUsageUtil.addUsage(response.getUsage(), tuple.getSecond()));
@@ -274,11 +274,11 @@ public class AiTutorImpl implements AiCTutor {
         chatMessages.add(currentMessage);
         // 发送上下文到AI 获取返回的响应数据
         ChatCompletionResponse response = this.chatCompletion(chatMessages);
-        Message responseMag = response.getChoices().get(0).getMessage();
-        log.info(Command.CHAT + " responseMag content: " + responseMag.getContent());
+        Message responseMsg = response.getChoices().get(0).getMessage();
+        log.info(Command.CHAT + " responseMsg content: " + responseMsg.getContent());
 
         // 将响应数据格式化成java bean返回请求端
-        ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMag.getContent(), ChatAssistantDataResp.class);
+        ChatAssistantDataResp chatAssistantDataResp = JSONUtil.toBean(responseMsg.getContent(), ChatAssistantDataResp.class);
 
         // 生成tips
         TipsReq tipsReq = new TipsReq();
@@ -292,7 +292,7 @@ public class AiTutorImpl implements AiCTutor {
 
 
         // 将响应数据加入到上下文缓存中
-        chatMessages.add(responseMag);
+        chatMessages.add(responseMsg);
         cacheChatMessages(chatId, chatMessages);
         return TupleUtil.tuple(chatAssistantDataResp, MsgIds.build(req.getUid(), chatId, response.getId()), TokenUsageUtil.addUsage(response.getUsage(), tuple.getSecond()));
     }
