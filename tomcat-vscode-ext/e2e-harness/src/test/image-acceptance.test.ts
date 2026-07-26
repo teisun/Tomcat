@@ -26,6 +26,7 @@ type DomSnapshot = {
   historyAttachmentThumbCount: number;
   historyPdfChipTitles: string[];
   historyAttachmentUnavailableCount: number;
+  html: string;
   imagePipelineProbe: string | null;
   inlineImages: Array<{
     cursor: string;
@@ -36,6 +37,7 @@ type DomSnapshot = {
   lightboxImageNaturalWidth: number;
   lightboxImageSrc: string | null;
   lightboxVisible: boolean;
+  messageTexts: string[];
   pendingAttachmentStripClientWidth: number;
   pendingAttachmentStripOverflowing: boolean;
   pendingAttachmentStripScrollWidth: number;
@@ -43,6 +45,7 @@ type DomSnapshot = {
   pendingAttachmentItemCount: number;
   pendingPdfChipTitles: string[];
   pendingAttachmentThumbCount: number;
+  timelineKinds: string[];
 };
 
 /** One entry of the in-webview image pipeline probe. */
@@ -201,6 +204,14 @@ async function captureScreenshot(name: string): Promise<string> {
   return targetPath;
 }
 
+async function setNextFakeServePromptScript(script: string): Promise<void> {
+  const scriptPath = path.join(
+    requireEnv("TOMCAT_FAKE_SERVE_STATE_DIR"),
+    "manual-acceptance-next-prompt-script.txt",
+  );
+  await fs.writeFile(scriptPath, `${script}\n`, "utf8");
+}
+
 async function waitForDom<T>(
   api: TomcatExtensionApi,
   predicate: (snapshot: DomSnapshot) => T | undefined,
@@ -220,9 +231,11 @@ async function waitForDom<T>(
     `Timed out waiting for chat DOM: ${JSON.stringify({
       activeSessionId: lastSnapshot?.activeSessionId,
       historyAttachmentThumbCount: lastSnapshot?.historyAttachmentThumbCount,
+      messageTexts: lastSnapshot?.messageTexts.slice(-8),
       pendingAttachmentStripClientWidth: lastSnapshot?.pendingAttachmentStripClientWidth,
       pendingAttachmentStripScrollWidth: lastSnapshot?.pendingAttachmentStripScrollWidth,
       pendingAttachmentThumbCount: lastSnapshot?.pendingAttachmentThumbCount,
+      timelineKinds: lastSnapshot?.timelineKinds,
     })}`,
   );
 }
@@ -622,7 +635,7 @@ suite("Tomcat image attachment visual acceptance", () => {
           snapshot.attachmentBitmaps.length === 11 &&
           snapshot.attachmentBitmaps.every((bitmap) => bitmap.width > 0),
       );
-      screenshots.push(await captureScreenshot("15-composer-thumb-sharpness.png"));
+      screenshots.push(await captureScreenshot("22-composer-thumb-sharpness.png"));
 
       // ── The same measurement, taken the old way ───────────────────────────────────
       // The strip used to point at the full-resolution image. Rather than multiplying
@@ -1072,15 +1085,106 @@ suite("Tomcat image attachment visual acceptance", () => {
         10_000,
       );
 
+      await setNextFakeServePromptScript("terminal_llm_error");
+      api.__testing.clearObservedEvents();
+      await api.__testing.sendWebviewIntent({
+        data: {
+          sessionId,
+          text: "terminal llm error acceptance",
+        },
+        messageId: "image-acceptance-terminal-llm-error",
+        type: "prompt",
+      });
+      await api.__testing.waitForEvent({ timeoutMs: 20_000, type: "agent_end" });
+      const terminalLlmErrorSnapshot = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.messageTexts.filter(
+            (text) => text === "Gateway rejected the attachment payload",
+          ).length === 1
+            ? snapshot
+            : undefined,
+        20_000,
+      );
+
+      await api.__testing.sendWebviewIntent({
+        messageId: "image-acceptance-retry-notice-session",
+        type: "newSession",
+      });
+      const retryNoticeSessionId = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.activeSessionId && snapshot.activeSessionId !== sessionId
+            ? snapshot.activeSessionId
+            : undefined,
+        20_000,
+      );
+      await setNextFakeServePromptScript("llm_error_degrade_then_success");
+      api.__testing.clearObservedEvents();
+      await api.__testing.sendWebviewIntent({
+        data: {
+          sessionId: retryNoticeSessionId,
+          text: "retry notice acceptance",
+        },
+        messageId: "image-acceptance-retry-degrade-success",
+        type: "prompt",
+      });
+      const retryNoticeSnapshot = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.activeSessionId === retryNoticeSessionId
+            && snapshot.messageTexts.some((text) => text.includes("Retrying after error:"))
+            && snapshot.messageTexts.some((text) =>
+              text.includes("本轮附件未被当前端点接受，已按纯文本发送"),
+            )
+            ? snapshot
+            : undefined,
+        20_000,
+      );
+      screenshots.push(await captureScreenshot("15-retry-and-degrade-notices.png"));
+      await api.__testing.waitForEvent({ timeoutMs: 20_000, type: "agent_end" });
+      const retrySuccessSnapshot = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.activeSessionId === retryNoticeSessionId
+            && snapshot.messageTexts.some((text) =>
+              text.includes("Scripted retry success for prompt: retry notice acceptance."),
+            )
+            && !snapshot.messageTexts.some((text) =>
+              text.includes("Gateway rejected the attachment payload"),
+            )
+            ? snapshot
+            : undefined,
+        20_000,
+      );
+
       const probeFor = (label: string): PipelineProbeResult =>
         pipelineProbe.find((entry) => entry.label === label) ?? { label };
 
       const fullResolutionBytes =
         loadedStrip.attachmentBitmaps.length *
         bitmapBytes(FIXTURE_WIDTH, FIXTURE_HEIGHT);
+      const decodedOnArrival = lazyStrip.attachmentBitmaps.filter(
+        (bitmap) => bitmap.width > 0,
+      ).length;
+      const eagerDecodeStillBounded =
+        lazyStrip.attachmentBitmapBytes > 0 &&
+        lazyStrip.attachmentBitmapBytes < fullResolutionBytes / 100;
 
       const report = {
         artifactsRoot: path.dirname(reportPath),
+        observations: {
+          // Chromium decides exactly when offscreen horizontal images decode. Some
+          // builds defer them, others eagerly decode them, so treating that timing as
+          // pass/fail would turn this acceptance run into a browser-version detector.
+          attachmentLazyDecode: {
+            decodedOnArrival,
+            measuredBytes: lazyStrip.attachmentBitmapBytes,
+            offscreenStillDeferred:
+              decodedOnArrival < lazyStrip.attachmentBitmaps.length,
+            total: lazyStrip.attachmentBitmaps.length,
+          },
+        },
         checks: {
           composerSingle: {
             passed: singleDraft.pendingAttachmentThumbCount === 1,
@@ -1093,23 +1197,12 @@ suite("Tomcat image attachment visual acceptance", () => {
             host: attachmentDiagnostics,
             passed: attachmentFetch.ok === true && (attachmentFetch.naturalWidth ?? 0) > 0,
           },
-          // Chromium's lazy-image policy is browser-version dependent: some builds defer
-          // offscreen horizontal thumbnails, others eagerly decode them. The product
-          // invariant that matters is narrower: even if the browser chooses eager decode,
-          // it must only decode 192px thumbnails, not the original 4000x3000 bitmaps.
-          attachmentLazyDecode: {
-            decodedOnArrival: lazyStrip.attachmentBitmaps.filter(
-              (bitmap) => bitmap.width > 0,
-            ).length,
-            eagerDecodeStillBounded:
-              lazyStrip.attachmentBitmapBytes > 0 &&
-              lazyStrip.attachmentBitmapBytes < fullResolutionBytes / 100,
+          // Hard requirement: whether Chromium decodes eagerly or lazily, it must only
+          // decode bounded 192px thumbnails here, never the original 4000x3000 sources.
+          attachmentBitmapBoundedOnArrival: {
+            decodedOnArrival,
             measuredBytes: lazyStrip.attachmentBitmapBytes,
-            passed:
-              lazyStrip.attachmentBitmaps.filter((bitmap) => bitmap.width > 0).length <
-                lazyStrip.attachmentBitmaps.length ||
-              (lazyStrip.attachmentBitmapBytes > 0 &&
-                lazyStrip.attachmentBitmapBytes < fullResolutionBytes / 100),
+            passed: eagerDecodeStillBounded,
             total: lazyStrip.attachmentBitmaps.length,
           },
           // The headline number: what eleven 4000x3000 images cost in the strip, measured
@@ -1302,6 +1395,35 @@ suite("Tomcat image attachment visual acceptance", () => {
               inlineImageLightbox.lightboxVisible &&
               inlineImageLightbox.lightboxImageNaturalWidth > 0 &&
               !inlineImageLightboxClosed.lightboxVisible,
+          },
+          terminalLlmErrorDedupe: {
+            matches: terminalLlmErrorSnapshot.messageTexts.filter(
+              (text) => text === "Gateway rejected the attachment payload",
+            ).length,
+            passed:
+              terminalLlmErrorSnapshot.messageTexts.filter(
+                (text) => text === "Gateway rejected the attachment payload",
+              ).length === 1,
+          },
+          retryNoticeAndDegradeState: {
+            passed:
+              retryNoticeSnapshot.messageTexts.some((text) =>
+                text.includes("Retrying after error:"),
+              ) &&
+              retryNoticeSnapshot.messageTexts.some((text) =>
+                text.includes("本轮附件未被当前端点接受，已按纯文本发送"),
+              ),
+            timelineKinds: retryNoticeSnapshot.timelineKinds,
+          },
+          retrySuccessNoResidualError: {
+            passed:
+              retrySuccessSnapshot.messageTexts.some((text) =>
+                text.includes("Scripted retry success for prompt: retry notice acceptance."),
+              ) &&
+              !retrySuccessSnapshot.messageTexts.some((text) =>
+                text.includes("Gateway rejected the attachment payload"),
+              ),
+            messageTexts: retrySuccessSnapshot.messageTexts,
           },
           // A design-tool SVG — `<style>` block, generated class names, `style=`
           // attributes — displayed as a vector, not as the PNG that exists for the model.

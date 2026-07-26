@@ -2145,14 +2145,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
               sessionId: activeSession.sessionId,
               files,
             });
-            // Show non-blocking feedback about vision capability
-            const hasVision = activeModelCapabilities?.includes("vision");
-            const hasImage = files.some((file) => file.mimeType.startsWith("image/"));
-            if (!hasVision && hasImage) {
-              postIntent(vscodeApi, "showWarningMessage", {
-                message: `Added ${files.length} attachment(s). The current model may not support vision — images will still be sent but might not be processed.`,
-              });
-            }
           }
         }}
         onResolveDrop={(uris) =>

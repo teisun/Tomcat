@@ -208,6 +208,12 @@ async function waitForSettingsPanelDom<T>(
   ) => T | undefined,
   timeoutMs = 15_000,
 ): Promise<T> {
+  // The invariant here is "the settings webview has mounted and already reflects the
+  // exact DOM state this scenario is about to assert on". A one-shot
+  // `captureSettingsDom()` races the webview mount and flakes, because the call can
+  // happen before the panel exists at all. Call this helper directly for DOM-based
+  // assertions; do not wrap it in another retry loop unless you are waiting on a
+  // different invariant than the DOM snapshot itself.
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     try {

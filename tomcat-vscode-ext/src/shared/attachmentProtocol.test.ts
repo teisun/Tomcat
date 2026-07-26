@@ -13,9 +13,9 @@ describe("attachmentProtocol utilities", () => {
     expect(decodeBase64Strict(Buffer.from("hello").toString("base64"))?.toString()).toBe(
       "hello",
     );
-    expect(decodeBase64Strict("not base64")) .toBeNull();
-    expect(decodeBase64Strict("YQ=")) .toBeNull();
-    expect(decodeBase64Strict("")) .toBeNull();
+    expect(decodeBase64Strict("not base64")).toBeNull();
+    expect(decodeBase64Strict("YQ=")).toBeNull();
+    expect(decodeBase64Strict("")).toBeNull();
   });
 
   it("normalizes unsafe filenames to a basename or fallback", () => {

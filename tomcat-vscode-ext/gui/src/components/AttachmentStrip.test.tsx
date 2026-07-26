@@ -38,6 +38,22 @@ function pdf(overrides: Partial<WebviewPendingAttachment> = {}): WebviewPendingA
   };
 }
 
+function fileAttachment(
+  overrides: Partial<WebviewPendingAttachment> = {},
+): WebviewPendingAttachment {
+  return {
+    blobSha: sha("file"),
+    bytes: 2048,
+    filename: "spec.docx",
+    id: "file-1",
+    kind: "file",
+    label: "spec.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    path: null,
+    ...overrides,
+  };
+}
+
 describe("AttachmentStrip", () => {
   it("renders nothing for an empty collection", () => {
     const { container } = render(<AttachmentStrip attachments={[]} />);
@@ -92,6 +108,28 @@ describe("AttachmentStrip", () => {
     expect(onOpen).toHaveBeenCalledWith(
       expect.objectContaining({ id: "pdf-1", path: "/tmp/brief.pdf" }),
     );
+  });
+
+  it("derives a DOCX chip label from the filename extension", () => {
+    render(<AttachmentStrip attachments={[fileAttachment()]} />);
+    const chip = screen.getByTestId("attachment-chip");
+    expect(chip.textContent).toBe("DOCX");
+    expect(chip.querySelector(".codicon-file")).toBeTruthy();
+  });
+
+  it("falls back to FILE when the filename has no extension", () => {
+    render(
+      <AttachmentStrip
+        attachments={[
+          fileAttachment({
+            filename: "README",
+            label: "README",
+            mimeType: "application/octet-stream",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("attachment-chip").textContent).toBe("FILE");
   });
 
   it("renders eleven read-only history images without delete controls", () => {

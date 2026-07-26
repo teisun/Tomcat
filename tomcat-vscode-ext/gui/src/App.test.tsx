@@ -4,6 +4,18 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { HostToWebviewFrame, VsCodeApiLike } from "./types";
 
+vi.mock("./attachments/imagePipeline", () => ({
+  prepareAttachment: vi.fn(
+    async (raw: { filename: string | null; mimeType: string; sourcePath?: string | null }) => ({
+      dataBase64: "c3R1Yg==",
+      filename: raw.filename,
+      mimeType: raw.mimeType,
+      sourcePath: raw.sourcePath ?? null,
+      warnings: [],
+    }),
+  ),
+}));
+
 function mount() {
   const postMessage = vi.fn();
   const vscodeApi: VsCodeApiLike = {
@@ -3222,6 +3234,72 @@ describe("Tomcat webview App", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows only the composer capability hint when pasted attachments are unsupported", async () => {
+    const { postMessage } = mount();
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModelCapabilities: {
+          "gpt-5.4": [],
+        },
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+      },
+      messageId: "state-unsupported-paste",
+    });
+    postMessage.mockClear();
+
+    const textbox = screen.getByTestId("composer-input");
+    const file = new File(["x"], "shot.png", { type: "image/png" });
+    await act(async () => {
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: () => "",
+          items: [
+            {
+              getAsFile: () => file,
+              kind: "file",
+              type: file.type,
+            },
+          ],
+        },
+      });
+    });
+
+    expect(await screen.findByText(/未声明 vision 能力/)).toBeTruthy();
+    expect(
+      postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
+    ).toHaveLength(0);
   });
 
   it("closes an active @ dropdown when the active session changes", async () => {

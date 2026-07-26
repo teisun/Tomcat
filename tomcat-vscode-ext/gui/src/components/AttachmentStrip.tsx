@@ -39,7 +39,6 @@ export function AttachmentStrip({
     >
       {attachments.map((attachment) => {
         const isImage = attachment.kind === "image";
-        const isPdf = attachment.mimeType === "application/pdf";
         const removeButton =
           !readonly && onRemove ? (
             <button
@@ -147,13 +146,14 @@ export function AttachmentStrip({
 
         // Non-image attachments (PDFs, etc)
         const tooltip = attachment.path ?? describeAttachment(attachment);
+        const fileLabel = fileChipLabel(attachment);
         const chipContents = (
           <>
             <span
               aria-hidden="true"
-              className={`tc-attachment-strip__file-icon codicon ${isPdf ? "codicon-file-pdf" : "codicon-file"}`}
+              className={`tc-attachment-strip__file-icon codicon ${fileLabel === "PDF" ? "codicon-file-pdf" : "codicon-file"}`}
             />
-            <span aria-hidden="true" className="tc-attachment-strip__file-label">PDF</span>
+            <span aria-hidden="true" className="tc-attachment-strip__file-label">{fileLabel}</span>
           </>
         );
         const isClickable = Boolean(attachment.path && onOpen);
@@ -196,6 +196,15 @@ export function AttachmentStrip({
 function describeAttachment(attachment: WebviewPendingAttachment): string {
   const size = formatAttachmentSize(attachment.bytes);
   return size ? `${attachment.label} · ${size}` : attachment.label;
+}
+
+function fileChipLabel(attachment: WebviewPendingAttachment): string {
+  if (attachment.mimeType === "application/pdf") {
+    return "PDF";
+  }
+  const name = (attachment.filename ?? attachment.label).trim();
+  const match = /\.([A-Za-z0-9]+)$/.exec(name);
+  return match ? match[1]!.toUpperCase() : "FILE";
 }
 
 function formatAttachmentSize(bytes: number | undefined): string | null {

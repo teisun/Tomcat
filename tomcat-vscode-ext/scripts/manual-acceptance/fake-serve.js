@@ -33,6 +33,7 @@ const ERROR_TEXT = [
 
 const STATE_DIR = process.env.TOMCAT_FAKE_SERVE_STATE_DIR || os.tmpdir();
 const STATE_PATH = path.join(STATE_DIR, "manual-acceptance-fake-serve-state.json");
+const PROMPT_SCRIPT_PATH = path.join(STATE_DIR, "manual-acceptance-next-prompt-script.txt");
 
 /**
  * Content-addressed attachment store, mirroring the real backend's layout.
@@ -55,6 +56,11 @@ let askQuestionCounter = 1;
 let assistantMessageCounter = 1;
 let historyCounter = 1;
 let sessionCounter = 1;
+let nextPromptScript = null;
+
+function normalizePromptScript(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
 function defaultThinkingLevels() {
   return {
@@ -127,6 +133,7 @@ function persistState() {
           activeSessionId,
           askQuestionCounter,
           historyCounter,
+          nextPromptScript,
           sessionCounter,
           sessions: Object.fromEntries(sessions.entries()),
         },
@@ -154,6 +161,7 @@ function loadState() {
       typeof parsed.askQuestionCounter === "number" ? parsed.askQuestionCounter : askQuestionCounter;
     historyCounter =
       typeof parsed.historyCounter === "number" ? parsed.historyCounter : historyCounter;
+    nextPromptScript = normalizePromptScript(parsed.nextPromptScript);
     sessionCounter =
       typeof parsed.sessionCounter === "number" ? parsed.sessionCounter : sessionCounter;
     sessions.clear();
@@ -165,6 +173,40 @@ function loadState() {
     }
   } catch (error) {
     console.error(`[fake-serve] failed to load state: ${String((error && error.message) || error)}`);
+  }
+}
+
+function consumeNextPromptScript() {
+  try {
+    if (fs.existsSync(PROMPT_SCRIPT_PATH)) {
+      const scripted = normalizePromptScript(fs.readFileSync(PROMPT_SCRIPT_PATH, "utf8"));
+      fs.rmSync(PROMPT_SCRIPT_PATH, { force: true });
+      if (scripted) {
+        nextPromptScript = null;
+        return scripted;
+      }
+    }
+  } catch (error) {
+    console.error(
+      `[fake-serve] failed to consume prompt script sidecar: ${String((error && error.message) || error)}`,
+    );
+  }
+  try {
+    if (!fs.existsSync(STATE_PATH)) {
+      return nextPromptScript;
+    }
+    const parsed = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    const scripted = normalizePromptScript(parsed.nextPromptScript);
+    if (!scripted) {
+      return nextPromptScript;
+    }
+    parsed.nextPromptScript = null;
+    fs.writeFileSync(STATE_PATH, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+    nextPromptScript = null;
+    return scripted;
+  } catch (error) {
+    console.error(`[fake-serve] failed to consume prompt script: ${String((error && error.message) || error)}`);
+    return nextPromptScript;
   }
 }
 
@@ -459,6 +501,67 @@ function startTurn(sessionId) {
   });
 }
 
+function emitRetryNotice(sessionId, errorMessage) {
+  send({
+    attempt: 2,
+    delayMs: 120,
+    errorMessage,
+    maxAttempts: 4,
+    sessionId,
+    type: "auto_retry_start",
+  });
+}
+
+function emitDegradeNotice(sessionId) {
+  send({
+    finishReason: "unsupported_multimodal_degraded",
+    message: "本轮附件未被当前端点接受，已按纯文本发送",
+    sessionId,
+    type: "llm_notice",
+  });
+}
+
+function emitTerminalLlmError(sessionId, reason, errorMessage, errorCode = null) {
+  send({
+    errorCode,
+    errorMessage,
+    reason,
+    sessionId,
+    type: "llm_error",
+  });
+}
+
+function scheduleScriptedRetrySuccess(sessionId, session, promptText, options = {}) {
+  const answerText = `Scripted retry success for prompt: ${promptText || "empty prompt"}.`;
+  const retryMessage =
+    "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
+  schedule(120, () => emitRetryNotice(sessionId, retryMessage));
+  if (options.degradeNotice) {
+    schedule(280, () => emitDegradeNotice(sessionId));
+  }
+  schedule(1500, () => emitMessageDelta(sessionId, "content_delta", answerText));
+  schedule(1900, () => {
+    recordHistoryEntry(session, {
+      content: answerText,
+      role: "assistant",
+    });
+    emitContextMetrics(sessionId, 0.52);
+    finishTurn(sessionId, null);
+  });
+}
+
+function scheduleScriptedTerminalLlmError(sessionId) {
+  schedule(200, () => {
+    emitTerminalLlmError(
+      sessionId,
+      "Gateway rejected the attachment payload",
+      "Gateway rejected the attachment payload",
+      null,
+    );
+    finishTurn(sessionId, null);
+  });
+}
+
 function buildLiveAssistantPayload(promptText) {
   const thinkingText = [
     "Live thinking: compare the hydrated transcript with the incoming stream so thinking always stays above the assistant reply.",
@@ -649,6 +752,10 @@ function handlePrompt(frame) {
   }
 
   const promptText = String(frame.text || "");
+  // The harness injects one-shot prompt scripts by editing the persisted state file.
+  // Consume that marker before startTurn()/recordHistoryEntry() call persistState(),
+  // or we would overwrite the file with the in-memory null and lose the script.
+  const promptScript = consumeNextPromptScript();
   const liveAssistant = buildLiveAssistantPayload(promptText);
 
   send({
@@ -664,6 +771,19 @@ function handlePrompt(frame) {
     content: buildPromptHistoryContent(frame, promptText),
     role: "user",
   });
+
+  if (promptScript === "llm_error_once_then_success") {
+    scheduleScriptedRetrySuccess(sessionId, session, promptText);
+    return;
+  }
+  if (promptScript === "llm_error_degrade_then_success") {
+    scheduleScriptedRetrySuccess(sessionId, session, promptText, { degradeNotice: true });
+    return;
+  }
+  if (promptScript === "terminal_llm_error") {
+    scheduleScriptedTerminalLlmError(sessionId);
+    return;
+  }
 
   if (ASK_QUESTION_REVERIFY_PATTERN.test(promptText)) {
     schedule(160, () => emitAskQuestion(sessionId));

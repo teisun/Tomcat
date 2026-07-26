@@ -1606,13 +1606,21 @@ fn dereference_page_attachments(
             let (encoded_field, encoded, mime_type, has_thumb) =
                 match object.get("type").and_then(|t| t.as_str()) {
                     Some("input_image") => {
-                        let Some(encoded) = object.get("image_b64").and_then(|d| d.as_str()) else {
+                        let Some(encoded) = object
+                            .get("image_b64")
+                            .and_then(|d| d.as_str())
+                            .map(ToString::to_string)
+                        else {
                             continue;
                         };
                         ("image_b64", encoded, None, true)
                     }
                     Some("input_file") => {
-                        let Some(encoded) = object.get("file_b64").and_then(|d| d.as_str()) else {
+                        let Some(encoded) = object
+                            .get("file_b64")
+                            .and_then(|d| d.as_str())
+                            .map(ToString::to_string)
+                        else {
                             continue;
                         };
                         let mime_type = object
@@ -1621,11 +1629,16 @@ fn dereference_page_attachments(
                             .or_else(|| object.get("mimeType").and_then(|value| value.as_str()))
                             .unwrap_or("application/pdf")
                             .to_string();
+                        let filename = crate::core::session::attachments::safe_filename(
+                            object.get("filename").and_then(|value| value.as_str()),
+                            &mime_type,
+                        );
+                        object.insert("filename".to_string(), json!(filename));
                         ("file_b64", encoded, Some(mime_type), false)
                     }
                     _ => continue,
                 };
-            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&encoded) else {
                 continue;
             };
             match store.materialize_from_transcript(&bytes) {

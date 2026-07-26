@@ -836,6 +836,10 @@ async fn get_messages_reference_mode_returns_pdf_hashes_instead_of_bytes() {
         serialized.contains("\"mimeType\":\"application/pdf\""),
         "必须回传 MIME 供宿主渲染 PDF"
     );
+    assert!(
+        serialized.contains("\"filename\":\"brief.pdf\""),
+        "必须回传 filename 供宿主展示 PDF 标签"
+    );
 
     let sha = serialized
         .split("\"blobSha\":\"")
