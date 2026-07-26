@@ -34,6 +34,7 @@ build/
 
 ### Cursor ###
 /.cursor/plans/
+/.cursor/rules/
 node_modules/
 test-stuff/
 
