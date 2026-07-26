@@ -201,6 +201,29 @@ async function waitForSettingsPanelState<T>(
   throw new Error("Timed out waiting for settings panel state to match the expected condition");
 }
 
+async function waitForSettingsPanelDom<T>(
+  api: TomcatExtensionApi,
+  predicate: (
+    dom: Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureSettingsDom"]>>,
+  ) => T | undefined,
+  timeoutMs = 15_000,
+): Promise<T> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const dom = await api.__testing.captureSettingsDom();
+      const result = predicate(dom);
+      if (result !== undefined) {
+        return result;
+      }
+    } catch {
+      // The settings webview may still be mounting; retry until the deadline.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Timed out waiting for settings panel DOM to match the expected condition");
+}
+
 async function waitForVisiblePreparedDiffEditors(
   toolCallId: string,
   timeoutMs = 15_000,
@@ -713,14 +736,14 @@ export async function assertWebviewAddModelsFlow(
     settingsSnapshot.state.serverVersion,
     "expected the extension to consider the connected fake serve version current",
   );
-  const settingsDom = await api.__testing.captureSettingsDom();
-  assert.ok(
-    settingsDom.html.includes(`Extension v${settingsSnapshot.state.extensionVersion}`),
-    "expected the settings footer to render the extension version",
-  );
-  assert.ok(
-    settingsDom.html.includes(`Serve v${settingsSnapshot.state.serverVersion}`),
-    "expected the settings footer to render the serve version",
+  await waitForSettingsPanelDom(
+    api,
+    (dom) =>
+      dom.html.includes(`Extension v${settingsSnapshot.state.extensionVersion}`)
+      && dom.html.includes(`Serve v${settingsSnapshot.state.serverVersion}`)
+        ? dom
+        : undefined,
+    20_000,
   );
 
   await assertSettingsKeyFieldsAligned(api);
@@ -2029,7 +2052,8 @@ export async function assertWebviewSessionSwitchRestoreFlow(
       snapshot.activeSessionId === sessionA &&
       snapshot.ctxLabel === "Ctx 55%" &&
       snapshot.planCardCount === 1 &&
-      snapshot.planStateText === "Plan: planning"
+      snapshot.planStateText === "Plan: planning" &&
+      !snapshot.disabledTestIds.includes("build-plan")
         ? snapshot
         : undefined,
     20_000,
@@ -2060,7 +2084,8 @@ export async function assertWebviewSessionSwitchRestoreFlow(
       snapshot.activeSessionId === sessionA &&
       snapshot.ctxLabel === "Ctx 55%" &&
       snapshot.planCardCount === 1 &&
-      snapshot.planStateText === "Plan: planning"
+      snapshot.planStateText === "Plan: planning" &&
+      !snapshot.disabledTestIds.includes("build-plan")
         ? snapshot
         : undefined,
     20_000,

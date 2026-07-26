@@ -2,7 +2,7 @@
 
 > 上位文档：[`../image-attachments.md`](../image-attachments.md)
 > 为什么是这个分层，见 [`01-placement-decision.md`](01-placement-decision.md)。
-> 实现：`tomcat/src/core/session/attachments.rs`（字节）、`tomcat-vscode-ext/src/shared/composerDraft.ts`（草稿）。
+> 实现：`tomcat/src/core/session/attachments.rs`（字节）、`tomcat-vscode-ext/src/shared/composerDraft.ts`（草稿）、`tomcat-vscode-ext/src/ui/webview/provider.ts`（webview 资源授权）。
 
 **这一页回答三个运维向的问题**：我的东西存在哪、什么时候会被删、删掉 `resvg` 到底省了多少。
 
@@ -75,6 +75,7 @@
       "mimeType": "image/png",
       "bytes": 4581234,              // 仅用于显示
       "blobSha": "3f2a…",            // ← 唯一指向字节的东西
+      "sourcePath": "/workspace/docs/screenshot.png", // 可选：仅给 UI hover / reopen 用
       "hasThumb": true,              // 缩略图在 thumbs/<blobSha>
       "providerSha": null,           // 仅 SVG 有：webview 转出的 PNG
       "providerText": null           // 仅 SVG 栅格化失败时有：源码
@@ -83,7 +84,22 @@
 }
 ```
 
-**这里面没有一个字节是图片数据。** 整份草稿约 200~400 字节，与附件数量几乎无关（每张图多约 200 字节的元数据）。这是写放大被消除的直接体现。
+**这里面没有一个字节是图片/PDF 数据。** 整份草稿约 200~400 字节，与附件数量几乎无关（每个附件多约 200 字节的元数据）。这是写放大被消除的直接体现。
+
+`sourcePath` 是这次新增的一个**纯 UI 字段**，只解决两个用户体验问题：
+
+```text
+  ① PDF 方块 hover 时，要能显示完整本地路径
+  ② 历史里的文件方块，用户点一下要能回到原文件
+```
+
+它**不进 Rust，不参与任何权威判定**。Rust 只认 `blobSha` 和字节本身，因为：
+
+```text
+  路径会变，哈希不会变
+  UI 想显示“它原来来自哪里”
+    != 后端需要把“原路径”当事实源保存一份
+```
 
 ### 2.3 耐久性三条机制
 
@@ -340,8 +356,21 @@ pub const PENDING_BLOB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
                 该附件显示为失效且可一键移除，草稿其余部分不受影响
   2. 存在但仍不显示 → 查 localResourceRoots 与 CSP
      两个 webview 的 img-src 都必须含 ${webview.cspSource}
-     localResourceRoots 必须含 attachments/blobs 与 attachments/thumbs
+     localResourceRoots 必须含 attachments/blobs、attachments/thumbs
      ※ 这里【没有】base64 兜底，配错就是裂图 —— 刻意的，见架构文档 §4
+```
+
+**「transcript 里的 `![...](path)` 没显示成图」**
+
+```text
+  1. 看 path 是不是工作区目录或系统临时目录里的本地文件
+     -> 不是：这是预期降级，会显示成可点击文本，不显示 <img>
+
+  2. 看 host 下发的 mediaRoots / localResourceRoots
+     -> 必须含当前 workspace folders 与 os.tmpdir()
+
+  3. 看 path 是不是远程 URL（http/https/data/blob）
+     -> 是：一律不渲染图片
 ```
 
 **「磁盘占用太大」**

@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useState } from "react";
 
-import type { WebviewMessageBlock, WebviewToolCard } from "../types";
+import type { WebviewMediaRoot, WebviewMessageBlock, WebviewToolCard } from "../types";
 import { GroupActivityTicker } from "./GroupActivityTicker";
 import { MessageBubble } from "./MessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
@@ -33,16 +33,20 @@ type ThinkingGroupProps = {
   group: AssistantResponseGroup;
   isLive?: boolean;
   isStreaming?: boolean;
+  mediaRoots?: WebviewMediaRoot[];
   onOpenFile(path: string, line?: number): void;
   onOpenDiff?(toolCallId: string): void;
+  onZoomImage?(image: { alt: string; src: string }): void;
 };
 
 function ThinkingGroupComponent({
   group,
   isLive = false,
   isStreaming = false,
+  mediaRoots,
   onOpenFile,
   onOpenDiff,
+  onZoomImage,
 }: ThinkingGroupProps) {
   const streaming = isStreaming && group.tools.some((tool) => tool.status !== "complete");
   const [collapsed, setCollapsed] = useState(true);
@@ -68,7 +72,12 @@ function ThinkingGroupComponent({
       data-testid="thinking-group"
     >
       {preamble ? (
-        <MessageBubble item={preamble as WebviewMessageBlock} onOpenFile={onOpenFile} />
+        <MessageBubble
+          item={preamble as WebviewMessageBlock}
+          mediaRoots={mediaRoots}
+          onOpenFile={onOpenFile}
+          onZoomImage={onZoomImage}
+        />
       ) : null}
       <div className="tc-thinking-list">
         <button
@@ -127,8 +136,10 @@ function areThinkingGroupPropsEqual(prev: ThinkingGroupProps, next: ThinkingGrou
     sameTools(prev.group.tools, next.group.tools) &&
     prev.isLive === next.isLive &&
     prev.isStreaming === next.isStreaming &&
+    prev.mediaRoots === next.mediaRoots &&
     prev.onOpenDiff === next.onOpenDiff &&
-    prev.onOpenFile === next.onOpenFile
+    prev.onOpenFile === next.onOpenFile &&
+    prev.onZoomImage === next.onZoomImage
   );
 }
 

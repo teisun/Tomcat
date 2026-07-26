@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as zlib from "node:zlib";
 
@@ -16,19 +17,31 @@ type DomSnapshot = {
     resolution: string | null;
     width: number;
   }>;
+  blockedInlineImageTexts: string[];
   attachmentSkeletonCount: number;
   attachmentUnavailableCount: number;
   composerText: string | null;
   focusedTestId: string | null;
   fullResolutionProbe: string | null;
   historyAttachmentThumbCount: number;
+  historyPdfChipTitles: string[];
   historyAttachmentUnavailableCount: number;
   imagePipelineProbe: string | null;
+  inlineImages: Array<{
+    cursor: string;
+    naturalHeight: number;
+    naturalWidth: number;
+    src: string;
+  }>;
+  lightboxImageNaturalWidth: number;
+  lightboxImageSrc: string | null;
+  lightboxVisible: boolean;
   pendingAttachmentStripClientWidth: number;
   pendingAttachmentStripOverflowing: boolean;
   pendingAttachmentStripScrollWidth: number;
   /** Entries in the draft strip, thumbnail or placeholder alike. */
   pendingAttachmentItemCount: number;
+  pendingPdfChipTitles: string[];
   pendingAttachmentThumbCount: number;
 };
 
@@ -48,6 +61,9 @@ type PipelineProbeResult = {
 type PreviewDomSnapshot = {
   activeId: string | null;
   activeThumbIndex: number;
+  copyButtonCopied?: boolean;
+  copyIconClass?: string | null;
+  downloadIconFontFamily?: string | null;
   position: number;
   stageClientWidth: number;
   /** 0 when the picture on the stage failed to decode. */
@@ -71,7 +87,7 @@ type TomcatExtensionApi = {
       thumbsDirExists: boolean;
     };
     dispatchImagePreviewDomAction(action: {
-      kind: "fit" | "next" | "previous" | "zoomIn" | "zoomOut";
+      kind: "copy" | "fit" | "next" | "previous" | "zoomIn" | "zoomOut";
     }): Promise<void>;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     focusWebview(): Promise<void>;
@@ -81,14 +97,27 @@ type TomcatExtensionApi = {
     };
     reloadWebview(): Promise<void>;
     restartServe(): Promise<void>;
+    injectServeEvent(event: unknown): Promise<void>;
+    applyWebviewSessionState(state: {
+      busy: boolean;
+      model: string;
+      sessionId: string;
+    }): Promise<void>;
     sendWebviewDomAction(action: {
       edge?: "bottom" | "top";
+      files?: Array<{
+        dataBase64: string;
+        filename: string;
+        mimeType: string;
+        sourcePath?: string | null;
+      }>;
       index?: number;
       kind:
         | "clickTestId"
         | "dragLeaveTestId"
         | "dragOverTestId"
         | "focusTestId"
+        | "pasteClipboardFiles"
         | "pressKeyOnTestId"
         | "probeAttachmentFetch"
         | "probeFullResolutionMemory"
@@ -383,6 +412,23 @@ function createAcceptancePng(index: number): {
   };
 }
 
+function createAcceptancePdf(index: number): {
+  dataBase64: string;
+  filename: string;
+  mimeType: "application/pdf";
+} {
+  const number = String(index).padStart(2, "0");
+  const pdf = Buffer.from(
+    `%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n2 0 obj\n<< /Type /Page /Parent 3 0 R >>\nendobj\n3 0 obj\n<< /Type /Pages /Kids [2 0 R] /Count 1 >>\nendobj\ntrailer\n<<>>\n%%EOF\nAcceptance PDF ${number}\n`,
+    "utf8",
+  );
+  return {
+    dataBase64: pdf.toString("base64"),
+    filename: `acceptance-brief-${number}.pdf`,
+    mimeType: "application/pdf",
+  };
+}
+
 const CRC_TABLE = (() => {
   const table = new Int32Array(256);
   for (let n = 0; n < 256; n += 1) {
@@ -437,6 +483,7 @@ suite("Tomcat image attachment visual acceptance", () => {
       .getConfiguration("workbench")
       .get<string>("colorTheme");
     const api = await hostE2e.getTomcatExtensionApi();
+    let blockedInlineDir: string | null = null;
 
     try {
       await api.__testing.focusWebview();
@@ -466,9 +513,12 @@ suite("Tomcat image attachment visual acceptance", () => {
       ];
 
       await api.__testing.sendWebviewIntent({
-        data: { images: [images[0]], sessionId },
-        messageId: "image-acceptance-single",
-        type: "attachImages",
+        data: {
+          files: [images[0]],
+          sessionId,
+        },
+        messageId: "image-acceptance-attach-single",
+        type: "attachFiles",
       });
       const singleDraft = await waitForDom(
         api,
@@ -479,9 +529,12 @@ suite("Tomcat image attachment visual acceptance", () => {
       screenshots.push(await captureScreenshot("01-composer-single-image.png"));
 
       await api.__testing.sendWebviewIntent({
-        data: { images: images.slice(1), sessionId },
-        messageId: "image-acceptance-eleven",
-        type: "attachImages",
+        data: {
+          files: images.slice(1),
+          sessionId,
+        },
+        messageId: "image-acceptance-attach-rest",
+        type: "attachFiles",
       });
       // Narrower than the sidebar itself, so the overflow this is testing stays inside the
       // window and is visible in the screenshot rather than running off the edge of it.
@@ -510,7 +563,7 @@ suite("Tomcat image attachment visual acceptance", () => {
           scrollBlock: "nearest",
           testId: "attachment-skeleton",
         });
-        screenshots.push(await captureScreenshot("14-composer-thumbnail-skeleton.png"));
+        screenshots.push(await captureScreenshot("19-composer-thumbnail-skeleton.png"));
       }
 
       const narrowDraft = await waitForDom(
@@ -569,7 +622,7 @@ suite("Tomcat image attachment visual acceptance", () => {
           snapshot.attachmentBitmaps.length === 11 &&
           snapshot.attachmentBitmaps.every((bitmap) => bitmap.width > 0),
       );
-      screenshots.push(await captureScreenshot("10-composer-thumb-sharpness.png"));
+      screenshots.push(await captureScreenshot("15-composer-thumb-sharpness.png"));
 
       // ── The same measurement, taken the old way ───────────────────────────────────
       // The strip used to point at the full-resolution image. Rather than multiplying
@@ -609,7 +662,7 @@ suite("Tomcat image attachment visual acceptance", () => {
         api,
         (snapshot) => snapshot.focusedTestId === "attachment-thumb",
       );
-      screenshots.push(await captureScreenshot("11-composer-keyboard-focus.png"));
+      screenshots.push(await captureScreenshot("16-composer-keyboard-focus.png"));
 
       // ── The draft outlives the backend ────────────────────────────────────────────
       // The point of moving draft ownership out of Rust: killing serve must not cost the
@@ -633,7 +686,7 @@ suite("Tomcat image attachment visual acceptance", () => {
           snapshot.composerText?.includes(draftText) === true,
         25_000,
       );
-      screenshots.push(await captureScreenshot("12-draft-survives-serve-restart.png"));
+      screenshots.push(await captureScreenshot("17-draft-survives-serve-restart.png"));
 
       // Surviving is half the requirement: the recovered draft has to still be a live
       // draft. Typing more into it and reloading proves the editing path came back too,
@@ -675,6 +728,27 @@ suite("Tomcat image attachment visual acceptance", () => {
             : undefined,
       );
       screenshots.push(await captureScreenshot("03-preview-pending-02-of-11.png"));
+      screenshots.push(await captureScreenshot("09-preview-toolbar-dark.png"));
+
+      const previewLightThemePassed = await setColorTheme(
+        "Default Light Modern",
+        vscode.ColorThemeKind.Light,
+      );
+      await pause(300);
+      screenshots.push(await captureScreenshot("09-preview-toolbar-light.png"));
+      await setColorTheme("Default Dark Modern", vscode.ColorThemeKind.Dark);
+      await pause(300);
+
+      await api.__testing.dispatchImagePreviewDomAction({ kind: "copy" });
+      const copiedPreview = await waitForPreviewDom(
+        api,
+        (snapshot) =>
+          snapshot.copyButtonCopied === true &&
+          /codicon-check/u.test(snapshot.copyIconClass ?? "")
+            ? snapshot
+            : undefined,
+      );
+      screenshots.push(await captureScreenshot("10-preview-copy-copied.png"));
 
       await api.__testing.dispatchImagePreviewDomAction({ kind: "zoomIn" });
       const zoomedPreview = await waitForPreviewDom(
@@ -762,7 +836,7 @@ suite("Tomcat image attachment visual acceptance", () => {
             ? snapshot
             : undefined,
       ).catch(() => api.__testing.captureImagePreviewDom());
-      screenshots.push(await captureScreenshot("15-preview-svg-attachment.png"));
+      screenshots.push(await captureScreenshot("20-preview-svg-attachment.png"));
 
       await api.__testing.executeCommand("workbench.action.closeActiveEditor");
       await api.__testing.focusWebview();
@@ -779,7 +853,7 @@ suite("Tomcat image attachment visual acceptance", () => {
         vscode.ColorThemeKind.HighContrast,
       );
       await api.__testing.focusWebview();
-      screenshots.push(await captureScreenshot("09-history-high-contrast.png"));
+      screenshots.push(await captureScreenshot("21-history-high-contrast.png"));
 
       await setColorTheme("Default Dark Modern", vscode.ColorThemeKind.Dark);
       await api.__testing.focusWebview();
@@ -790,9 +864,12 @@ suite("Tomcat image attachment visual acceptance", () => {
       // a removable attachment, never as a broken image.
       const strandedImage = createAcceptanceImage(12);
       await api.__testing.sendWebviewIntent({
-        data: { images: [strandedImage], sessionId },
-        messageId: "image-acceptance-stranded",
-        type: "attachImages",
+        data: {
+          files: [strandedImage],
+          sessionId,
+        },
+        messageId: "image-acceptance-attach-stranded",
+        type: "attachFiles",
       });
       await pollDom(api, (snapshot) => snapshot.pendingAttachmentItemCount === 1, 30_000);
       const blobsDir = path.join(
@@ -815,7 +892,7 @@ suite("Tomcat image attachment visual acceptance", () => {
         (snapshot) => snapshot.attachmentUnavailableCount >= 1,
         25_000,
       );
-      screenshots.push(await captureScreenshot("13-attachment-unavailable.png"));
+      screenshots.push(await captureScreenshot("18-attachment-unavailable.png"));
 
       // One click clears the dead attachment, and the rest of the draft is untouched.
       await sendDomAction(api, {
@@ -832,9 +909,12 @@ suite("Tomcat image attachment visual acceptance", () => {
       // Clicking a thumbnail opens the preview, so Delete on a focused thumbnail is the
       // only keyboard path to removing one.
       await api.__testing.sendWebviewIntent({
-        data: { images: [createAcceptanceImage(13)], sessionId },
-        messageId: "image-acceptance-keyboard-remove",
-        type: "attachImages",
+        data: {
+          files: [createAcceptanceImage(13)],
+          sessionId,
+        },
+        messageId: "image-acceptance-attach-remove-keyboard",
+        type: "attachFiles",
       });
       // Waits for the thumbnail, not just the attachment: until one exists the strip shows
       // a placeholder, and a placeholder is not a focusable target.
@@ -848,6 +928,148 @@ suite("Tomcat image attachment visual acceptance", () => {
       const clearedByKeyboard = await pollDom(
         api,
         (snapshot) => snapshot.pendingAttachmentItemCount === 0,
+      );
+
+      // ── PDF paste path and transcript inline images ──────────────────────────────
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      assert.ok(workspaceRoot, "expected a workspace root for PDF and inline-image acceptance");
+      const inlineRelativePath = "docs/accept-inline-image.png";
+      const inlineWorkspacePath = path.join(workspaceRoot, inlineRelativePath);
+      await fs.mkdir(path.dirname(inlineWorkspacePath), { recursive: true });
+      await fs.writeFile(
+        inlineWorkspacePath,
+        Buffer.from(createAcceptancePng(21).dataBase64, "base64"),
+      );
+
+      blockedInlineDir = await fs.mkdtemp(
+        path.join(os.homedir(), ".tomcat-inline-image-blocked-"),
+      );
+      const blockedInlinePath = path.join(blockedInlineDir, "blocked-inline-image.png");
+      await fs.writeFile(
+        blockedInlinePath,
+        Buffer.from(createAcceptancePng(22).dataBase64, "base64"),
+      );
+
+      const pdfRelativePath = "docs/acceptance-brief-01.pdf";
+      const pdfWorkspacePath = path.join(workspaceRoot, pdfRelativePath);
+      const pdfAttachment = {
+        ...createAcceptancePdf(1),
+        sourcePath: pdfWorkspacePath,
+      };
+      await fs.writeFile(pdfWorkspacePath, Buffer.from(pdfAttachment.dataBase64, "base64"));
+
+      await sendDomAction(api, {
+        files: [pdfAttachment],
+        kind: "pasteClipboardFiles",
+        testId: "composer-input",
+      });
+      const pendingPdfChip = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.pendingPdfChipTitles.includes(pdfWorkspacePath)
+            ? snapshot
+            : undefined,
+        20_000,
+      );
+      screenshots.push(await captureScreenshot("11-composer-pdf-chip.png"));
+
+      api.__testing.clearObservedEvents();
+      await api.__testing.sendWebviewIntent({
+        data: {
+          sessionId,
+          text: "PDF acceptance history message",
+        },
+        messageId: "image-acceptance-pdf-prompt",
+        type: "prompt",
+      });
+      await api.__testing.waitForEvent({ timeoutMs: 20_000, type: "agent_end" });
+      const historyPdfChip = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.historyPdfChipTitles.includes(pdfWorkspacePath)
+            ? snapshot
+            : undefined,
+        20_000,
+      );
+      screenshots.push(await captureScreenshot("12-history-pdf-chip.png"));
+
+      await api.__testing.applyWebviewSessionState({
+        busy: true,
+        model: "gpt-5.4",
+        sessionId,
+      });
+      await api.__testing.injectServeEvent({
+        sessionId,
+        type: "agent_start",
+      });
+      await api.__testing.injectServeEvent({
+        assistantMessageEvent: {
+          delta: [
+            "Workspace image:\n\n",
+            `![workspace image](${inlineRelativePath})`,
+            "\n\nBlocked image:\n\n",
+            `![blocked image](${blockedInlinePath})`,
+          ].join(""),
+          kind: "content_delta",
+        },
+        assistantMessageId: "assistant-inline-image-acceptance",
+        message: {},
+        sessionId,
+        type: "message_update",
+      });
+      const inlineImageMessage = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.inlineImages.some((image) => image.naturalWidth > 0) &&
+          snapshot.blockedInlineImageTexts.some((text) => text.includes(blockedInlinePath))
+            ? snapshot
+            : undefined,
+        20_000,
+      );
+      await api.__testing.injectServeEvent({
+        assistantMessageId: "assistant-inline-image-acceptance",
+        message: {},
+        sessionId,
+        type: "message_end",
+      });
+      await api.__testing.injectServeEvent({
+        messages: [],
+        sessionId,
+        type: "agent_end",
+      });
+      await api.__testing.injectServeEvent({
+        sessionId,
+        type: "agent_idle",
+      });
+      await api.__testing.applyWebviewSessionState({
+        busy: false,
+        model: "gpt-5.4",
+        sessionId,
+      });
+      screenshots.push(await captureScreenshot("13-transcript-inline-image.png"));
+
+      await sendDomAction(api, {
+        index: 0,
+        kind: "clickTestId",
+        testId: "inline-image",
+      });
+      const inlineImageLightbox = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.lightboxVisible && snapshot.lightboxImageNaturalWidth > 0
+            ? snapshot
+            : undefined,
+        20_000,
+      );
+      screenshots.push(await captureScreenshot("14-inline-image-lightbox.png"));
+      await sendDomAction(api, {
+        kind: "clickTestId",
+        testId: "image-lightbox-overlay",
+      });
+      const inlineImageLightboxClosed = await waitForDom(
+        api,
+        (snapshot) => (!snapshot.lightboxVisible ? snapshot : undefined),
+        10_000,
       );
 
       const probeFor = (label: string): PipelineProbeResult =>
@@ -871,16 +1093,23 @@ suite("Tomcat image attachment visual acceptance", () => {
             host: attachmentDiagnostics,
             passed: attachmentFetch.ok === true && (attachmentFetch.naturalWidth ?? 0) > 0,
           },
-          // Offscreen thumbnails are not decoded at all until scrolled to, so the strip
-          // costs less than the worst case below for as long as the user leaves it alone.
+          // Chromium's lazy-image policy is browser-version dependent: some builds defer
+          // offscreen horizontal thumbnails, others eagerly decode them. The product
+          // invariant that matters is narrower: even if the browser chooses eager decode,
+          // it must only decode 192px thumbnails, not the original 4000x3000 bitmaps.
           attachmentLazyDecode: {
             decodedOnArrival: lazyStrip.attachmentBitmaps.filter(
               (bitmap) => bitmap.width > 0,
             ).length,
+            eagerDecodeStillBounded:
+              lazyStrip.attachmentBitmapBytes > 0 &&
+              lazyStrip.attachmentBitmapBytes < fullResolutionBytes / 100,
             measuredBytes: lazyStrip.attachmentBitmapBytes,
             passed:
               lazyStrip.attachmentBitmaps.filter((bitmap) => bitmap.width > 0).length <
-              11,
+                lazyStrip.attachmentBitmaps.length ||
+              (lazyStrip.attachmentBitmapBytes > 0 &&
+                lazyStrip.attachmentBitmapBytes < fullResolutionBytes / 100),
             total: lazyStrip.attachmentBitmaps.length,
           },
           // The headline number: what eleven 4000x3000 images cost in the strip, measured
@@ -945,6 +1174,25 @@ suite("Tomcat image attachment visual acceptance", () => {
           },
           keyboardRemoval: {
             passed: clearedByKeyboard.pendingAttachmentItemCount === 0,
+          },
+          previewCodiconFont: {
+            fontFamily: copiedPreview.downloadIconFontFamily ?? null,
+            passed: /codicon/i.test(copiedPreview.downloadIconFontFamily ?? ""),
+          },
+          previewCopyFeedback: {
+            copied: copiedPreview.copyButtonCopied === true,
+            iconClass: copiedPreview.copyIconClass ?? null,
+            passed:
+              copiedPreview.copyButtonCopied === true &&
+              /codicon-check/u.test(copiedPreview.copyIconClass ?? ""),
+          },
+          pdfPastePath: {
+            passed: pendingPdfChip.pendingPdfChipTitles.includes(pdfWorkspacePath),
+            titles: pendingPdfChip.pendingPdfChipTitles,
+          },
+          pdfHistoryRendering: {
+            passed: historyPdfChip.historyPdfChipTitles.includes(pdfWorkspacePath),
+            titles: historyPdfChip.historyPdfChipTitles,
           },
           // Placeholders while thumbnails are generated, rather than originals: the
           // in-between state has to be bounded too.
@@ -1034,6 +1282,27 @@ suite("Tomcat image attachment visual acceptance", () => {
             passed: rebuiltHistory.historyAttachmentThumbCount >= 11,
             thumbCount: rebuiltHistory.historyAttachmentThumbCount,
           },
+          inlineWorkspaceImage: {
+            cursor: inlineImageMessage.inlineImages[0]?.cursor ?? null,
+            naturalWidths: inlineImageMessage.inlineImages.map((image) => image.naturalWidth),
+            passed:
+              inlineImageMessage.inlineImages.some((image) => image.naturalWidth > 0) &&
+              inlineImageMessage.inlineImages.some((image) => image.cursor === "zoom-in"),
+          },
+          inlineOutsideImageBlocked: {
+            blockedTexts: inlineImageMessage.blockedInlineImageTexts,
+            passed: inlineImageMessage.blockedInlineImageTexts.some((text) =>
+              text.includes(blockedInlinePath),
+            ),
+          },
+          inlineImageLightbox: {
+            lightboxImageNaturalWidth: inlineImageLightbox.lightboxImageNaturalWidth,
+            lightboxImageSrc: inlineImageLightbox.lightboxImageSrc,
+            passed:
+              inlineImageLightbox.lightboxVisible &&
+              inlineImageLightbox.lightboxImageNaturalWidth > 0 &&
+              !inlineImageLightboxClosed.lightboxVisible,
+          },
           // A design-tool SVG — `<style>` block, generated class names, `style=`
           // attributes — displayed as a vector, not as the PNG that exists for the model.
           svgAttachmentRenders: {
@@ -1066,7 +1335,7 @@ suite("Tomcat image attachment visual acceptance", () => {
         },
         limitations: [
           "The 320px composer case uses the existing test-only root-width shim inside a real VS Code Webview because automated divider dragging is unreliable on macOS.",
-          "Screenshots capture the full VS Code window via macOS screencapture; copy and Save As remain covered by automated protocol tests and require OS permission/dialog interaction for manual acceptance.",
+          "Screenshots capture the full VS Code window via macOS screencapture; the copy-success state and codicon font load are checked here, but the native Save As dialog itself still needs manual acceptance.",
           "fullResolutionBytes is the arithmetic cost of decoding the same images at source resolution (11 x 4000 x 3000 x 4), not a second measured run: reintroducing the old data: URI pipeline to measure it would mean shipping the defect again.",
         ],
         screenshots,
@@ -1080,6 +1349,9 @@ suite("Tomcat image attachment visual acceptance", () => {
         assert.equal(check.passed, true, `expected ${name} acceptance check to pass`);
       }
     } finally {
+      if (blockedInlineDir) {
+        await fs.rm(blockedInlineDir, { force: true, recursive: true });
+      }
       await vscode.workspace
         .getConfiguration("workbench")
         .update(

@@ -1,8 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-07-26 10:44 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-07-26 18:06 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 附件体验收尾与 transcript 内联图已闭环：预览工具栏统一切到 codicon，复制成功会亮 `1.5s` 对勾；`attachImages` 泛化为 `attachFiles`，PDF 与图片共用粘贴 / 拖拽 / 选择器 / 历史 reference 全链路，`sourcePath` 只作 UI hover / reopen 元数据贯通到 pending 与 history，PDF 在 composer / history 中改为 48px `PDF` 方块；assistant 正文新增 **display-only** 本地内联图支线，只有 `![alt](path)` 且路径落在 workspace 或 `os.tmpdir()` 授权范围内时才直渲并可轻量放大，远程或越界路径一律降级成文本，不进 Rust CAS。`SystemOutputConventions` 也同步扩到 `![...](path)`，这是 transcript 富渲染里**第二次“提示词—渲染耦合”扩展**；由于 prompt 通过 `include_str!` 编译进 CLI，发布顺序必须是**CLI 与扩展同发，或先发 CLI**。验证：`npm run accept:image` 全绿并产出 `09-14` 新验收图；`npm run gate:full`、`npm run test:integration` 全绿；`cargo test` 当前被独立红测 `checkpoint_cli_e2e::test_hangup_during_tool_run_allows_same_process_followup` 阻塞（30s 子进程退出超时，已单例复跑确认，与本轮附件 / prompt 改动文件无交集）。@2026-07-26
+- [✓] **[P1]** AI 辅助配置出库已完成：仅 `/.cursor/rules/` 与 `/.cursor/plans/` 加入 `.gitignore` 并从 Git 索引移除，本地文件保留不删，`/.cursor/commands/` 继续受版本控制。@2026-07-26
 - [✓] **[P0]** 图片附件链路整改已落地：草稿权威从 Rust 草稿目录迁到扩展层 `ComposerDraftStore`（只存文本与哈希引用）；Rust 新增内容寻址 `AttachmentBlobStore` 与 `ingest_attachment` / `cache_attachment_thumbnail`，`initialize` 握手下发 `attachmentRoot`；webview 用 `asWebviewUri` + 192px 缩略图回填，SVG 走 typed `blob:` 显示、栅格化 PNG 作 `providerSha`。验收：`accept:image` 22 checks 全绿，11 图位图实测约 480MB → 1.16MB，打字 outbound 0 字节；版本 CLI `0.1.17 → 0.1.18`、扩展 `0.1.27 → 0.1.28`（`bundledCliVersion=0.1.18`）。本机产物（不入库）`tomcat-cli-v0.1.18-x86_64-apple-darwin.tar.gz` 与纯插件 `tomcat-vscode-ext-0.1.28.vsix`。@2026-07-26
 - [✓] **[P0]** 流式回答“整本重发”性能债已收口：host 抽出 `StateBroadcaster`（约 16ms 攒发 + force flush），`applyEvent` 产出 `none|patch|session` mutation，过桥按三层择帧——`state`（结构变化）/`sessionView`（单会话整份）/`sessionPatch`（timeline 热路径 `appendText|upsert|remove` + per-session `seq`）。GUI 用 `mergeSessionViewSnapshot` / `applySessionPatchFrame` 接帧，seq 跳号或 target 缺失即 `resyncSessionView`；`TOMCAT_DISABLE_SESSION_PATCHES=1` 可一键退回单会话帧。叶子热路径组件补 `React.memo`；新增 bridge bench（`npm run bench:webview-bridge`）与 patch≡full 等价性测试。bench after：`sessionPatch` ~167B vs full ~328KB（~1965x）、行渲染每 delta 1 vs 500（500x）、patch merge ~95x 快于 full reconcile。扩展 `0.1.26 → 0.1.27`；本机纯插件 `tomcat-vscode-ext-0.1.27.vsix`。验证：`test:unit`（core 232 / gui 359）、`test:integration`（304，含等价性与 provider_flow）、`verify:vsix`、`compile` 全绿；E2E 库登记 `E2E-VSCEXT-034/035`。@2026-07-24
 - [✓] **[P0]** Bash 执行与验证耗时整改已落地：`tools.bash.timeout_ms`（到期杀进程）改为 `foreground_wait_ms`（默认 16s，硬夹 8–16s）的**前台观察窗**；到期后有 shared registry 的路径（主 loop / Verifier / CodeReviewer / ext host）`promote_to_background` 转同一 tracked task，模型用 `task_output`/`task_stop` 收口，不再半途杀编译。抽出 `build_bash_task_registry` 统一装配 wait 策略与 background guard；裸 primitive / 隔离单测无 registry 时到期有界停进程组，杜绝 ephemeral registry 泄漏 runaway。ext host 本期补齐 `taskOutput`/`taskStop` HostCall（block wait 夹到宿主 async 超时内），插件 `exec` 可跟前后台。GUI 命令卡支持 liveOutput 增量与前后台同卡转换。版本：CLI `0.1.17`、扩展 `0.1.26`（`bundledCliVersion=0.1.17`）；本机产物 `tomcat-cli-v0.1.17-x86_64-apple-darwin.tar.gz` 与纯插件 `tomcat-vscode-ext-0.1.26.vsix`。验证：相关 Rust lib/E2E（含 Verifier 长命令 `task_output`）与扩展设定/协议版本断言已同步。@2026-07-24
@@ -34,7 +36,8 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
-- 图片附件：serve 新增 `ingest_attachment` / `cache_attachment_thumbnail`；`initialize` 响应新增 `attachmentRoot`；`send_message` 附件改为按 `blobSha`/`providerSha` 引用，不再内联 base64。扩展侧草稿迁到 `ComposerDraftStore`（workspace/globalStorage）；webview intent 新增 `attachImages` / `cacheAttachmentThumbnail` / `syncComposerDraft` 等；显示走 `asWebviewUri`，缩略图缺失时骨架占位。CLI `0.1.18` / 扩展 `0.1.28`（`bundledCliVersion=0.1.18`）。
+- 附件链路已从“图片专用”泛化为“图片 / PDF 共用”：共享协议文件改名 `attachmentProtocol.ts`，`attachImages`/`ImageAttachmentCandidate`/`attachImagesResult` 改为 `attachFiles`/`AttachmentCandidate`/`attachFilesResult`；校验器按 MIME 分流（图片 4.5MB、PDF 25MB、其他拒绝）；`AttachmentCandidate` / `AttachmentUpload` / `WebviewAttachmentView` / 草稿引用均新增 `kind` 与可选 `sourcePath`。serve `get_messages(reference)` 现在也会把 `input_file` 物化成 `blobSha/bytes/filename/mimeType` 并剥离 base64，修掉历史 PDF 写放大。composer / history 的非图片附件统一渲染成 48px `PDF` 方块。CLI `0.1.18` / 扩展 `0.1.28`（`bundledCliVersion=0.1.18`）。
+- transcript 本地内联图新增一条**显示层专用**支线：host `localResourceRoots` / `mediaRoots` 现在额外覆盖 workspace folders 与 `os.tmpdir()`，并在工作区列表变化时热更新；webview `state` 快照新增 `mediaRoots`，`ChatMarkdown` 在 markdown 装饰阶段只对 `![alt](path)` 做路径白名单解析与 URL 改写，远程 / 越界路径降级成 blocked link；点击图片进入 `ImageLightbox`，不引入新的 Rust 附件协议，也不复制字节进 CAS。
 - Host→Webview 新增 `channel:"sessionView"` / `channel:"sessionPatch"`；Webview→Host 新增 intent `resyncSessionView`。`sessionPatch` ops：`appendText{id,text}` / `upsert{item,afterId?,beforeId?}` / `remove{id}`，带 per-session 自增 `seq`。host 内部 `SessionRenderMutation` + `StateBroadcaster` 择帧；环境变量 `TOMCAT_DISABLE_SESSION_PATCHES=1` 关闭增量、退回 `sessionView`。扩展版本 `0.1.27`。
 - `[tools.bash].timeout_ms` 移除，改为 `foreground_wait_ms`（默认 16000，合法 8000–16000）；到期语义从“杀进程”改为“有 registry 则转 tracked 后台 / 无 registry 则有界停止”。新增 `build_bash_task_registry`；主 loop、Verifier、CodeReviewer、ext host 注入 shared registry。HostCall 新增 `taskOutput` / `taskStop`；插件 SDK `exec` 可带 `foreground_wait_ms`，回执可含后台 `task_id`/`log_path`/`next_actions`。CLI `0.1.17` / 扩展 `0.1.26`（`bundledCliVersion=0.1.17`）。
 - 命令卡片完整命令展示统一消费 `command` + 可选 `args[]`；thinking turn 摘要单 Shell 即时回退改为固定 `Ran shell command`，utility prompt 禁止复述原始 shell 命令。扩展版本 `0.1.25`。
@@ -52,14 +55,15 @@
 - `MarkdownBody` 现复用 `buildDecoratedHtml(markdown, sourceLineMap?)`，因此 plan 预览与 transcript 共享同一套同步高亮、代码卡片、copy 按钮与内联文件链接语义，同时保留 `data-source-line` 能力。
 - `openFile.data.line?: number`；`VsCodeIde.showFile(path, line?)` → `selection + revealRange`。
 - plan 预览协议新增 `openFile { path, line? }`；plan body 内联路径与 transcript 复用同一套 linkify/open-file 语义。
-- `PromptKey::SystemOutputConventions` 插入系统提示词链（`ToolInstructions(20) -> OutputConventions(21) -> ParallelTools(22)`）。
+- `PromptKey::SystemOutputConventions` 继续承担 transcript 富渲染契约：除原有 clickable path 规则外，现新增 `![alt](path)` 本地图片约定，并显式禁止 `http:` / `https:` / `data:` / `blob:` 图像源；该模板通过 `include_str!` 编译进 CLI（运行期不读盘、不支持 env override），因此这类渲染能力发布时必须与 CLI 一起发版，或先发 CLI。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 无 | - | - |
+| `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；已单例复跑确认，与本轮附件 / prompt 改动文件无交集，`accept:image` / `gate:full` / `test:integration` 已绿。 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因；本轮先如实记录，不把 unrelated 红测误记成附件回归 |
 
 ### 集成说明
+- 最新补充（2026-07-26 18:06）：附件体验第二轮收口已完成：preview toolbar codicon + copy 对勾、PDF 真剪贴板 / PDF 方块 / history PDF 渲染、transcript `![...](path)` 本地图直渲与轻量放大、`/.cursor/rules` 与 `/.cursor/plans` 出库，以及 `SystemOutputConventions` 对 `![...](path)` 的第二次提示词—渲染耦合同步。验证：`npm run accept:image`、`npm run gate:full`、`npm run test:integration` 全绿；`cargo test` 被独立红测 `checkpoint_cli_e2e::test_hangup_during_tool_run_allows_same_process_followup` 阻塞，已单例复跑确认。 
 - 最新补充（2026-07-26 10:44）：图片附件整改已合入本分支。草稿改扩展层、字节走 CAS；`accept:image` 22/22；内存 480MB→1.16MB；版本 CLI `0.1.18` / 扩展 `0.1.28`；本机 CLI tar.gz 与纯插件 VSIX 已打包（制品不入库）。
 - 最新补充（2026-07-24 21:04）：流式热路径三层发送（state/sessionView/sessionPatch）+ 攒发调度 + seq/resync 已落地；扩展 `0.1.27`；bench after 显示 patch 载荷/行渲染相对全量显著下降；`test:unit` / `test:integration` / `verify:vsix` 全绿；本机纯插件 `tomcat-vscode-ext-0.1.27.vsix`（制品不入库）。
 - 最新补充（2026-07-24 16:08）：Bash timeout→background 与子代理/ext host tracked execution 已落地；版本 CLI `0.1.17` / 扩展 `0.1.26`；本机 CLI tar.gz 与纯插件 VSIX 已打包（制品不入库）。

@@ -8,6 +8,12 @@ const renderMock = vi.fn(async (_id: string, _graph: string) => ({
   svg: '<svg data-testid="mermaid-svg"><g>flow</g></svg>',
 }));
 const initializeMock = vi.fn();
+const ROOTS = [
+  {
+    fsPath: "/workspace",
+    webviewBase: "vscode-webview://workspace",
+  },
+];
 
 vi.mock("mermaid", () => ({
   default: {
@@ -154,8 +160,49 @@ describe("ChatMarkdown", () => {
     );
     const body = screen.getByTestId("chat-markdown");
     expect(body.querySelector("script")).toBeNull();
-    expect(body.querySelector("img")?.getAttribute("onerror")).toBeNull();
+    expect(body.querySelector("img")).toBeNull();
+    expect(body.querySelector(".tc-blocked-image")?.getAttribute("onerror")).toBeNull();
     expect((window as Window & { __tc_pwned?: boolean }).__tc_pwned).toBeUndefined();
+  });
+
+  it("renders allowed local markdown images with zoom metadata and forwards clicks", () => {
+    const onZoomImage = vi.fn();
+    render(
+      <ChatMarkdown
+        markdown={"![mockup](docs/mockup.png)"}
+        mediaRoots={ROOTS}
+        onOpenFile={() => undefined}
+        onZoomImage={onZoomImage}
+      />,
+    );
+
+    const image = screen
+      .getByTestId("chat-markdown")
+      .querySelector<HTMLImageElement>(".tc-inline-image");
+    expect(image).not.toBeNull();
+    expect(image?.getAttribute("data-tc-image-src")).toBe("vscode-webview://workspace/docs/mockup.png");
+
+    fireEvent.click(image!);
+    expect(onZoomImage).toHaveBeenCalledWith({
+      alt: "mockup",
+      src: "vscode-webview://workspace/docs/mockup.png",
+    });
+  });
+
+  it("degrades remote markdown images into blocked links without rendering an img tag", () => {
+    render(
+      <ChatMarkdown
+        markdown={"![remote](https://example.com/diagram.png)"}
+        mediaRoots={ROOTS}
+        onOpenFile={() => undefined}
+      />,
+    );
+
+    const body = screen.getByTestId("chat-markdown");
+    expect(body.querySelector("img")).toBeNull();
+    const blocked = body.querySelector<HTMLAnchorElement>(".tc-blocked-image");
+    expect(blocked).not.toBeNull();
+    expect(blocked?.textContent).toBe("https://example.com/diagram.png");
   });
 
   it("auto-closes an unterminated fence so streaming partial code still renders as a card", async () => {
@@ -250,5 +297,36 @@ describe("ChatMarkdown", () => {
     expect(spy.mock.calls.filter(([code]) => code.includes("const first = 1;"))).toHaveLength(1);
     expect(spy.mock.calls.filter(([code]) => code.includes("const second = 2;"))).toHaveLength(1);
     spy.mockRestore();
+  });
+
+  it("does not emit an img tag while a streaming image markdown token is still incomplete", () => {
+    const { rerender } = render(
+      <ChatMarkdown
+        markdown={"![mockup](docs/mockup"}
+        mediaRoots={ROOTS}
+        onOpenFile={() => undefined}
+      />,
+    );
+
+    const body = screen.getByTestId("chat-markdown");
+    expect(body.querySelector("img")).toBeNull();
+
+    rerender(
+      <ChatMarkdown
+        markdown={"![mockup](docs/mockup.png"}
+        mediaRoots={ROOTS}
+        onOpenFile={() => undefined}
+      />,
+    );
+    expect(body.querySelector("img")).toBeNull();
+
+    rerender(
+      <ChatMarkdown
+        markdown={"![mockup](docs/mockup.png)"}
+        mediaRoots={ROOTS}
+        onOpenFile={() => undefined}
+      />,
+    );
+    expect(body.querySelector(".tc-inline-image")).not.toBeNull();
   });
 });

@@ -1,8 +1,27 @@
+import * as os from "node:os";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import { TomcatWebviewViewProvider } from "../provider";
 import type { HostToWebviewFrame } from "../protocol";
+
+const workspace = vscode.workspace as typeof vscode.workspace & {
+  onDidChangeWorkspaceFolders?: (
+    listener: (event: vscode.WorkspaceFoldersChangeEvent) => void,
+  ) => vscode.Disposable;
+  workspaceFolders?: Array<{ uri: vscode.Uri }>;
+};
+const originalWorkspaceFolders = workspace.workspaceFolders;
+const originalWorkspaceFolderListener = workspace.onDidChangeWorkspaceFolders;
+
+function makeWorkspaceFolder(fsPath: string, index = 0): vscode.WorkspaceFolder {
+  return {
+    index,
+    name: fsPath.split("/").filter(Boolean).at(-1) ?? fsPath,
+    uri: vscode.Uri.file(fsPath),
+  };
+}
 
 function createProvider() {
   const postedFrames: HostToWebviewFrame[] = [];
@@ -60,6 +79,8 @@ function createProvider() {
 afterEach(() => {
   vi.useRealTimers();
   delete process.env.TOMCAT_DISABLE_SESSION_PATCHES;
+  workspace.onDidChangeWorkspaceFolders = originalWorkspaceFolderListener;
+  workspace.workspaceFolders = originalWorkspaceFolders;
 });
 
 describe("provider broadcast frames", () => {
@@ -242,6 +263,64 @@ describe("provider broadcast frames", () => {
       messageId: "state-now",
     }).length;
     expect(patchBytes).toBeLessThan(fullStateBytes);
+
+    provider.dispose();
+  });
+
+  it("includes workspace and temp media roots in decorated state snapshots", () => {
+    workspace.workspaceFolders = [makeWorkspaceFolder("/workspace")];
+
+    const { provider } = createProvider();
+    const state = (provider as unknown as {
+      currentState(): {
+        mediaRoots?: Array<{ fsPath: string; webviewBase: string }>;
+      };
+    }).currentState();
+
+    expect(state.mediaRoots).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ fsPath: "/workspace" }),
+        expect.objectContaining({ fsPath: os.tmpdir() }),
+      ]),
+    );
+
+    provider.dispose();
+  });
+
+  it("reloads resource roots when workspace folders change", () => {
+    let listener: ((event: vscode.WorkspaceFoldersChangeEvent) => void) | undefined;
+    workspace.workspaceFolders = [makeWorkspaceFolder("/workspace")];
+    workspace.onDidChangeWorkspaceFolders = (nextListener) => {
+      listener = nextListener;
+      return new vscode.Disposable(() => {
+        listener = undefined;
+      });
+    };
+
+    const { provider } = createProvider();
+    const internals = provider as unknown as {
+      isReady: boolean;
+      stateStore: { setReady(ready: boolean): void };
+      view: {
+        webview: {
+          options: { localResourceRoots?: vscode.Uri[] };
+        };
+      };
+    };
+    internals.isReady = true;
+    internals.stateStore.setReady(true);
+
+    const nextWorkspaceFolders = [
+      makeWorkspaceFolder("/workspace", 0),
+      makeWorkspaceFolder("/workspace-two", 1),
+    ];
+    workspace.workspaceFolders = nextWorkspaceFolders;
+    listener?.({ added: [nextWorkspaceFolders[1]], removed: [] });
+
+    expect(internals.isReady).toBe(false);
+    expect(internals.view.webview.options.localResourceRoots?.map((uri) => uri.path)).toEqual(
+      expect.arrayContaining(["/workspace", "/workspace-two"]),
+    );
 
     provider.dispose();
   });

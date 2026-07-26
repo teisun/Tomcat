@@ -1,8 +1,11 @@
 import { fileChipIconClass } from "../FileChip";
+import { COPY_FLASH_MS } from "../copyFeedback";
 import { parseCodeFenceInfo } from "./codeFence";
 import { basenameOf, detectInlineFilePath, inferLanguageFromPath } from "./inlinePath";
+import { rewriteLocalImages } from "./localImages";
 import { renderMarkdownHtml, sanitizeMarkdownHtml } from "./markdownRuntime";
 import { highlightToHtml } from "./richRenderRuntime";
+import type { WebviewMediaRoot } from "../../types";
 
 function withLocationSuffix(label: string, line?: number, column?: number): string {
   if (typeof line !== "number") {
@@ -94,7 +97,7 @@ export function flashCopyButton(button: HTMLElement): void {
     window.setTimeout(() => {
       setCopyButtonCopiedState(button, false);
       delete button.dataset.tcCopyResetTimer;
-    }, 1_500),
+    }, COPY_FLASH_MS),
   );
 }
 
@@ -202,13 +205,22 @@ export function linkifyInlineFilePaths(container: HTMLElement): void {
   }
 }
 
-export function buildDecoratedHtml(markdown: string, sourceLineMap?: number[]): string {
+export function buildDecoratedHtml(
+  markdown: string,
+  options?: {
+    mediaRoots?: WebviewMediaRoot[];
+    sourceLineMap?: number[];
+  },
+): string {
   if (typeof document === "undefined") {
-    return sanitizeMarkdownHtml(renderMarkdownHtml(markdown, sourceLineMap));
+    return sanitizeMarkdownHtml(renderMarkdownHtml(markdown, options?.sourceLineMap));
   }
   const container = document.createElement("div");
-  container.innerHTML = sanitizeMarkdownHtml(renderMarkdownHtml(markdown, sourceLineMap));
+  container.innerHTML = sanitizeMarkdownHtml(
+    renderMarkdownHtml(markdown, options?.sourceLineMap),
+  );
   decorateCodeCards(container);
+  rewriteLocalImages(container, options?.mediaRoots ?? []);
   linkifyInlineFilePaths(container);
   return container.innerHTML;
 }

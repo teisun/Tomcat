@@ -122,7 +122,10 @@ fn build_system_prompt_contains_output_conventions_section() {
     let prompt = build_system_prompt("/tmp");
     assert!(prompt.contains("Output conventions"));
     assert!(prompt.contains("clickable file link"));
+    assert!(prompt.contains("![mockup](docs/mockup.png)"));
+    assert!(prompt.contains("use `![alt](path)` only"));
     assert!(prompt.contains("Do not emit `file://`, `vscode://`"));
+    assert!(prompt.contains("Only local workspace or temporary-directory filesystem paths can render inline"));
     assert!(prompt.contains("workspace-relative path"));
     assert!(prompt.contains("Do not emit bare filenames"));
 }

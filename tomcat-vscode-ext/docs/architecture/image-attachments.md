@@ -1,11 +1,11 @@
 # 图片附件：粘贴、缩略图、预览与草稿的分层方案
 
-> 适用范围：Composer 里的图片/PDF 附件从「用户粘贴」到「发给模型」到「历史里回看」的全链路，横跨 webview / 扩展宿主 / Rust 后端三层。
+> 适用范围：Composer 里的图片/PDF 附件从「用户粘贴」到「发给模型」到「历史里回看」的全链路，以及 transcript 里 assistant 提到的本地内联图片显示，横跨 webview / 扩展宿主 / Rust 后端三层。
 > 单一事实源：协议与类型以 `tomcat/src/api/serve/types.rs`（生成 `wire.d.ts`）为准；字节存储以 `tomcat/src/core/session/attachments.rs` 为准；草稿存储以 `tomcat-vscode-ext/src/shared/composerDraft.ts` 为准。本组文档不复制定义，只解释「为什么长这样」。
 > 上位文档：[`tomcat-vscode-extension.md`](tomcat-vscode-extension.md)（扩展整体三层职责）。
 > 本文替代了早期版本中「草稿存 Rust + CAS + 两阶段提交 + `resvg` 栅格化」的设计。那一版为什么被推翻、依据是什么，见 [`01-placement-decision.md`](image-attachments/01-placement-decision.md) —— 它是本组文档里最该先读的一篇。
 
-**一句话定位**：**图片字节只搬一次**（粘贴那一刻交给 Rust，之后全链路只传 32 字节的哈希），**编辑状态归编辑器**（草稿文本在扩展层落盘，打字不跨进程），**像素工作归 Chromium**（缩略图降采样与 SVG 栅格化都在 webview 做，Rust 一个图形库都不装）。
+**一句话定位**：**图片字节只搬一次**（粘贴那一刻交给 Rust，之后全链路只传 32 字节的哈希），**编辑状态归编辑器**（草稿文本在扩展层落盘，打字不跨进程），**像素工作归 Chromium**（缩略图降采样、SVG 栅格化、以及 transcript 本地图显示都在 webview 做，Rust 一个图形库都不装）。
 
 ---
 
@@ -16,6 +16,7 @@
 | [`01-placement-decision.md`](image-attachments/01-placement-decision.md) | 草稿该放哪一层：7 个同类产品的横向调研证据、决策、以及**什么条件下该推翻它**；另附「为什么不放扩展宿主做栅格化」的排除记录 | 想改动分层、或者怀疑「这为什么不放后端」时，先读它。 |
 | [`02-storage-and-gc.md`](image-attachments/02-storage-and-gc.md) | 草稿文件布局、blob store 目录布局、租约与 GC 语义、依赖体积实测数据 | 要动存储、写 GC、排查「我的图去哪了」时查它。 |
 | [`03-user-guide.md`](image-attachments/03-user-guide.md) | 面向用户：怎么加图、怎么预览、限制是什么、升级注意事项 | 要写 release note 或回答用户问题时查它。 |
+| [`04-inline-transcript-images.md`](image-attachments/04-inline-transcript-images.md) | transcript 里什么时候把 `![...](path)` 画成图、为什么只认工作区/临时目录、为什么提示词必须同步改 | 想改 assistant 正文里的本地图片显示，先读它。 |
 
 测试怎么分层、四个测试位置各自跑什么，见 [`../testing-layers.md`](../testing-layers.md)。
 
@@ -112,7 +113,7 @@
 │  └ SVG: canvas.toBlob  │      │                    │      │                      │
 │      → provider PNG    │      │                    │      │                      │
 │        │               │      │                    │      │                      │
-│  attachImages intent   │      │                    │      │                      │
+│  attachFiles intent    │      │                    │      │                      │
 │  （唯一带字节的一跳）  │─────▶│ attachmentIngest   │      │                      │
 │                        │      │   .ts              │─────▶│ ingest_attachment    │
 │                        │      │                    │      │  ├ MIME + 大小 + 魔术│
@@ -135,6 +136,11 @@
 │ 打字                   │      │                    │      │                      │
 │  syncComposerDraft ───▶│ ─────▶│ 只更新本地草稿     │  ✗   │ （协议零流量）        │
 │                        │      │                    │      │                      │
+│ assistant 文本         │      │                    │      │                      │
+│  ![alt](path)          │◀─────│ mediaRoots 快照    │  ✗   │ （不进 Rust / CAS）   │
+│   → 改写成 webview URL │ URL  │ workspace/tmp 授权 │      │                      │
+│   → 点击放大           │      │                    │      │                      │
+│                        │      │                    │      │                      │
 │ 发送                   │      │                    │      │                      │
 │  sendUserMessage ─────▶│ ─────▶│ prompt {           │─────▶│ prompt               │
 │                        │      │   attachments:[    │      │  ├ 按 sha 取已校验字节│
@@ -147,9 +153,10 @@
 
 **这张图最该看清的三件事：**
 
-1. **带字节的箭头只有一根** —— `attachImages` → `ingest_attachment`。全协议其他任何命令都只传哈希，这条由一个静态 schema 扫描测试守着（见 [`../testing-layers.md`](../testing-layers.md) 的契约测试一节）。
+1. **带字节的箭头只有一根** —— `attachFiles` → `ingest_attachment`。全协议其他任何命令都只传哈希，这条由一个静态 schema 扫描测试守着（见 [`../testing-layers.md`](../testing-layers.md) 的契约测试一节）。
 2. **打字那一行的箭头断在扩展宿主** —— 打字不产生任何 Rust 流量，这是写放大被结构性消除的地方。
-3. **发送不搬字节** —— `promote` 只删掉一个空的租约标记文件，图片字节从 ingest 落盘那一刻起就没再动过。
+3. **transcript 内联图这条支线只改 URL** —— 它吃的是“模型输出的本地路径”，不是“用户新交进来的字节”，所以不会多出一条 copy-to-CAS 管道。
+4. **发送不搬字节** —— `promote` 只删掉一个空的租约标记文件，图片字节从 ingest 落盘那一刻起就没再动过。
 
 ---
 
@@ -163,6 +170,7 @@
 │   · createImageBitmap(blob, {resizeWidth:192}) → 缩略图                   │
 │   · SVG: <img> + canvas.drawImage + toBlob('image/png') → 给模型的 PNG    │
 │   · 失败降级：SVG 源码当文本发给模型（≤50KB），显示仍走原生 <img>          │
+│   · transcript: `![alt](path)` → 检查授权范围 → 改写成 webview URL         │
 │   文件：gui/src/attachments/imagePipeline.ts                              │
 └──────────────────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -170,7 +178,7 @@
 │   · 草稿：text / segments / 附件引用，防抖原子落盘（composerDraft.ts）     │
 │   · ingest 客户端：把字节交给 Rust，换回哈希（attachmentIngest.ts）        │
 │   · 路径映射：blobSha → asWebviewUri（attachmentUris.ts）                 │
-│   · localResourceRoots 授权 blobs/ 与 thumbs/                            │
+│   · localResourceRoots 授权 blobs/、thumbs/、workspace roots、tmp         │
 └──────────────────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ Rust 后端 —— 纯字节仓库，零图形库                                         │
@@ -228,6 +236,7 @@
   ⑤ 内容自校验：读 blob 时重算哈希，与文件名不符则隔离为 .corrupt-* 并当作不存在
   ⑥ 伪造哈希：prompt 带一个未经 ingest 的 blobSha 会被拒绝 —— 客户端无法绕过 ② 的校验
   ⑦ CSP：两个 webview 的 img-src 均为 ${webview.cspSource} blob:，chat 侧已去掉 data:
+  ⑧ transcript 本地图：只接受 workspace/tmp 内的普通文件路径；http/https/data/blob 一律降级
 ```
 
 **刻意没有的东西：**
@@ -249,13 +258,15 @@
     src/shared/composerDraft.ts          草稿存储：防抖、原子写、损坏隔离、session id 断言
     src/shared/attachmentIngest.ts       ingest 客户端（全链路唯一发送字节的地方）
     src/shared/attachmentUris.ts         blobSha → asWebviewUri，含 localResourceRoots 计算
-    src/shared/imageAttachmentProtocol.ts 候选图片校验与共享类型
-    src/ui/webview/provider.ts           chat webview 宿主：草稿生命周期、附件视图模型
+    src/shared/attachmentProtocol.ts     附件候选校验与共享类型（图片/PDF）
+    src/ui/webview/provider.ts           chat webview 宿主：草稿生命周期、附件视图模型、mediaRoots 授权
     src/ui/imagePreview/ImagePreviewPanel.ts 预览面板宿主：单实例复用、另存为
 
   webview
     gui/src/attachments/imagePipeline.ts 缩略图降采样、SVG 栅格化、降级链
     gui/src/components/AttachmentStrip.tsx 附件条（只用 thumbUri，懒加载，失效态）
+    gui/src/components/markdown/localImages.ts transcript 本地图片路径解析与 DOM 改写
+    gui/src/components/ImageLightbox.tsx transcript 轻量放大图
     gui/src/imagePreview/PreviewPanel.tsx 预览（大图只加载当前 ±1 张，filmstrip 用 thumbUri）
 ```
 

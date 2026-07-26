@@ -20,7 +20,10 @@ export function MarkdownBody({
   sourceLineMap?: number[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const html = useMemo(() => buildDecoratedHtml(markdown, sourceLineMap), [markdown, sourceLineMap]);
+  const html = useMemo(
+    () => buildDecoratedHtml(markdown, { sourceLineMap }),
+    [markdown, sourceLineMap],
+  );
 
   useEffect(() => {
     const container = containerRef.current;

@@ -3,6 +3,7 @@ import { memo, useEffect, useMemo, useRef, type MouseEvent } from "react";
 import { buildDecoratedHtml, flashCopyButton } from "./markdownDecorators";
 import { renderMermaidBlocks, splitTopLevelBlocks } from "./markdownRuntime";
 import { logRichRender } from "./richRenderRuntime";
+import type { WebviewMediaRoot } from "../../types";
 
 function closeOpenFenceIfNeeded(markdown: string): string {
   const lines = markdown.split("\n");
@@ -26,9 +27,18 @@ function closeOpenFenceIfNeeded(markdown: string): string {
   return `${markdown}\n${fenceStack.map((char) => char.repeat(3)).join("\n")}`;
 }
 
-const ChatMarkdownBlock = memo(function ChatMarkdownBlock({ raw }: { raw: string }) {
+const ChatMarkdownBlock = memo(function ChatMarkdownBlock({
+  mediaRoots,
+  raw,
+}: {
+  mediaRoots?: WebviewMediaRoot[];
+  raw: string;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const html = useMemo(() => buildDecoratedHtml(closeOpenFenceIfNeeded(raw)), [raw]);
+  const html = useMemo(
+    () => buildDecoratedHtml(closeOpenFenceIfNeeded(raw), { mediaRoots }),
+    [mediaRoots, raw],
+  );
 
   useEffect(() => {
     const container = containerRef.current;
@@ -60,12 +70,16 @@ const ChatMarkdownBlock = memo(function ChatMarkdownBlock({ raw }: { raw: string
 
 function ChatMarkdownComponent({
   markdown,
+  mediaRoots,
   onOpenFile,
   onOpenLink,
+  onZoomImage,
 }: {
   markdown: string;
+  mediaRoots?: WebviewMediaRoot[];
   onOpenFile(path: string, line?: number): void;
   onOpenLink?(href: string): void;
+  onZoomImage?(image: { alt: string; src: string }): void;
 }) {
   const blocks = useMemo(() => splitTopLevelBlocks(markdown), [markdown]);
 
@@ -95,6 +109,21 @@ function ChatMarkdownComponent({
       return;
     }
 
+    const imageTarget = target?.closest<HTMLElement>("[data-tc-image-src]");
+    if (imageTarget) {
+      event.preventDefault();
+      event.stopPropagation();
+      const image = imageTarget as HTMLImageElement;
+      const src = image.dataset.tcImageSrc ?? image.getAttribute("src") ?? "";
+      if (src) {
+        onZoomImage?.({
+          alt: image.getAttribute("alt") ?? "",
+          src,
+        });
+      }
+      return;
+    }
+
     const anchor = target?.closest<HTMLAnchorElement>("a");
     if (!anchor) {
       return;
@@ -113,7 +142,9 @@ function ChatMarkdownComponent({
       data-testid="chat-markdown"
       onClick={handleClick}
     >
-      {blocks.map((raw, index) => <ChatMarkdownBlock key={index} raw={raw} />)}
+      {blocks.map((raw, index) => (
+        <ChatMarkdownBlock key={index} mediaRoots={mediaRoots} raw={raw} />
+      ))}
     </div>
   );
 }

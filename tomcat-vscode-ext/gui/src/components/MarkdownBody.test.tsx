@@ -125,8 +125,8 @@ describe("MarkdownBody", () => {
     );
     const body = screen.getByTestId("plan-markdown-body");
     expect(body.querySelector("script")).toBeNull();
-    const img = body.querySelector("img");
-    expect(img?.getAttribute("onerror")).toBeNull();
+    expect(body.querySelector("img")).toBeNull();
+    expect(body.querySelector(".tc-blocked-image")?.getAttribute("onerror")).toBeNull();
     expect((window as unknown as { __pwned?: boolean }).__pwned).toBeUndefined();
   });
 

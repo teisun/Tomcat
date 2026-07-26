@@ -3,6 +3,7 @@ import { Fragment, type RefObject, useMemo } from "react";
 import type {
   AskQuestionResult,
   WebviewCheckpoint,
+  WebviewMediaRoot,
   WebviewPlanState,
   WebviewTimelineItem,
   WebviewTodo,
@@ -120,11 +121,13 @@ export function TranscriptView({
   onRestoreCheckpoint,
   onRetryUserMessage,
   onSetBuildModel,
+  onZoomImage,
   planId,
   planState,
   planTodos = [],
   sessionTodos = [],
   timeline,
+  mediaRoots,
   transcriptRef,
 }: {
   availableModels?: string[];
@@ -142,11 +145,13 @@ export function TranscriptView({
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
   onSetBuildModel?(modelId: string): void;
+  onZoomImage?(image: { alt: string; src: string }): void;
   planId?: string | null;
   planState?: WebviewPlanState | null;
   planTodos?: WebviewTodo[];
   sessionTodos?: WebviewTodo[];
   timeline: WebviewTimelineItem[];
+  mediaRoots?: WebviewMediaRoot[];
   transcriptRef?: RefObject<HTMLElement | null>;
 }) {
   const renderedTimeline = useMemo(
@@ -177,9 +182,11 @@ export function TranscriptView({
             <MessageBubble
               item={item}
               key={item.id}
+              mediaRoots={mediaRoots}
               onOpenFile={onOpenFile}
               onOpenImagePreview={onOpenImagePreview}
               onRetry={onRetryUserMessage}
+              onZoomImage={onZoomImage}
             />
           );
         case "checkpoint":
@@ -246,9 +253,11 @@ export function TranscriptView({
               <MessageBubble
                 item={group.preamble}
                 key={`${group.preamble.id}-preamble`}
+                mediaRoots={mediaRoots}
                 onOpenFile={onOpenFile}
                 onOpenImagePreview={onOpenImagePreview}
                 onRetry={onRetryUserMessage}
+                onZoomImage={onZoomImage}
               />
             ) : null}
             {segments.map((segment, index) => {
@@ -305,8 +314,10 @@ export function TranscriptView({
                   isLive={isActiveTailContextGroup}
                   isStreaming={isStreaming}
                   key={`group-context-${group.assistantMessageId}-${index}`}
+                  mediaRoots={mediaRoots}
                   onOpenDiff={onOpenDiff}
                   onOpenFile={onOpenFile}
+                  onZoomImage={onZoomImage}
                 />
               );
             })}

@@ -78,10 +78,16 @@ fn output_conventions_template_mentions_clickable_paths_and_forbidden_uris() {
     let s = load(PromptKey::SystemOutputConventions);
     assert!(s.contains("inline code"));
     assert!(s.contains("clickable file link"));
+    assert!(s.contains("![mockup](docs/mockup.png)"));
+    assert!(s.contains("use `![alt](path)` only"));
     assert!(s.contains("src/app.ts:42"));
     assert!(s.contains("workspace-relative path"));
     assert!(s.contains("Button.tsx"));
     assert!(s.contains("ChatMarkdown.tsx:172"));
+    assert!(s.contains("http:"));
+    assert!(s.contains("https:"));
+    assert!(s.contains("data:"));
+    assert!(s.contains("blob:"));
     assert!(s.contains("file://"));
     assert!(s.contains("vscode://"));
     assert!(s.contains("【F:path†L1-L2】"));

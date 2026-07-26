@@ -62,6 +62,22 @@ function snapshotFor(attachmentCount: number): string {
   return JSON.stringify(store.snapshot());
 }
 
+function snapshotWithMediaRoots(attachmentCount: number): string {
+  return JSON.stringify({
+    ...JSON.parse(snapshotFor(attachmentCount)),
+    mediaRoots: [
+      {
+        fsPath: "/workspace",
+        webviewBase: "https://webview.test/workspace",
+      },
+      {
+        fsPath: os.tmpdir(),
+        webviewBase: "https://webview.test/tmp",
+      },
+    ],
+  });
+}
+
 describe("snapshot memory contract", () => {
   it("costs a bounded, tiny amount per attachment regardless of image size", () => {
     const withNone = snapshotFor(0).length;
@@ -86,6 +102,13 @@ describe("snapshot memory contract", () => {
     expect(snapshot).not.toContain("dataBase64");
     expect(snapshot).not.toContain("data:image");
     expect(snapshot).not.toContain("base64");
+  });
+
+  it("serializes mediaRoots once per snapshot, not once per attachment", () => {
+    const rootsOnlyOverhead = snapshotWithMediaRoots(0).length - snapshotFor(0).length;
+    const rootsWithElevenImages = snapshotWithMediaRoots(11).length - snapshotFor(11).length;
+
+    expect(rootsWithElevenImages).toBe(rootsOnlyOverhead);
   });
 
   it("describes attachments purely by reference", () => {
@@ -230,7 +253,32 @@ describe("history images rebuilt from a transcript", () => {
     const message = store
       .snapshot()
       .sessionViews.s1?.timeline.find((item) => item.type === "message");
-    return message?.type === "message" ? message.imageAttachments?.[0] : undefined;
+    return message?.type === "message" ? message.attachments?.[0] : undefined;
+  }
+
+  function historyWithPdf(blobSha: string) {
+    return {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: [
+              { text: "read this", type: "text" },
+              {
+                blobSha,
+                bytes: 4096,
+                filename: "brief.pdf",
+                mime_type: "application/pdf",
+                type: "input_file",
+              },
+            ],
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    };
   }
 
   // A transcript names images by hash and nothing else, so every session switch and every
@@ -280,6 +328,29 @@ describe("history images rebuilt from a transcript", () => {
     // Without this the bubble shows an empty square forever: the hash is still in the
     // transcript, but the blob behind it was collected.
     expect(historyImageIn(store)).toMatchObject({ unavailable: true });
+  });
+
+  it("keeps history PDFs reference-only, with no base64 sneaking back in", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.setAttachmentUriResolver((attachment) => ({
+      fullUri: `https://webview.test/blobs/${attachment.blobSha}`,
+      thumbUri: null,
+    }));
+    store.hydrateHistory("s1", historyWithPdf(sha(8)));
+
+    const message = store
+      .snapshot()
+      .sessionViews.s1?.timeline.find((item) => item.type === "message");
+    const attachment = message?.type === "message" ? message.attachments?.[0] : undefined;
+
+    expect(attachment).toMatchObject({
+      blobSha: sha(8),
+      fullUri: `https://webview.test/blobs/${sha(8)}`,
+      kind: "file",
+      mimeType: "application/pdf",
+    });
+    expect(JSON.stringify(message)).not.toContain("dataBase64");
   });
 });
 
@@ -344,6 +415,16 @@ describe("chat webview security headers", () => {
   });
 
   it("grants the attachment directories to the webview, and only once known", () => {
+    const workspace = vscode.workspace as typeof vscode.workspace & {
+      workspaceFolders: vscode.WorkspaceFolder[];
+    };
+    workspace.workspaceFolders = [
+      {
+        index: 0,
+        name: "workspace",
+        uri: vscode.Uri.file("/workspace"),
+      },
+    ];
     const withoutRoot = (
       providerWithRoot(null) as unknown as { resourceRoots(): vscode.Uri[] }
     ).resourceRoots();
@@ -353,10 +434,17 @@ describe("chat webview security headers", () => {
       }
     ).resourceRoots();
 
-    expect(withoutRoot.map((uri) => uri.path)).toEqual(["/ext/gui/dist", "/ext/media"]);
+    expect(withoutRoot.map((uri) => uri.path)).toEqual([
+      "/ext/gui/dist",
+      "/ext/media",
+      "/workspace",
+      vscode.Uri.file(os.tmpdir()).path,
+    ]);
     expect(withRoot.map((uri) => uri.path)).toEqual([
       "/ext/gui/dist",
       "/ext/media",
+      "/workspace",
+      vscode.Uri.file(os.tmpdir()).path,
       `${ATTACHMENT_ROOT}/blobs`,
       `${ATTACHMENT_ROOT}/thumbs`,
     ]);

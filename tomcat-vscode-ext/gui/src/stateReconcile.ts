@@ -191,12 +191,14 @@ export function reconcileStateSnapshot(
     previous.availableModelReasoningLevels,
     next.availableModelReasoningLevels,
   );
+  const mediaRoots = reconcileValue(previous.mediaRoots, next.mediaRoots);
   if (
     previous.activeSessionId === next.activeSessionId &&
     previous.availableModels === availableModels &&
     previous.availableModelCapabilities === availableModelCapabilities &&
     previous.availableModelReasoningLevels === availableModelReasoningLevels &&
     previous.buildModel === next.buildModel &&
+    previous.mediaRoots === mediaRoots &&
     previous.modelAdminSupported === next.modelAdminSupported &&
     previous.ready === next.ready &&
     previous.sessions === sessions &&
@@ -209,6 +211,7 @@ export function reconcileStateSnapshot(
     availableModelCapabilities,
     availableModelReasoningLevels,
     availableModels,
+    mediaRoots,
     sessions,
     sessionViews,
   };
