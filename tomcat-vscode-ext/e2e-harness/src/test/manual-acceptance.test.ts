@@ -3,6 +3,8 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+import * as vscode from "vscode";
+
 const repoRoot = path.resolve(__dirname, "../../../");
 const hostE2e = require(path.resolve(
   repoRoot,
@@ -12,6 +14,9 @@ const hostE2e = require(path.resolve(
 };
 
 type DomSnapshot = Awaited<ReturnType<TomcatApi["__testing"]["captureWebviewDom"]>>;
+type PreviewDomSnapshot = Awaited<
+  ReturnType<TomcatApi["__testing"]["captureImagePreviewDom"]>
+>;
 type WebviewState = ReturnType<TomcatApi["__testing"]["getWebviewState"]>;
 
 type TomcatApi = {
@@ -23,11 +28,16 @@ type TomcatApi = {
       composerRowCount: number;
       expandedThinkingCount: number;
       expandedToolTitles: string[];
+      historyAttachmentThumbCount: number;
       html: string;
       jumpToLatestVisible: boolean;
       latestUserTopWithinStream: number | null;
       messageTexts: string[];
       overflowAnchor: string | null;
+      pendingAttachmentStripClientWidth: number;
+      pendingAttachmentStripOverflowing: boolean;
+      pendingAttachmentStripScrollWidth: number;
+      pendingAttachmentThumbCount: number;
       sessionTabs: string[];
       sessionGroupHeaders: string[];
       sessionMoreButtons: string[];
@@ -62,7 +72,21 @@ type TomcatApi = {
         }
       >;
     };
+    captureImagePreviewDom(): Promise<{
+      activeId: string | null;
+      activeThumbIndex: number;
+      position: number;
+      stageClientWidth: number;
+      stageScrollWidth: number;
+      thumbCount: number;
+      total: number;
+      zoom: "fit" | number;
+    }>;
     clearObservedEvents(): void;
+    dispatchImagePreviewDomAction(action: {
+      kind: "fit" | "next" | "previous" | "zoomIn" | "zoomOut";
+    }): Promise<void>;
+    executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     focusWebview(): Promise<void>;
     restartServe(): Promise<void>;
     sendWebviewDomAction(action: {
@@ -112,15 +136,94 @@ async function waitForDom<T>(
   timeoutMs = 15_000,
 ): Promise<T> {
   const startedAt = Date.now();
+  let lastSnapshot: DomSnapshot | undefined;
   while (Date.now() - startedAt < timeoutMs) {
     const snapshot = await api.__testing.captureWebviewDom();
+    lastSnapshot = snapshot;
     const result = predicate(snapshot);
     if (result !== undefined) {
       return result;
     }
     await pause(100);
   }
-  throw new Error("Timed out waiting for webview DOM to match the expected condition");
+  throw new Error(
+    `Timed out waiting for webview DOM. Last snapshot: ${JSON.stringify({
+      activeSessionId: lastSnapshot?.activeSessionId,
+      historyAttachmentThumbCount: lastSnapshot?.historyAttachmentThumbCount,
+      messageTexts: lastSnapshot?.messageTexts.slice(-5),
+      pendingAttachmentThumbCount: lastSnapshot?.pendingAttachmentThumbCount,
+      timelineKinds: lastSnapshot?.timelineKinds.slice(-10),
+      toolTitles: lastSnapshot?.toolTitles.slice(-5),
+    })}`,
+  );
+}
+
+async function waitForPreviewDom<T>(
+  api: TomcatApi,
+  predicate: (snapshot: PreviewDomSnapshot) => T | undefined,
+  timeoutMs = 15_000,
+): Promise<T> {
+  const startedAt = Date.now();
+  let lastError: unknown;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const snapshot = await api.__testing.captureImagePreviewDom();
+      const result = predicate(snapshot);
+      if (result !== undefined) {
+        return result;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await pause(100);
+  }
+  throw new Error(
+    `Timed out waiting for image preview DOM: ${String(
+      lastError instanceof Error ? lastError.message : lastError ?? "no snapshot",
+    )}`,
+  );
+}
+
+function createAcceptanceImage(index: number): {
+  dataBase64: string;
+  filename: string;
+  mimeType: "image/svg+xml";
+} {
+  const hue = (index * 37) % 360;
+  const accent = (hue + 155) % 360;
+  const number = String(index).padStart(2, "0");
+  const svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300">',
+    `<rect width="480" height="300" rx="28" fill="hsl(${hue} 72% 42%)"/>`,
+    `<circle cx="382" cy="82" r="58" fill="hsl(${accent} 88% 64%)" opacity="0.9"/>`,
+    '<path d="M0 252 L128 126 L230 224 L306 142 L480 300 L0 300 Z" fill="rgba(255,255,255,.2)"/>',
+    `<text x="32" y="72" fill="white" font-family="system-ui,sans-serif" font-size="28" font-weight="700">TOMCAT IMAGE</text>`,
+    `<text x="32" y="210" fill="white" font-family="system-ui,sans-serif" font-size="104" font-weight="800">${number}</text>`,
+    '</svg>',
+  ].join("");
+  return {
+    dataBase64: Buffer.from(svg, "utf8").toString("base64"),
+    filename: `acceptance-image-${number}.svg`,
+    mimeType: "image/svg+xml",
+  };
+}
+
+async function setColorTheme(
+  themeName: string,
+  expectedKind: vscode.ColorThemeKind,
+): Promise<boolean> {
+  await vscode.workspace
+    .getConfiguration("workbench")
+    .update("colorTheme", themeName, vscode.ConfigurationTarget.Global);
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    if (vscode.window.activeColorTheme.kind === expectedKind) {
+      await pause(300);
+      return true;
+    }
+    await pause(100);
+  }
+  return false;
 }
 
 async function waitForWebviewState<T>(
@@ -175,10 +278,17 @@ suite("Tomcat manual acceptance", () => {
     const screenshots: string[] = [];
     const limitations: string[] = [];
     const reportPath = requireEnv("TOMCAT_ACCEPT_REPORT_PATH");
+    const originalColorTheme = vscode.workspace
+      .getConfiguration("workbench")
+      .get<string>("colorTheme");
     const api = await hostE2e.getTomcatExtensionApi();
 
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady(20_000);
+    console.log(
+      "Manual acceptance initial state:",
+      JSON.stringify(api.__testing.getWebviewState()),
+    );
 
     const hydrated = await waitForDom(
       api,
@@ -521,6 +631,146 @@ suite("Tomcat manual acceptance", () => {
       sessionList.sessionTabs.every((label) => !/^\d+_[0-9a-f]+$/.test(label.trim())) &&
       sessionList.sessionGroupHeaders.some((header) => /Today|Yesterday|Last 7 days|Last 30 days|Older/i.test(header));
 
+    // Image attachment acceptance: draft strip, 11-image overflow, standalone
+    // preview, transcript hydration, restart recovery, and theme variants.
+    await sendDomAction(api, {
+      index: -1,
+      kind: "clickTestId",
+      testId: "session-select",
+    });
+    const imageSessionId = api.__testing.getWebviewState().activeSessionId;
+    assert.ok(imageSessionId, "expected an active session for image acceptance");
+    const acceptanceImages = Array.from({ length: 11 }, (_, index) =>
+      createAcceptanceImage(index + 1),
+    );
+
+    await api.__testing.sendWebviewIntent({
+      data: {
+        images: [acceptanceImages[0]],
+        sessionId: imageSessionId,
+      },
+      messageId: "manual-acceptance-attach-single-image",
+      type: "attachImages",
+    });
+    const singleImageDraft = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.pendingAttachmentThumbCount === 1 ? snapshot : undefined,
+      10_000,
+    );
+    screenshots.push(await captureScreenshot("17-image-composer-single.png"));
+
+    await api.__testing.sendWebviewIntent({
+      data: {
+        images: acceptanceImages.slice(1),
+        sessionId: imageSessionId,
+      },
+      messageId: "manual-acceptance-attach-ten-images",
+      type: "attachImages",
+    });
+    await sendDomAction(api, {
+      kind: "setRootWidth",
+      widthPx: 320,
+    });
+    const narrowImageDraft = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.pendingAttachmentThumbCount === 11 &&
+        snapshot.pendingAttachmentStripOverflowing
+          ? snapshot
+          : undefined,
+      10_000,
+    );
+    screenshots.push(await captureScreenshot("18-image-composer-11-narrow.png"));
+
+    await sendDomAction(api, {
+      index: 1,
+      kind: "clickTestId",
+      testId: "attachment-thumb",
+    });
+    const previewSecond = await waitForPreviewDom(
+      api,
+      (snapshot) =>
+        snapshot.position === 2 &&
+        snapshot.total === 11 &&
+        snapshot.thumbCount === 11
+          ? snapshot
+          : undefined,
+      15_000,
+    );
+    screenshots.push(await captureScreenshot("19-image-preview-02-of-11.png"));
+
+    await api.__testing.dispatchImagePreviewDomAction({ kind: "zoomIn" });
+    const previewZoomed = await waitForPreviewDom(
+      api,
+      (snapshot) =>
+        typeof snapshot.zoom === "number" && snapshot.zoom > 1
+          ? snapshot
+          : undefined,
+      5_000,
+    );
+    screenshots.push(await captureScreenshot("20-image-preview-zoomed.png"));
+
+    await api.__testing.executeCommand("workbench.action.closeActiveEditor");
+    await api.__testing.focusWebview();
+    await sendDomAction(api, {
+      kind: "setRootWidth",
+      widthPx: null,
+    });
+    api.__testing.clearObservedEvents();
+    await api.__testing.sendWebviewIntent({
+      data: {
+        sessionId: imageSessionId,
+        text: "Image acceptance history message",
+      },
+      messageId: "manual-acceptance-image-prompt",
+      type: "prompt",
+    });
+    await api.__testing.waitForEvent({
+      timeoutMs: 20_000,
+      type: "agent_end",
+    });
+    const historyImages = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.historyAttachmentThumbCount >= 11 ? snapshot : undefined,
+      15_000,
+    );
+    screenshots.push(await captureScreenshot("21-image-history-sent.png"));
+
+    await api.__testing.restartServe();
+    await api.__testing.waitForWebviewReady(20_000);
+    await api.__testing.focusWebview();
+    const restartHistoryImages = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.historyAttachmentThumbCount >= 11 ? snapshot : undefined,
+      20_000,
+    );
+    screenshots.push(await captureScreenshot("22-image-history-after-restart.png"));
+
+    const lightThemePassed = await setColorTheme(
+      "Default Light Modern",
+      vscode.ColorThemeKind.Light,
+    );
+    await api.__testing.focusWebview();
+    screenshots.push(await captureScreenshot("23-image-history-light-theme.png"));
+
+    const highContrastThemePassed = await setColorTheme(
+      "Default High Contrast",
+      vscode.ColorThemeKind.HighContrast,
+    );
+    await api.__testing.focusWebview();
+    screenshots.push(await captureScreenshot("24-image-history-high-contrast.png"));
+
+    await vscode.workspace
+      .getConfiguration("workbench")
+      .update(
+        "colorTheme",
+        originalColorTheme,
+        vscode.ConfigurationTarget.Global,
+      );
+
     const toolScrollMetric = toolExpanded.toolBodyMetrics.find((entry) =>
       /search_workspace/i.test(entry.title),
     );
@@ -539,6 +789,24 @@ suite("Tomcat manual acceptance", () => {
         },
         composer: {
           passed: true,
+        },
+        imageAttachments: {
+          passed:
+            singleImageDraft.pendingAttachmentThumbCount === 1 &&
+            narrowImageDraft.pendingAttachmentThumbCount === 11 &&
+            narrowImageDraft.pendingAttachmentStripOverflowing &&
+            narrowImageDraft.pendingAttachmentStripScrollWidth >
+              narrowImageDraft.pendingAttachmentStripClientWidth &&
+            previewSecond.position === 2 &&
+            previewSecond.total === 11 &&
+            previewSecond.activeThumbIndex === 1 &&
+            typeof previewZoomed.zoom === "number" &&
+            previewZoomed.zoom > 1 &&
+            historyImages.historyAttachmentThumbCount >= 11 &&
+            restartHistoryImages.historyAttachmentThumbCount >= 11,
+        },
+        imageThemes: {
+          passed: lightThemePassed && highContrastThemePassed,
         },
         hydration: {
           passed:

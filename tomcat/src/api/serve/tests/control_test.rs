@@ -125,6 +125,8 @@ async fn serve_initialize_control_request_sets_ready_state() {
         "new_session",
         "switch_session",
         "get_messages",
+        "ingest_attachment",
+        "cache_attachment_thumbnail",
         "close_session",
         "list_sessions",
         "interrupt",

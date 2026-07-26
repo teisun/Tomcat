@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -32,6 +33,18 @@ const ERROR_TEXT = [
 
 const STATE_DIR = process.env.TOMCAT_FAKE_SERVE_STATE_DIR || os.tmpdir();
 const STATE_PATH = path.join(STATE_DIR, "manual-acceptance-fake-serve-state.json");
+
+/**
+ * Content-addressed attachment store, mirroring the real backend's layout.
+ *
+ * The acceptance harness runs against a real VS Code webview, so these files have to
+ * genuinely exist on disk: images reach the webview through `asWebviewUri`, which
+ * fetches the file rather than receiving bytes over the message channel. A fake that
+ * only echoed hashes back would render nothing but broken images.
+ */
+const ATTACHMENT_ROOT = path.join(STATE_DIR, "attachments");
+const BLOBS_DIR = path.join(ATTACHMENT_ROOT, "blobs");
+const THUMBS_DIR = path.join(ATTACHMENT_ROOT, "thumbs");
 
 const timers = new Set();
 const sessions = new Map();
@@ -475,6 +488,137 @@ function buildLiveAssistantPayload(promptText) {
   };
 }
 
+/** Write bytes under their own sha256 and return the hash. */
+function putBlob(bytes) {
+  const sha = crypto.createHash("sha256").update(bytes).digest("hex");
+  const target = path.join(BLOBS_DIR, sha);
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(BLOBS_DIR, { recursive: true });
+    fs.writeFileSync(target, bytes);
+  }
+  return sha;
+}
+
+/** Thumbnails are addressed by the hash of the image they came from, never their own. */
+function putThumbnail(sourceSha, bytes) {
+  fs.mkdirSync(THUMBS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(THUMBS_DIR, sourceSha), bytes);
+}
+
+function handleIngestAttachment(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const attachment = frame?.attachment ?? frame?.params?.attachment ?? {};
+  const dataBase64 = attachment.dataBase64;
+  if (typeof dataBase64 !== "string" || typeof attachment.mimeType !== "string") {
+    send({
+      error: "ingest_attachment requires dataBase64 and mimeType",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const bytes = Buffer.from(dataBase64, "base64");
+  const blobSha = putBlob(bytes);
+
+  let hasThumb = false;
+  if (typeof attachment.thumbBase64 === "string" && attachment.thumbBase64.length > 0) {
+    putThumbnail(blobSha, Buffer.from(attachment.thumbBase64, "base64"));
+    hasThumb = true;
+  }
+
+  let providerSha = null;
+  if (typeof attachment.providerBase64 === "string" && attachment.providerBase64.length > 0) {
+    providerSha = putBlob(Buffer.from(attachment.providerBase64, "base64"));
+  }
+
+  send({
+    id: frame.id,
+    payload: {
+      blobSha,
+      bytes: bytes.length,
+      filename:
+        typeof attachment.filename === "string" && attachment.filename.length > 0
+          ? attachment.filename
+          : "pasted-image.png",
+      hasThumb,
+      mimeType: attachment.mimeType,
+      providerSha,
+    },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
+function handleCacheAttachmentThumbnail(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const input = frame?.thumbnail ?? frame?.params?.thumbnail ?? frame ?? {};
+  const sourceSha = input.blobSha ?? input.sourceSha;
+  const thumbBase64 = input.thumbBase64;
+  const ok =
+    typeof sourceSha === "string" &&
+    /^[0-9a-f]{64}$/.test(sourceSha) &&
+    typeof thumbBase64 === "string" &&
+    thumbBase64.length > 0;
+  if (ok) {
+    putThumbnail(sourceSha, Buffer.from(thumbBase64, "base64"));
+  }
+  send({
+    id: frame.id,
+    payload: { cached: ok },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
+/**
+ * Turn the reference-only attachments on a prompt into transcript image parts.
+ *
+ * The wire carries hashes, so the transcript records hashes too — the bytes are
+ * already on disk from `ingest_attachment` and are never copied again.
+ */
+function buildPromptHistoryContent(frame, promptText) {
+  const attachments = Array.isArray(frame?.params?.attachments)
+    ? frame.params.attachments
+    : [];
+  const imageParts = attachments.flatMap((attachment, index) => {
+    if (attachment?.kind !== "image" || typeof attachment.blobSha !== "string") {
+      return [];
+    }
+    const blobPath = path.join(BLOBS_DIR, attachment.blobSha);
+    let bytes = 0;
+    try {
+      bytes = fs.statSync(blobPath).size;
+    } catch {
+      // A hash with no bytes behind it is exactly the "unavailable attachment"
+      // degradation path, so record it and let the UI show that state.
+    }
+    return [{
+      blobSha: attachment.blobSha,
+      bytes,
+      filename:
+        typeof attachment.filename === "string"
+          ? attachment.filename
+          : `attached-image-${index + 1}.png`,
+      hasThumb: fs.existsSync(path.join(THUMBS_DIR, attachment.blobSha)),
+      mime_type:
+        typeof attachment.mimeType === "string" ? attachment.mimeType : "image/png",
+      type: "input_image",
+    }];
+  });
+  if (imageParts.length === 0) {
+    return promptText;
+  }
+  return [
+    ...(promptText ? [{ text: promptText, type: "input_text" }] : []),
+    ...imageParts,
+  ];
+}
+
 function handlePrompt(frame) {
   const sessionId = frame.sessionId || activeSessionId || createSession();
   const session = touchSession(ensureSession(sessionId));
@@ -504,7 +648,7 @@ function handlePrompt(frame) {
   startTurn(sessionId);
 
   recordHistoryEntry(session, {
-    content: promptText,
+    content: buildPromptHistoryContent(frame, promptText),
     role: "user",
   });
 
@@ -652,6 +796,9 @@ function handleCommand(frame) {
         const sessionId = activeSessionId || createSession();
         send({
           payload: {
+            // Handed over at handshake time, like the real backend: the host needs it
+            // before the first render or granting it later reloads the webview.
+            attachmentRoot: ATTACHMENT_ROOT,
             capabilities: [
               "ask_question",
               "prompt",
@@ -665,6 +812,8 @@ function handleCommand(frame) {
               "list_models",
               "set_model",
               "set_thinking_level",
+              "ingest_attachment",
+              "cache_attachment_thumbnail",
             ],
             protocolVersion: 1,
             sessionId,
@@ -723,6 +872,12 @@ function handleCommand(frame) {
         success: true,
         type: "response",
       });
+      return;
+    case "ingest_attachment":
+      handleIngestAttachment(frame);
+      return;
+    case "cache_attachment_thumbnail":
+      handleCacheAttachmentThumbnail(frame);
       return;
     case "get_state": {
       const sessionId = frame.sessionId || activeSessionId || createSession();

@@ -17,6 +17,7 @@ pub(crate) use super::writer::*;
 pub(crate) use super::*;
 
 mod ask_question_test;
+mod attachment_test;
 mod commands_test;
 mod control_test;
 mod event_pump_test;

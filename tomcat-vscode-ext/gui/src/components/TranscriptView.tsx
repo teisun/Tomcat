@@ -115,6 +115,7 @@ export function TranscriptView({
   onBuildPlan,
   onOpenDiff,
   onOpenFile,
+  onOpenImagePreview,
   onOpenPlanFile,
   onRestoreCheckpoint,
   onRetryUserMessage,
@@ -136,6 +137,7 @@ export function TranscriptView({
   onBuildPlan(planId: string | null, path: string): void;
   onOpenDiff?(toolCallId: string): void;
   onOpenFile(path: string, line?: number): void;
+  onOpenImagePreview?(imageId: string): void;
   onOpenPlanFile(path: string): void;
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
@@ -176,6 +178,7 @@ export function TranscriptView({
               item={item}
               key={item.id}
               onOpenFile={onOpenFile}
+              onOpenImagePreview={onOpenImagePreview}
               onRetry={onRetryUserMessage}
             />
           );
@@ -244,6 +247,7 @@ export function TranscriptView({
                 item={group.preamble}
                 key={`${group.preamble.id}-preamble`}
                 onOpenFile={onOpenFile}
+                onOpenImagePreview={onOpenImagePreview}
                 onRetry={onRetryUserMessage}
               />
             ) : null}

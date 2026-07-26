@@ -1,8 +1,35 @@
-import { act, createEvent, fireEvent, render, screen } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createRef } from "react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
+
+/**
+ * jsdom omits `Blob.arrayBuffer`, which the paste path uses to get at the bytes.
+ * Chromium — the only engine this code actually runs in — has had it since 2019.
+ */
+function pastedFile(bytes: number[], name: string, type: string): File {
+  const file = new File([new Uint8Array(bytes)], name, { type });
+  if (typeof file.arrayBuffer !== "function") {
+    Object.defineProperty(file, "arrayBuffer", {
+      value: async () => new Uint8Array(bytes).buffer,
+    });
+  }
+  return file;
+}
+
+// jsdom has no image decoder, so the real pipeline can only ever report "no thumbnail"
+// here. Stub it: these tests are about the paste plumbing, and the pixel work is covered
+// against real bytes in imagePipeline.test.ts.
+vi.mock("../attachments/imagePipeline", () => ({
+  prepareAttachment: vi.fn(async (raw: { filename: string | null; mimeType: string }) => ({
+    dataBase64: "c3R1Yg==",
+    filename: raw.filename,
+    mimeType: raw.mimeType,
+    thumbBase64: "dGh1bWI=",
+    warnings: [],
+  })),
+}));
 
 function renderComposer({
   availableModels = ["gpt-5.4"],
@@ -16,6 +43,7 @@ function renderComposer({
   modelCapabilities = ["vision", "files"],
   modelValue = "gpt-5.4",
   modeValue = "plan",
+  onAttachImages = vi.fn(),
   onContextSearchClose = vi.fn(),
   onContextSearchOpen = vi.fn(),
   onContextSearchQueryChange = vi.fn(),
@@ -54,6 +82,11 @@ function renderComposer({
   modelCapabilities?: string[];
   modelValue?: string;
   modeValue?: "chat" | "plan";
+  onAttachImages?: (images: Array<{
+    dataBase64: string;
+    filename?: string | null;
+    mimeType: string;
+  }>) => void;
   onContextSearchClose?: () => void;
   onContextSearchOpen?: () => void;
   onContextSearchQueryChange?: (query: string) => void;
@@ -87,6 +120,7 @@ function renderComposer({
       modelValue={modelValue}
       supportedReasoningLevels={supportedReasoningLevels}
       thinkingLevelValue={thinkingLevelValue}
+      onAttachImages={onAttachImages}
       onContextSearchClose={onContextSearchClose}
       onContextSearchOpen={onContextSearchOpen}
       onContextSearchQueryChange={onContextSearchQueryChange}
@@ -105,6 +139,7 @@ function renderComposer({
   );
   return {
     ...renderResult,
+    onAttachImages,
     onDraftChange,
     onModeChange,
     onResolveDrop,
@@ -746,6 +781,52 @@ describe("Composer", () => {
       ],
       text: "app.ts ",
     });
+  });
+
+  it("extracts multiple clipboard image Files without inserting placeholder text", async () => {
+    const onAttachImages = vi.fn();
+    renderComposer({ onAttachImages });
+    const textbox = screen.getByTestId("composer-input");
+    const files = [
+      pastedFile([1, 2, 3], "one.png", "image/png"),
+      pastedFile([4, 5], "two.webp", "image/webp"),
+    ];
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: () => "",
+        items: files.map((file) => ({
+          getAsFile: () => file,
+          kind: "file",
+          type: file.type,
+        })),
+      },
+    });
+    await waitFor(() => expect(onAttachImages).toHaveBeenCalledTimes(1));
+    expect(onAttachImages.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ filename: "one.png", mimeType: "image/png" }),
+      expect.objectContaining({ filename: "two.webp", mimeType: "image/webp" }),
+    ]);
+    expect(textbox.textContent).not.toContain("image attachment");
+  });
+
+  it("warns when pasted images are attached to a model without vision", async () => {
+    const onAttachImages = vi.fn();
+    renderComposer({ modelCapabilities: [], onAttachImages });
+    const file = pastedFile([1], "shot.png", "image/png");
+    fireEvent.paste(screen.getByTestId("composer-input"), {
+      clipboardData: {
+        getData: () => "",
+        items: [
+          {
+            getAsFile: () => file,
+            kind: "file",
+            type: file.type,
+          },
+        ],
+      },
+    });
+    expect(await screen.findByText(/未声明 vision 能力/)).toBeTruthy();
+    await waitFor(() => expect(onAttachImages).toHaveBeenCalledTimes(1));
   });
 
   it("clears drop highlighting on dragend", () => {

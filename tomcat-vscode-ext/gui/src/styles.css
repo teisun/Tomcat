@@ -84,6 +84,145 @@ input:focus-visible {
   gap: 8px;
 }
 
+/* AttachmentStrip: horizontal row of image thumbnails and file chips */
+.tc-attachment-strip {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 8px;
+  padding: 4px 0;
+  align-items: center;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--vscode-scrollbarSlider-background, #7f7f7f61) 82%, transparent) transparent;
+}
+.tc-attachment-strip::-webkit-scrollbar {
+  height: 6px;
+}
+.tc-attachment-strip::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--vscode-scrollbarSlider-background, #7f7f7f61) 82%, transparent);
+  background-clip: padding-box;
+  border: 1px solid transparent;
+  border-radius: 999px;
+}
+.tc-attachment-strip__item {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+.tc-attachment-strip__thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-panel-border, #7f7f7f4d);
+  overflow: hidden;
+  cursor: pointer;
+  padding: 0;
+  background: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tc-attachment-strip__thumb:hover,
+.tc-attachment-strip__thumb:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+.tc-attachment-strip__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/*
+ * Placeholder while a thumbnail is still being produced.
+ *
+ * Exactly the size of the thumbnail it stands in for, so eleven images landing one by
+ * one do not shift the composer under the user's cursor.
+ */
+.tc-attachment-strip__skeleton {
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-panel-border, #7f7f7f4d);
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  display: inline-block;
+  animation: tc-attachment-skeleton-pulse 1.4s ease-in-out infinite;
+}
+@keyframes tc-attachment-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tc-attachment-strip__skeleton {
+    animation: none;
+  }
+}
+.tc-attachment-strip__close {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-panel-border, #7f7f7f4d);
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.85;
+}
+.tc-attachment-strip__close:hover {
+  opacity: 1;
+  background: var(--vscode-inputValidation-errorBackground, #f14c4c1f);
+  border-color: var(--vscode-errorForeground, #f14c4c);
+}
+/* History image thumbnails inside user message bubbles */
+.tc-attachment-strip--history {
+  margin-top: 8px;
+}
+
+.tc-attachment-feedback {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 2px 4px;
+}
+
+.tc-attachment-feedback--error {
+  color: var(--vscode-errorForeground);
+}
+
+/*
+ * Present to assistive technology, absent from the layout.
+ *
+ * Used for outcomes a sighted user can already see — an attached image shows up in the
+ * strip, so a "1 attachment added" banner is noise on screen but the only signal a
+ * screen reader user gets. `clip-path` rather than `display: none`, which would remove
+ * the node from the accessibility tree along with the layout.
+ */
+.tc-visually-hidden {
+  border: 0;
+  clip-path: inset(50%);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
 .tc-card,
 .tc-banner,
 .tc-message,
@@ -1141,6 +1280,19 @@ input:focus-visible {
   background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.15));
   color: inherit;
   cursor: pointer;
+}
+
+/*
+ * The bytes behind this attachment are gone (see `AttachmentStrip`). Error-coloured
+ * border and text rather than a filled background, so it stays legible in high contrast
+ * where background tints are dropped but borders are not.
+ *
+ * Must come after `--attachment`, which sets `color: inherit` at the same specificity and
+ * would otherwise win and leave a failed attachment looking like a normal one.
+ */
+.tc-chip--unavailable {
+  border-color: var(--vscode-errorForeground, #f14c4c);
+  color: var(--vscode-errorForeground, #f14c4c);
 }
 
 .tc-chip--reference {

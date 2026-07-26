@@ -22,7 +22,12 @@ pub enum ServeAttachmentKind {
 }
 
 /// 多模态消息中的单个附件描述。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+///
+/// **这里只有引用，没有字节。** 字节在粘贴那一刻就已经通过 `ingest_attachment` 交给后端了，
+/// 发送时只说「用那份哈希对应的字节」。这让打字与发送两条路径的载荷都与图片大小无关。
+///
+/// `blob_sha` 与 `file_id` 二选一：前者是本机 ingest 过的字节，后者是已上传到 provider 的文件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServeAttachment {
     pub kind: ServeAttachmentKind,
@@ -30,8 +35,13 @@ pub struct ServeAttachment {
     pub filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    /// 已经过 `ingest_attachment` 校验并落盘的字节的 sha256。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_base64: Option<String>,
+    pub blob_sha: Option<String>,
+    /// 发给模型用的那份字节的 sha256。仅 SVG 会与 `blob_sha` 不同（webview 转出的 PNG）。
+    /// 省略则表示模型直接用 `blob_sha`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
 }
@@ -131,6 +141,19 @@ pub struct NewSessionParams {
     pub mode: Option<ServeSessionMode>,
 }
 
+/// 历史消息里的图片附件以什么形态回给调用方。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentMode {
+    /// 原样回 transcript 里的 base64。**默认值**，保证 CLI 与既有调用方行为不变。
+    #[default]
+    Inline,
+    /// 把字节物化进 `attachments/cache/` 并只回哈希引用。
+    ///
+    /// webview 走这一条：字节由 Chromium 通过资源 URI 自己去拉，完全不进 JS 内存。
+    Reference,
+}
+
 /// `get_messages` 的分页/裁剪参数。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +164,8 @@ pub struct GetMessagesParams {
     pub limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub attachment_mode: AttachmentMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -371,6 +396,89 @@ pub enum ServeCommand {
         #[serde(default, skip_serializing_if = "Value::is_null")]
         payload: Value,
     },
+    /// 把一份附件字节交给后端收好，换回内容哈希。
+    ///
+    /// **这是全协议唯一携带图片字节的命令。** 它在粘贴/拖入/选择文件时逐张调用一次，
+    /// 之后所有环节（打字、快照、发送、历史渲染）只传哈希。
+    /// `r-test-payload-contract` 用 schema 静态扫描守住这条不变量。
+    #[serde(rename_all = "camelCase")]
+    IngestAttachment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        attachment: IngestAttachmentInput,
+    },
+    /// 补交一张历史图的缩略图（见 [`CacheThumbnailInput`]）。
+    #[serde(rename_all = "camelCase")]
+    CacheAttachmentThumbnail {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        thumbnail: CacheThumbnailInput,
+    },
+}
+
+/// `ingest_attachment` 的入参。
+///
+/// 三份字节各有明确分工，都由 webview 侧的 Chromium 产出：
+/// - `data_base64`：原始字节，用于显示与（非 SVG 时）发给模型
+/// - `thumb_base64`：192px 缩略图，附件条与 filmstrip 只加载它
+/// - `provider_base64`：仅 SVG 需要 —— 模型的视觉接口不认 SVG，webview 用 canvas 转成 PNG
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestAttachmentInput {
+    pub kind: ServeAttachmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    pub mime_type: String,
+    pub data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_base64: Option<String>,
+    /// `provider_base64` 的 MIME（SVG 转出的 PNG 即 `image/png`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_mime_type: Option<String>,
+}
+
+/// `cache_attachment_thumbnail` 的入参。
+///
+/// 历史消息里的图片没有经过 `ingest_attachment`（它们的字节来自 transcript），
+/// 所以缩略图要在 webview 第一次渲染那个会话时补生成一次，然后由后端存下来复用。
+/// 之后再打开同一个会话就直接拿 192px 的缩略图，不必再解一遍原图。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheThumbnailInput {
+    /// 缩略图所派生自的那份字节的 sha256。
+    pub source_sha: String,
+    pub thumb_base64: String,
+}
+
+/// `ingest_attachment` 的响应。
+///
+/// 从这里开始，这份附件在系统里的身份就是这几个哈希，不再是字节。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestAttachmentResponse {
+    /// 原始字节的 sha256。
+    pub blob_sha: String,
+    /// 缩略图是否已就绪。
+    ///
+    /// 缩略图按**源字节的哈希**存在 `thumbs/<blob_sha>`，而不是按它自己的哈希存。
+    /// 理由：没有任何人会问「给我哈希是 Y 的那张缩略图」，大家问的都是
+    /// 「给我 blob X 的小图」。按自身哈希存会让它变成一份普通 blob —— 于是要占租约、
+    /// 要参与 GC，而它本质上只是可随时重建的派生数据。所以这里只回一个布尔值，
+    /// URI 也就固定是 `thumbs/<blobSha>`，历史图与新粘贴的图走同一套路径。
+    pub has_thumb: bool,
+    /// 发给模型用的那份字节的 sha256；仅 SVG 会与 `blob_sha` 不同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_sha: Option<String>,
+    /// 原始字节数（十进制），扩展层用它做草稿总量预算。
+    pub bytes: u64,
+    pub mime_type: String,
+    pub filename: String,
 }
 
 impl ServeCommand {
@@ -395,7 +503,9 @@ impl ServeCommand {
             | Self::GetMessages { id, .. }
             | Self::CloseSession { id, .. }
             | Self::ListSessions { id, .. }
-            | Self::Interrupt { id, .. } => id.as_deref(),
+            | Self::Interrupt { id, .. }
+            | Self::IngestAttachment { id, .. }
+            | Self::CacheAttachmentThumbnail { id, .. } => id.as_deref(),
             Self::ControlRequest { .. }
             | Self::ControlResponse { .. }
             | Self::ControlCancel { .. } => None,
@@ -416,6 +526,8 @@ impl ServeCommand {
             | Self::GetMessages { session_id, .. }
             | Self::CloseSession { session_id, .. }
             | Self::Interrupt { session_id, .. }
+            | Self::IngestAttachment { session_id, .. }
+            | Self::CacheAttachmentThumbnail { session_id, .. }
             | Self::ControlRequest { session_id, .. }
             | Self::ControlResponse { session_id, .. }
             | Self::ControlCancel { session_id, .. } => session_id.as_deref(),
@@ -468,6 +580,8 @@ impl ServeCommand {
             Self::CloseSession { .. } => "close_session",
             Self::ListSessions { .. } => "list_sessions",
             Self::Interrupt { .. } => "interrupt",
+            Self::IngestAttachment { .. } => "ingest_attachment",
+            Self::CacheAttachmentThumbnail { .. } => "cache_attachment_thumbnail",
             Self::ControlRequest { .. } => "control_request",
             Self::ControlResponse { .. } => "control_response",
             Self::ControlCancel { .. } => "control_cancel",

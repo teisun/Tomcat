@@ -17,6 +17,8 @@ export type RequestCommand = Exclude<
 
 export interface InitializePayload {
   protocolVersion: number;
+  /** Absolute path of the attachment directory, absent on older servers. */
+  attachmentRoot?: string | null;
   capabilities: string[];
   sessionId?: string | null;
   serverVersion?: string | null;
@@ -109,6 +111,10 @@ export function parseInitializePayload(payload: unknown): InitializePayload {
 
   return {
     protocolVersion: payload.protocolVersion,
+    attachmentRoot:
+      typeof payload.attachmentRoot === "string" && payload.attachmentRoot.length > 0
+        ? payload.attachmentRoot
+        : null,
     capabilities: payload.capabilities,
     sessionId:
       payload.sessionId === undefined || payload.sessionId === null

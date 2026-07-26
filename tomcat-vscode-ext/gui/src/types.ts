@@ -30,6 +30,11 @@ export interface WebviewDomAction {
     | "clickTestId"
     | "dragOverTestId"
     | "dragLeaveTestId"
+    | "focusTestId"
+    | "pressKeyOnTestId"
+    | "probeAttachmentFetch"
+    | "probeFullResolutionMemory"
+    | "probeImagePipeline"
     | "scrollIntoView"
     | "scrollToEdge"
     | "setInputValue"
@@ -48,6 +53,14 @@ export interface WebviewMessageBlock {
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
   id: string;
+  /**
+   * Images attached to this message, as references rather than bytes.
+   *
+   * The bytes stay on disk in the backend and reach Chromium over the webview resource
+   * protocol, so scrolling back through a long transcript costs DOM nodes, not
+   * megabytes of base64 pinned on the JavaScript heap.
+   */
+  imageAttachments?: WebviewAttachmentView[];
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
@@ -254,24 +267,46 @@ export interface WebviewApprovalCard {
   type: "approval";
 }
 
-export interface WebviewPendingAttachment {
-  attachment: {
-    dataBase64?: string | null;
-    fileId?: string | null;
-    filename?: string | null;
-    kind: "file" | "image";
-    mimeType?: string | null;
-  };
+/** An image the webview may render, identified by hash instead of carrying bytes. */
+export interface WebviewAttachmentView {
+  /** sha256 of the original bytes; the backend's name for this attachment. */
+  blobSha: string;
+  /** Original byte count, for display only. */
+  bytes?: number;
+  filename: string;
+  /** Full-resolution URL. Only the preview panel should load this. */
+  fullUri?: string | null;
+  /** True once a downsampled version exists in the backend. */
+  hasThumb?: boolean;
   id: string;
+  mimeType: string;
+  /** Downsampled URL, or null until a thumbnail has been generated. */
+  thumbUri?: string | null;
+  /**
+   * The backend no longer has these bytes.
+   *
+   * Applies to history as much as to a draft: a transcript keeps naming an image after
+   * its blob has been garbage-collected, and a message that quietly renders an empty
+   * square is worse than one that says the image is gone.
+   */
+  unavailable?: boolean;
+}
+
+export interface WebviewPendingAttachment extends WebviewAttachmentView {
   kind: "file" | "image";
   label: string;
-  mimeType?: string | null;
   path?: string | null;
+}
+
+export interface WebviewComposerDraft {
+  segments: WebviewMessageSegment[];
+  text: string;
 }
 
 export interface WebviewSessionSnapshot {
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
+  composerDraft?: WebviewComposerDraft;
   contextRatio?: number | null;
   hasMoreHistory?: boolean;
   historyLoading?: boolean;
@@ -461,6 +496,68 @@ export type WebviewIntent =
         sessionId: string;
       };
     }
+  /**
+   * A thumbnail the webview generated for an attachment the backend had none for.
+   *
+   * The only message that carries image bytes besides the paste path, and it carries the
+   * small end: a 192px PNG, never the original.
+   */
+  | {
+      messageId: string;
+      type: "cacheAttachmentThumbnail";
+      data: {
+        blobSha: string;
+        sessionId: string;
+        thumbBase64: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "syncComposerDraft";
+      data: {
+        segments: WebviewMessageSegment[];
+        sessionId: string;
+        text: string;
+      };
+    }
+  | {
+      messageId: string;
+      /**
+       * The one message in the whole system that carries image bytes.
+       *
+       * Everything downstream of ingest speaks in hashes. Downsampling and SVG
+       * rasterisation happen here, before the send, because a webview is the only place
+       * in this system with a decoder that can resize *during* decode rather than
+       * after — which is the difference between a 4000x3000 paste costing 48 KB and
+       * costing 48 MB.
+       */
+      type: "attachImages";
+      data: {
+        images: Array<{
+          dataBase64: string;
+          filename?: string | null;
+          mimeType: string;
+          /** PNG rendering for formats providers reject. Base64. */
+          providerBase64?: string;
+          providerMimeType?: string;
+          /** SVG source to send as text when rasterisation was not possible. */
+          providerText?: string;
+          /** Downsampled preview, PNG, base64. Absent when generation failed. */
+          thumbBase64?: string;
+          /** Non-fatal notes from the image pipeline, surfaced to the user. */
+          warnings?: string[];
+        }>;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openImagePreview" | "removeDraftAttachment";
+      data: {
+        attachmentId: string;
+        sessionId: string;
+      };
+    }
   | {
       messageId: string;
       type: "removeAttachment";
@@ -593,6 +690,7 @@ export type WebviewIntent =
         fileChipTopWithinStream: number | null;
         fileChipVisible: boolean;
         historyLoaderVisible: boolean;
+        historyAttachmentThumbCount: number;
         html: string;
         jumpToLatestVisible: boolean;
         planCardTopWithinStream: number | null;
@@ -605,6 +703,10 @@ export type WebviewIntent =
         modelDropdownRight: number | null;
         modelDropdownTop: number | null;
         overflowAnchor: string | null;
+        pendingAttachmentStripClientWidth: number;
+        pendingAttachmentStripOverflowing: boolean;
+        pendingAttachmentStripScrollWidth: number;
+        pendingAttachmentThumbCount: number;
         sessionTabs: string[];
         sessionGroupHeaders: string[];
         sessionMoreButtons: string[];

@@ -275,6 +275,20 @@ export class Uri {
     return new Uri(base.scheme, base.authority, joined.startsWith("/") ? joined : `/${joined}`, base.query);
   }
 
+  with(change: {
+    authority?: string;
+    path?: string;
+    query?: string;
+    scheme?: string;
+  }): Uri {
+    return new Uri(
+      change.scheme ?? this.scheme,
+      change.authority ?? this.authority,
+      change.path ?? this.path,
+      change.query ?? this.query,
+    );
+  }
+
   get fsPath(): string {
     return this.path;
   }
@@ -429,6 +443,45 @@ export const workspace = {
         throw new FileSystemError(`File not found: ${uri.toString()}`);
       }
       return { size: entry.text.length, type: entry.type };
+    },
+    async createDirectory(uri: Uri): Promise<void> {
+      files.set(uri.toString(), { text: "", type: FileType.Directory });
+    },
+    async writeFile(uri: Uri, content: Uint8Array): Promise<void> {
+      files.set(uri.toString(), {
+        text: Buffer.from(content).toString("utf8"),
+        type: FileType.File,
+      });
+    },
+    async delete(uri: Uri): Promise<void> {
+      if (!files.delete(uri.toString())) {
+        throw new FileSystemError(`File not found: ${uri.toString()}`);
+      }
+    },
+    async rename(
+      source: Uri,
+      target: Uri,
+      options?: { overwrite?: boolean },
+    ): Promise<void> {
+      const entry = files.get(source.toString());
+      if (!entry) {
+        throw new FileSystemError(`File not found: ${source.toString()}`);
+      }
+      if (files.has(target.toString()) && options?.overwrite !== true) {
+        throw new FileSystemError(`File exists: ${target.toString()}`);
+      }
+      files.delete(source.toString());
+      files.set(target.toString(), entry);
+    },
+    async copy(source: Uri, target: Uri, options?: { overwrite?: boolean }): Promise<void> {
+      const entry = files.get(source.toString());
+      if (!entry) {
+        throw new FileSystemError(`File not found: ${source.toString()}`);
+      }
+      if (files.has(target.toString()) && options?.overwrite !== true) {
+        throw new FileSystemError(`File exists: ${target.toString()}`);
+      }
+      files.set(target.toString(), { ...entry });
     },
   },
   async applyEdit(edit: WorkspaceEdit): Promise<boolean> {

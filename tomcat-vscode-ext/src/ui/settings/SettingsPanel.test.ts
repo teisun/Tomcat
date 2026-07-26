@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import { SettingsPanel } from "./SettingsPanel";
+import type { InitializeResult } from "../../serveClient/initialize";
 import type { SettingsIntent } from "../../shared/settingsProtocol";
 
 describe("settings panel html asset resolution", () => {
@@ -49,7 +50,7 @@ describe("settings panel html asset resolution", () => {
     });
     const panel = new SettingsPanel({
       ensureInitialized: async () => ({} as never),
-      expectedCliVersion: "0.1.17",
+      expectedCliVersion: "0.1.18",
       extensionUri,
       extensionVersion: "0.1.24",
       messenger: {} as never,
@@ -78,7 +79,7 @@ describe("settings panel html asset resolution", () => {
     });
     const panel = new SettingsPanel({
       ensureInitialized: async () => ({} as never),
-      expectedCliVersion: "0.1.17",
+      expectedCliVersion: "0.1.18",
       extensionUri,
       extensionVersion: "0.1.24",
       messenger: {} as never,
@@ -97,12 +98,7 @@ describe("settings panel html asset resolution", () => {
 
 describe("settings panel model management flow", () => {
   function createPanel(overrides?: {
-    ensureInitialized?: () => Promise<{
-      capabilities: string[];
-      protocolVersion: number;
-      serverVersion: string | null;
-      sessionId: string | null;
-    }>;
+    ensureInitialized?: () => Promise<InitializeResult>;
     expectedCliVersion?: string | null;
     extensionVersion?: string | null;
     messenger?: Partial<{
@@ -130,6 +126,7 @@ describe("settings panel model management flow", () => {
       ensureInitialized:
         overrides?.ensureInitialized
         ?? (async () => ({
+          attachmentRoot: null,
           capabilities: [
             "list_models",
             "list_provider_keys",
@@ -138,10 +135,10 @@ describe("settings panel model management flow", () => {
             "upsert_model",
           ],
           protocolVersion: 1,
-          serverVersion: "0.1.17",
+          serverVersion: "0.1.18",
           sessionId: null,
         })),
-      expectedCliVersion: overrides?.expectedCliVersion ?? "0.1.17",
+      expectedCliVersion: overrides?.expectedCliVersion ?? "0.1.18",
       extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
       extensionVersion: overrides?.extensionVersion ?? "0.1.24",
       messenger: messenger as never,
@@ -241,8 +238,8 @@ describe("settings panel model management flow", () => {
     } satisfies SettingsIntent);
 
     expect(panel.__testingSnapshot().state.extensionVersion).toBe("0.1.24");
-    expect(panel.__testingSnapshot().state.expectedCliVersion).toBe("0.1.17");
-    expect(panel.__testingSnapshot().state.serverVersion).toBe("0.1.17");
+    expect(panel.__testingSnapshot().state.expectedCliVersion).toBe("0.1.18");
+    expect(panel.__testingSnapshot().state.serverVersion).toBe("0.1.18");
   });
 
   it("keeps previous models and exposes list failures", async () => {

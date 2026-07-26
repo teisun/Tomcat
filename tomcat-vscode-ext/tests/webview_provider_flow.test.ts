@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
@@ -65,6 +70,14 @@ class FakeMessenger {
     model: string;
     sessionId: string | null | undefined;
   }> = [];
+  /**
+   * A real directory standing in for the backend blob store.
+   *
+   * Real, not mocked, because the host decides whether a draft's attachment still exists
+   * by looking for the file. A fake path would make every attachment look missing, and
+   * the "bytes are gone" degradation would be all these tests ever exercised.
+   */
+  readonly attachmentRoot = mkdtempSync(path.join(tmpdir(), "tomcat-blobs-"));
   private readonly listeners = new Set<(event: Record<string, unknown>) => void>();
   listModelsPayload: Record<string, unknown> = {
     models: [{ id: "gpt-5.4" }, { id: "claude-4.6-sonnet" }],
@@ -92,12 +105,54 @@ class FakeMessenger {
 
   async request(command: Record<string, unknown>) {
     this.requestCalls.push(command);
+    const sessionId = String(command.sessionId ?? "session-1");
+    if (command.type === "get_state") {
+      return {
+        payload: { sessionId },
+        sessionId,
+        success: true,
+        type: "response",
+      };
+    }
+    if (command.type === "cache_attachment_thumbnail") {
+      const thumbnail = command.thumbnail as Record<string, unknown>;
+      const sourceSha = String(thumbnail.sourceSha ?? "");
+      mkdirSync(path.join(this.attachmentRoot, "thumbs"), { recursive: true });
+      writeFileSync(
+        path.join(this.attachmentRoot, "thumbs", sourceSha),
+        Buffer.from(String(thumbnail.thumbBase64 ?? ""), "base64"),
+      );
+      return { payload: null, sessionId, success: true, type: "response" };
+    }
+    if (command.type === "ingest_attachment") {
+      const attachment = command.attachment as Record<string, unknown>;
+      const bytes = Buffer.from(String(attachment.dataBase64 ?? ""), "base64");
+      // Content addressing, same as the backend: the hash *is* the name.
+      const blobSha = createHash("sha256").update(bytes).digest("hex");
+      const filename = String(attachment.filename ?? "pasted-image.png");
+      const mimeType = String(attachment.mimeType ?? "image/png");
+      mkdirSync(path.join(this.attachmentRoot, "blobs"), { recursive: true });
+      writeFileSync(path.join(this.attachmentRoot, "blobs", blobSha), bytes);
+      return {
+        payload: {
+          blobSha,
+          bytes: bytes.length,
+          filename,
+          hasThumb: typeof attachment.thumbBase64 === "string",
+          mimeType,
+          providerSha: null,
+        },
+        sessionId,
+        success: true,
+        type: "response",
+      };
+    }
     if (this.requestImpl) {
       return this.requestImpl(command);
     }
     return {
       payload: { accepted: true },
-      sessionId: String(command.sessionId ?? "session-1"),
+      sessionId,
       success: true,
       type: "response",
     };
@@ -187,6 +242,7 @@ class FakeMessenger {
 
 function initializeResult(): InitializeResult {
   return {
+    attachmentRoot: null,
     capabilities: [
       "ask_question",
       "list_provider_keys",
@@ -362,7 +418,12 @@ function buildProvider(options: BuildProviderOptions = {}) {
       showFile: async () => undefined,
       ...options.ideOverrides,
     } as never,
-    initialize: async () => initializeResult(),
+    // The host learns where attachment bytes live from the handshake, and uses it to grant
+    // the webview read access. Without it every image resolves to nothing.
+    initialize: async () => ({
+      ...initializeResult(),
+      attachmentRoot: messenger.attachmentRoot,
+    }),
     messenger: messenger as never,
     openModelSettings,
     sessionRouter: sessionRouter as never,
@@ -371,6 +432,9 @@ function buildProvider(options: BuildProviderOptions = {}) {
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
   return { historyCalls, messenger, provider, sessionState };
 }
+
+/** sha256 of the "png-bytes" fixture, i.e. the name the backend gives it. */
+const PNG_SHA = "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56";
 
 describe("webview provider integration", () => {
   it("hydrates history during bootstrap and carries attachments through prompt requests", async () => {
@@ -395,13 +459,37 @@ describe("webview provider integration", () => {
       type: "pickContext",
     });
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments[0]).toMatchObject({
-      attachment: {
-        filename: "diagram.png",
-      },
+      // A hash and two URLs. The bytes went to the backend once, at pick time, and the
+      // host holds nothing but this reference from here on.
+      blobSha: PNG_SHA,
+      // The file picker never passes through a webview, so nothing has produced a
+      // thumbnail for this image yet. It must stay marked as such: the strip draws a
+      // placeholder rather than the 4000x3000 original.
+      hasThumb: false,
       kind: "image",
       label: "diagram.png",
       mimeType: "image/png",
     });
+
+    // The webview notices the gap and fills it. Once the thumbnail lands, the attachment
+    // flips over to it — otherwise a picked image would show a placeholder forever.
+    await provider.dispatchTestIntent({
+      data: {
+        blobSha: PNG_SHA,
+        sessionId: "session-1",
+        thumbBase64: Buffer.from("thumb-bytes").toString("base64"),
+      },
+      messageId: "thumb-1",
+      type: "cacheAttachmentThumbnail",
+    });
+    expect(
+      provider.currentState().sessionViews["session-1"]?.pendingAttachments[0],
+    ).toMatchObject({ blobSha: PNG_SHA, hasThumb: true });
+    expect(
+      messenger.requestCalls.filter(
+        (call) => call.type === "cache_attachment_thumbnail",
+      ),
+    ).toHaveLength(1);
 
     await provider.dispatchTestIntent({
       data: {
@@ -415,21 +503,28 @@ describe("webview provider integration", () => {
     const promptRequest = messenger.requestCalls.find((call) => call.type === "prompt");
     expect(promptRequest).toEqual(
       expect.objectContaining({
-        params: {
+        params: expect.objectContaining({
+          // Sending carries the hash the backend already has. This is the whole
+          // write-amplification fix in one assertion: the bytes crossed the boundary
+          // once, at pick time, and the send is a few dozen bytes no matter how large
+          // the image is.
           attachments: [
             expect.objectContaining({
-              dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
+              blobSha: PNG_SHA,
               filename: "diagram.png",
               kind: "image",
               mimeType: "image/png",
             }),
           ],
           userMessageId: expect.any(String),
-        },
+        }),
         sessionId: "session-1",
         text: "send with attachment",
         type: "prompt",
       }),
+    );
+    expect(JSON.stringify(promptRequest)).not.toContain(
+      Buffer.from("png-bytes", "utf8").toString("base64"),
     );
     const userMessageId = (promptRequest?.params as { userMessageId?: string } | undefined)?.userMessageId;
     const sentUserMessage = provider.currentState().sessionViews["session-1"]?.timeline.find(
@@ -510,18 +605,20 @@ describe("webview provider integration", () => {
     );
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
       expect.objectContaining({
-        attachment: expect.objectContaining({
-          dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
-          filename: "diagram.png",
-          kind: "image",
-          mimeType: "image/png",
-        }),
+        blobSha: PNG_SHA,
+        bytes: "png-bytes".length,
+        filename: "diagram.png",
         kind: "image",
         label: "diagram.png",
         mimeType: "image/png",
-        path: "/workspace/diagram.png",
+        path: null,
       }),
     ]);
+    // The contract this replaced an assertion on inline base64 with: the snapshot the
+    // webview receives must contain no image bytes anywhere.
+    expect(
+      JSON.stringify(provider.currentState().sessionViews["session-1"]?.pendingAttachments),
+    ).not.toContain(Buffer.from("png-bytes", "utf8").toString("base64"));
 
     const attachmentId = provider.currentState().sessionViews["session-1"]?.pendingAttachments[0]?.id;
     expect(attachmentId).toBeTruthy();
@@ -724,16 +821,12 @@ describe("webview provider integration", () => {
     );
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
       expect.objectContaining({
-        attachment: expect.objectContaining({
-          dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
-          filename: "mockup.png",
-          kind: "image",
-          mimeType: "image/png",
-        }),
+        blobSha: PNG_SHA,
+        filename: "mockup.png",
         kind: "image",
         label: "mockup.png",
         mimeType: "image/png",
-        path: "/workspace/assets/mockup.png",
+        path: null,
       }),
     ]);
 

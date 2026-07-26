@@ -70,11 +70,9 @@ describe("webview dual-channel state store", () => {
     });
     store.setPendingAttachments("s1", [
       {
-        attachment: {
-          dataBase64: "YWJj",
-          kind: "file",
-          mimeType: "text/plain",
-        },
+        blobSha: "a".repeat(64),
+        bytes: 3,
+        filename: "README.md",
         id: "att-1",
         kind: "file",
         label: "README.md",
@@ -911,11 +909,9 @@ describe("webview dual-channel state store", () => {
     });
     store.setPendingAttachments("s1", [
       {
-        attachment: {
-          dataBase64: "YWJj",
-          kind: "file",
-          mimeType: "text/plain",
-        },
+        blobSha: "a".repeat(64),
+        bytes: 3,
+        filename: "README.md",
         id: "att-1",
         kind: "file",
         label: "README.md",

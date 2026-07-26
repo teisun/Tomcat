@@ -27,6 +27,7 @@ pub(crate) async fn handle_control_or_interrupt(
         } => {
             if subtype == "initialize" {
                 state.initialized.store(true, Ordering::SeqCst);
+                super::run_attachment_housekeeping(&state);
                 let response = ControlFrame::response(
                     request_id,
                     session_id.or_else(|| state.registry.active_session_id()),
@@ -49,12 +50,17 @@ pub(crate) async fn handle_control_or_interrupt(
                             "new_session",
                             "switch_session",
                             "get_messages",
+                            "ingest_attachment",
+                            "cache_attachment_thumbnail",
                             "close_session",
                             "list_sessions",
                             "interrupt",
                             "ask_question"
                         ],
                         "sessionId": state.registry.active_session_id(),
+                        // 见 `serve::attachment_root`：宿主必须在渲染 webview 之前拿到它。
+                        "attachmentRoot": super::attachment_root(&state)
+                            .map(|path| path.to_string_lossy().into_owned()),
                     }),
                 );
                 state.writer.send(OutFrame::Control(response))?;

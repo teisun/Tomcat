@@ -24,7 +24,7 @@ describe("TomcatMessenger control roundtrip", () => {
         payload: {
           capabilities: ["prompt", "ask_question"],
           protocolVersion: 1,
-          serverVersion: "0.1.17",
+          serverVersion: "0.1.18",
           sessionId: "s-bootstrap",
         },
         requestId: command.requestId,
@@ -34,9 +34,10 @@ describe("TomcatMessenger control roundtrip", () => {
     );
 
     await expect(pending).resolves.toEqual({
+      attachmentRoot: null,
       capabilities: ["prompt", "ask_question"],
       protocolVersion: 1,
-      serverVersion: "0.1.17",
+      serverVersion: "0.1.18",
       sessionId: "s-bootstrap",
     });
   });

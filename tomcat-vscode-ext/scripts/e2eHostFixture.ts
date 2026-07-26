@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 
 export interface HostE2eFixture {
+  attachmentRootDir: string;
   cleanup(): Promise<void>;
   editFilePath: string;
   env: NodeJS.ProcessEnv;
@@ -57,6 +58,7 @@ overview: Keep one Creating plan header and a breathing View Plan state.
 # Plan tool UX
 `);
   return `#!/usr/bin/env node
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
@@ -69,6 +71,13 @@ const requireInit =
     : ${JSON.stringify(Boolean(options.requireInit))};
 const setupMarkerPath =
   process.env.TOMCAT_VSCODE_TEST_SETUP_MARKER || ${JSON.stringify(setupMarkerPath)};
+// Attachment bytes live outside the extension, exactly as they do with a real backend,
+// so the host has to be told where they are and grant the webview access to that path.
+const ATTACHMENT_ROOT =
+  process.env.TOMCAT_VSCODE_TEST_ATTACHMENT_ROOT ||
+  path.join(path.dirname(setupMarkerPath), "..", "attachments");
+const BLOBS_DIR = path.join(ATTACHMENT_ROOT, "blobs");
+const THUMBS_DIR = path.join(ATTACHMENT_ROOT, "thumbs");
 const BUILTIN_MODELS = [
   {
     api: "openai",
@@ -128,7 +137,7 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.17";
+const serverVersion = "0.1.18";
 
 if (process.argv[2] === "--version") {
   process.stdout.write("tomcat fake " + serverVersion + "\\n");
@@ -964,6 +973,91 @@ function startTurn(sessionId) {
   });
 }
 
+/** Write bytes under their own sha256, the way the real blob store does. */
+function putBlob(bytes) {
+  const sha = crypto.createHash("sha256").update(bytes).digest("hex");
+  const target = path.join(BLOBS_DIR, sha);
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(BLOBS_DIR, { recursive: true });
+    fs.writeFileSync(target, bytes);
+  }
+  return sha;
+}
+
+/** Thumbnails are addressed by the hash of the image they came from, never their own. */
+function putThumbnail(sourceSha, bytes) {
+  fs.mkdirSync(THUMBS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(THUMBS_DIR, sourceSha), bytes);
+}
+
+function handleIngestAttachment(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const attachment = (frame && frame.attachment) || {};
+  if (
+    typeof attachment.dataBase64 !== "string" ||
+    typeof attachment.mimeType !== "string"
+  ) {
+    send({
+      error: "ingest_attachment requires dataBase64 and mimeType",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const bytes = Buffer.from(attachment.dataBase64, "base64");
+  const blobSha = putBlob(bytes);
+  let hasThumb = false;
+  if (typeof attachment.thumbBase64 === "string" && attachment.thumbBase64.length > 0) {
+    putThumbnail(blobSha, Buffer.from(attachment.thumbBase64, "base64"));
+    hasThumb = true;
+  }
+  const providerSha =
+    typeof attachment.providerBase64 === "string" && attachment.providerBase64.length > 0
+      ? putBlob(Buffer.from(attachment.providerBase64, "base64"))
+      : null;
+
+  send({
+    id: frame.id,
+    payload: {
+      blobSha,
+      bytes: bytes.length,
+      filename:
+        typeof attachment.filename === "string" && attachment.filename.length > 0
+          ? attachment.filename
+          : "pasted-image.png",
+      hasThumb,
+      mimeType: attachment.mimeType,
+      providerSha,
+    },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
+function handleCacheAttachmentThumbnail(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const thumbnail = (frame && frame.thumbnail) || {};
+  const cached =
+    typeof thumbnail.sourceSha === "string" &&
+    /^[0-9a-f]{64}$/.test(thumbnail.sourceSha) &&
+    typeof thumbnail.thumbBase64 === "string" &&
+    thumbnail.thumbBase64.length > 0;
+  if (cached) {
+    putThumbnail(thumbnail.sourceSha, Buffer.from(thumbnail.thumbBase64, "base64"));
+  }
+  send({
+    id: frame.id,
+    payload: { cached },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
 function handlePrompt(frame) {
   const sessionId = frame.sessionId || activeSessionId || createSession();
   const session = touchSession(ensureSession(sessionId));
@@ -1595,9 +1689,12 @@ function handleCommand(frame) {
         const sessionId = activeSessionId || createSession();
         send({
           payload: {
+            attachmentRoot: ATTACHMENT_ROOT,
             capabilities: [
               "prompt",
               "ask_question",
+              "ingest_attachment",
+              "cache_attachment_thumbnail",
               "new_session",
               "switch_session",
               "list_sessions",
@@ -1937,6 +2034,12 @@ function handleCommand(frame) {
       }, 10);
       break;
     }
+    case "ingest_attachment":
+      handleIngestAttachment(frame);
+      break;
+    case "cache_attachment_thumbnail":
+      handleCacheAttachmentThumbnail(frame);
+      break;
     case "prompt":
     case "follow_up":
       handlePrompt(frame);
@@ -1986,8 +2089,13 @@ export async function createHostE2eFixture(
   const fakeServePath = path.join(rootDir, "fake-tomcat.js");
   const editFilePath = path.join(rootDir, "edit-target.txt");
   const setupMarkerPath = path.join(rootDir, "setup", "ready");
+  const attachmentRootDir = path.join(rootDir, "attachments");
 
   await mkdir(workspaceDir, { recursive: true });
+  // Created up front so the host can grant the webview access to a path that exists;
+  // an ingest that happens to be the first write should not be what creates it.
+  await mkdir(path.join(attachmentRootDir, "blobs"), { recursive: true });
+  await mkdir(path.join(attachmentRootDir, "thumbs"), { recursive: true });
   await writeFile(editFilePath, "before\n", "utf8");
   await writeFile(
     fakeServePath,
@@ -1997,12 +2105,14 @@ export async function createHostE2eFixture(
   await chmod(fakeServePath, 0o755);
 
   return {
+    attachmentRootDir,
     async cleanup() {
       await rm(rootDir, { force: true, recursive: true });
     },
     editFilePath,
     env: {
       ...process.env,
+      TOMCAT_VSCODE_TEST_ATTACHMENT_ROOT: attachmentRootDir,
       TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
       TOMCAT_VSCODE_TEST_EDIT_FILE: editFilePath,
       TOMCAT_VSCODE_TEST_PATH: fakeServePath,

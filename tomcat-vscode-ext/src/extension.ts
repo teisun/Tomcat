@@ -58,11 +58,16 @@ import {
   resolveUriToFileReference,
 } from "./ui/webview/contextReferences";
 import { SettingsPanel, type SettingsDomSnapshot } from "./ui/settings/SettingsPanel";
+import type {
+  ImagePreviewDomAction,
+  ImagePreviewDomSnapshot,
+} from "./shared/imagePreviewProtocol";
 import type { SettingsIntent, SettingsStateSnapshot } from "./shared/settingsProtocol";
 import type {
   PlanPreviewDomAction,
   PlanPreviewDomSnapshot,
 } from "./shared/planPreviewProtocol";
+import { ImagePreviewPanel } from "./ui/imagePreview/ImagePreviewPanel";
 import {
   type PlanActivePanelInfo,
   PLAN_PREVIEW_VIEW_TYPE,
@@ -98,6 +103,7 @@ export interface TomcatExtensionApi {
   __testing: {
     applyPreparedEdit(toolCallId: string): Promise<boolean>;
     captureSettingsDom(): Promise<SettingsDomSnapshot>;
+    captureImagePreviewDom(): Promise<ImagePreviewDomSnapshot>;
     captureWebviewDom(): Promise<{
       activeSessionId: string | null;
       approvalCount: number;
@@ -118,6 +124,7 @@ export interface TomcatExtensionApi {
       fileChipTopWithinStream: number | null;
       fileChipVisible: boolean;
       historyLoaderVisible: boolean;
+      historyAttachmentThumbCount: number;
       html: string;
       jumpToLatestVisible: boolean;
       planCardTopWithinStream: number | null;
@@ -130,6 +137,10 @@ export interface TomcatExtensionApi {
       modelDropdownRight: number | null;
       modelDropdownTop: number | null;
       overflowAnchor: string | null;
+      pendingAttachmentStripClientWidth: number;
+      pendingAttachmentStripOverflowing: boolean;
+      pendingAttachmentStripScrollWidth: number;
+      pendingAttachmentThumbCount: number;
       sessionTabs: string[];
       sessionGroupHeaders: string[];
       sessionMoreButtons: string[];
@@ -182,6 +193,7 @@ export interface TomcatExtensionApi {
     }>;
     clearObservedEvents(): void;
     clearObservedFileOpens(): void;
+    dispatchImagePreviewDomAction(action: ImagePreviewDomAction): Promise<void>;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     focusWebview(): Promise<void>;
     getObservedEvents(): ServeEvent[];
@@ -202,6 +214,9 @@ export interface TomcatExtensionApi {
       visible: boolean;
       webviewReady: boolean;
     };
+    getAttachmentDiagnostics(): ReturnType<
+      TomcatWebviewViewProvider["getAttachmentDiagnostics"]
+    >;
     getWebviewState(): ReturnType<TomcatWebviewViewProvider["currentState"]>;
     hydrateWebviewHistory(payload: SessionHistoryPayload): Promise<void>;
     applyWebviewSessionState(payload: SessionStatePayload): Promise<void>;
@@ -803,6 +818,10 @@ export async function activate(
       ? extensionPackage.tomcat.bundledCliVersion
       : null;
   const webviewProvider = new TomcatWebviewViewProvider({
+    // Workspace-scoped: the attachment directory follows the tomcat data dir, which can
+    // differ per workspace, and a wrong remembered path would grant the wrong root.
+    attachmentRootMemento: context.workspaceState,
+    draftStorage: context,
     extensionUri: context.extensionUri,
     getDefaultCwd,
     ide,
@@ -1250,6 +1269,13 @@ export async function activate(
   const api: TomcatExtensionApi = {
     __testing: {
       applyPreparedEdit: (toolCallId) => ide.applyPreparedEdit(toolCallId),
+      captureImagePreviewDom: async () => {
+        const panel = ImagePreviewPanel.getCurrent();
+        if (!panel?.isVisible) {
+          throw new Error("Image preview panel is not open");
+        }
+        return panel.__testingCaptureDom();
+      },
       captureSettingsDom: async () => settingsPanel.__testingCaptureDom(),
       captureWebviewDom: async () => {
         await webviewProvider.waitUntilReady();
@@ -1268,6 +1294,13 @@ export async function activate(
       },
       clearObservedFileOpens: () => {
         observedFileOpens.length = 0;
+      },
+      dispatchImagePreviewDomAction: async (action) => {
+        const panel = ImagePreviewPanel.getCurrent();
+        if (!panel?.isVisible) {
+          throw new Error("Image preview panel is not open");
+        }
+        await panel.__testingDispatchDomAction(action);
       },
       executeCommand: (command, ...args) =>
         vscode.commands.executeCommand(command, ...args),
@@ -1292,6 +1325,7 @@ export async function activate(
       getResolvedExecutable: () => resolvedExecutable,
       getLastContextSearchIntent: () => webviewProvider.getLastContextSearchIntent(),
       getSettingsPanelState: () => settingsPanel.__testingSnapshot(),
+      getAttachmentDiagnostics: () => webviewProvider.getAttachmentDiagnostics(),
       getWebviewState: () => webviewProvider.currentState(),
       hydrateWebviewHistory: async (payload) => {
         await webviewProvider.waitUntilReady();

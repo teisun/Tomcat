@@ -31,6 +31,35 @@ async function seedManualAcceptanceSettings(
   await fs.writeFile(settingsPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
 }
 
+async function runInCleanElectronEnvironment(
+  callback: () => Promise<void>,
+): Promise<void> {
+  const contaminatedKeys = [
+    "ELECTRON_RUN_AS_NODE",
+    "VSCODE_CRASH_REPORTER_PROCESS_TYPE",
+    "VSCODE_ESM_ENTRYPOINT",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS",
+    "VSCODE_IPC_HOOK",
+  ] as const;
+  const previous = new Map<string, string | undefined>();
+  for (const key of contaminatedKeys) {
+    previous.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  try {
+    await callback();
+  } finally {
+    for (const key of contaminatedKeys) {
+      const value = previous.get(key);
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const extensionRoot = path.resolve(__dirname, "..");
   const harnessRoot = path.resolve(extensionRoot, "e2e-harness");
@@ -60,6 +89,7 @@ async function main(): Promise<void> {
     await fs.mkdir(userDataDir, { recursive: true });
     await fs.mkdir(workspaceDir, { recursive: true });
     await fs.mkdir(screenshotsDir, { recursive: true });
+    await fs.chmod(fakeServePath, 0o755);
     await fs.writeFile(
       path.join(workspaceDir, "README.md"),
       "# Manual acceptance workspace\n",
@@ -72,7 +102,11 @@ async function main(): Promise<void> {
       cwd: extensionRoot,
       stdio: "inherit",
     });
-    packageVsix({ extensionRoot, outPath: vsixPath });
+    packageVsix({
+      extensionRoot,
+      outPath: vsixPath,
+      skipBuild: process.env.TOMCAT_ACCEPT_SKIP_BUILD === "1",
+    });
     execFileSync(
       resolveVsCodeCli(),
       [
@@ -90,24 +124,26 @@ async function main(): Promise<void> {
     );
 
     await fs.access(harnessTestsPath);
-    await runTests({
-      extensionDevelopmentPath: harnessRoot,
-      extensionTestsEnv: {
-        ...process.env,
-        TOMCAT_ACCEPT_REPORT_PATH: reportPath,
-        TOMCAT_ACCEPT_SCREENSHOTS_DIR: screenshotsDir,
-        TOMCAT_FAKE_SERVE_STATE_DIR: fakeServeStateDir,
-        TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
-        TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
-      },
-      extensionTestsPath: harnessTestsPath,
-      launchArgs: [
-        workspaceDir,
-        `--extensions-dir=${extensionsDir}`,
-        `--user-data-dir=${userDataDir}`,
-      ],
-      reuseMachineInstall: true,
-      vscodeExecutablePath: resolveVsCodeExecutable(),
+    await runInCleanElectronEnvironment(async () => {
+      await runTests({
+        extensionDevelopmentPath: harnessRoot,
+        extensionTestsEnv: {
+          ...process.env,
+          TOMCAT_ACCEPT_REPORT_PATH: reportPath,
+          TOMCAT_ACCEPT_SCREENSHOTS_DIR: screenshotsDir,
+          TOMCAT_FAKE_SERVE_STATE_DIR: fakeServeStateDir,
+          TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
+          TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+        },
+        extensionTestsPath: harnessTestsPath,
+        launchArgs: [
+          workspaceDir,
+          `--extensions-dir=${extensionsDir}`,
+          `--user-data-dir=${userDataDir}`,
+        ],
+        reuseMachineInstall: true,
+        vscodeExecutablePath: resolveVsCodeExecutable(),
+      });
     });
 
     const reportText = await fs.readFile(reportPath, "utf8");

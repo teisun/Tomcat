@@ -125,7 +125,13 @@ Body paragraph.
 `;
 
 function initResult(capabilities: string[]): InitializeResult {
-  return { capabilities, protocolVersion: 1, serverVersion: null, sessionId: null };
+  return {
+    attachmentRoot: null,
+    capabilities,
+    protocolVersion: 1,
+    serverVersion: null,
+    sessionId: null,
+  };
 }
 
 function makeDeps(

@@ -24,6 +24,67 @@ use crate::{
     RestoreOptions,
 };
 
+// ── 附件测试脚手架 ────────────────────────────────────────────────────
+//
+// 协议上只有 ingest_attachment 携带字节，因此测试也必须先把字节交给后端换回哈希，
+// 再用哈希去发送 —— 这跟真实客户端走的是同一条路。
+
+/// 1x1 PNG，最小的合法位图。
+fn test_png_bytes() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0x60,
+        0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE5, 0x27, 0xDE, 0xFC, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ]
+}
+
+fn test_pdf_bytes() -> Vec<u8> {
+    b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n".to_vec()
+}
+
+/// 把字节落进这个会话的 blob store，返回它的 sha —— 等价于走一遍 ingest_attachment。
+fn ingest_test_bytes(slot: &Arc<crate::api::serve::registry::SessionSlot>, bytes: &[u8]) -> String {
+    let sha = slot
+        .ctx
+        .session_runtime
+        .session
+        .attachment_store()
+        .put(bytes)
+        .expect("store attachment bytes");
+    slot.ctx
+        .session_runtime
+        .session
+        .attachment_store()
+        .mark_pending(&slot.session_id, &sha)
+        .expect("lease attachment bytes");
+    sha
+}
+
+/// 一个不存在于任何 blob store 里的、格式合法的 sha —— 用来验证伪造哈希被拒。
+fn forged_sha() -> String {
+    "f".repeat(64)
+}
+
+/// 在临时 store 上装配一条消息。
+///
+/// `build_user_message` 只依赖 blob store 而不依赖整个 session slot，
+/// 所以这类纯装配逻辑的测试不需要拉起一个会话。
+fn build_message_for_test(
+    text: &str,
+    params: &ServeMessageParams,
+) -> Result<crate::core::llm::ChatMessage, String> {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let store = crate::core::session::attachments::AttachmentBlobStore::new(tmp.path());
+    crate::api::serve::commands::build_user_message(
+        &store,
+        text.to_string(),
+        params,
+        crate::api::serve::commands::AttachmentBytes::Archival,
+    )
+}
+
 struct CurrentDirGuard {
     previous: std::path::PathBuf,
 }
@@ -841,7 +902,8 @@ async fn serve_prompt_with_image_attachment_builds_multimodal_message() {
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: None,
+                    blob_sha: None,
+                    provider_sha: None,
                     file_id: Some("file-vision".to_string()),
                 }],
                 ..ServeMessageParams::default()
@@ -902,7 +964,8 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: None,
+                    blob_sha: None,
+                    provider_sha: None,
                     file_id: Some("file-follow-up".to_string()),
                 }],
                 user_message_id: Some("follow-up-fixed-id".to_string()),
@@ -967,7 +1030,8 @@ async fn serve_prompt_invalid_attachment_returns_error() {
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: Some("Zm9v".to_string()),
+                    blob_sha: Some(ingest_test_bytes(&slot, &test_png_bytes())),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -1017,7 +1081,8 @@ async fn serve_prompt_file_attachment_without_filename_returns_error() {
                     kind: ServeAttachmentKind::File,
                     filename: None,
                     mime_type: Some("application/pdf".to_string()),
-                    data_base64: Some("JVBERi0xLjQK".to_string()),
+                    blob_sha: Some(ingest_test_bytes(&slot, &test_pdf_bytes())),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -1069,7 +1134,8 @@ async fn serve_prompt_non_pdf_file_attachment_returns_error() {
                     kind: ServeAttachmentKind::File,
                     filename: Some("notes.md".to_string()),
                     mime_type: Some("text/markdown".to_string()),
-                    data_base64: Some("IyBoaQ==".to_string()),
+                    blob_sha: Some(forged_sha()),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -1121,7 +1187,8 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
                     kind: ServeAttachmentKind::File,
                     filename: Some("notes.pdf".to_string()),
                     mime_type: Some("application/pdf".to_string()),
-                    data_base64: Some("JVBERi0xLjQK".to_string()),
+                    blob_sha: Some(ingest_test_bytes(&slot, &test_pdf_bytes())),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -1154,13 +1221,14 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
         &parts[0],
         ChatMessageContentPart::InputText { text } if text == "summarize file"
     ));
+    let expected_pdf = base64::engine::general_purpose::STANDARD.encode(test_pdf_bytes());
     assert!(matches!(
         &parts[1],
         ChatMessageContentPart::InputFile {
             source: FileSource::Inline(ref inline),
         } if inline.filename == "notes.pdf"
             && inline.mime_type == "application/pdf"
-            && inline.data == "JVBERi0xLjQK"
+            && inline.data == expected_pdf
     ));
 }
 
@@ -1293,14 +1361,15 @@ fn build_user_message_preserves_segment_order_and_appends_attachments() {
             kind: ServeAttachmentKind::Image,
             filename: None,
             mime_type: None,
-            data_base64: None,
+            blob_sha: None,
+            provider_sha: None,
             file_id: Some("image-file-id".to_string()),
         }],
         ..ServeMessageParams::default()
     };
 
     let message =
-        crate::api::serve::commands::build_user_message("fallback text".to_string(), &params)
+        build_message_for_test("fallback text", &params)
             .expect("build message");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
@@ -1350,7 +1419,7 @@ fn build_user_message_accepts_reference_only_segments() {
         ..ServeMessageParams::default()
     };
 
-    let message = crate::api::serve::commands::build_user_message(String::new(), &params)
+    let message = build_message_for_test("", &params)
         .expect("build message");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
@@ -1382,7 +1451,7 @@ fn build_user_message_accepts_non_pdf_file_references_without_attachment_validat
         ..ServeMessageParams::default()
     };
 
-    let message = crate::api::serve::commands::build_user_message(String::new(), &params)
+    let message = build_message_for_test("", &params)
         .expect("non-PDF file references should stay on the context-reference path");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
@@ -1492,7 +1561,8 @@ async fn serve_steer_ignores_attachments() {
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: None,
+                    blob_sha: None,
+                    provider_sha: None,
                     file_id: Some("ignored-file".to_string()),
                 }],
                 user_message_id: Some("steer-fixed-id".to_string()),
@@ -2654,7 +2724,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: None,
+                    blob_sha: None,
+                    provider_sha: None,
                     file_id: Some("file-vision".to_string()),
                 }],
                 ..ServeMessageParams::default()
@@ -2690,7 +2761,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
                     kind: ServeAttachmentKind::File,
                     filename: Some("notes.pdf".to_string()),
                     mime_type: Some("application/pdf".to_string()),
-                    data_base64: Some("JVBERi0xLjQK".to_string()),
+                    blob_sha: Some(ingest_test_bytes(&slot, &test_pdf_bytes())),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()

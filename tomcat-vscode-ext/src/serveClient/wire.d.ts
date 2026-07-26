@@ -3,6 +3,12 @@
 
 export type AssistantMessageEvent = any;
 
+export type AttachmentMode = "inline" | "reference";
+
+export interface CacheThumbnailInput {
+  sourceSha: string;
+  thumbBase64: string;
+}
 export interface Capabilities {
   files?: boolean;
   reasoning?: boolean;
@@ -19,9 +25,19 @@ export interface FileDiffLine {
   text: string;
 }
 export interface GetMessagesParams {
+  attachmentMode?: AttachmentMode;
   cursor?: null | string;
   lastNTurns?: null | number;
   limit?: null | number;
+}
+export interface IngestAttachmentInput {
+  dataBase64: string;
+  filename?: null | string;
+  kind: ServeAttachmentKind;
+  mimeType: string;
+  providerBase64?: null | string;
+  providerMimeType?: null | string;
+  thumbBase64?: null | string;
 }
 export type ListSessionsScope = "live" | "disk";
 
@@ -60,11 +76,12 @@ export interface NewSessionParams {
   mode?: ServeSessionMode | null;
 }
 export interface ServeAttachment {
-  dataBase64?: null | string;
+  blobSha?: null | string;
   fileId?: null | string;
   filename?: null | string;
   kind: ServeAttachmentKind;
   mimeType?: null | string;
+  providerSha?: null | string;
 }
 export type ServeAttachmentKind = "image" | "file";
 
@@ -266,6 +283,14 @@ export type ControlFrame = {
   type: "control_response";
 };
 
+export interface IngestAttachmentResponse {
+  blobSha: string;
+  bytes: number;
+  filename: string;
+  hasThumb: boolean;
+  mimeType: string;
+  providerSha?: null | string;
+}
 export interface ListModelsPayload {
   models: ModelView[];
 }
@@ -301,6 +326,11 @@ export type ServeCommand = {
   planId?: null | string;
   sessionId?: null | string;
   type: "set_plan_mode";
+} | {
+  attachment: IngestAttachmentInput;
+  id?: null | string;
+  sessionId?: null | string;
+  type: "ingest_attachment";
 } | {
   checkpointId: string;
   dryRun?: boolean | null;
@@ -367,6 +397,11 @@ export type ServeCommand = {
   id?: null | string;
   sessionId: string;
   type: "switch_session";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
+  thumbnail: CacheThumbnailInput;
+  type: "cache_attachment_thumbnail";
 } | {
   id?: null | string;
   sessionId?: null | string;

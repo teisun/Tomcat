@@ -19,6 +19,7 @@ import {
   type NodeViewProps,
 } from "@tiptap/react";
 
+import { prepareAttachment, type PreparedAttachment } from "../attachments/imagePipeline";
 import { referenceIdentity } from "../contextReferences";
 import type {
   ContextSearchMatch,
@@ -456,6 +457,7 @@ interface ComposerProps {
   onContextSearchQueryChange(query: string): void;
   supportedReasoningLevels?: string[] | undefined;
   thinkingLevelValue: string;
+  onAttachImages?(images: PreparedAttachment[]): void;
   onPickContext(): void;
   onDraftChange(draft: ComposerDraft): void;
   onModeChange(value: "chat" | "plan"): void;
@@ -481,6 +483,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   modelCapabilities,
   modeValue,
   modelValue,
+  onAttachImages,
   onContextSearchClose,
   onContextSearchOpen,
   onContextSearchQueryChange,
@@ -512,6 +515,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modeMenuRef = useRef<HTMLDivElement | null>(null);
   const effortMenuRef = useRef<HTMLDivElement | null>(null);
+  const latestAttachmentHandlersRef = useRef({
+    modelCapabilities,
+    onAttachImages,
+  });
+  latestAttachmentHandlersRef.current = {
+    modelCapabilities,
+    onAttachImages,
+  };
   const latestContextSearchHandlersRef = useRef({
     onClose: onContextSearchClose,
     onOpen: onContextSearchOpen,
@@ -613,6 +624,52 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
       },
       handlePaste(view, event) {
+        // First check for images in clipboard
+        const imageFiles: File[] = [];
+        const items = event.clipboardData?.items ?? [];
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          if (item.kind === "file" && item.type.startsWith("image/")) {
+            const file = item.getAsFile();
+            if (file) {
+              imageFiles.push(file);
+            }
+          }
+        }
+        if (imageFiles.length > 0) {
+          event.preventDefault();
+          if (!latestAttachmentHandlersRef.current.modelCapabilities?.includes("vision")) {
+            setCapabilityHint(
+              "当前模型未声明 vision 能力；图片会保留在草稿中，请切换支持图片的模型后发送。",
+            );
+          }
+          // Downsample and rasterise here, before the bytes leave the webview. This is
+          // the only process in the system with a decoder that can resize during decode,
+          // so a 4000x3000 paste is turned into a 192px thumbnail without ever
+          // allocating the 48MB full-size bitmap.
+          Promise.all(
+            imageFiles.map(async (file) =>
+              prepareAttachment({
+                bytes: await file.arrayBuffer(),
+                filename: file.name || null,
+                mimeType: file.type,
+              }),
+            ),
+          )
+            .then((images) => {
+              latestAttachmentHandlersRef.current.onAttachImages?.(images);
+            })
+            .catch(() => {
+              // Fallback: paste as text if image processing fails
+              const text = event.clipboardData?.getData("text/plain");
+              if (text) {
+                view.dispatch(view.state.tr.insertText(text));
+              }
+            });
+          return true;
+        }
+
+        // No images: handle text paste as before
         const text = event.clipboardData?.getData("text/plain");
         if (text === undefined) {
           return false;

@@ -1,6 +1,7 @@
 //! 会话管理：元数据 store（sessions.json）与 transcript（pi-mono 相容 JSONL）的 CRUD、上下文组装。
 
 mod append_message_chain;
+pub mod attachments;
 pub mod context_metrics;
 pub(crate) mod manager;
 mod model_thinking;

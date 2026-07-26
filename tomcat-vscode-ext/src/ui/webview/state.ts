@@ -19,6 +19,7 @@ import {
 import type {
   HostEventFrameContent,
   WebviewApprovalCard,
+  WebviewAttachmentView,
   WebviewBoundaryBlock,
   WebviewMessageBlock,
   WebviewMessageSegment,
@@ -62,6 +63,7 @@ type AppendMessageOptions = {
   detailText?: string | null;
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
+  imageAttachments?: NonNullable<WebviewMessageBlock["imageAttachments"]>;
   preferredId?: string | null;
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
@@ -144,6 +146,10 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
   return {
     busy: false,
     checkpoints: [],
+    composerDraft: {
+      segments: [],
+      text: "",
+    },
     contextRatio: null,
     hasMoreHistory: false,
     historyLoading: false,
@@ -545,7 +551,8 @@ function contentToMessageSegments(
           break;
         case "input_image":
         case "image":
-          pushTextSegment(segments, "[image attachment]");
+          // Images are extracted separately as imageAttachments on the block.
+          // Skip placeholder text here — thumbnails are rendered by MessageBubble.
           break;
         case "input_file":
         case "file":
@@ -598,7 +605,68 @@ function extractMessageText(content: unknown): string | undefined {
       .join("");
     return text || undefined;
   }
-  return asText(content);
+  // Structured arrays can legitimately contain images only. Do not stringify
+  // their base64 payload into the visible transcript.
+  return Array.isArray(content) ? undefined : asText(content);
+}
+
+function imageFilename(index: number, mimeType: string): string {
+  const extension =
+    mimeType === "image/jpeg"
+      ? "jpg"
+      : mimeType === "image/svg+xml"
+        ? "svg"
+        : mimeType.split("/").pop() || "png";
+  return `image-${index + 1}.${extension}`;
+}
+
+/**
+ * Read image references out of a transcript message.
+ *
+ * The backend is asked for history with `attachmentMode: "reference"`, so every
+ * `input_image` part arrives carrying a `blobSha` and no bytes. This function used to
+ * pull `image_b64` out and carry it around in the snapshot, which meant every state
+ * push re-sent the whole transcript's worth of base64 and pinned another copy of it on
+ * the JavaScript heap.
+ *
+ * A part with no `blobSha` is skipped rather than guessed at. That happens only if
+ * something asked for inline mode by mistake, and quietly reviving the base64 path
+ * would hide the mistake instead of surfacing it.
+ */
+function extractImageAttachments(
+  content: unknown,
+  messageId: string,
+): WebviewAttachmentView[] {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const images: WebviewAttachmentView[] = [];
+  for (let index = 0; index < content.length; index += 1) {
+    const entry = content[index];
+    if (!isRecord(entry)) continue;
+    if (entry.type !== "input_image" && entry.type !== "image") continue;
+    if (typeof entry.blobSha !== "string" || !/^[0-9a-f]{64}$/.test(entry.blobSha)) {
+      continue;
+    }
+    const mimeType =
+      typeof entry.mime_type === "string"
+        ? entry.mime_type
+        : typeof entry.mimeType === "string"
+          ? entry.mimeType
+          : "image/png";
+    images.push({
+      blobSha: entry.blobSha,
+      bytes: typeof entry.bytes === "number" ? entry.bytes : undefined,
+      filename:
+        typeof entry.filename === "string"
+          ? entry.filename
+          : imageFilename(index, mimeType),
+      hasThumb: entry.hasThumb === true,
+      id: `${messageId}:image:${index}`,
+      mimeType,
+    });
+  }
+  return images;
 }
 
 function extractThinkingText(
@@ -1243,17 +1311,22 @@ function applyHistoryEntry(
         ? entry.id
         : `history-message-${(text ?? role ?? "unknown").length}`;
     if (role === "user") {
-      if (!text) {
+      if (!text && !Array.isArray(entry.message.content)) {
         return;
       }
       const segments = contentToMessageSegments(entry.message.content);
-      session.timeline.push({
+      const imageAttachments = extractImageAttachments(entry.message.content, id);
+      const block: WebviewMessageBlock = {
         id,
         kind: "user",
         segments,
-        text,
+        text: text ?? "",
         type: "message",
-      } satisfies WebviewMessageBlock);
+      };
+      if (imageAttachments.length > 0) {
+        block.imageAttachments = imageAttachments;
+      }
+      session.timeline.push(block);
       return;
     }
     if (role === "assistant") {
@@ -1663,6 +1736,11 @@ function pushMessage(
   if (options.deliveryState) {
     next.deliveryState = options.deliveryState;
   }
+  if (options.imageAttachments?.length) {
+    next.imageAttachments = options.imageAttachments.map((image) => ({
+      ...image,
+    }));
+  }
   if (options.retryable !== undefined) {
     next.retryable = options.retryable;
   }
@@ -1853,8 +1931,25 @@ function mapSessionToTab(session: SessionSummary): WebviewSessionTab {
   };
 }
 
+/**
+ * Maps an attachment's hash to the URLs a webview can load it from.
+ *
+ * Injected rather than imported because it needs a live `Webview` and the backend's
+ * attachment root, neither of which this store knows about. `unavailable` reports that
+ * the hash no longer has bytes behind it.
+ */
+export type AttachmentUriResolver = (attachment: {
+  blobSha: string;
+  hasThumb?: boolean;
+}) => {
+  fullUri: string | null;
+  thumbUri: string | null;
+  unavailable?: boolean;
+};
+
 export class WebviewStateStore {
   private state: WebviewStateSnapshot;
+  private attachmentUriResolver: AttachmentUriResolver | null = null;
   private readonly runtimes = new Map<string, SessionRuntimeState>();
 
   constructor() {
@@ -1897,6 +1992,20 @@ export class WebviewStateStore {
 
   setReady(ready: boolean): void {
     this.state.ready = ready;
+  }
+
+  /**
+   * Install the hash-to-URL mapping used for history images.
+   *
+   * Set once the webview exists, and again whenever the attachment root changes, since
+   * every URL depends on both. Already-built timelines are re-resolved on the spot so a
+   * root that arrives after the first history load does not leave images address-less.
+   */
+  setAttachmentUriResolver(resolver: AttachmentUriResolver | null): void {
+    this.attachmentUriResolver = resolver;
+    for (const session of Object.values(this.state.sessionViews)) {
+      this.resolveHistoryAttachmentUris(session);
+    }
   }
 
   setAvailableModels(
@@ -1990,11 +2099,42 @@ export class WebviewStateStore {
     this.syncTabOwnedByFrontend(payload.sessionId);
   }
 
+  setComposerDraft(
+    sessionId: string,
+    draft: NonNullable<WebviewSessionSnapshot["composerDraft"]>,
+  ): void {
+    this.ensureSession(sessionId).composerDraft = {
+      segments: draft.segments.map((segment) => ({ ...segment })),
+      text: draft.text,
+    };
+  }
+
   setPendingAttachments(
     sessionId: string,
     attachments: WebviewPendingAttachment[],
   ): void {
     this.ensureSession(sessionId).pendingAttachments = [...attachments];
+  }
+
+  /**
+   * Update every history image that names this hash.
+   *
+   * Used when a thumbnail is generated after the fact: history views come from the
+   * transcript rather than from the draft, so they would otherwise keep showing a
+   * placeholder for an image whose thumbnail is already on disk. Matched by hash rather
+   * than by attachment id because the same image can appear in several messages.
+   */
+  updateHistoryAttachments(
+    sessionId: string,
+    blobSha: string,
+    patch: { hasThumb: boolean; thumbUri: string | null },
+  ): void {
+    for (const item of this.ensureSession(sessionId).timeline) {
+      if (item.type !== "message" || !item.imageAttachments) continue;
+      item.imageAttachments = item.imageAttachments.map((attachment) =>
+        attachment.blobSha === blobSha ? { ...attachment, ...patch } : attachment,
+      );
+    }
   }
 
   setCheckpoints(
@@ -2013,7 +2153,12 @@ export class WebviewStateStore {
   }
 
   clearPendingAttachments(sessionId: string): void {
-    this.ensureSession(sessionId).pendingAttachments = [];
+    const session = this.ensureSession(sessionId);
+    session.pendingAttachments = [];
+    session.composerDraft = {
+      segments: [],
+      text: "",
+    };
   }
 
   removePendingAttachment(sessionId: string, attachmentId: string): void {
@@ -2090,6 +2235,7 @@ export class WebviewStateStore {
     sessionId: string,
     text: string,
     options: {
+      imageAttachments?: NonNullable<WebviewMessageBlock["imageAttachments"]>;
       messageId: string;
       segments?: WebviewMessageSegment[];
       submitKind: UserSubmitKind;
@@ -2099,6 +2245,7 @@ export class WebviewStateStore {
     const runtime = this.ensureRuntime(sessionId);
     pushMessage(session, "user", text, options.messageId, {
       deliveryState: "pending",
+      imageAttachments: options.imageAttachments,
       segments: options.segments,
       submitKind: options.submitKind,
     });
@@ -2179,7 +2326,13 @@ export class WebviewStateStore {
       frame.type === "__test.capture_dom" ||
       frame.type === "__test.dom_action" ||
       frame.type === "contextSearchResult" ||
-      frame.type === "insertReference"
+      frame.type === "insertReference" ||
+      frame.type === "attachImagesResult" ||
+      frame.type === "imageAttachmentFeedback" ||
+      frame.type === "preview.ready" ||
+      frame.type === "preview.select" ||
+      frame.type === "preview.save" ||
+      frame.type === "preview.close"
     ) {
       return NO_SESSION_RENDER_MUTATION;
     }
@@ -2565,8 +2718,8 @@ export class WebviewStateStore {
         return patchRenderMutation(session.sessionId, op ? [op] : []);
       }
       default:
-        if (isPlanEvent(frame)) {
-          this.applyPlanEvent(session, frame);
+        if (isPlanEvent(frame as any)) {
+          this.applyPlanEvent(session, frame as any);
           return sessionRenderMutation(session.sessionId);
         }
         return NO_SESSION_RENDER_MUTATION;
@@ -2689,6 +2842,30 @@ export class WebviewStateStore {
     }
     session.hasMoreHistory = runtime.hasMoreHistory;
     session.historyLoading = runtime.historyLoading;
+    this.resolveHistoryAttachmentUris(session);
+  }
+
+  /**
+   * Give history images the URLs they need to render.
+   *
+   * A transcript records a hash and nothing else, so an image rebuilt from history has no
+   * address until someone maps it — and a rebuild happens on every session switch and
+   * every reopened window. Without this pass those images stay placeholders forever,
+   * which looks like "the thumbnail is still loading" and never resolves.
+   *
+   * The optimistic bubble for a message that was just sent already carries URLs; the
+   * resolver produces the same ones from the same hash, so a rebuild is idempotent.
+   */
+  private resolveHistoryAttachmentUris(session: WebviewSessionSnapshot): void {
+    const resolve = this.attachmentUriResolver;
+    if (!resolve) return;
+    for (const item of session.timeline) {
+      if (item.type !== "message" || !item.imageAttachments?.length) continue;
+      item.imageAttachments = item.imageAttachments.map((attachment) => ({
+        ...attachment,
+        ...resolve(attachment),
+      }));
+    }
   }
 
   private applyPlanEvent(

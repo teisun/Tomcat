@@ -18,6 +18,14 @@ export const SERVE_MODEL_ADMIN_CAPABILITIES = [
 ] as const;
 
 export interface InitializeResult {
+  /**
+   * Absolute path of the attachment directory, or null on a server that predates it.
+   *
+   * Handed over at handshake time rather than with a session's state because webview
+   * resource roots have to be final before the first render; changing them afterwards
+   * reloads the webview.
+   */
+  attachmentRoot: string | null;
   capabilities: string[];
   protocolVersion: number;
   sessionId: string | null;
@@ -65,6 +73,7 @@ export async function initializeServe(
   assertRequiredCapabilities(payload.capabilities);
 
   return {
+    attachmentRoot: payload.attachmentRoot ?? null,
     capabilities: payload.capabilities,
     protocolVersion: payload.protocolVersion,
     sessionId: payload.sessionId ?? frame.sessionId ?? null,

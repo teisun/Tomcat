@@ -352,6 +352,35 @@ impl ChatMessageContentPart {
         })
     }
 
+    /// Build an archival SVG image part after the caller has applied the stricter
+    /// SVG safety validation. This representation is for transcript persistence;
+    /// providers receive a rasterized PNG copy instead.
+    pub(crate) fn validated_svg_base64_for_transcript(
+        data_base64: impl Into<String>,
+    ) -> Result<Self, AppError> {
+        let data = data_base64.into();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|error| {
+                AppError::Llm(format!(
+                    "validated_svg_base64_for_transcript: base64 解码失败: {error}"
+                ))
+            })?;
+        if decoded.is_empty() || decoded.len() > IMAGE_MAX_BYTES {
+            return Err(AppError::Llm(format!(
+                "validated_svg_base64_for_transcript: 图片 {} 字节不在 1..={IMAGE_MAX_BYTES} 范围内",
+                decoded.len()
+            )));
+        }
+        Ok(Self::InputImage {
+            source: ImageSource::Inline(ImageInlineSource {
+                mime_type: "image/svg+xml".to_string(),
+                data,
+            }),
+            detail: None,
+        })
+    }
+
     /// inline 文件 helper（PR-RJ-0 重构）：从磁盘路径直接构造 `InputFile`。
     ///
     /// 与 [`Self::image_b64`] 相同设计契约：metadata 预检 → 读字节 → base64 → 装 variant。

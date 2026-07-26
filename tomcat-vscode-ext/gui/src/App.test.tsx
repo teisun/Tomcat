@@ -1417,6 +1417,7 @@ describe("Tomcat webview App", () => {
     );
     fireEvent.click(screen.getByLabelText("添加文件/文件夹/图片"));
     fireEvent.click(screen.getByTestId("attachment-chip"));
+    fireEvent.click(screen.getByTestId("attachment-remove"));
     fireEvent.click(screen.getByTestId("plan-card-title"));
     fireEvent.click(screen.getByTestId("build-plan"));
     fireEvent.click(screen.getByTestId("approval-option-q1-yes"));
@@ -1468,7 +1469,14 @@ describe("Tomcat webview App", () => {
     expect(
       postMessage.mock.calls.some(
         ([message]) =>
-          message.type === "removeAttachment" &&
+          message.type === "openImagePreview" &&
+          message.data?.attachmentId === "att-1",
+      ),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "removeDraftAttachment" &&
           message.data?.attachmentId === "att-1",
       ),
     ).toBe(true);

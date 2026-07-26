@@ -158,6 +158,71 @@ pub(crate) fn default_mode(cfg: &AppConfig) -> Result<SessionMode, AppError> {
     crate::resolve_session_mode(&cfg.session.default_mode, env_override.as_deref())
 }
 
+/// 进程启动时跑一遍附件目录的家务活。
+///
+/// 三件事，都只做一次、都在握手时做完，因此永远不落在打字或发送的热路径上：
+///
+/// 1. 删掉旧版本遗留的后端草稿目录 —— 草稿改由扩展层持有后它已无人读取
+/// 2. 回收超期租约（上次会话没发出去、进程又崩了的那些字节）
+/// 3. 把派生缓存压回上限以内
+///
+/// 全部失败都只记日志：家务活做不成的后果是多占点磁盘，不该阻止用户开始工作。
+pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
+    let Some(manager) = scoped_session_manager(state) else {
+        return;
+    };
+    manager.discard_legacy_draft_dir();
+
+    let store = manager.attachment_store();
+    let is_referenced = |sha: &str| manager.any_transcript_references_blob(sha);
+    match store.gc_pending(
+        crate::core::session::attachments::PENDING_BLOB_TTL,
+        &is_referenced,
+    ) {
+        Ok(report) if report.leases_released > 0 || report.blobs_deleted > 0 => {
+            tracing::info!(
+                "serve: attachment gc released {} lease(s), reclaimed {} blob(s), kept {} still referenced",
+                report.leases_released,
+                report.blobs_deleted,
+                report.blobs_retained
+            );
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("serve: attachment gc failed: {error}"),
+    }
+
+    match store.evict_rebuildable_over_budget(
+        crate::core::session::attachments::REBUILDABLE_MAX_BYTES,
+        &is_referenced,
+    ) {
+        Ok(evicted) if evicted > 0 => {
+            tracing::info!("serve: evicted {evicted} bytes of rebuildable attachment data");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("serve: attachment eviction failed: {error}"),
+    }
+}
+
+/// 按当前配置构造会话管理器，用于「还没有任何会话」时也需要访问磁盘布局的场合。
+fn scoped_session_manager(state: &ServeState) -> Option<SessionManager> {
+    let sessions_dir = resolve_sessions_dir(&state.cfg).ok()?;
+    let session_key = session_key_for_agent(
+        &state.cfg.agent.id,
+        default_mode(&state.cfg).ok()?,
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    );
+    Some(SessionManager::new_scoped(sessions_dir, session_key))
+}
+
+/// 附件目录的绝对路径，握手时就能给出。
+///
+/// 宿主要用它配 webview 的 `localResourceRoots`，而这个配置只有在 webview 首次渲染
+/// 之前写好才不会引发重载 —— 所以它必须来自 `initialize`，不能等到某个会话的
+/// `get_state`：那时 webview 早就渲染完了，再改资源根就是一次可见的白屏。
+pub(crate) fn attachment_root(state: &ServeState) -> Option<PathBuf> {
+    Some(scoped_session_manager(state)?.attachment_store().root().to_path_buf())
+}
+
 pub(crate) fn normalize_session_mode(
     cfg: &AppConfig,
     explicit: Option<ServeSessionMode>,

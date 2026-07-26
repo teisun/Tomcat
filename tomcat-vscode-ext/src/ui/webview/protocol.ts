@@ -9,6 +9,13 @@ import type {
   ServeEvent,
 } from "../../serveClient/wire";
 import type { ParticipantPlanState } from "../../shared/planState";
+import type { ImageAttachmentResultItem } from "../../shared/imageAttachmentProtocol";
+import type {
+  PreviewClose,
+  PreviewReady,
+  PreviewSave,
+  PreviewSelect,
+} from "../../shared/imagePreviewProtocol";
 
 export type WebviewMessageSegment = ServeContentSegment;
 export type WebviewReference = Extract<
@@ -26,6 +33,11 @@ export interface WebviewDomAction {
     | "clickTestId"
     | "dragOverTestId"
     | "dragLeaveTestId"
+    | "focusTestId"
+    | "pressKeyOnTestId"
+    | "probeAttachmentFetch"
+    | "probeFullResolutionMemory"
+    | "probeImagePipeline"
     | "scrollIntoView"
     | "scrollToEdge"
     | "setInputValue"
@@ -44,6 +56,15 @@ export interface WebviewMessageBlock {
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
   id: string;
+  /**
+   * Images attached to this message, as references rather than bytes.
+   *
+   * The bytes stay in the backend blob store and reach Chromium over the webview
+   * resource protocol. Putting them here as base64 was what made a scrolled-back
+   * transcript cost hundreds of megabytes: every snapshot pinned another copy on the
+   * JavaScript heap.
+   */
+  imageAttachments?: WebviewAttachmentView[];
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
@@ -227,18 +248,58 @@ export interface WebviewApprovalCard {
   type: "approval";
 }
 
-export interface WebviewPendingAttachment {
-  attachment: ServeAttachment;
+/**
+ * One attachment as the UI sees it: identity, metadata, and two URLs. No bytes.
+ *
+ * `thumbUri` and `fullUri` are separate on purpose. A 48px square in the attachment
+ * strip and a full-screen preview are wildly different memory costs, and pointing both
+ * at the same source is how eleven thumbnails came to decode eleven full-size bitmaps.
+ */
+export interface WebviewAttachmentView {
+  /** sha256 of the original bytes; the backend's name for this attachment. */
+  blobSha: string;
+  /** Original byte count, for display only. */
+  bytes?: number;
+  filename: string;
+  /** Full-resolution URL. Only the preview panel should load this. */
+  fullUri?: string | null;
+  /** True once a downsampled version exists in the backend. */
+  hasThumb?: boolean;
   id: string;
+  mimeType: string;
+  /** Downsampled URL, or the full one when no thumbnail exists yet. */
+  thumbUri?: string | null;
+  /**
+   * The backend no longer has these bytes.
+   *
+   * Applies to history as much as to a draft: a transcript keeps naming an image after
+   * its blob has been garbage-collected, and a message that quietly renders an empty
+   * square is worse than one that says the image is gone.
+   */
+  unavailable?: boolean;
+}
+
+/**
+ * An attachment sitting in the composer, waiting to be sent.
+ *
+ * Carries the same reference view as history plus the composer-only bits: a label to
+ * show, and `unavailable` for the case where the backend no longer has the bytes.
+ */
+export interface WebviewPendingAttachment extends WebviewAttachmentView {
   kind: ServeAttachment["kind"];
   label: string;
-  mimeType?: string | null;
   path?: string | null;
+}
+
+export interface WebviewComposerDraft {
+  segments: WebviewMessageSegment[];
+  text: string;
 }
 
 export interface WebviewSessionSnapshot {
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
+  composerDraft?: WebviewComposerDraft;
   contextRatio?: number | null;
   hasMoreHistory?: boolean;
   historyLoading?: boolean;
@@ -323,6 +384,21 @@ export type HostEventFrameContent =
   | {
       type: "__test.capture_dom";
     }
+  | {
+      type: "attachImagesResult";
+      items: ImageAttachmentResultItem[];
+    }
+  | {
+      type: "imageAttachmentFeedback";
+      data: {
+        message: string;
+        hasErrors: boolean;
+      };
+    }
+  | PreviewReady
+  | PreviewSelect
+  | PreviewSave
+  | PreviewClose
   | {
       action: WebviewDomAction;
       type: "__test.dom_action";
@@ -452,6 +528,78 @@ export type WebviewIntent =
       type: "resyncSessionView";
       data: {
         sessionId: string;
+      };
+    }
+  /**
+   * A thumbnail the webview generated for an attachment the backend had none for.
+   *
+   * The only message that carries image bytes besides the paste path, and it carries the
+   * small end: a 192px PNG, never the original.
+   */
+  | {
+      messageId: string;
+      type: "cacheAttachmentThumbnail";
+      data: {
+        blobSha: string;
+        sessionId: string;
+        thumbBase64: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "syncComposerDraft";
+      data: {
+        sessionId: string;
+        segments: WebviewMessageSegment[];
+        text: string;
+      };
+    }
+  | {
+      messageId: string;
+      /**
+       * Hand pasted or dropped images to the host.
+       *
+       * The one message in the whole protocol that carries image bytes, and it fires
+       * once per paste. Everything afterwards — snapshots, keystrokes, the prompt
+       * itself — speaks in hashes.
+       *
+       * The webview has already downsampled a thumbnail and, for SVG, rendered a PNG,
+       * because a webview is the only place in this system with a decoder that can
+       * resize during decode rather than after it.
+       */
+      type: "attachImages";
+      data: {
+        sessionId: string;
+        images: {
+          dataBase64: string;
+          filename?: string | null;
+          mimeType: string;
+          /** PNG rendering for formats providers reject. Base64. */
+          providerBase64?: string;
+          providerMimeType?: string;
+          /** SVG source to send as text when rasterisation was not possible. */
+          providerText?: string;
+          /** Downsampled preview, PNG, base64. Absent when generation failed. */
+          thumbBase64?: string;
+          /** Non-fatal notes from the webview pipeline, surfaced to the user. */
+          warnings?: string[];
+        }[];
+      };
+    }
+  | {
+      messageId: string;
+      type: "openImagePreview";
+      data: {
+        sessionId: string;
+        attachmentId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "removeDraftAttachment";
+      data: {
+        sessionId: string;
+        attachmentId: string;
       };
     }
   | {
@@ -595,6 +743,8 @@ export type WebviewIntent =
         fileChipTopWithinStream: number | null;
         fileChipVisible: boolean;
         historyLoaderVisible: boolean;
+        historyAttachmentThumbCount: number;
+        historyAttachmentUnavailableCount: number;
         html: string;
         jumpToLatestVisible: boolean;
         planCardTopWithinStream: number | null;
@@ -607,6 +757,10 @@ export type WebviewIntent =
         modelDropdownRight: number | null;
         modelDropdownTop: number | null;
         overflowAnchor: string | null;
+        pendingAttachmentStripClientWidth: number;
+        pendingAttachmentStripOverflowing: boolean;
+        pendingAttachmentStripScrollWidth: number;
+        pendingAttachmentThumbCount: number;
         sessionTabs: string[];
         sessionGroupHeaders: string[];
         sessionMoreButtons: string[];
@@ -856,6 +1010,43 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         isRecord(value.data) &&
         Array.isArray(value.data.uris) &&
         value.data.uris.every(isString)
+      );
+    case "cacheAttachmentThumbnail":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.sessionId) &&
+        isString(value.data.blobSha) &&
+        isString(value.data.thumbBase64)
+      );
+    case "syncComposerDraft":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.sessionId) &&
+        isString(value.data.text) &&
+        Array.isArray(value.data.segments) &&
+        value.data.segments.every(isWebviewMessageSegmentShape)
+      );
+    case "attachImages":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.sessionId) &&
+        Array.isArray(value.data.images) &&
+        (value.data.images as unknown[]).every(
+          (img) =>
+            isRecord(img) && isString(img.dataBase64) && isString(img.mimeType),
+        )
+      );
+    case "openImagePreview":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.sessionId) &&
+        isString(value.data.attachmentId)
+      );
+    case "removeDraftAttachment":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.sessionId) &&
+        isString(value.data.attachmentId)
       );
     case "removeAttachment":
       return isRecord(value.data) && isString(value.data.attachmentId);

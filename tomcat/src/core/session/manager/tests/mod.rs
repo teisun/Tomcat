@@ -10,8 +10,11 @@
 //! - `fold_test`：`compute_fold_start` / `filter_turns_by_day` 纯函数等价类。
 //! - `context_state_test`：`ContextState::estimated_token_count` / `usage_ratio` /
 //!   `invalidate_api_usage` / `persist_context_observability`。
+//! - `attachment_test`：附件 blob store 的联动 —— 旧草稿目录丢弃、跨会话引用判据、
+//!   `delete_session` 回收未发送字节。
 
 mod append_test;
+mod attachment_test;
 mod context_state_test;
 mod crud_test;
 mod fold_test;

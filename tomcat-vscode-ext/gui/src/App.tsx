@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  blobToBase64,
+  makeThumbnailFromUrl,
+  prepareAttachment,
+} from "./attachments/imagePipeline";
 import { AttachmentChips } from "./components/AttachmentChips";
+import { AttachmentStrip } from "./components/AttachmentStrip";
 import { injectCheckpointMarkers } from "./components/checkpointMarkers";
 import { Composer, type ComposerDraft, type ComposerHandle } from "./components/Composer";
 import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
@@ -14,6 +20,7 @@ import { isWebviewReference } from "./contextReferences";
 import type {
   AskQuestionResult,
   ContextSearchMatch,
+  WebviewAttachmentView,
   HostToWebviewFrame,
   VsCodeApiLike,
   WebviewDomAction,
@@ -21,6 +28,7 @@ import type {
   WebviewIntent,
   WebviewReference,
   WebviewCheckpoint,
+  WebviewComposerDraft,
   WebviewTimelineItem,
   WebviewStateSnapshot,
 } from "./types";
@@ -47,6 +55,15 @@ const EMPTY_DRAFT: ComposerDraft = {
   text: "",
 };
 const CONTEXT_SEARCH_DEBOUNCE_MS = readContextSearchDebounceMs();
+const COMPOSER_DRAFT_DEBOUNCE_MS = 250;
+/**
+ * How long an attachment error stays on screen.
+ *
+ * It used to stay forever: nothing ever cleared it, so "image.png: exceeds 4.5 MB" was
+ * still sitting under the composer several messages later, describing a paste the user
+ * had long since given up on.
+ */
+const ATTACHMENT_FEEDBACK_TIMEOUT_MS = 8000;
 
 interface ContextSearchState {
   loading: boolean;
@@ -107,6 +124,14 @@ function draftsEqual(left: ComposerDraft, right: ComposerDraft): boolean {
     JSON.stringify(left.segments) === JSON.stringify(right.segments)
   );
 }
+
+/** Digest of a hosted draft, used to notice when the host has a different one. */
+function composerDraftSignature(draft: WebviewComposerDraft): string {
+  return `${draft.text}\u0000${JSON.stringify(draft.segments)}`;
+}
+
+/** The draft state the host assumes for a session it has never been told about. */
+const EMPTY_COMPOSER_DRAFT: WebviewComposerDraft = { segments: [], text: "" };
 
 function isInsertReferenceEvent(
   content: HostToWebviewFrame["content"],
@@ -391,6 +416,39 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   const commandBlockCount = document.querySelectorAll(
     '[data-testid="tool-row"][data-tool-category="command"]',
   ).length;
+  const pendingAttachmentStrip = document.querySelector<HTMLElement>(
+    '[data-attachment-source="draft"]',
+  );
+  const pendingAttachmentThumbCount = document.querySelectorAll(
+    '[data-testid="attachment-thumb"]',
+  ).length;
+  // Every entry in the draft strip, whatever state it is in: a rendered thumbnail, a
+  // placeholder waiting for one, or a chip. Distinct from the thumbnail count because
+  // thumbnails arrive a moment after the attachments do.
+  const pendingAttachmentItemCount =
+    pendingAttachmentStrip?.querySelectorAll(".tc-attachment-strip__item").length ?? 0;
+  const historyAttachmentThumbCount = document.querySelectorAll(
+    '[data-testid="history-attachment-thumb"]',
+  ).length;
+  /**
+   * What the attachment strip actually costs in bitmap memory, measured rather than argued.
+   *
+   * `naturalWidth`/`naturalHeight` are the dimensions Chromium decoded, so multiplying by
+   * 4 bytes per pixel gives the real cost of the decoded image. This is the number the
+   * whole reference-based redesign exists to hold down: the same eleven images at full
+   * resolution would be four hundred times this.
+   */
+  const attachmentBitmaps = [
+    ...document.querySelectorAll<HTMLImageElement>(".tc-attachment-strip__img"),
+  ].map((image) => ({
+    height: image.naturalHeight,
+    resolution: image.dataset.attachmentResolution ?? null,
+    width: image.naturalWidth,
+  }));
+  const attachmentBitmapBytes = attachmentBitmaps.reduce(
+    (total, bitmap) => total + bitmap.width * bitmap.height * 4,
+    0,
+  );
   const assistantCodeCardCount = document.querySelectorAll('[data-testid="assistant-code-card"]').length;
   const assistantClickablePathCount = document.querySelectorAll(
     '[data-testid="assistant-clickable-path"]',
@@ -537,7 +595,240 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     actionToolRowCount: actionToolRows.length,
     editDiffBadgeCount: editDiffBadges,
     commandBlockCount,
+    historyAttachmentThumbCount,
+    historyAttachmentUnavailableCount: document.querySelectorAll(
+      '[data-attachment-source="history"] [data-testid="attachment-unavailable"]',
+    ).length,
+    attachmentBitmapBytes,
+    attachmentBitmaps,
+    attachmentFetchProbe:
+      document.querySelector('[data-testid="attachment-fetch-probe"]')?.textContent ?? null,
+    attachmentSkeletonCount: document.querySelectorAll('[data-testid="attachment-skeleton"]')
+      .length,
+    // Split by strip, because losing the bytes behind a draft attachment and losing them
+    // behind a sent one are different situations with different fixes: the draft one is
+    // removable, the history one is a record of something that happened.
+    attachmentUnavailableCount:
+      pendingAttachmentStrip?.querySelectorAll('[data-testid="attachment-unavailable"]')
+        .length ?? 0,
+    // The composer is a contenteditable rich-text editor, so its text lives in the DOM
+    // rather than in a `value` property.
+    composerText:
+      document.querySelector<HTMLElement>('[data-testid="composer-input"]')?.textContent ??
+      null,
+    focusedTestId: document.activeElement instanceof HTMLElement
+      ? (document.activeElement.dataset.testid ?? null)
+      : null,
+    fullResolutionProbe:
+      document.querySelector('[data-testid="full-resolution-probe"]')?.textContent ?? null,
+    imagePipelineProbe:
+      document.querySelector('[data-testid="image-pipeline-probe"]')?.textContent ?? null,
+    pendingAttachmentStripClientWidth: pendingAttachmentStrip?.clientWidth ?? 0,
+    pendingAttachmentStripOverflowing:
+      !!pendingAttachmentStrip &&
+      pendingAttachmentStrip.scrollWidth > pendingAttachmentStrip.clientWidth,
+    pendingAttachmentStripScrollWidth: pendingAttachmentStrip?.scrollWidth ?? 0,
+    pendingAttachmentItemCount,
+    pendingAttachmentThumbCount,
   };
+}
+
+/**
+ * Exercise the image pipeline inside the real webview and publish the outcome to the DOM.
+ *
+ * This exists because the two risks in doing pixel work here cannot be reproduced
+ * anywhere else: jsdom has neither `createImageBitmap` nor a canvas that can encode,
+ * so a unit test proves nothing about whether Chromium in a VS Code webview will
+ * actually rasterise an SVG. Both known pitfalls are covered:
+ *
+ * 1. An SVG with no intrinsic `width`/`height` — `drawImage` has nothing to scale from
+ *    and historically fails or draws an empty bitmap.
+ * 2. Canvas tainting — if the browser considers the source cross-origin, `toBlob`
+ *    throws `SecurityError` and rasterisation is impossible regardless of anything else.
+ *
+ * The result is written into a hidden node so the existing `captureWebviewDom` bridge
+ * can read it back; the harness asserts on it rather than on a screenshot.
+ */
+async function probeImagePipeline(): Promise<void> {
+  const encoder = new TextEncoder();
+  const svgWithSize = encoder.encode(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="240"><rect width="400" height="240" fill="#2d7"/></svg>',
+  );
+  // No width/height, only a viewBox: pitfall 1.
+  const svgWithoutSize = encoder.encode(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240"><circle cx="200" cy="120" r="100" fill="#37d"/></svg>',
+  );
+  // A design-tool style SVG: inline style, a <style> block and a url(#id) reference.
+  // The blacklist this architecture removed used to reject all three.
+  const svgDesignTool = encoder.encode(
+    [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200">',
+      "<style>.a{fill:#e63}</style>",
+      '<defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/></linearGradient></defs>',
+      '<rect width="320" height="200" fill="url(#g)" style="opacity:.9"/>',
+      '<circle class="a" cx="160" cy="100" r="60"/>',
+      "</svg>",
+    ].join(""),
+  );
+
+  const measure = async (base64: string): Promise<{ height: number; width: number }> => {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+    const size = { height: bitmap.height, width: bitmap.width };
+    bitmap.close();
+    return size;
+  };
+
+  const inspect = async (
+    label: string,
+    bytes: Uint8Array,
+    mimeType: string,
+  ): Promise<Record<string, unknown>> => {
+    try {
+      const prepared = await prepareAttachment({
+        bytes: bytes.slice().buffer,
+        filename: `${label}.svg`,
+        mimeType,
+      });
+      const thumb = prepared.thumbBase64 ? await measure(prepared.thumbBase64) : null;
+      const provider = prepared.providerBase64
+        ? await measure(prepared.providerBase64)
+        : null;
+      return {
+        label,
+        providerIsPng: prepared.providerMimeType === "image/png",
+        providerSize: provider,
+        rasterised: !!prepared.providerBase64,
+        thumbSize: thumb,
+        thumbWithinBudget: thumb ? Math.max(thumb.width, thumb.height) <= 192 : false,
+        usedSourceFallback: typeof prepared.providerText === "string",
+        warnings: prepared.warnings,
+      };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error), label };
+    }
+  };
+
+  const results = [
+    await inspect("svg-with-size", svgWithSize, "image/svg+xml"),
+    await inspect("svg-without-size", svgWithoutSize, "image/svg+xml"),
+    await inspect("svg-design-tool", svgDesignTool, "image/svg+xml"),
+  ];
+
+  let node = document.querySelector<HTMLElement>('[data-testid="image-pipeline-probe"]');
+  if (!node) {
+    node = document.createElement("div");
+    node.dataset.testid = "image-pipeline-probe";
+    node.style.display = "none";
+    document.body.appendChild(node);
+  }
+  node.textContent = JSON.stringify(results);
+}
+
+/**
+ * Report what the resource protocol actually serves for an attachment URL.
+ *
+ * Content-addressed files are named by hash alone, and VS Code decides a webview
+ * resource's `Content-Type` purely from the file extension
+ * (`platform/webview/common/mimeTypes.ts`). A hash has no extension, so this is where we
+ * find out whether the browser is being handed something it will render as an image.
+ */
+async function probeAttachmentFetch(): Promise<void> {
+  const image = document.querySelector<HTMLImageElement>(".tc-attachment-strip__img");
+  const result: Record<string, unknown> = {
+    naturalHeight: image?.naturalHeight ?? null,
+    naturalWidth: image?.naturalWidth ?? null,
+    src: image?.src ?? null,
+  };
+  if (image?.src) {
+    try {
+      const response = await fetch(image.src);
+      result.contentType = response.headers.get("content-type");
+      result.ok = response.ok;
+      result.status = response.status;
+      result.bytes = (await response.blob()).size;
+    } catch (error) {
+      result.error = error instanceof Error ? error.message : String(error);
+    }
+  }
+  let node = document.querySelector<HTMLElement>('[data-testid="attachment-fetch-probe"]');
+  if (!node) {
+    node = document.createElement("div");
+    node.dataset.testid = "attachment-fetch-probe";
+    node.style.display = "none";
+    document.body.appendChild(node);
+  }
+  node.textContent = JSON.stringify(result);
+}
+
+/**
+ * Reproduce the pre-remediation attachment strip and measure what it cost.
+ *
+ * The old strip pointed its 48px thumbnails at the full-resolution image, so this renders
+ * exactly that — the same images, in the same webview, at the same CSS size — and reads
+ * back the dimensions Chromium decoded. Without this the "before" number would be a
+ * multiplication we did on paper; with it, both sides of the comparison are measurements
+ * taken on the same machine minutes apart.
+ *
+ * The probe images are removed once measured, so the page is left as it was found.
+ */
+async function probeFullResolutionMemory(rawSources: string | null): Promise<void> {
+  let sources: string[] = [];
+  try {
+    const parsed = JSON.parse(rawSources ?? "[]");
+    sources = Array.isArray(parsed) ? parsed.filter((uri) => typeof uri === "string") : [];
+  } catch {
+    sources = [];
+  }
+
+  const stage = document.createElement("div");
+  stage.dataset.testid = "full-resolution-stage";
+  stage.style.cssText = "position:absolute;left:-9999px;top:0;";
+  document.body.appendChild(stage);
+
+  const decoded: Array<{ height: number; width: number }> = [];
+  const failed: string[] = [];
+  try {
+    // Decoded one after another, but all left in the document: eleven simultaneous
+    // 48MB decodes is enough to make Chromium start refusing them, which would
+    // understate the very cost this probe exists to measure. Sequential decoding still
+    // ends with every bitmap resident at once, which is the number we want.
+    for (const uri of sources) {
+      const image = document.createElement("img");
+      image.src = uri;
+      image.style.cssText = "width:48px;height:48px;object-fit:cover;";
+      stage.appendChild(image);
+      try {
+        await image.decode();
+        decoded.push({ height: image.naturalHeight, width: image.naturalWidth });
+      } catch (error) {
+        // Expected for the SVG fixture: a hash-named blob is served as an unknown type,
+        // which is exactly why SVGs go through a blob URL instead of this path.
+        failed.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+  } finally {
+    stage.remove();
+  }
+
+  let node = document.querySelector<HTMLElement>('[data-testid="full-resolution-probe"]');
+  if (!node) {
+    node = document.createElement("div");
+    node.dataset.testid = "full-resolution-probe";
+    node.style.display = "none";
+    document.body.appendChild(node);
+  }
+  node.textContent = JSON.stringify({
+    bitmaps: decoded,
+    bytes: decoded.reduce((total, size) => total + size.width * size.height * 4, 0),
+    failures: failed,
+    measured: decoded.length,
+    requested: sources.length,
+  });
 }
 
 function runDomAction(action: WebviewDomAction): void {
@@ -559,6 +850,38 @@ function runDomAction(action: WebviewDomAction): void {
         : (action.index ?? 0);
     return nodes[resolvedIndex] ?? null;
   };
+
+  if (action.kind === "probeImagePipeline") {
+    void probeImagePipeline();
+    return;
+  }
+
+  if (action.kind === "probeAttachmentFetch") {
+    void probeAttachmentFetch();
+    return;
+  }
+
+  if (action.kind === "probeFullResolutionMemory") {
+    void probeFullResolutionMemory(action.value ?? null);
+    return;
+  }
+
+  if (action.kind === "focusTestId") {
+    resolveActionTarget()?.focus();
+    return;
+  }
+
+  if (action.kind === "pressKeyOnTestId") {
+    const target = resolveActionTarget();
+    if (!target) {
+      return;
+    }
+    target.focus();
+    const key = action.value ?? "Delete";
+    target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key }));
+    target.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key }));
+    return;
+  }
 
   if (action.kind === "setRootWidth") {
     const root = document.getElementById("root");
@@ -708,10 +1031,38 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [pendingRestoreDialog, setPendingRestoreDialog] = useState<PendingRestoreDialogState | null>(
     null,
   );
+  const [imageAttachmentFeedback, setImageAttachmentFeedback] = useState<{
+    hasErrors: boolean;
+    message: string;
+    /** Bumped on every report so a repeat of the same message still re-announces. */
+    seq: number;
+  } | null>(null);
+  const attachmentFeedbackSeqRef = useRef(0);
   const stateRef = useRef<WebviewStateSnapshot>(EMPTY_STATE);
   const composerRef = useRef<ComposerHandle | null>(null);
   const pendingInsertionsRef = useRef<Array<{ reference: WebviewReference; sessionId: string }>>([]);
   const pendingComposerSubmissionRef = useRef<PendingComposerSubmission | null>(null);
+  const pendingDraftSyncRef = useRef<{
+    draft: ComposerDraft;
+    sessionId: string;
+  } | null>(null);
+  const draftSyncTimerRef = useRef<number | null>(null);
+  /**
+   * What the host was last told, per session, so identical drafts are not resent.
+   *
+   * Needed because the composer emits a change on mount and on every session switch.
+   * Those emissions carry an empty draft that the host already assumes, so syncing them
+   * is pure protocol noise — and this whole design exists to keep the typing path off
+   * the wire.
+   */
+  const syncedDraftRef = useRef(new Map<string, string>());
+  const appliedComposerDraftRef = useRef<{
+    // A digest of the draft content rather than a revision counter. The host no longer
+    // hands out revisions: the draft lives in the extension layer, and the webview owns
+    // it once hydrated, so there is no shared counter left to compare against.
+    signature: string;
+    sessionId: string;
+  } | null>(null);
   const pendingRestoreRefillRef = useRef<PendingRestoreRefill | null>(null);
   const contextSearchRequestSeqRef = useRef(0);
   const latestContextSearchRequestIdRef = useRef<string | null>(null);
@@ -729,6 +1080,43 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     [state.activeSessionId, state.sessionViews],
   );
   stateRef.current = state;
+
+  const flushComposerDraft = useCallback(() => {
+    if (draftSyncTimerRef.current !== null) {
+      window.clearTimeout(draftSyncTimerRef.current);
+      draftSyncTimerRef.current = null;
+    }
+    const pending = pendingDraftSyncRef.current;
+    pendingDraftSyncRef.current = null;
+    if (!pending) {
+      return;
+    }
+    const signature = composerDraftSignature(pending.draft);
+    const lastSynced = syncedDraftRef.current.get(pending.sessionId);
+    // An empty draft the host was never told about is the state it already assumes;
+    // an unchanged draft is nothing to tell it either. Clearing a draft the host *does*
+    // hold still syncs, because that is what deletes the file.
+    if (signature === (lastSynced ?? composerDraftSignature(EMPTY_COMPOSER_DRAFT))) {
+      return;
+    }
+    syncedDraftRef.current.set(pending.sessionId, signature);
+    postIntent(vscodeApi, "syncComposerDraft", {
+      segments: pending.draft.segments,
+      sessionId: pending.sessionId,
+      text: pending.draft.text,
+    });
+  }, [vscodeApi]);
+
+  const scheduleComposerDraftSync = useCallback((sessionId: string, draft: ComposerDraft) => {
+    pendingDraftSyncRef.current = { draft, sessionId };
+    if (draftSyncTimerRef.current !== null) {
+      window.clearTimeout(draftSyncTimerRef.current);
+    }
+    draftSyncTimerRef.current = window.setTimeout(
+      flushComposerDraft,
+      COMPOSER_DRAFT_DEBOUNCE_MS,
+    );
+  }, [flushComposerDraft]);
 
   const activeApprovalCount =
     activeSession?.timeline.filter((item) => item.type === "approval" && !item.resolved).length ?? 0;
@@ -816,6 +1204,130 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       pendingRestoreRefillRef.current = null;
     }
   }, [activeSession?.sessionId]);
+
+  useEffect(() => {
+    const sessionId = activeSession?.sessionId;
+    const backendDraft = activeSession?.composerDraft;
+    const composer = composerRef.current;
+    if (!sessionId || !backendDraft || !composer) {
+      return;
+    }
+    const signature = composerDraftSignature(backendDraft);
+    const applied = appliedComposerDraftRef.current;
+    if (applied?.sessionId === sessionId && applied.signature === signature) {
+      return;
+    }
+    appliedComposerDraftRef.current = { sessionId, signature };
+    const nextDraft: ComposerDraft = {
+      hasContent:
+        backendDraft.segments.some(
+          (segment) =>
+            segment.type === "reference" || segment.text.trim().length > 0,
+        ) || backendDraft.text.trim().length > 0,
+      segments: backendDraft.segments,
+      text: backendDraft.text,
+    };
+    if (!draftsEqual(composer.getDraft(), nextDraft)) {
+      composer.replaceDraft(nextDraft);
+    }
+  }, [activeSession?.composerDraft, activeSession?.sessionId]);
+
+  useEffect(() => {
+    return () => {
+      flushComposerDraft();
+    };
+  }, [activeSession?.sessionId, flushComposerDraft]);
+
+  // Attachment feedback expires on its own. Keyed on `seq` so a second identical
+  // message restarts the clock instead of inheriting the first one's remaining time.
+  useEffect(() => {
+    if (!imageAttachmentFeedback) {
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setImageAttachmentFeedback(null),
+      ATTACHMENT_FEEDBACK_TIMEOUT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [imageAttachmentFeedback?.seq]);
+
+  // Anything that changes what the message was describing clears it early: switching
+  // session, or emptying the attachment strip it was talking about.
+  useEffect(() => {
+    setImageAttachmentFeedback(null);
+  }, [activeSession?.sessionId]);
+
+  const pendingAttachmentCount = activeSession?.pendingAttachments.length ?? 0;
+  useEffect(() => {
+    if (pendingAttachmentCount === 0) {
+      setImageAttachmentFeedback(null);
+    }
+  }, [pendingAttachmentCount]);
+
+  /**
+   * Generate the thumbnails the backend does not have yet.
+   *
+   * Pasting produces a thumbnail as a side effect of reading the clipboard, but the file
+   * picker and message history do not: those bytes reach the backend without ever passing
+   * through a webview. Attachments in that state have no thumbnail, and the strip refuses
+   * to substitute the original — it shows a placeholder instead, because eleven
+   * full-resolution decodes is the exact failure this design exists to prevent.
+   *
+   * So the webview fills the gap itself: read the image over the resource protocol,
+   * downsample inside the decoder, hand the small result back. Each hash is attempted
+   * once per session; a failure leaves the placeholder rather than retrying forever.
+   */
+  const attemptedThumbnailsRef = useRef(new Set<string>());
+  const thumbnailWorkRef = useRef(false);
+  const [thumbnailPass, setThumbnailPass] = useState(0);
+  useEffect(() => {
+    const session = activeSession;
+    if (!session || thumbnailWorkRef.current) return;
+
+    // One at a time, on purpose. Generating eleven at once means eleven simultaneous
+    // decodes, which is the memory spike this is here to avoid; and each completed
+    // thumbnail changes the snapshot anyway, so a batch would be interrupted mid-flight.
+    let next: { blobSha: string; fullUri: string; mimeType: string } | null = null;
+    const consider = (attachment: WebviewAttachmentView & { kind?: string }) => {
+      if (next || attachment.hasThumb || !attachment.fullUri) return;
+      if (attachment.kind === "file" || !attachment.mimeType.startsWith("image/")) return;
+      if (attemptedThumbnailsRef.current.has(attachment.blobSha)) return;
+      next = {
+        blobSha: attachment.blobSha,
+        fullUri: attachment.fullUri,
+        mimeType: attachment.mimeType,
+      };
+    };
+    for (const attachment of session.pendingAttachments) consider(attachment);
+    for (const item of session.timeline) {
+      if (item.type !== "message") continue;
+      for (const attachment of item.imageAttachments ?? []) consider(attachment);
+    }
+    if (!next) return;
+
+    const target = next as { blobSha: string; fullUri: string; mimeType: string };
+    attemptedThumbnailsRef.current.add(target.blobSha);
+    thumbnailWorkRef.current = true;
+    void (async () => {
+      try {
+        const thumb = await makeThumbnailFromUrl(target.fullUri, target.mimeType);
+        postIntent(vscodeApi, "cacheAttachmentThumbnail", {
+          blobSha: target.blobSha,
+          sessionId: session.sessionId,
+          thumbBase64: await blobToBase64(thumb),
+        });
+      } catch (error) {
+        // The placeholder stays. Retrying would most likely fail the same way, and a
+        // missing thumbnail costs memory rather than correctness.
+        console.warn(`Tomcat could not build a thumbnail for ${target.blobSha}`, error);
+      } finally {
+        thumbnailWorkRef.current = false;
+        // Move to the next one. A success also arrives as a new snapshot, but a failure
+        // does not, and without this nudge the remaining images would never be attempted.
+        setThumbnailPass((pass) => pass + 1);
+      }
+    })();
+  }, [activeSession, thumbnailPass, vscodeApi]);
 
   useEffect(() => {
     if (!contextSearch.open) {
@@ -955,6 +1467,26 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         return;
       }
       if (frame.channel === "event") {
+        if (
+          typeof frame.content === "object" &&
+          frame.content !== null &&
+          "type" in frame.content &&
+          frame.content.type === "imageAttachmentFeedback" &&
+          "data" in frame.content &&
+          typeof frame.content.data === "object" &&
+          frame.content.data !== null &&
+          "message" in frame.content.data &&
+          typeof frame.content.data.message === "string" &&
+          "hasErrors" in frame.content.data &&
+          typeof frame.content.data.hasErrors === "boolean"
+        ) {
+          setImageAttachmentFeedback({
+            hasErrors: frame.content.data.hasErrors,
+            message: frame.content.data.message,
+            seq: ++attachmentFeedbackSeqRef.current,
+          });
+          return;
+        }
         const contextSearchResult = parseContextSearchResultEvent(frame.content);
         if (contextSearchResult) {
           if (contextSearchResult.requestId !== latestContextSearchRequestIdRef.current) {
@@ -1087,6 +1619,18 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       });
     },
     [activeSession?.sessionId, canPrompt, vscodeApi],
+  );
+  const handleOpenImagePreview = useCallback(
+    (imageId: string) => {
+      if (!activeSession?.sessionId) {
+        return;
+      }
+      postIntent(vscodeApi, "openImagePreview", {
+        attachmentId: imageId,
+        sessionId: activeSession.sessionId,
+      });
+    },
+    [activeSession?.sessionId, vscodeApi],
   );
 
   const handleContextSearchOpen = () => {
@@ -1326,6 +1870,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 checkpoints={activeSession.checkpoints ?? []}
                 onOpenDiff={handleOpenDiff}
                 onOpenFile={handleOpenFile}
+                onOpenImagePreview={handleOpenImagePreview}
                 onOpenPlanFile={handleOpenPlanFile}
                 onRetryUserMessage={handleRetryUserMessage}
                 canBuildPlan={canBuildPlan}
@@ -1376,15 +1921,41 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         sessionTodos={activeSession?.sessionTodos ?? []}
       />
 
-      <AttachmentChips
+      <AttachmentStrip
         attachments={activeSession?.pendingAttachments ?? []}
-        onRemove={(attachmentId) =>
-          postIntent(vscodeApi, "removeAttachment", {
+        onOpen={(attachmentId) =>
+          postIntent(vscodeApi, "openImagePreview", {
             attachmentId,
-            sessionId: activeSession?.sessionId ?? null,
+            sessionId: activeSession?.sessionId ?? "",
+          })
+        }
+        onRemove={(attachmentId) =>
+          postIntent(vscodeApi, "removeDraftAttachment", {
+            attachmentId,
+            sessionId: activeSession?.sessionId ?? "",
           })
         }
       />
+      {imageAttachmentFeedback ? (
+        <div
+          className={
+            imageAttachmentFeedback.hasErrors
+              ? "tc-attachment-feedback tc-attachment-feedback--error"
+              : // Success is announced but not shown: the images are already visible in
+                // the strip above, so a banner saying so is redundant on screen while
+                // still being the only signal a screen reader user gets.
+                "tc-visually-hidden"
+          }
+          data-testid={
+            imageAttachmentFeedback.hasErrors
+              ? "attachment-feedback-error"
+              : "attachment-feedback-announcement"
+          }
+          role="status"
+        >
+          {imageAttachmentFeedback.message}
+        </div>
+      ) : null}
 
       {pendingRestoreDialog ? (
         <RestoreConfirmDialog
@@ -1419,7 +1990,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId: activeSession?.sessionId ?? null,
           })
         }
-        onDraftChange={() => undefined}
+        onDraftChange={(draft) => {
+          if (activeSession?.sessionId) {
+            scheduleComposerDraftSync(activeSession.sessionId, draft);
+          }
+        }}
         onModeChange={handleModeChange}
         onModelChange={(modelId) => {
           if (!activeSession || !modelId) {
@@ -1447,6 +2022,21 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId: activeSession.sessionId,
           });
         }}
+        onAttachImages={(images) => {
+          if (activeSession) {
+            postIntent(vscodeApi, "attachImages", {
+              sessionId: activeSession.sessionId,
+              images,
+            });
+            // Show non-blocking feedback about vision capability
+            const hasVision = activeModelCapabilities?.includes("vision");
+            if (!hasVision && images.length > 0) {
+              postIntent(vscodeApi, "showWarningMessage", {
+                message: `Added ${images.length} image(s). The current model may not support vision — images will still be sent but might not be processed.`,
+              });
+            }
+          }
+        }}
         onResolveDrop={(uris) =>
           postIntent(vscodeApi, "resolveDrop", {
             sessionId: activeSession?.sessionId ?? null,
@@ -1461,7 +2051,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId: activeSession.sessionId,
           });
         }}
-        onSubmit={() =>
+        onSubmit={() => {
+          flushComposerDraft();
           submitPrompt(
             vscodeApi,
             composerRef.current,
@@ -1470,8 +2061,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             (pending) => {
               pendingComposerSubmissionRef.current = pending;
             },
-          )
-        }
+          );
+        }}
         planState={activeSession?.planState}
       />
     </main>

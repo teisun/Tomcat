@@ -705,7 +705,7 @@ export async function assertWebviewAddModelsFlow(
   );
   assert.strictEqual(
     settingsSnapshot.state.serverVersion,
-    "0.1.17",
+    "0.1.18",
     "expected the settings panel state to carry the fake serve version",
   );
   assert.strictEqual(
@@ -2995,6 +2995,23 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
   }
 }
 
+/** 4x4 truecolour PNG — real bytes, small enough to keep inline. */
+const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAK0lEQVR4nA3JQREAAAyDsAqrsApDBLK2HxdiYuMiX6mtq7xldm7yN1gcwgElshfBr2E1gwAAAABJRU5ErkJggg==";
+
+/**
+ * Count attachments in the pending strip regardless of what each one currently looks
+ * like. An image starts as a loading placeholder, becomes a thumbnail once one has been
+ * generated, and turns into a chip if its bytes went missing — all the same attachment.
+ */
+function countPendingAttachments(html: string): number {
+  return (
+    html.match(
+      /data-testid="attachment-(?:thumb|chip|skeleton|unavailable)"/gu,
+    ) ?? []
+  ).length;
+}
+
 export async function assertWebviewPickContextFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -3010,7 +3027,9 @@ export async function assertWebviewPickContextFlow(
   const imagePath = path.join(workspaceDir, "pick-context-image.png");
   const codePath = path.join(workspaceDir, "pick-context.ts");
   const folderPath = path.join(workspaceDir, "pick-context-folder");
-  await fs.writeFile(imagePath, "png-bytes", "utf8");
+  // Real PNG bytes, because the picked file now travels through ingest and thumbnail
+  // generation. A placeholder string would be rejected before it reached the strip.
+  await fs.writeFile(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
   await fs.writeFile(codePath, "export const pickContext = true;\n", "utf8");
   await fs.mkdir(folderPath, { recursive: true });
 
@@ -3022,8 +3041,7 @@ export async function assertWebviewPickContextFlow(
         : undefined,
     20_000,
   );
-  const baselineAttachmentCount =
-    (baselineSnapshot.html.match(/data-testid="attachment-chip"/gu) ?? []).length;
+  const baselineAttachmentCount = countPendingAttachments(baselineSnapshot.html);
   const baselineReferenceCount =
     (baselineSnapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
 
@@ -3042,11 +3060,10 @@ export async function assertWebviewPickContextFlow(
     const snapshot = await waitForWebviewDomSnapshot(
       api,
       (candidate) => {
-        const attachmentCount = (candidate.html.match(/data-testid="attachment-chip"/gu) ?? []).length;
         const referenceCount = (candidate.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
         return (
           candidate.activeSessionId === sessionId &&
-          attachmentCount === baselineAttachmentCount + 1 &&
+          countPendingAttachments(candidate.html) === baselineAttachmentCount + 1 &&
           referenceCount === baselineReferenceCount + 2 &&
           candidate.html.includes("pick-context-image.png") &&
           candidate.html.includes("pick-context.ts") &&
@@ -3059,7 +3076,7 @@ export async function assertWebviewPickContextFlow(
     );
 
     assert.equal(
-      (snapshot.html.match(/data-testid="attachment-chip"/gu) ?? []).length,
+      countPendingAttachments(snapshot.html),
       baselineAttachmentCount + 1,
       "expected the picker to add exactly one pending attachment",
     );
@@ -3085,6 +3102,20 @@ export async function assertWebviewPickContextFlow(
 
     assert.equal(settled.attachments[0]?.label, "pick-context-image.png");
     assert.equal(settled.attachments[0]?.kind, "image");
+
+    // A picked file arrives without a thumbnail — nothing decoded it yet. The webview is
+    // expected to notice, downsample the image itself, and hand the result back, which is
+    // what keeps the 48px strip from loading full-resolution photographs.
+    const withThumbnail = await waitForWebviewDomSnapshot(
+      api,
+      (candidate) =>
+        candidate.html.includes('data-testid="attachment-thumb"') ? candidate : undefined,
+      20_000,
+    );
+    assert.ok(
+      withThumbnail.html.includes('data-attachment-resolution="thumb"'),
+      "expected the strip to end up showing a generated thumbnail, not the source image",
+    );
   } finally {
     api.__testing.setOpenDialogHandler(undefined);
   }

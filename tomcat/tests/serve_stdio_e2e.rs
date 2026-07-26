@@ -32,6 +32,40 @@ fn initialize(child: &mut ServeChild) -> String {
         .to_string()
 }
 
+/// 先把字节交给后端，换回一个引用，再发送。
+///
+/// 发送命令本身不再接受字节：`ingest_attachment` 是全协议唯一携带 base64 的地方，
+/// 所以任何附件都得先过这一道。返回 `blobSha`。
+fn ingest(
+    child: &mut ServeChild,
+    session_id: &str,
+    request_id: &str,
+    attachment: serde_json::Value,
+) -> String {
+    child.send_value(&json!({
+        "type": "ingest_attachment",
+        "id": request_id,
+        "sessionId": session_id,
+        "attachment": attachment
+    }));
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some(request_id)
+    });
+    let response = frames
+        .iter()
+        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some(request_id))
+        .expect("ingest response");
+    assert_eq!(
+        response.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "ingest failed: {response:?}"
+    );
+    response["payload"]["blobSha"]
+        .as_str()
+        .expect("blobSha")
+        .to_string()
+}
+
 fn configure_openai_responses_fixture(fx: &ServeFixture, base_url: &str) {
     fs::write(
         fx.home_path.join(".tomcat").join("models.toml"),
@@ -462,7 +496,7 @@ fn serve_prompt_with_attachment_roundtrip() {
 
 #[test]
 #[serial]
-fn serve_prompt_with_inline_file_attachment_roundtrip() {
+fn serve_prompt_with_ingested_file_attachment_roundtrip() {
     common::setup_logging();
     let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         responses_sse_delta("file ok"),
@@ -472,6 +506,18 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
     configure_openai_responses_fixture(&fx, &server.base_url);
     let mut child = spawn_serve_child(&fx);
     let session_id = initialize(&mut child);
+
+    let blob_sha = ingest(
+        &mut child,
+        &session_id,
+        "file-ingest-1",
+        json!({
+            "kind": "file",
+            "filename": "notes.pdf",
+            "mimeType": "application/pdf",
+            "dataBase64": "JVBERi0xLjQK"
+        }),
+    );
 
     child.send_value(&json!({
         "type": "prompt",
@@ -484,7 +530,7 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
                     "kind": "file",
                     "filename": "notes.pdf",
                     "mimeType": "application/pdf",
-                    "dataBase64": "JVBERi0xLjQK"
+                    "blobSha": blob_sha
                 }
             ]
         }
@@ -801,6 +847,43 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
     let mut child = spawn_serve_child(&fx);
     let session_id = initialize(&mut child);
 
+    // 第一道门：字节根本进不来。
+    child.send_value(&json!({
+        "type": "ingest_attachment",
+        "id": "file-e2e-bad-ingest",
+        "sessionId": session_id,
+        "attachment": {
+            "kind": "file",
+            "filename": "notes.md",
+            "mimeType": "text/markdown",
+            "dataBase64": "IyBoaQ=="
+        }
+    }));
+    let ingest_frames = child.recv_until(WAIT_TIMEOUT, |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-bad-ingest")
+    });
+    let ingest_response = ingest_frames
+        .iter()
+        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-bad-ingest"))
+        .expect("bad ingest response");
+    assert_eq!(ingest_response["success"].as_bool(), Some(false));
+    assert_eq!(
+        ingest_response["error"].as_str(),
+        Some("unsupported file mime type: text/markdown")
+    );
+
+    // 第二道门：字节是合法 PDF，但发送时声明成了别的类型。
+    let blob_sha = ingest(
+        &mut child,
+        &session_id,
+        "file-e2e-good-ingest",
+        json!({
+            "kind": "file",
+            "filename": "notes.pdf",
+            "mimeType": "application/pdf",
+            "dataBase64": "JVBERi0xLjQK"
+        }),
+    );
     child.send_value(&json!({
         "type": "prompt",
         "id": "file-e2e-bad-mime",
@@ -812,7 +895,7 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
                     "kind": "file",
                     "filename": "notes.md",
                     "mimeType": "text/markdown",
-                    "dataBase64": "IyBoaQ=="
+                    "blobSha": blob_sha
                 }
             ]
         }
@@ -882,6 +965,17 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
     });
     assert_eq!(count_event(&first_frames, "agent_end"), 1);
 
+    let pdf_sha = ingest(
+        &mut child,
+        &session_id,
+        "hist-2-ingest",
+        json!({
+            "kind": "file",
+            "filename": "notes.pdf",
+            "mimeType": "application/pdf",
+            "dataBase64": "JVBERi0xLjQK"
+        }),
+    );
     child.send_value(&json!({
         "type": "prompt",
         "id": "hist-2",
@@ -893,7 +987,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
                     "kind": "file",
                     "filename": "notes.pdf",
                     "mimeType": "application/pdf",
-                    "dataBase64": "JVBERi0xLjQK"
+                    "blobSha": pdf_sha
                 }
             ]
         }
@@ -982,12 +1076,23 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
 
 #[test]
 #[serial]
-fn serve_prompt_with_inline_file_attachment_missing_filename_returns_error() {
+fn serve_prompt_with_file_attachment_missing_filename_returns_error() {
     common::setup_logging();
     let fx = setup_serve_fixture("http://127.0.0.1:1");
     let mut child = spawn_serve_child(&fx);
     let session_id = initialize(&mut child);
 
+    let blob_sha = ingest(
+        &mut child,
+        &session_id,
+        "file-e2e-missing-name-ingest",
+        json!({
+            "kind": "file",
+            "filename": "notes.pdf",
+            "mimeType": "application/pdf",
+            "dataBase64": "JVBERi0xLjQK"
+        }),
+    );
     child.send_value(&json!({
         "type": "prompt",
         "id": "file-e2e-missing-name",
@@ -998,7 +1103,7 @@ fn serve_prompt_with_inline_file_attachment_missing_filename_returns_error() {
                 {
                     "kind": "file",
                     "mimeType": "application/pdf",
-                    "dataBase64": "JVBERi0xLjQK"
+                    "blobSha": blob_sha
                 }
             ]
         }

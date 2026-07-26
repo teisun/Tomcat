@@ -11,8 +11,8 @@ use crate::infra::events::WireEvent;
 use crate::{resolve_agent_trail_dir, AppConfig, AppError};
 
 use super::types::{
-    ControlFrame, ListModelsPayload, ListProviderKeysPayload, OutFrame, RemoveModelResponse,
-    ResponseFrame, ServeCommand, SetProviderKeyResponse, UpsertModelResponse,
+    ControlFrame, IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload, OutFrame,
+    RemoveModelResponse, ResponseFrame, ServeCommand, SetProviderKeyResponse, UpsertModelResponse,
 };
 use crate::core::llm::{ModelKeyStatus, ModelView, ProviderKeyView};
 
@@ -31,6 +31,9 @@ pub(crate) struct ServeSchemaBundle {
     remove_model_response: schemars::schema::RootSchema,
     set_provider_key_response: schemars::schema::RootSchema,
     list_provider_keys_payload: schemars::schema::RootSchema,
+    /// 响应方向也必须纳入生成 —— 否则 TS 侧只能靠 `as any` 加手写 parser，
+    /// 而漂移风险最大的恰恰是响应方向。
+    ingest_attachment_response: schemars::schema::RootSchema,
 }
 
 pub fn schema_output_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
@@ -55,6 +58,7 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         remove_model_response: schema_for!(RemoveModelResponse),
         set_provider_key_response: schema_for!(SetProviderKeyResponse),
         list_provider_keys_payload: schema_for!(ListProviderKeysPayload),
+        ingest_attachment_response: schema_for!(IngestAttachmentResponse),
     }
 }
 
@@ -98,6 +102,10 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         (
             "ListProviderKeysPayload",
             &bundle.list_provider_keys_payload,
+        ),
+        (
+            "IngestAttachmentResponse",
+            &bundle.ingest_attachment_response,
         ),
     ];
 

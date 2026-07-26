@@ -1,8 +1,13 @@
 import { memo, useEffect, useState } from "react";
 
+import { AttachmentStrip } from "./AttachmentStrip";
 import { ReferenceChip } from "./ReferenceChip";
 import { ChatMarkdown } from "./markdown/ChatMarkdown";
-import type { WebviewMessageBlock, WebviewMessageSegment } from "../types";
+import type {
+  WebviewMessageBlock,
+  WebviewMessageSegment,
+  WebviewPendingAttachment,
+} from "../types";
 
 const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
   assistant: "Tomcat",
@@ -16,12 +21,14 @@ const NOOP_OPEN_FILE = () => undefined;
 type MessageBubbleProps = {
   item: WebviewMessageBlock;
   onOpenFile?: (path: string, line?: number) => void;
+  onOpenImagePreview?: (imageId: string) => void;
   onRetry?: (messageId: string) => void;
 };
 
 function MessageBubbleComponent({
   item,
   onOpenFile,
+  onOpenImagePreview,
   onRetry,
 }: MessageBubbleProps) {
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -37,6 +44,14 @@ function MessageBubbleComponent({
   const canToggleRawError = rawErrorDetail !== null && rawErrorDetail.trim() !== item.text.trim();
   const segments: WebviewMessageSegment[] =
     item.segments?.length ? item.segments : [{ text: item.text, type: "text" }];
+  const historyAttachments: WebviewPendingAttachment[] = (item.imageAttachments ?? []).map(
+    (image) => ({
+      ...image,
+      kind: "image",
+      label: image.filename,
+      path: null,
+    }),
+  );
 
   useEffect(() => {
     setDetailsExpanded(false);
@@ -93,6 +108,11 @@ function MessageBubbleComponent({
           )
         )}
       </div>
+      <AttachmentStrip
+        attachments={historyAttachments}
+        onOpen={onOpenImagePreview}
+        readonly
+      />
       {canToggleRawError ? (
         <div className="tc-message__detail-actions" data-testid="error-detail-actions">
           <button
@@ -160,6 +180,7 @@ function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbl
   return (
     prev.item === next.item &&
     prev.onOpenFile === next.onOpenFile &&
+    prev.onOpenImagePreview === next.onOpenImagePreview &&
     prev.onRetry === next.onRetry
   );
 }

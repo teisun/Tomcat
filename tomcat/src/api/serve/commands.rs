@@ -16,12 +16,16 @@ use serde_json::json;
 use crate::api::chat::commands::{checkpoint_kind_label, restore_core, RestoreCoreReport};
 use crate::core::llm::{
     list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
-    ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ProviderKeyInput,
-    ThinkingLevel,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind, ContextReference,
+    ProviderKeyInput, ThinkingLevel,
+};
+use crate::core::session::attachments::{
+    safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore,
+    REBUILDABLE_MAX_BYTES,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::transcript::{
-    entry_id, find_entry_line_offset, read_entry_at_offset, TranscriptPage,
+    entry_id, find_entry_line_offset, read_entry_at_offset, TranscriptEntry, TranscriptPage,
 };
 use crate::infra::events::{AgentEvent, WireEvent};
 use crate::AppError;
@@ -29,10 +33,12 @@ use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
 
 use super::control;
 use super::types::{
-    ListModelsPayload, ListProviderKeysPayload, ListSessionsScope, OutFrame, RemoveModelResponse,
-    ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand, ServeContentSegment,
-    ServeContextRefKind, ServeContextReference, ServeMessageParams, ServeSessionMode,
-    SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse,
+    AttachmentMode, CacheThumbnailInput, IngestAttachmentInput, IngestAttachmentResponse,
+    ListModelsPayload,
+    ListProviderKeysPayload, ListSessionsScope, OutFrame, RemoveModelResponse, ResponseFrame,
+    ServeAttachment, ServeAttachmentKind, ServeCommand, ServeContentSegment, ServeContextRefKind,
+    ServeContextReference, ServeMessageParams, ServeSessionMode, SetPlanModeAction,
+    SetProviderKeyResponse, UpsertModelResponse,
 };
 use super::{
     cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
@@ -130,14 +136,19 @@ pub(crate) async fn handle_command(
                 send_error(&state, id, session_id, "busy")?;
                 return Ok(());
             }
-            let input_message = match build_user_message(text, &params) {
-                Ok(message) => message,
+
+            let (archival_message, mut input_message) = match build_turn_messages(&slot, text, &params)
+            {
+                Ok(pair) => pair,
                 Err(error) => {
                     send_error(&state, id, Some(slot.session_id.clone()), error)?;
                     return Ok(());
                 }
             };
-            let input_message = persist_turn_input_message(&slot, input_message, &params)?;
+            let row_id = persist_turn_input_message(&slot, &archival_message, &params)?;
+            input_message.msg_id = Some(row_id);
+            release_attachment_leases(&slot, &params);
+
             start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
         }
         ServeCommand::Steer {
@@ -150,8 +161,9 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
-            let input_message =
-                persist_turn_input_message(&slot, ChatMessage::steering(text), &params)?;
+            let mut input_message = ChatMessage::steering(text);
+            let row_id = persist_turn_input_message(&slot, &input_message, &params)?;
+            input_message.msg_id = Some(row_id);
             if slot.is_busy() {
                 slot.ctx
                     .session_runtime
@@ -177,14 +189,17 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
-            let input_message = match build_user_message(text, &params) {
-                Ok(message) => message,
+            let (archival_message, mut input_message) = match build_turn_messages(&slot, text, &params)
+            {
+                Ok(pair) => pair,
                 Err(error) => {
                     send_error(&state, id, Some(slot.session_id.clone()), error)?;
                     return Ok(());
                 }
             };
-            let input_message = persist_turn_input_message(&slot, input_message, &params)?;
+            let row_id = persist_turn_input_message(&slot, &archival_message, &params)?;
+            input_message.msg_id = Some(row_id);
+            release_attachment_leases(&slot, &params);
             if slot.is_busy() {
                 slot.ctx
                     .session_runtime
@@ -319,6 +334,10 @@ pub(crate) async fn handle_command(
             let next_cursor = encode_next_cursor(&page).map_err(|error| {
                 AppError::Config(format!("encode get_messages cursor failed: {error}"))
             })?;
+            let mut page = page;
+            if params.attachment_mode == AttachmentMode::Reference {
+                dereference_page_attachments(&slot, &mut page.entries);
+            }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
@@ -536,6 +555,50 @@ pub(crate) async fn handle_command(
                     "sessionKey": slot.ctx.session_runtime.session.current_session_key(),
                 })),
             )))?;
+        }
+        ServeCommand::IngestAttachment {
+            id,
+            session_id,
+            attachment,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            match ingest_attachment(&slot, &attachment) {
+                Ok(response) => {
+                    state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                        id,
+                        Some(slot.session_id.clone()),
+                        Some(serde_json::to_value(response)?),
+                    )))?;
+                }
+                Err(error) => {
+                    send_error(&state, id, Some(slot.session_id.clone()), error)?;
+                }
+            }
+        }
+        ServeCommand::CacheAttachmentThumbnail {
+            id,
+            session_id,
+            thumbnail,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            match cache_attachment_thumbnail(&slot, &thumbnail) {
+                Ok(()) => {
+                    state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                        id,
+                        Some(slot.session_id.clone()),
+                        Some(json!({ "cached": true })),
+                    )))?;
+                }
+                Err(error) => {
+                    send_error(&state, id, Some(slot.session_id.clone()), error)?;
+                }
+            }
         }
         ServeCommand::SetPlanMode {
             id,
@@ -1261,9 +1324,66 @@ fn to_context_reference(reference: &ServeContextReference) -> ContextReference {
     }
 }
 
-pub(crate) fn build_user_message(
+/// 构造一个回合的两条消息：落 transcript 的那条与发给模型的那条。
+///
+/// 为什么必须是两条：transcript 是不可变档案，要留住用户**实际附上**的东西（比如原始 SVG）；
+/// 而模型的视觉接口只认位图，SVG 得换成 webview 在 ingest 时转好的 PNG。
+///
+/// 旧实现的做法是「先建一条，再无条件 `.clone()` 一份去做 SVG 替换」——
+/// 11 张图就是把几十 MB base64 白拷一次，哪怕一张 SVG 都没有。这里改成只在
+/// 真的存在 provider 覆盖（即某个附件带 `provider_sha`）时才构造第二条，否则直接复用同一条。
+fn build_turn_messages(
+    slot: &Arc<super::registry::SessionSlot>,
     text: String,
     params: &ServeMessageParams,
+) -> Result<(ChatMessage, ChatMessage), String> {
+    let store = slot.ctx.session_runtime.session.attachment_store();
+    let archival = build_user_message(&store, text, params, AttachmentBytes::Archival)?;
+    let needs_provider_override = params.attachments.iter().any(|attachment| {
+        attachment
+            .provider_sha
+            .as_deref()
+            .is_some_and(|provider| Some(provider) != attachment.blob_sha.as_deref())
+    });
+    if !needs_provider_override {
+        let input = archival.clone();
+        return Ok((archival, input));
+    }
+    let text_for_provider = single_text_of(&archival);
+    let input = build_user_message(&store, text_for_provider, params, AttachmentBytes::Provider)?;
+    Ok((archival, input))
+}
+
+/// `build_user_message` 取哪一份字节。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachmentBytes {
+    /// 用户实际附上的那份，落 transcript。
+    Archival,
+    /// 发给模型的那份；SVG 会取 webview 转好的 PNG。
+    Provider,
+}
+
+/// 当 params 没有 segments 时，`build_user_message` 只用到 `text`；
+/// 构造第二条消息时把它取回来，避免要求调用方复制一份 String。
+fn single_text_of(message: &ChatMessage) -> String {
+    match message.content.as_ref() {
+        Some(ChatMessageContent::Text(text)) => text.clone(),
+        Some(ChatMessageContent::Parts(parts)) => parts
+            .iter()
+            .find_map(|part| match part {
+                ChatMessageContentPart::InputText { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+pub(crate) fn build_user_message(
+    store: &AttachmentBlobStore,
+    text: String,
+    params: &ServeMessageParams,
+    which: AttachmentBytes,
 ) -> Result<ChatMessage, String> {
     if params.segments.is_empty() && params.attachments.is_empty() {
         return Ok(ChatMessage::user(text));
@@ -1287,7 +1407,7 @@ pub(crate) fn build_user_message(
         }
     }
     for attachment in &params.attachments {
-        parts.push(parse_attachment_part(attachment)?);
+        parts.push(resolve_attachment_part(store, attachment, which)?);
     }
     Ok(ChatMessage::user_with_parts(parts))
 }
@@ -1300,12 +1420,19 @@ fn normalized_user_message_id(params: &ServeMessageParams) -> Option<&str> {
         .filter(|candidate| !candidate.is_empty())
 }
 
+/// 把输入消息落进 transcript，返回它的 row id。
+///
+/// 只返回 row id 而不返回整条消息：调用方需要的就只是这个 id，
+/// 让它回抄到「发给模型」那条消息上。返回整条消息会诱使调用方手工搬字段
+/// （旧实现就是 `input_message.msg_id = persisted.msg_id`），
+/// 将来 persist 若再规范化别的字段，provider 那条会静默漏掉。
 fn persist_turn_input_message(
     slot: &Arc<super::registry::SessionSlot>,
-    mut message: ChatMessage,
+    message: &ChatMessage,
     params: &ServeMessageParams,
-) -> Result<ChatMessage, AppError> {
-    let row_id = if let Some(forced_id) = normalized_user_message_id(params) {
+) -> Result<String, AppError> {
+    let payload = serde_json::to_value(message)?;
+    if let Some(forced_id) = normalized_user_message_id(params) {
         if slot
             .ctx
             .session_runtime
@@ -1313,80 +1440,332 @@ fn persist_turn_input_message(
             .get_entry_for_session(&slot.session_id, forced_id)?
             .is_none()
         {
-            slot.ctx
+            return slot
+                .ctx
                 .session_runtime
                 .session
-                .append_message_with_id(serde_json::to_value(&message)?, forced_id)?
-        } else {
-            slot.ctx
-                .session_runtime
-                .session
-                .append_message(serde_json::to_value(&message)?)?
+                .append_message_with_id(payload, forced_id);
         }
-    } else {
-        slot.ctx
-            .session_runtime
-            .session
-            .append_message(serde_json::to_value(&message)?)?
-    };
-    message.msg_id = Some(row_id);
-    Ok(message)
+    }
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(payload)
 }
 
-fn parse_attachment_part(attachment: &ServeAttachment) -> Result<ChatMessageContentPart, String> {
-    match (&attachment.data_base64, &attachment.file_id) {
+/// 发送成功后释放这一回合用到的全部附件租约。
+///
+/// 释放租约就是「零拷贝提升」的全部动作 —— 字节原地不动，只是不再被当作待清理的草稿字节。
+/// 失败只记日志：租约没释放的后果是 GC 晚一轮回收，不影响用户，不值得让发送失败。
+fn release_attachment_leases(
+    slot: &Arc<super::registry::SessionSlot>,
+    params: &ServeMessageParams,
+) {
+    let store = slot.ctx.session_runtime.session.attachment_store();
+    for attachment in &params.attachments {
+        for sha in [
+            attachment.blob_sha.as_deref(),
+            attachment.provider_sha.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Err(error) = store.promote(&slot.session_id, sha) {
+                tracing::warn!(
+                    "serve: failed to release attachment lease {sha} for {}: {error}",
+                    slot.session_id
+                );
+            }
+        }
+    }
+}
+
+/// 收录一份附件字节，换回内容哈希。
+///
+/// 这是全协议唯一接收图片字节的地方，因此也是**唯一的权威校验点**：
+/// 扩展层的检查只用于即时 UI 反馈，永远不被信任。发送时 prompt 只带哈希，
+/// 后端按哈希取自己已校验过的字节，客户端无法绕过校验。
+fn ingest_attachment(
+    slot: &Arc<super::registry::SessionSlot>,
+    input: &IngestAttachmentInput,
+) -> Result<IngestAttachmentResponse, String> {
+    let bytes = decode_base64(&input.data_base64, "dataBase64")?;
+    match input.kind {
+        ServeAttachmentKind::Image => validate_image_bytes(&bytes, &input.mime_type)?,
+        ServeAttachmentKind::File => validate_file_bytes(&bytes, &input.mime_type)?,
+    }
+
+    let store = slot.ctx.session_runtime.session.attachment_store();
+    let lease = |sha: &str| -> Result<(), String> {
+        store
+            .mark_pending(&slot.session_id, sha)
+            .map_err(|error| format!("unable to record attachment lease: {error}"))
+    };
+    let persist = |bytes: &[u8]| -> Result<String, String> {
+        let sha = store
+            .put(bytes)
+            .map_err(|error| format!("unable to store attachment bytes: {error}"))?;
+        lease(&sha)?;
+        Ok(sha)
+    };
+
+    let blob_sha = persist(&bytes)?;
+
+    // 缩略图是可选的：webview 生成失败时降级为直接引用原图，功能不受影响。
+    //
+    // 存进 `thumbs/<blob_sha>` 而不是当成一份普通 blob：缩略图是纯派生数据，
+    // 不该占租约、不该参与 blob GC，被淘汰了下次重新生成即可。这也让「新粘贴的图」
+    // 与「历史图补交的缩略图」落在同一个位置，宿主只需要一条查找规则。
+    let has_thumb = match input.thumb_base64.as_deref() {
+        Some(encoded) => {
+            let thumb = decode_base64(encoded, "thumbBase64")?;
+            validate_image_bytes(&thumb, "image/png")
+                .map_err(|error| format!("invalid thumbnail: {error}"))?;
+            store
+                .put_thumbnail(&blob_sha, &thumb)
+                .map_err(|error| format!("unable to store thumbnail: {error}"))?;
+            true
+        }
+        None => false,
+    };
+
+    // provider 覆盖同样可选，只有 SVG 才有。
+    let provider_sha = match input.provider_base64.as_deref() {
+        Some(encoded) => {
+            let provider_mime = input.provider_mime_type.as_deref().unwrap_or("image/png");
+            let provider = decode_base64(encoded, "providerBase64")?;
+            validate_image_bytes(&provider, provider_mime)
+                .map_err(|error| format!("invalid provider rendition: {error}"))?;
+            Some(persist(&provider)?)
+        }
+        None => None,
+    };
+
+    Ok(IngestAttachmentResponse {
+        blob_sha,
+        has_thumb,
+        provider_sha,
+        bytes: bytes.len() as u64,
+        mime_type: input.mime_type.clone(),
+        filename: safe_filename(input.filename.as_deref(), &input.mime_type),
+    })
+}
+
+/// 收下一张历史图的缩略图。
+fn cache_attachment_thumbnail(
+    slot: &Arc<super::registry::SessionSlot>,
+    input: &CacheThumbnailInput,
+) -> Result<(), String> {
+    let thumb = decode_base64(&input.thumb_base64, "thumbBase64")?;
+    validate_image_bytes(&thumb, "image/png")
+        .map_err(|error| format!("invalid thumbnail: {error}"))?;
+    let store = slot.ctx.session_runtime.session.attachment_store();
+    if !store.exists(&input.source_sha) {
+        return Err(format!(
+            "unknown attachment blob {}; nothing to attach a thumbnail to",
+            input.source_sha
+        ));
+    }
+    store
+        .put_thumbnail(&input.source_sha, &thumb)
+        .map_err(|error| format!("unable to store thumbnail: {error}"))?;
+    evict_rebuildable(slot, &store);
+    Ok(())
+}
+
+/// 把一页 transcript 条目里的内联图片字节换成引用。
+///
+/// transcript **格式不变**，它仍是唯一权威事实源；这里改的只是「回给调用方的那一份表示」。
+/// 字节被物化进 `attachments/blobs/` 后，宿主拿到的就只有哈希，
+/// 图片由 Chromium 通过 webview 资源 URI 自己去拉，完全不进 JavaScript 内存。
+///
+/// 出错时保留原样的 base64：宁可这一张回退成内联，也不要让整页历史打不开。
+/// 注意这**不是**「取不到资源就回退 base64」那条被禁止的降级路径 —— 那条禁令针对的是
+/// 渲染侧的资源 URI 配错，必须直接暴露；这里是物化写盘失败，属于真正的 IO 异常。
+fn dereference_page_attachments(
+    slot: &Arc<super::registry::SessionSlot>,
+    entries: &mut [TranscriptEntry],
+) {
+    let store = slot.ctx.session_runtime.session.attachment_store();
+    let mut touched = false;
+    for entry in entries.iter_mut() {
+        let TranscriptEntry::Message(message) = entry else {
+            continue;
+        };
+        let Some(parts) = message
+            .message
+            .get_mut("content")
+            .and_then(|content| content.as_array_mut())
+        else {
+            continue;
+        };
+        for part in parts {
+            let Some(object) = part.as_object_mut() else {
+                continue;
+            };
+            if object.get("type").and_then(|t| t.as_str()) != Some("input_image") {
+                continue;
+            }
+            let Some(encoded) = object.get("image_b64").and_then(|d| d.as_str()) else {
+                continue;
+            };
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+                continue;
+            };
+            match store.materialize_from_transcript(&bytes) {
+                Ok(sha) => {
+                    object.remove("image_b64");
+                    object.insert("blobSha".to_string(), json!(sha));
+                    object.insert("bytes".to_string(), json!(bytes.len()));
+                    object.insert("hasThumb".to_string(), json!(store.has_thumbnail(&sha)));
+                    touched = true;
+                }
+                Err(error) => {
+                    tracing::warn!("serve: unable to materialize history attachment: {error}");
+                }
+            }
+        }
+    }
+    if touched {
+        evict_rebuildable(slot, &store);
+    }
+}
+
+/// 顺手把可重建字节压回预算内。
+///
+/// 判据要问 transcript：只有「transcript 里还留着这份字节」的图才允许被淘汰，
+/// 因为那意味着它随时能再物化一份。未发送的字节磁盘上只有一份，永远不参与淘汰。
+fn evict_rebuildable(
+    slot: &Arc<super::registry::SessionSlot>,
+    store: &crate::core::session::attachments::AttachmentBlobStore,
+) {
+    let session = &slot.ctx.session_runtime.session;
+    let _ = store.evict_rebuildable_over_budget(REBUILDABLE_MAX_BYTES, &|sha| {
+        session.any_transcript_references_blob(sha)
+    });
+}
+
+fn decode_base64(encoded: &str, field: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("invalid base64 in {field}: {error}"))
+}
+
+/// 把一个附件引用还原成消息里的一个 content part。
+///
+/// 校验顺序是刻意的：**先看声明是否自洽，再去取字节**。
+/// 声明层面的错（缺 mimeType、文件类型不是 PDF、缺 filename）与字节无关，
+/// 早报早止，也不必为了报这个错先读一遍磁盘。
+fn resolve_attachment_part(
+    store: &AttachmentBlobStore,
+    attachment: &ServeAttachment,
+    which: AttachmentBytes,
+) -> Result<ChatMessageContentPart, String> {
+    match (&attachment.blob_sha, &attachment.file_id) {
         (Some(_), Some(_)) => {
-            return Err(
-                "invalid_attachment: dataBase64 and fileId are mutually exclusive".to_string(),
-            );
+            return Err("invalid_attachment: blobSha and fileId are mutually exclusive".to_string());
         }
         (None, None) => {
             return Err(
-                "invalid_attachment: exactly one of dataBase64 or fileId is required".to_string(),
+                "invalid_attachment: exactly one of blobSha or fileId is required".to_string(),
             );
         }
         _ => {}
     }
 
+    if let Some(file_id) = attachment.file_id.clone() {
+        return match attachment.kind {
+            ServeAttachmentKind::Image => ChatMessageContentPart::image_file_id(file_id)
+                .map_err(|error| format!("invalid_attachment: {error}")),
+            ServeAttachmentKind::File => {
+                ChatMessageContentPart::file_file_id(file_id, attachment.filename.clone())
+                    .map_err(|error| format!("invalid_attachment: {error}"))
+            }
+        };
+    }
+
+    // ── 声明自洽性 ──
+    let declared_mime = attachment
+        .mime_type
+        .clone()
+        .ok_or_else(|| match attachment.kind {
+            ServeAttachmentKind::Image => {
+                "invalid_attachment: image attachment requires mimeType".to_string()
+            }
+            ServeAttachmentKind::File => {
+                "invalid_attachment: file attachment requires mimeType".to_string()
+            }
+        })?;
+    let file_name = match attachment.kind {
+        ServeAttachmentKind::File => {
+            if !declared_mime.eq_ignore_ascii_case("application/pdf") {
+                return Err(format!(
+                    "invalid_attachment: file attachments only support application/pdf; use kind=image for images (got {declared_mime})"
+                ));
+            }
+            Some(attachment.filename.clone().ok_or_else(|| {
+                "invalid_attachment: file attachment requires filename".to_string()
+            })?)
+        }
+        ServeAttachmentKind::Image => None,
+    };
+
+    // ── 取字节 ──
+    let blob_sha = attachment
+        .blob_sha
+        .as_deref()
+        .expect("blobSha presence checked above");
+    // Provider 方向优先取 provider_sha（SVG 转出的 PNG），其余情况两者相同。
+    let sha = match which {
+        AttachmentBytes::Provider => attachment.provider_sha.as_deref().unwrap_or(blob_sha),
+        AttachmentBytes::Archival => blob_sha,
+    };
+    let bytes = store
+        .get(sha)
+        .map_err(|error| format!("invalid_attachment: {error}"))?
+        .ok_or_else(|| {
+            format!("invalid_attachment: unknown attachment blob {sha}; call ingest_attachment first")
+        })?;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
     match attachment.kind {
         ServeAttachmentKind::Image => {
-            if let Some(file_id) = attachment.file_id.clone() {
-                ChatMessageContentPart::image_file_id(file_id)
+            let mime_type = resolved_image_mime(attachment, which, declared_mime);
+            if mime_type == "image/svg+xml" {
+                ChatMessageContentPart::validated_svg_base64_for_transcript(data)
                     .map_err(|error| format!("invalid_attachment: {error}"))
             } else {
-                let mime_type = attachment.mime_type.clone().ok_or_else(|| {
-                    "invalid_attachment: image attachment requires mimeType".to_string()
-                })?;
-                let data = attachment.data_base64.clone().ok_or_else(|| {
-                    "invalid_attachment: image attachment requires dataBase64".to_string()
-                })?;
                 ChatMessageContentPart::image_base64_data(mime_type, data)
                     .map_err(|error| format!("invalid_attachment: {error}"))
             }
         }
-        ServeAttachmentKind::File => {
-            if let Some(file_id) = attachment.file_id.clone() {
-                ChatMessageContentPart::file_file_id(file_id, attachment.filename.clone())
-                    .map_err(|error| format!("invalid_attachment: {error}"))
-            } else {
-                let mime_type = attachment.mime_type.clone().ok_or_else(|| {
-                    "invalid_attachment: file attachment requires mimeType".to_string()
-                })?;
-                if !mime_type.eq_ignore_ascii_case("application/pdf") {
-                    return Err(format!(
-                        "invalid_attachment: file attachments only support application/pdf; use kind=image for images (got {mime_type})"
-                    ));
-                }
-                let filename = attachment.filename.clone().ok_or_else(|| {
-                    "invalid_attachment: file attachment requires filename".to_string()
-                })?;
-                let data = attachment.data_base64.clone().ok_or_else(|| {
-                    "invalid_attachment: file attachment requires dataBase64".to_string()
-                })?;
-                ChatMessageContentPart::file_base64_data(filename, mime_type, data)
-                    .map_err(|error| format!("invalid_attachment: {error}"))
-            }
-        }
+        ServeAttachmentKind::File => ChatMessageContentPart::file_base64_data(
+            file_name.expect("filename validated above for file attachments"),
+            declared_mime,
+            data,
+        )
+        .map_err(|error| format!("invalid_attachment: {error}")),
+    }
+}
+
+/// 取这一份字节对应的 MIME。
+///
+/// SVG 在 provider 方向已经被 webview 换成了 PNG，所以声明的 MIME 也要跟着换，
+/// 否则会把 PNG 字节标成 `image/svg+xml` 发出去。
+fn resolved_image_mime(
+    attachment: &ServeAttachment,
+    which: AttachmentBytes,
+    declared: String,
+) -> String {
+    let overridden = which == AttachmentBytes::Provider
+        && attachment
+            .provider_sha
+            .as_deref()
+            .is_some_and(|provider| Some(provider) != attachment.blob_sha.as_deref());
+    if overridden {
+        "image/png".to_string()
+    } else {
+        declared
     }
 }
 

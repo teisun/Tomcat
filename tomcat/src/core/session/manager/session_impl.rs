@@ -174,6 +174,70 @@ impl SessionManager {
         &self.sessions_dir
     }
 
+    /// 创建附件字节仓库（内容寻址，见 `core::session::attachments`）。
+    ///
+    /// 注意这里**只有字节**。未发送的草稿文本与附件引用归扩展层持有，
+    /// 理由见 `tomcat-vscode-ext/docs/architecture/composer-draft-placement.md`。
+    pub fn attachment_store(&self) -> crate::core::session::attachments::AttachmentBlobStore {
+        crate::core::session::attachments::AttachmentBlobStore::new(&self.sessions_dir)
+    }
+
+    /// 判断某份字节是否仍被本会话的 transcript 引用。
+    ///
+    /// 供附件 GC 决定「租约到期后字节能不能删」。逐行扫 transcript 找 `blobSha`
+    /// 字面量即可 —— GC 是低频后台动作，不值得为它维护一份反向索引。
+    pub fn transcript_references_blob(&self, session_id: &str, sha: &str) -> bool {
+        let Ok(content) = std::fs::read_to_string(self.transcript_path(session_id)) else {
+            return false;
+        };
+        content.contains(sha)
+    }
+
+    /// 判断某份字节是否仍被**任何**会话的 transcript 引用。
+    ///
+    /// 内容寻址意味着同一张图会被多个会话共享同一份字节，所以 GC 前必须问遍所有 transcript，
+    /// 只看当前会话会把别人还在用的字节删掉。这是启动时的一次性动作，扫全量是可以接受的。
+    pub fn any_transcript_references_blob(&self, sha: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if std::fs::read_to_string(&path)
+                .map(|content| content.contains(sha))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 丢弃旧版本遗留的后端草稿目录。
+    ///
+    /// 草稿改由扩展层持有后，`sessions_dir/drafts/` 不再有任何读者。这里不做迁移而是直接删除：
+    /// 草稿是「未发送的临时内容」，一次性清空可以接受，也避免把一份没人再读的格式长期背在身上。
+    /// 用户文档已写明「升级后未发送的草稿会清空一次」。
+    pub fn discard_legacy_draft_dir(&self) {
+        let legacy = self.sessions_dir.join("drafts");
+        if !legacy.exists() {
+            return;
+        }
+        match std::fs::remove_dir_all(&legacy) {
+            Ok(()) => tracing::info!(
+                "sessions: discarded legacy backend draft directory {} (drafts now live in the extension layer)",
+                legacy.display()
+            ),
+            Err(error) => tracing::warn!(
+                "sessions: failed to discard legacy draft directory {}: {error}",
+                legacy.display()
+            ),
+        }
+    }
+
     pub fn append_in_flight_counter(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.append_in_flight)
     }
@@ -592,6 +656,20 @@ impl SessionManager {
         let path = self.transcript_path(&entry.session_id);
         let _ = std::fs::remove_file(&path);
         let _ = remove_resume_index(&path);
+        // 本会话的 transcript 已删，但内容寻址意味着同一份字节可能被别的会话共享。
+        // 所以判据必须是「问遍所有 transcript」——只看自己会把别人还在用的图删掉。
+        // 仍被别的会话租着的字节由 clear_session 自己按租约保留。
+        if let Err(error) = self
+            .attachment_store()
+            .clear_session(&entry.session_id, &|sha| {
+                self.any_transcript_references_blob(sha)
+            })
+        {
+            tracing::warn!(
+                "sessions: failed to release attachment leases for {}: {error}",
+                entry.session_id
+            );
+        }
         Ok(())
     }
 
