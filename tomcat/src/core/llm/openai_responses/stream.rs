@@ -426,7 +426,7 @@ fn push_terminal_events(
             reason: meta
                 .finish_reason
                 .clone()
-                .unwrap_or_else(|| format!("error:{message}")),
+                .unwrap_or_else(|| "error".to_string()),
             message,
             code: meta.error_code.clone(),
         });

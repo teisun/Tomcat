@@ -64,6 +64,7 @@ type AppendMessageOptions = {
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
   attachments?: NonNullable<WebviewMessageBlock["attachments"]>;
+  label?: string | null;
   preferredId?: string | null;
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
@@ -123,6 +124,34 @@ function asText(value: unknown): string | undefined {
   } catch {
     return String(value);
   }
+}
+
+function formatLlmErrorDisplay(input: {
+  errorMessage: unknown;
+  reason: unknown;
+}): { label?: string | null; text: string } {
+  const reason =
+    typeof input.reason === "string" && input.reason.trim().length > 0
+      ? input.reason.trim()
+      : null;
+  const errorMessage =
+    typeof input.errorMessage === "string" && input.errorMessage.trim().length > 0
+      ? input.errorMessage.trim()
+      : null;
+
+  if (!errorMessage && !reason) {
+    return { text: "Unknown error" };
+  }
+  if (!errorMessage) {
+    return { text: reason ?? "Unknown error" };
+  }
+  if (!reason || reason === "error" || reason === errorMessage) {
+    return { text: errorMessage };
+  }
+  return {
+    label: reason,
+    text: errorMessage,
+  };
 }
 
 function parseAskQuestionRequest(
@@ -1752,6 +1781,9 @@ function pushMessage(
   if (options.detailText !== undefined) {
     next.detailText = options.detailText;
   }
+  if (options.label !== undefined) {
+    next.label = options.label;
+  }
   if (options.deliveryState) {
     next.deliveryState = options.deliveryState;
   }
@@ -2439,7 +2471,15 @@ export class WebviewStateStore {
         pushMessage(session, "notice", frame.message);
         return sessionRenderMutation(session.sessionId);
       case "llm_error":
-        pushMessage(session, "error", `${frame.reason}: ${frame.errorMessage}`);
+        {
+          const display = formatLlmErrorDisplay({
+            errorMessage: frame.errorMessage,
+            reason: frame.reason,
+          });
+          pushMessage(session, "error", display.text, undefined, {
+            label: display.label ?? undefined,
+          });
+        }
         return sessionRenderMutation(session.sessionId);
       case "extension_error":
         pushMessage(session, "error", `${frame.event}: ${frame.error}`);

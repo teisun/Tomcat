@@ -4,9 +4,9 @@ use crate::api::chat::run_loop::compose_planned_turn_messages;
 use crate::core::session::manager::init_context_state;
 use crate::SessionEntry;
 use crate::{
-    AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
-    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
-    RetentionPolicy, SessionManager,
+    AgentRunOutcome, AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
+    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
+    RestoreOptions, RetentionPolicy, SessionManager,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 fn spawn_single_response_server(
     status: u16,
@@ -748,6 +749,61 @@ fn checkpoint_recording_test_context(
     (dir, ctx, transcript_path)
 }
 
+fn chat_turn_test_context(
+    entries: &[crate::test_support::TestModelOverride<'_>],
+) -> (tempfile::TempDir, ChatContext, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    crate::test_support::write_models_override(dir.path(), entries);
+
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
+    ctx.session_runtime
+        .session
+        .create_session(&session_key, None)
+        .unwrap();
+    let transcript_path = ctx
+        .session_runtime
+        .session
+        .current_transcript_path()
+        .unwrap()
+        .expect("transcript path");
+    (dir, ctx, transcript_path)
+}
+
+fn pdf_user_message() -> crate::ChatMessage {
+    let pdf_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"%PDF-1.4\n%%EOF\n",
+    );
+    crate::ChatMessage::user_with_parts(vec![
+        crate::ChatMessageContentPart::text("Read this PDF"),
+        crate::ChatMessageContentPart::file_base64_data(
+            "brief.pdf",
+            "application/pdf",
+            pdf_b64,
+        )
+        .expect("build pdf part"),
+    ])
+}
+
+fn image_user_message() -> crate::ChatMessage {
+    let image_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"fake-png",
+    );
+    crate::ChatMessage::user_with_parts(vec![
+        crate::ChatMessageContentPart::text("Inspect this image"),
+        crate::ChatMessageContentPart::image_base64_data("image/png", image_b64)
+            .expect("build image part"),
+    ])
+}
+
 #[test]
 fn append_message_chain_invariant_is_nonfatal() {
     let err = crate::AppError::invariant("append_message_chain", "tool tail broken");
@@ -1454,6 +1510,98 @@ fn user_prompt_for_mode_formats_all_states() {
         }),
         "u[Chat]> "
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn validate_capabilities_rejects_pdf_before_appending_user_message() {
+    const ENV_KEY: &str = "TOMCAT_VALIDATE_PDF_BEFORE_APPEND_KEY";
+    let _api_guard = EnvGuard::set(ENV_KEY, "stub");
+    let (_dir, ctx, transcript_path) = chat_turn_test_context(&[crate::test_support::TestModelOverride {
+        files: false,
+        ..crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
+    }]);
+    let before = fs::read(&transcript_path).expect("read transcript before");
+    let mut context_state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+
+    let outcome = run_chat_turn_with_message(
+        &ctx,
+        Some(pdf_user_message()),
+        "sys",
+        &mut context_state,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("turn outcome");
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    let after = fs::read(&transcript_path).expect("read transcript after");
+    assert_eq!(before, after, "capability reject 不应把这条 user turn 写进 transcript");
+    let rendered = String::from_utf8_lossy(&after);
+    assert!(!rendered.contains("brief.pdf"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn validate_capabilities_accepts_pdf_when_files_enabled() {
+    const ENV_KEY: &str = "TOMCAT_VALIDATE_PDF_ENABLED_KEY";
+    let _api_guard = EnvGuard::set(ENV_KEY, "stub");
+    let _no_proxy = EnvGuard::set("NO_PROXY", "127.0.0.1,localhost");
+    let _no_proxy_lower = EnvGuard::set("no_proxy", "127.0.0.1,localhost");
+    let (base_url, hits, handle) = spawn_single_response_server(404, r#"{"error":"not found"}"#);
+    let (_dir, ctx, transcript_path) = chat_turn_test_context(&[
+        crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
+            .with_base_url(&base_url),
+    ]);
+    let mut context_state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+
+    let outcome = run_chat_turn_with_message(
+        &ctx,
+        Some(pdf_user_message()),
+        "sys",
+        &mut context_state,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("turn outcome");
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    let rendered = fs::read_to_string(&transcript_path).expect("read transcript after");
+    assert!(rendered.contains("brief.pdf"), "正常路径应保留 user transcript");
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "通过校验后应实际发起一次请求");
+    handle.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn validate_capabilities_rejects_image_before_appending_user_message() {
+    const ENV_KEY: &str = "TOMCAT_VALIDATE_IMAGE_BEFORE_APPEND_KEY";
+    let _api_guard = EnvGuard::set(ENV_KEY, "stub");
+    let (_dir, ctx, transcript_path) = chat_turn_test_context(&[crate::test_support::TestModelOverride {
+        vision: false,
+        ..crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
+    }]);
+    let before = fs::read(&transcript_path).expect("read transcript before");
+    let mut context_state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+
+    let outcome = run_chat_turn_with_message(
+        &ctx,
+        Some(image_user_message()),
+        "sys",
+        &mut context_state,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("turn outcome");
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    let after = fs::read(&transcript_path).expect("read transcript after");
+    assert_eq!(before, after, "vision reject 不应把这条 user turn 写进 transcript");
+    let rendered = String::from_utf8_lossy(&after);
+    assert!(!rendered.contains("image/png"));
 }
 
 #[test]

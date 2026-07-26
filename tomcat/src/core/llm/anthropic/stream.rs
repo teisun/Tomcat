@@ -234,11 +234,13 @@ impl<S> AnthropicStream<S> {
                     .or_else(|| error.get("code"))
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                let reason = code
+                    .as_deref()
+                    .filter(|code| !code.is_empty())
+                    .map(|code| format!("error:{code}"))
+                    .unwrap_or_else(|| "error".to_string());
                 let mut events = vec![StreamEvent::LlmError {
-                    reason: format!(
-                        "error:{}",
-                        code.clone().unwrap_or_else(|| "unknown".to_string())
-                    ),
+                    reason,
                     message,
                     code,
                 }];
@@ -449,5 +451,53 @@ mod tests {
             event,
             StreamEvent::FinishReason { reason } if reason == "stop"
         )));
+    }
+
+    #[test]
+    fn parse_block_error_uses_error_code_as_reason_label() {
+        let mut stream = AnthropicStream::new(
+            empty::<Result<Bytes, reqwest::Error>>(),
+            ProviderCompatProfile::anthropic_messages("claude-opus-4-6"),
+            true,
+        );
+
+        let events = stream
+            .parse_block(
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"boom\"}}\n\n",
+            )
+            .expect("error event");
+
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::LlmError {
+                reason,
+                message,
+                code: Some(code),
+            }) if reason == "error:server_error" && message == "boom" && code == "server_error"
+        ));
+    }
+
+    #[test]
+    fn parse_block_error_without_code_uses_plain_error_label() {
+        let mut stream = AnthropicStream::new(
+            empty::<Result<Bytes, reqwest::Error>>(),
+            ProviderCompatProfile::anthropic_messages("claude-opus-4-6"),
+            true,
+        );
+
+        let events = stream
+            .parse_block(
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"boom\"}}\n\n",
+            )
+            .expect("error event");
+
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::LlmError {
+                reason,
+                message,
+                code: None,
+            }) if reason == "error" && message == "boom"
+        ));
     }
 }

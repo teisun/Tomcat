@@ -316,7 +316,7 @@ fn responses_payload_incomplete_content_filter_maps_to_error_metadata() {
     let r = responses_payload_to_chat_response(&raw);
     assert_eq!(
         r.choices[0].finish_reason.as_deref(),
-        Some("error:content_filter")
+        Some("error")
     );
     assert_eq!(
         r.choices[0].message.error_message.as_deref(),
@@ -324,7 +324,7 @@ fn responses_payload_incomplete_content_filter_maps_to_error_metadata() {
     );
     assert_eq!(
         r.choices[0].message.finish_reason.as_deref(),
-        Some("error:content_filter")
+        Some("error")
     );
 }
 
@@ -1661,10 +1661,10 @@ fn responses_chunk_failed_event_emits_structured_error_and_finish_reason() {
             reason,
             message,
             code: Some(code)
-        } if reason == "error:boom" && message == "boom" && code == "server_error"
+        } if reason == "error:server_error" && message == "boom" && code == "server_error"
     ));
     assert!(
-        matches!(&events[1], StreamEvent::FinishReason { reason } if reason == "error:boom"),
+        matches!(&events[1], StreamEvent::FinishReason { reason } if reason == "error:server_error"),
         "unexpected {:?}",
         events
     );
@@ -1688,11 +1688,11 @@ fn responses_chunk_incomplete_content_filter_emits_structured_error_and_finish_r
             reason,
             message,
             code: None
-        } if reason == "error:content_filter" && message == "content_filter"
+        } if reason == "error" && message == "content_filter"
     ));
     assert!(matches!(
         &events[1],
-        StreamEvent::FinishReason { reason } if reason == "error:content_filter"
+        StreamEvent::FinishReason { reason } if reason == "error"
     ));
 }
 

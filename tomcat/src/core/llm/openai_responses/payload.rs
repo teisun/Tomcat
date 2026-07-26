@@ -60,13 +60,13 @@ impl ResponsesTerminalMetadata {
 
     fn error(message: impl Into<String>, code: Option<String>) -> Self {
         let message = message.into();
-        let reason_suffix = if message.is_empty() {
-            code.clone().unwrap_or_else(|| "unknown".to_string())
-        } else {
-            message.clone()
-        };
+        let finish_reason = code
+            .as_deref()
+            .filter(|code| !code.is_empty())
+            .map(|code| format!("error:{code}"))
+            .unwrap_or_else(|| "error".to_string());
         Self {
-            finish_reason: Some(format!("error:{reason_suffix}")),
+            finish_reason: Some(finish_reason),
             error_message: Some(message),
             error_code: code,
             notice_message: None,

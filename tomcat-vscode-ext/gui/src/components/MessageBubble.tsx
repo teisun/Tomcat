@@ -87,7 +87,7 @@ function MessageBubbleComponent({
       {showHeader ? (
         <div className="tc-message__header">
           <strong>{MESSAGE_LABELS[item.kind]}</strong>
-          <span>{item.kind}</span>
+          <span>{item.label ?? item.kind}</span>
         </div>
       ) : null}
       <div className="message-text rendered-markdown" data-testid="message-text">

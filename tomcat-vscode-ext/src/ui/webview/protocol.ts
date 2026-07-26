@@ -62,6 +62,7 @@ export interface WebviewMessageBlock {
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
   id: string;
+  label?: string | null;
   /**
    * Images attached to this message, as references rather than bytes.
    *

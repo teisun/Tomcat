@@ -171,17 +171,6 @@ fn current_user_prompt(ctx: &ChatContext) -> String {
     )
 }
 
-fn append_failed_turn_message(
-    context_state: &mut crate::core::ContextState,
-    message: ChatMessage,
-    account_chars: bool,
-) {
-    if account_chars {
-        context_state.on_message_appended(estimate_msg_chars(&message));
-    }
-    context_state.messages.push(message);
-}
-
 fn drain_follow_up_messages(ctx: &ChatContext) -> Vec<ChatMessage> {
     {
         let mut queue = ctx.session_runtime.follow_up_queue.lock();
@@ -606,6 +595,28 @@ pub async fn run_chat_turn_with_message(
         _ => system_text.to_string(),
     };
     let planned_messages = drain_planned_turn_messages(ctx, input_message);
+    if let Err(error) = ctx.global_services.model_catalog.with_catalog(|catalog| {
+        validate_capabilities(
+            catalog,
+            &ctx.config.llm.default_model,
+            LlmScene::Main,
+            &main_call.model,
+            &main_call.capabilities,
+            &planned_messages,
+        )
+    }) {
+        let _ = ctx
+            .session_runtime
+            .session
+            .persist_context_observability(context_state);
+        let error_message = error.to_string();
+        let _ = root_event_emitter.emit(AgentEvent::AgentStart);
+        let _ = root_event_emitter.emit(AgentEvent::AgentEnd {
+            messages: Vec::new(),
+            error: Some(error_message),
+        });
+        return Ok(AgentRunOutcome::Failed(error));
+    }
     let (messages, appended_messages) = append_planned_messages_with_rehydrate_retry(
         ctx,
         system_text,
@@ -652,31 +663,6 @@ pub async fn run_chat_turn_with_message(
         ratio = context_state.usage_ratio(),
         compaction_count = context_state.session_obs.compaction_count
     );
-    if let Err(error) = ctx.global_services.model_catalog.with_catalog(|catalog| {
-        validate_capabilities(
-            catalog,
-            &ctx.config.llm.default_model,
-            LlmScene::Main,
-            &main_call.model,
-            &main_call.capabilities,
-            &planned_messages,
-        )
-    }) {
-        for (message, account_chars) in appended_messages {
-            append_failed_turn_message(context_state, message, account_chars);
-        }
-        let _ = ctx
-            .session_runtime
-            .session
-            .persist_context_observability(context_state);
-        let error_message = error.to_string();
-        let _ = root_event_emitter.emit(AgentEvent::AgentStart);
-        let _ = root_event_emitter.emit(AgentEvent::AgentEnd {
-            messages: Vec::new(),
-            error: Some(error_message),
-        });
-        return Ok(AgentRunOutcome::Failed(error));
-    }
     let mut messages = messages;
     if let std::borrow::Cow::Owned(degraded) =
         degrade_unsupported_multimodal(&messages, &main_call.capabilities)

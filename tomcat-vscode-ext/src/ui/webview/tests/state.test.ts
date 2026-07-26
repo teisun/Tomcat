@@ -125,6 +125,75 @@ describe("derivePlanActivity", () => {
 });
 
 describe("WebviewStateStore wire routing", () => {
+  it("renders llm_error body once and puts label on the message header metadata", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      errorCode: "server_error",
+      errorMessage: "boom",
+      reason: "error:server_error",
+      sessionId: "s1",
+      type: "llm_error",
+    } as never);
+
+    const message = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item): item is WebviewMessageBlock => item.type === "message");
+    expect(message).toMatchObject({
+      kind: "error",
+      label: "error:server_error",
+      text: "boom",
+      type: "message",
+    });
+  });
+
+  it("does not duplicate llm_error when reason and body are the same string", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      errorCode: null,
+      errorMessage: "content_filter",
+      reason: "content_filter",
+      sessionId: "s1",
+      type: "llm_error",
+    } as never);
+
+    const message = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item): item is WebviewMessageBlock => item.type === "message");
+    expect(message).toMatchObject({
+      kind: "error",
+      text: "content_filter",
+      type: "message",
+    });
+    expect(message?.label).toBeUndefined();
+  });
+
+  it("renders auto_retry_start as a notice instead of an error bubble", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      attempt: 2,
+      delayMs: 1000,
+      errorMessage: "boom",
+      maxAttempts: 4,
+      sessionId: "s1",
+      type: "auto_retry_start",
+    } as never);
+
+    const message = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item): item is WebviewMessageBlock => item.type === "message");
+    expect(message).toMatchObject({
+      kind: "notice",
+      text: "Retrying after error: boom",
+      type: "message",
+    });
+  });
+
   it("upserts plan.todos and session.todos", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
