@@ -117,13 +117,16 @@ export interface PreviewForceClose {
 
 /** Test-only action used by the real VS Code acceptance harness. */
 export interface ImagePreviewDomAction {
-  kind: "fit" | "next" | "previous" | "zoomIn" | "zoomOut";
+  kind: "copy" | "fit" | "next" | "previous" | "zoomIn" | "zoomOut";
 }
 
 /** Minimal visual state returned by the preview Webview test bridge. */
 export interface ImagePreviewDomSnapshot {
   activeId: string | null;
   activeThumbIndex: number;
+  copyButtonCopied?: boolean;
+  copyIconClass?: string | null;
+  downloadIconFontFamily?: string | null;
   position: number;
   stageClientWidth: number;
   /**

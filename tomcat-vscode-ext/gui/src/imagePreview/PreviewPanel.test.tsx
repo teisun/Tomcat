@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PreviewSection } from "../../../src/shared/imagePreviewProtocol";
+import { COPY_FLASH_MS } from "../components/copyFeedback";
 import {
   PreviewPanel,
   clipboardBlobForPicture,
@@ -59,6 +60,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -108,6 +110,38 @@ describe("PreviewPanel", () => {
     expect(screen.getByTestId("preview-stage").getAttribute("data-zoom")).toBe("fit");
     fireEvent.keyDown(window, { key: "Escape" });
     expect(postMessage).toHaveBeenCalledWith({ data: {}, type: "preview.close" });
+  });
+
+  it("renders codicon toolbar and filmstrip icons, including the stateful fit toggle", async () => {
+    render(<PreviewPanel />);
+    pushState();
+    await screen.findByText("2 / 11");
+
+    expect(
+      screen.getByRole("button", { name: "Zoom out" }).querySelector(".codicon-zoom-out"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Actual size" }).querySelector(".codicon-screen-normal"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Zoom in" }).querySelector(".codicon-zoom-in"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Copy image" }).querySelector(".codicon-copy"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Save as/ }).querySelector(".codicon-download"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Previous" }).querySelector(".codicon-chevron-left"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Next" }).querySelector(".codicon-chevron-right"),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Actual size" }));
+    const fitButton = screen.getByRole("button", { name: "Fit to window" });
+    expect(fitButton.querySelector(".codicon-screen-full")).toBeTruthy();
   });
 
   it("posts Save As and announces success, cancellation and failure accessibly", async () => {
@@ -164,9 +198,81 @@ describe("PreviewPanel", () => {
     render(<PreviewPanel />);
     pushState();
     await screen.findByText("2 / 11");
+    const copyButton = screen.getByRole("button", { name: "Copy image" });
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    expect(copyButton.classList.contains("is-copied")).toBe(true);
+    expect(copyButton.querySelector(".codicon-check")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("Image copied");
+    await waitFor(
+      () => expect(copyButton.classList.contains("is-copied")).toBe(false),
+      { timeout: COPY_FLASH_MS + 1_000 },
+    );
+    expect(copyButton.querySelector(".codicon-copy")).toBeTruthy();
+  });
+
+  it("keeps the copy icon when clipboard write fails", async () => {
+    const write = vi.fn().mockRejectedValue(new Error("nope"));
+    class ClipboardItemMock {
+      static supports(type: string): boolean {
+        return type === "image/png";
+      }
+      constructor(readonly items: Record<string, Blob>) {}
+    }
+    vi.stubGlobal("ClipboardItem", ClipboardItemMock);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        arrayBuffer: async () => new Uint8Array([1]).buffer,
+        ok: true,
+      }),
+    );
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { write },
+    });
+    render(<PreviewPanel />);
+    pushState();
+    await screen.findByText("2 / 11");
+    const copyButton = screen.getByRole("button", { name: "Copy image" });
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain("Copy failed"),
+    );
+    expect(copyButton.classList.contains("is-copied")).toBe(false);
+    expect(copyButton.querySelector(".codicon-copy")).toBeTruthy();
+    expect(copyButton.querySelector(".codicon-check")).toBeNull();
+  });
+
+  it("clears the copy reset timer on unmount", async () => {
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    const write = vi.fn().mockResolvedValue(undefined);
+    class ClipboardItemMock {
+      static supports(type: string): boolean {
+        return type === "image/png";
+      }
+      constructor(readonly items: Record<string, Blob>) {}
+    }
+    vi.stubGlobal("ClipboardItem", ClipboardItemMock);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        arrayBuffer: async () => new Uint8Array([1]).buffer,
+        ok: true,
+      }),
+    );
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { write },
+    });
+    const { unmount } = render(<PreviewPanel />);
+    pushState();
+    await screen.findByText("2 / 11");
     fireEvent.click(screen.getByRole("button", { name: "Copy image" }));
     await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole("status").textContent).toContain("Image copied");
+    unmount();
+    expect(clearTimeoutSpy).toHaveBeenCalled();
   });
 
   // The bytes come back typed from the attachment's own mime type, not from the resource

@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { COPY_FLASH_MS } from "../components/copyFeedback";
 import type {
   ImagePreviewDomAction,
   PreviewPicture,
@@ -128,10 +129,12 @@ export async function clipboardBlobForPicture(
 export function PreviewPanel() {
   const [state, setState] = useState<PreviewState | null>(null);
   const [zoom, setZoom] = useState<"fit" | number>("fit");
+  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const stageRef = useRef<HTMLDivElement>(null);
   const filmstripRef = useRef<HTMLDivElement>(null);
   const activeThumbRef = useRef<HTMLButtonElement>(null);
   const liveRegionRef = useRef<HTMLDivElement>(null);
+  const copyResetTimerRef = useRef<number | null>(null);
 
   // Send ready message on mount and receive Host state updates.
   useEffect(() => {
@@ -173,11 +176,20 @@ export function PreviewPanel() {
     }
   }, [state?.activeId]);
 
-  const announce = (text: string) => {
+  const announce = useCallback((text: string) => {
     if (liveRegionRef.current) {
       liveRegionRef.current.textContent = text;
     }
-  };
+  }, []);
+
+  const clearCopyResetTimer = useCallback(() => {
+    if (copyResetTimerRef.current !== null) {
+      window.clearTimeout(copyResetTimerRef.current);
+      copyResetTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => clearCopyResetTimer, [clearCopyResetTimer]);
 
   const pictures = state ? collectPictures(state.sections) : [];
   const activeIndex = state ? pictures.findIndex((p) => p.id === state.activeId) : -1;
@@ -240,6 +252,11 @@ export function PreviewPanel() {
     ? (svgObjectUrl ?? activeFullUri)
     : activeFullUri;
 
+  useEffect(() => {
+    clearCopyResetTimer();
+    setCopyState("idle");
+  }, [activePicture?.id, clearCopyResetTimer]);
+
   // ── Navigation ──
 
   const goTo = useCallback((id: string) => {
@@ -282,60 +299,6 @@ export function PreviewPanel() {
     });
   }, []);
 
-  // Test-only bridge used by the Development Host visual acceptance harness.
-  useEffect(() => {
-    const handleTestMessage = (event: MessageEvent) => {
-      const msg = event.data as {
-        action?: ImagePreviewDomAction;
-        requestId?: string;
-        type?: string;
-      };
-      if (msg.type === "preview.__test.dom_action" && msg.action) {
-        switch (msg.action.kind) {
-          case "fit":
-            setZoom("fit");
-            break;
-          case "next":
-            goNext();
-            break;
-          case "previous":
-            goPrev();
-            break;
-          case "zoomIn":
-            zoomIn();
-            break;
-          case "zoomOut":
-            zoomOut();
-            break;
-        }
-        return;
-      }
-      if (msg.type !== "preview.__test.capture_dom" || !msg.requestId) {
-        return;
-      }
-      vscodeApi.postMessage({
-        type: "preview.__test.dom_snapshot",
-        requestId: msg.requestId,
-        snapshot: {
-          activeId: state?.activeId ?? null,
-          activeThumbIndex: activeIndex,
-          position: state?.position ?? 0,
-          stageClientWidth: stageRef.current?.clientWidth ?? 0,
-          stageNaturalWidth:
-            document.querySelector<HTMLImageElement>(
-              '[data-testid="preview-stage-image"]',
-            )?.naturalWidth ?? 0,
-          stageScrollWidth: stageRef.current?.scrollWidth ?? 0,
-          thumbCount: pictures.length,
-          total: state?.total ?? 0,
-          zoom,
-        },
-      });
-    };
-    window.addEventListener("message", handleTestMessage);
-    return () => window.removeEventListener("message", handleTestMessage);
-  }, [activeIndex, goNext, goPrev, pictures.length, state, zoom, zoomIn, zoomOut]);
-
   // ── Keyboard ──
 
   useEffect(() => {
@@ -369,11 +332,89 @@ export function PreviewPanel() {
       await navigator.clipboard.write([
         new ClipboardItem({ [blob.type]: blob }),
       ]);
+      clearCopyResetTimer();
+      setCopyState("copied");
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopyState("idle");
+        copyResetTimerRef.current = null;
+      }, COPY_FLASH_MS);
       announce("Image copied to clipboard");
     } catch {
+      clearCopyResetTimer();
+      setCopyState("idle");
       announce("Copy failed");
     }
-  }, [activePicture]);
+  }, [activePicture, announce, clearCopyResetTimer]);
+
+  // Test-only bridge used by the Development Host visual acceptance harness.
+  useEffect(() => {
+    const handleTestMessage = (event: MessageEvent) => {
+      const msg = event.data as {
+        action?: ImagePreviewDomAction;
+        requestId?: string;
+        type?: string;
+      };
+      if (msg.type === "preview.__test.dom_action" && msg.action) {
+        switch (msg.action.kind) {
+          case "copy":
+            void handleCopy();
+            break;
+          case "fit":
+            setZoom("fit");
+            break;
+          case "next":
+            goNext();
+            break;
+          case "previous":
+            goPrev();
+            break;
+          case "zoomIn":
+            zoomIn();
+            break;
+          case "zoomOut":
+            zoomOut();
+            break;
+        }
+        return;
+      }
+      if (msg.type !== "preview.__test.capture_dom" || !msg.requestId) {
+        return;
+      }
+      vscodeApi.postMessage({
+        type: "preview.__test.dom_snapshot",
+        requestId: msg.requestId,
+        snapshot: {
+          activeId: state?.activeId ?? null,
+          activeThumbIndex: activeIndex,
+          copyButtonCopied: copyState === "copied",
+          copyIconClass:
+            document
+              .querySelector<HTMLSpanElement>(
+                'button[aria-label="Copied"] .codicon, button[aria-label="Copy image"] .codicon',
+              )
+              ?.className ?? null,
+          downloadIconFontFamily:
+            getComputedStyle(
+              document.querySelector<HTMLSpanElement>('button[aria-label="Save as…"] .codicon')
+                ?? document.body,
+              "::before",
+            ).fontFamily || null,
+          position: state?.position ?? 0,
+          stageClientWidth: stageRef.current?.clientWidth ?? 0,
+          stageNaturalWidth:
+            document.querySelector<HTMLImageElement>(
+              '[data-testid="preview-stage-image"]',
+            )?.naturalWidth ?? 0,
+          stageScrollWidth: stageRef.current?.scrollWidth ?? 0,
+          thumbCount: pictures.length,
+          total: state?.total ?? 0,
+          zoom,
+        },
+      });
+    };
+    window.addEventListener("message", handleTestMessage);
+    return () => window.removeEventListener("message", handleTestMessage);
+  }, [activeIndex, copyState, goNext, goPrev, handleCopy, pictures.length, state, zoom, zoomIn, zoomOut]);
 
   // ── Save (via Host) ──
 
@@ -412,14 +453,26 @@ export function PreviewPanel() {
         <span style={{ fontWeight: 600 }}>{state.displayLabel}</span>
         <span style={{ opacity: 0.7, fontSize: 12 }}>{state.position} / {state.total}</span>
         <div style={{ flex: 1 }} />
-        <ToolButton onClick={zoomOut} label="Zoom out" shortcut="-">−</ToolButton>
-        <ToolButton onClick={toggleZoom} label={zoom === "fit" ? "Actual size" : "Fit to window"} shortcut="0">⊡</ToolButton>
-        <ToolButton onClick={zoomIn} label="Zoom in" shortcut="+">+</ToolButton>
+        <ToolButton iconClass="codicon-zoom-out" onClick={zoomOut} label="Zoom out" shortcut="-" />
+        <ToolButton
+          iconClass={zoom === "fit" ? "codicon-screen-normal" : "codicon-screen-full"}
+          onClick={toggleZoom}
+          label={zoom === "fit" ? "Actual size" : "Fit to window"}
+          shortcut="0"
+        />
+        <ToolButton iconClass="codicon-zoom-in" onClick={zoomIn} label="Zoom in" shortcut="+" />
         <div style={{ width: 1, height: 24, background: "var(--vscode-panel-border, #333)" }} />
-        <ToolButton onClick={handleCopy} label="Copy image" shortcut="">⧉</ToolButton>
-        <ToolButton onClick={handleSave} label="Save as…" shortcut="">↓</ToolButton>
+        <ToolButton
+          className={copyState === "copied" ? "is-copied" : undefined}
+          copied={copyState === "copied"}
+          iconClass={copyState === "copied" ? "codicon-check" : "codicon-copy"}
+          onClick={handleCopy}
+          label={copyState === "copied" ? "Copied" : "Copy image"}
+          shortcut=""
+        />
+        <ToolButton iconClass="codicon-download" onClick={handleSave} label="Save as…" shortcut="" />
         <div style={{ width: 1, height: 24, background: "var(--vscode-panel-border, #333)" }} />
-        <ToolButton onClick={handleClose} label="Close (Escape)" shortcut="Esc">✕</ToolButton>
+        <ToolButton iconClass="codicon-close" onClick={handleClose} label="Close (Escape)" shortcut="Esc" />
       </header>
 
       {/* Stage */}
@@ -462,7 +515,7 @@ export function PreviewPanel() {
       {/* Filmstrip */}
       <nav aria-label="Image thumbnails" style={{ flex: "none", borderTop: "1px solid var(--vscode-panel-border, #333)", padding: "8px 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "0 12px" }}>
-          <FilmstripButton onClick={goPrev} disabled={activeIndex <= 0} label="Previous">‹</FilmstripButton>
+          <FilmstripButton iconClass="codicon-chevron-left" onClick={goPrev} disabled={activeIndex <= 0} label="Previous" />
           <div
             ref={filmstripRef}
             role="list"
@@ -514,32 +567,72 @@ export function PreviewPanel() {
               </div>
             ))}
           </div>
-          <FilmstripButton onClick={goNext} disabled={activeIndex >= pictures.length - 1} label="Next">›</FilmstripButton>
+          <FilmstripButton iconClass="codicon-chevron-right" onClick={goNext} disabled={activeIndex >= pictures.length - 1} label="Next" />
         </div>
       </nav>
     </main>
   );
 }
 
-function ToolButton({ children, onClick, label, shortcut }: { children: React.ReactNode; onClick(): void; label: string; shortcut: string }) {
+function ToolButton({
+  className,
+  copied = false,
+  iconClass,
+  onClick,
+  label,
+  shortcut,
+}: {
+  className?: string;
+  copied?: boolean;
+  iconClass: string;
+  onClick(): void;
+  label: string;
+  shortcut: string;
+}) {
   return (
     <button
       aria-label={label}
+      className={className}
       title={`${label}${shortcut ? ` (${shortcut})` : ""}`}
       onClick={onClick}
       style={{
-        background: "none", border: "1px solid transparent", borderRadius: 4, color: "var(--vscode-foreground, #ccc)",
-        cursor: "pointer", padding: "4px 8px", fontSize: 16, lineHeight: 1, display: "inline-flex", alignItems: "center", gap: 4,
+        background: "none",
+        border: "1px solid transparent",
+        borderRadius: 4,
+        color: copied
+          ? "var(--vscode-testing-iconPassed, var(--vscode-terminal-ansiGreen, #73c991))"
+          : "var(--vscode-foreground, #ccc)",
+        cursor: "pointer",
+        padding: "4px 8px",
+        fontSize: 0,
+        lineHeight: 1,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
       }}
       onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--vscode-panel-border, #555)"; }}
       onMouseLeave={(e) => { e.currentTarget.style.borderColor = "transparent"; }}
     >
-      {children}
+      <span
+        aria-hidden="true"
+        className={`codicon ${iconClass}`}
+        style={{ fontSize: 16, lineHeight: 1 }}
+      />
     </button>
   );
 }
 
-function FilmstripButton({ children, onClick, disabled, label }: { children: React.ReactNode; onClick(): void; disabled: boolean; label: string }) {
+function FilmstripButton({
+  iconClass,
+  onClick,
+  disabled,
+  label,
+}: {
+  iconClass: string;
+  onClick(): void;
+  disabled: boolean;
+  label: string;
+}) {
   return (
     <button
       aria-label={label}
@@ -548,10 +641,14 @@ function FilmstripButton({ children, onClick, disabled, label }: { children: Rea
       style={{
         background: "none", border: "1px solid var(--vscode-panel-border, #333)", borderRadius: 4,
         color: disabled ? "var(--vscode-disabledForeground, #555)" : "var(--vscode-foreground, #ccc)",
-        cursor: disabled ? "default" : "pointer", padding: "4px 10px", fontSize: 18, lineHeight: 1, flex: "none",
+        cursor: disabled ? "default" : "pointer", padding: "4px 10px", fontSize: 0, lineHeight: 1, flex: "none",
       }}
     >
-      {children}
+      <span
+        aria-hidden="true"
+        className={`codicon ${iconClass}`}
+        style={{ fontSize: 16, lineHeight: 1 }}
+      />
     </button>
   );
 }
