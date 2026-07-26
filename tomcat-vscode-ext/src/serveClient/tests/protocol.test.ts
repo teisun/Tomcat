@@ -8,14 +8,14 @@ describe("serve client protocol helpers", () => {
       parseInitializePayload({
         capabilities: ["prompt", "ask_question"],
         protocolVersion: 1,
-        serverVersion: "0.1.18",
+        serverVersion: "0.1.19",
         sessionId: "s1",
       }),
     ).toEqual({
       attachmentRoot: null,
       capabilities: ["prompt", "ask_question"],
       protocolVersion: 1,
-      serverVersion: "0.1.18",
+      serverVersion: "0.1.19",
       sessionId: "s1",
     });
   });

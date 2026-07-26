@@ -728,7 +728,7 @@ export async function assertWebviewAddModelsFlow(
   );
   assert.strictEqual(
     settingsSnapshot.state.serverVersion,
-    "0.1.18",
+    "0.1.19",
     "expected the settings panel state to carry the fake serve version",
   );
   assert.strictEqual(
