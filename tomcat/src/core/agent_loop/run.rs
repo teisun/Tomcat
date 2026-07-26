@@ -61,11 +61,13 @@ use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::core::session::{
     find_dangling_tail_tool_call_ids, manager::INTERRUPTED_TOOL_RESULT_TEXT,
 };
-use crate::infra::error::AppError;
+use crate::infra::error::{
+    is_unsupported_multimodal_text, llm_http_status, llm_stage, llm_summary, AppError,
+};
 use crate::infra::events::AgentEvent;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::error_classifier::handle_overflow_retry;
+use super::error_classifier::{handle_overflow_retry, handle_unsupported_multimodal_retry};
 use super::reasoning_loop::run_reasoning_loop;
 use super::steering_injection::inject_steering_messages;
 use super::types::{AgentLoop, AgentRunOutcome, AgentRunResult, LoopError};
@@ -245,6 +247,7 @@ impl AgentLoop {
         messages: &mut Vec<ChatMessage>,
     ) -> Result<String, LoopError> {
         let mut last_err: Option<AppError> = None;
+        let mut unsupported_multimodal_hits = 0u32;
         for attempt in 1..=self.config.max_attempts {
             if attempt > 1 {
                 let delay_ms = next_retry_delay_ms(self.config.retry_base_delay_ms, attempt);
@@ -272,7 +275,7 @@ impl AgentLoop {
                 }
             }
 
-            match run_reasoning_loop(self, messages).await {
+            match run_reasoning_loop(self, messages, attempt, self.config.max_attempts).await {
                 Ok(text) => {
                     if attempt > 1 {
                         self.emit_event(AgentEvent::AutoRetryEnd {
@@ -300,6 +303,24 @@ impl AgentLoop {
                     // retry 控制流（last_err / max_attempts 判定）仍由本函数持有，
                     // 保证"谁拥有 attempt 循环谁决定终止"。
                     let _stats = handle_overflow_retry(self, messages, attempt, &e);
+                    let unsupported_multimodal_hit = matches!(&e, AppError::LlmDetailed(_))
+                        && llm_stage(&e).is_none()
+                        && llm_http_status(&e).is_none()
+                        && llm_summary(&e)
+                            .as_deref()
+                            .is_some_and(is_unsupported_multimodal_text);
+                    if unsupported_multimodal_hit {
+                        unsupported_multimodal_hits =
+                            unsupported_multimodal_hits.saturating_add(1);
+                        let attempts_left_after_this =
+                            self.config.max_attempts.saturating_sub(attempt);
+                        if unsupported_multimodal_hits >= 2 && attempts_left_after_this >= 1 {
+                            let _stats =
+                                handle_unsupported_multimodal_retry(self, messages, attempt, &e);
+                        }
+                    } else {
+                        unsupported_multimodal_hits = 0;
+                    }
                     last_err = Some(e);
                     if attempt == self.config.max_attempts {
                         let fatal = last_err

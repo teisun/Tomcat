@@ -432,3 +432,15 @@ pub(super) struct OverflowTrimStats {
     pub(super) ratio_after: f64,
     pub(super) applied: bool,
 }
+
+/// `handle_unsupported_multimodal_retry` 的结果统计。
+///
+/// - `applied == true`：消息已按临时能力集降级，并发出一条用户可见的 notice；
+/// - `degraded_vision / degraded_files`：本次是否真的把图片 / 文件 part 改写成了占位文本。
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct UnsupportedMultimodalRetryStats {
+    pub(super) applied: bool,
+    pub(super) degraded_vision: bool,
+    pub(super) degraded_files: bool,
+}

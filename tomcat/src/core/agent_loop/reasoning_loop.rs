@@ -36,6 +36,8 @@ use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize, 
 pub(super) async fn run_reasoning_loop(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
+    attempt: u32,
+    max_attempts: u32,
 ) -> Result<String, LoopError> {
     agent.reasoning_turn_budget_exhausted = false;
     let mut final_text = String::new();
@@ -87,7 +89,7 @@ pub(super) async fn run_reasoning_loop(
         // Stream 消费（含 LLM connect + MessageStart/Update/End 发射 + cancel 抢占）
         // 整块委托给 stream_handler::run_chat_stream；aborted / Err 路径均已
         // 先发 MessageEnd，调用方仅需补 partial assistant 落盘与 make_aborted。
-        let outcome = stream_handler::run_chat_stream(agent, req).await?;
+        let outcome = stream_handler::run_chat_stream(agent, req, attempt, max_attempts).await?;
         let super::types::StreamOutcome {
             content_buf,
             tool_calls_buf,

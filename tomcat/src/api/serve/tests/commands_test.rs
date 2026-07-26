@@ -15,7 +15,7 @@ use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
 };
 use crate::core::llm::{
-    Capabilities, ChatMessageContent, ChatMessageContentPart, ContextRefKind, FileSource,
+    Capabilities, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextRefKind, FileSource,
     ImageSource, LlmProvider, MessageKind, ModelEntryInput, StreamEvent,
 };
 use crate::{
@@ -132,6 +132,35 @@ fn count_event(lines: &[serde_json::Value], event_type: &str) -> usize {
         .count()
 }
 
+fn latest_user_request_parts(request: &ChatRequest) -> &[ChatMessageContentPart] {
+    let user_message = request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+        .expect("user message");
+    let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
+        panic!("expected multimodal user parts, got {:?}", user_message.content);
+    };
+    parts
+}
+
+fn request_has_input_file(request: &ChatRequest) -> bool {
+    latest_user_request_parts(request)
+        .iter()
+        .any(|part| matches!(part, ChatMessageContentPart::InputFile { .. }))
+}
+
+fn request_has_file_placeholder(request: &ChatRequest) -> bool {
+    latest_user_request_parts(request).iter().any(|part| {
+        matches!(
+            part,
+            ChatMessageContentPart::InputText { text }
+                if text.contains(UNSUPPORTED_FILE_INPUT_PLACEHOLDER)
+        )
+    })
+}
+
 fn first_event_index(lines: &[serde_json::Value], event_type: &str) -> Option<usize> {
     lines
         .iter()
@@ -213,6 +242,72 @@ fn latest_user_entry(
                 == Some("user")
         })
         .expect("latest user entry")
+}
+
+fn unsupported_file_input_stream(message: &str) -> Vec<Result<StreamEvent, crate::AppError>> {
+    vec![
+        Ok(StreamEvent::LlmError {
+            reason: "error:invalid_request_error".to_string(),
+            message: message.to_string(),
+            code: Some("invalid_request_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error:invalid_request_error".to_string(),
+        }),
+    ]
+}
+
+fn content_filter_stream() -> Vec<Result<StreamEvent, crate::AppError>> {
+    vec![
+        Ok(StreamEvent::LlmError {
+            reason: "error".to_string(),
+            message: "content_filter".to_string(),
+            code: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error".to_string(),
+        }),
+    ]
+}
+
+fn ok_text_stream(text: &str) -> Vec<Result<StreamEvent, crate::AppError>> {
+    vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: text.to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+async fn prompt_with_pdf_attachment(
+    state: &Arc<ServeState>,
+    slot: &Arc<crate::api::serve::registry::SessionSlot>,
+    id: &str,
+    text: &str,
+) {
+    handle_command(
+        Arc::clone(state),
+        ServeCommand::Prompt {
+            id: Some(id.to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: text.to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::File,
+                    filename: Some("notes.pdf".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    blob_sha: Some(ingest_test_bytes(slot, &test_pdf_bytes())),
+                    provider_sha: None,
+                    file_id: None,
+                }],
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
 }
 
 #[derive(Debug, Clone)]
@@ -1230,6 +1325,187 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
             && inline.mime_type == "application/pdf"
             && inline.data == expected_pdf
     ));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_retries_stream_terminal_refusal_without_rendering_llm_error() {
+    let _api_key = install_test_api_key();
+    let refusal = unsupported_file_input_stream(
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.",
+    );
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![refusal, ok_text_stream("retry ok")])
+            .await;
+
+    prompt_with_pdf_attachment(&state, &slot, "retry-once-ok", "summarize file").await;
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+    })
+    .await;
+
+    assert_eq!(count_event(&lines, "auto_retry_start"), 1);
+    assert_eq!(count_event(&lines, "llm_error"), 0);
+    let recorded = requests.0.lock().clone();
+    assert_eq!(recorded.len(), 2, "transient refusal should be retried once");
+    assert!(
+        recorded.iter().all(request_has_input_file),
+        "the raw retry path must keep input_file unchanged on both attempts",
+    );
+    let transcript = std::fs::read_to_string(
+        slot.ctx
+            .session_runtime
+            .session
+            .transcript_path(&slot.session_id),
+    )
+    .expect("read transcript");
+    assert!(transcript.contains("retry ok"), "assistant success should reach transcript");
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_degrades_after_second_refusal_and_succeeds() {
+    let _api_key = install_test_api_key();
+    let refusal_message =
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
+    let (state, buffer, _temp, slot, requests) = build_initialized_state_with_recorded_streams(
+        vec![
+            unsupported_file_input_stream(refusal_message),
+            unsupported_file_input_stream(refusal_message),
+            ok_text_stream("degraded retry ok"),
+        ],
+    )
+    .await;
+
+    prompt_with_pdf_attachment(&state, &slot, "retry-degrade-ok", "summarize file").await;
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+    })
+    .await;
+
+    assert_eq!(count_event(&lines, "auto_retry_start"), 2);
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("llm_notice")
+                && line.get("message").and_then(serde_json::Value::as_str)
+                    == Some("本轮附件未被当前端点接受，已按纯文本发送")
+        }),
+        "degrade retry should surface a notice: {lines:?}"
+    );
+    // Provider-call ladder is pinned in `run_basic_test`; this serve test keeps its scope
+    // to the real stdout/session stack: the user should see the notice and still land on a
+    // successful assistant turn.
+    assert_eq!(count_event(&lines, "llm_error"), 0);
+    let recorded = requests.0.lock().clone();
+    assert_eq!(
+        recorded.len(),
+        3,
+        "second refusal should produce original + raw retry + degraded retry",
+    );
+    assert!(
+        recorded[..2].iter().all(request_has_input_file),
+        "the first two attempts must keep input_file before degradation",
+    );
+    assert!(
+        !request_has_input_file(&recorded[2]),
+        "the degraded retry must strip input_file from the final request",
+    );
+    assert!(
+        request_has_file_placeholder(&recorded[2]),
+        "the degraded retry must carry the file placeholder text",
+    );
+    let transcript = std::fs::read_to_string(
+        slot.ctx
+            .session_runtime
+            .session
+            .transcript_path(&slot.session_id),
+    )
+    .expect("read transcript");
+    assert!(
+        transcript.contains("degraded retry ok"),
+        "successful degraded retry should still persist assistant output",
+    );
+    assert!(
+        !requests.0.lock().is_empty(),
+        "integration stack should issue provider requests",
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_exhausted_stream_terminal_refusal_surfaces_one_final_error() {
+    let _api_key = install_test_api_key();
+    let refusal_message =
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
+    let (state, buffer, _temp, slot, requests) = build_initialized_state_with_recorded_streams(
+        vec![
+            unsupported_file_input_stream(refusal_message),
+            unsupported_file_input_stream(refusal_message),
+            unsupported_file_input_stream(refusal_message),
+            unsupported_file_input_stream(refusal_message),
+        ],
+    )
+    .await;
+
+    prompt_with_pdf_attachment(&state, &slot, "retry-exhausted", "summarize file").await;
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").and_then(serde_json::Value::as_str).is_some()
+    })
+    .await;
+
+    assert_eq!(count_event(&lines, "llm_error"), 0);
+    let final_errors = lines
+        .iter()
+        .filter(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").and_then(serde_json::Value::as_str).is_some()
+        })
+        .count();
+    assert_eq!(final_errors, 1, "terminal refusal should render once");
+    let recorded = requests.0.lock().clone();
+    assert_eq!(
+        recorded.len(),
+        4,
+        "four consecutive refusals should consume the full retry budget",
+    );
+    assert!(
+        request_has_file_placeholder(&recorded[2]) && request_has_file_placeholder(&recorded[3]),
+        "degraded attempts must stay degraded until the retry budget is exhausted",
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_content_filter_stream_refusal_does_not_retry() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![content_filter_stream()]).await;
+
+    prompt_with_pdf_attachment(&state, &slot, "content-filter-terminal", "summarize file").await;
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("content_filter"))
+    })
+    .await;
+
+    assert_eq!(count_event(&lines, "auto_retry_start"), 0);
+    assert_eq!(requests.0.lock().len(), 1, "content_filter must remain fatal");
 }
 
 #[tokio::test]

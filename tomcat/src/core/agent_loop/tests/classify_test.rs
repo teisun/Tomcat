@@ -5,7 +5,9 @@
 
 use crate::core::agent_loop::error_classifier::classify_error;
 use crate::core::agent_loop::LoopError;
-use crate::infra::error::{llm_error, llm_http_status_error, LlmErrorStage};
+use crate::infra::error::{
+    llm_error, llm_http_status_error, llm_stream_terminal_error, LlmErrorStage,
+};
 
 #[test]
 fn classify_error_retryable_429() {
@@ -87,4 +89,41 @@ fn classify_error_read_timeout_stage_is_retryable() {
     let e = llm_error("openai", LlmErrorStage::ReadTimeout, "读取响应超时");
     let r = classify_error(e);
     assert!(matches!(r, LoopError::Retryable(_)));
+}
+
+#[test]
+fn classify_error_stream_terminal_error_is_retryable() {
+    let e = llm_stream_terminal_error(
+        "fcodex",
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.",
+        Some("invalid_request_error".into()),
+    );
+    let r = classify_error(e);
+    assert!(matches!(r, LoopError::Retryable(_)));
+}
+
+#[test]
+fn classify_error_content_filter_stream_terminal_stays_fatal() {
+    let e = llm_stream_terminal_error("openai", "content_filter", None);
+    let r = classify_error(e);
+    assert!(matches!(r, LoopError::Fatal(_)));
+}
+
+#[test]
+fn classify_error_context_overflow_still_wins_before_generic_400() {
+    let body = r#"{"error":{"message":"maximum context length reached; please reduce the length","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+    let e = llm_http_status_error("openai", 400, body);
+    let r = classify_error(e);
+    assert!(matches!(r, LoopError::Retryable(_)));
+}
+
+#[test]
+fn classify_error_invalid_model_400_stays_fatal() {
+    let e = llm_http_status_error(
+        "openai",
+        400,
+        r#"{"error":{"message":"invalid model","type":"invalid_request_error"}}"#,
+    );
+    let r = classify_error(e);
+    assert!(matches!(r, LoopError::Fatal(_)));
 }

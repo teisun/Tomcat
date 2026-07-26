@@ -36,6 +36,7 @@ pub struct LlmError {
     provider: Option<String>,
     stage: Option<LlmErrorStage>,
     http_status: Option<u16>,
+    code: Option<String>,
     summary: String,
     source: Option<AnyhowError>,
 }
@@ -46,6 +47,16 @@ pub fn llm_error(
     summary: impl Into<String>,
 ) -> AppError {
     AppError::LlmDetailed(Box::new(LlmError::new(provider, stage, summary)))
+}
+
+pub fn llm_stream_terminal_error(
+    provider: impl Into<String>,
+    summary: impl Into<String>,
+    code: Option<String>,
+) -> AppError {
+    AppError::LlmDetailed(Box::new(LlmError::stream_terminal(
+        provider, summary, code,
+    )))
 }
 
 pub fn llm_http_status_error(
@@ -126,6 +137,7 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: Some(stage),
             http_status: None,
+            code: None,
             summary: summary.into(),
             source: None,
         }
@@ -144,8 +156,24 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: Some(stage),
             http_status: None,
+            code: None,
             summary: summary.into(),
             source: Some(source.into()),
+        }
+    }
+
+    pub fn stream_terminal(
+        provider: impl Into<String>,
+        summary: impl Into<String>,
+        code: Option<String>,
+    ) -> Self {
+        Self {
+            provider: Some(provider.into()),
+            stage: None,
+            http_status: None,
+            code,
+            summary: summary.into(),
+            source: None,
         }
     }
 
@@ -158,6 +186,7 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: None,
             http_status: Some(http_status),
+            code: None,
             summary: summary.into(),
             source: None,
         }
@@ -173,6 +202,7 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: Some(stage),
             http_status: Some(http_status),
+            code: None,
             summary: summary.into(),
             source: None,
         }
@@ -192,6 +222,10 @@ impl LlmError {
 
     pub fn http_status_value(&self) -> Option<u16> {
         self.http_status
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
     }
 
     pub fn source_chain(&self) -> Vec<String> {
@@ -236,6 +270,13 @@ pub fn llm_summary(err: &AppError) -> Option<String> {
     }
 }
 
+pub fn llm_code(err: &AppError) -> Option<String> {
+    match err {
+        AppError::LlmDetailed(detail) => detail.code().map(ToString::to_string),
+        _ => None,
+    }
+}
+
 pub fn llm_source_chain(err: &AppError) -> Vec<String> {
     match err {
         AppError::LlmDetailed(detail) => detail.source_chain(),
@@ -265,6 +306,19 @@ pub fn is_context_overflow_text(text: &str) -> bool {
         || lower.contains("reduce the length")
         || (lower.contains("context")
             && (lower.contains("length") || lower.contains("token") || lower.contains("limit")))
+}
+
+pub fn is_unsupported_multimodal_text(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    (lower.contains("invalid_enum_value")
+        && (lower.contains("input_file") || lower.contains("input_image")))
+        || lower.contains("does not support image input")
+        || lower.contains("does not support file input")
+        || lower.contains("unsupported content type")
+}
+
+pub fn is_deterministic_stream_refusal_text(text: &str) -> bool {
+    text.to_lowercase().contains("content_filter")
 }
 
 pub fn is_context_overflow(err: &AppError) -> bool {

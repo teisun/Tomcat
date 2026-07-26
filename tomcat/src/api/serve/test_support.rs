@@ -470,7 +470,10 @@ pub async fn build_initialized_state_with_recorded_streams(
     SharedRequests,
 ) {
     let temp = tempfile::tempdir().expect("tempdir");
-    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    // 这些集成用例要验证 retry ladder 的形状，而不是浪费时间等真实退避。
+    // 退避本身的毫秒公式已经由 `run.rs` 单测单独钉住。
+    cfg.llm.agent_retry_base_delay_ms = 0;
     let (provider, requests) = RecordingMockLlm::new(streams);
     let provider: Arc<dyn LlmProvider> = Arc::new(provider);
     let (state, buffer, temp, slot) =

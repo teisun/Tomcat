@@ -10,15 +10,54 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use base64::Engine as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
-use crate::core::llm::{ChatMessage, StreamEvent};
+use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, StreamEvent};
+use crate::core::llm::multimodal::UNSUPPORTED_FILE_INPUT_PLACEHOLDER;
 use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::event_bus::EventBus;
 use crate::infra::{wire, DefaultEventBus, EventContext};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{
+    MockLlmProvider, MockPrimitiveExecutor, RecordingStreamLlmProvider,
+};
+
+fn unsupported_file_stream() -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::LlmError {
+            reason: "error:invalid_request_error".to_string(),
+            message:
+                "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'."
+                    .to_string(),
+            code: Some("invalid_request_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error:invalid_request_error".to_string(),
+        }),
+    ]
+}
+
+fn ok_text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: text.to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+fn pdf_user_message() -> ChatMessage {
+    let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4\n%%EOF\n");
+    ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("summarize file"),
+        ChatMessageContentPart::file_base64_data("notes.pdf", "application/pdf", pdf_b64)
+            .expect("pdf part"),
+    ])
+}
 
 #[tokio::test]
 async fn run_returns_text_when_llm_returns_text_only() {
@@ -176,6 +215,153 @@ async fn run_honors_larger_configured_attempt_budget() {
         other => panic!("max_attempts=5 应允许第 5 次成功，实际: {other:?}"),
     };
     assert_eq!(result.final_text, "AFTER_RETRIES");
+}
+
+#[tokio::test]
+async fn run_retries_unsupported_file_once_then_degrades_before_next_attempt() {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        unsupported_file_stream(),
+        unsupported_file_stream(),
+        ok_text_stream("DEGRADED_OK"),
+    ]);
+    let llm = Arc::new(provider);
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let degrade_notices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let retry_events = Arc::clone(&retry_events);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |_ctx: EventContext| {
+                retry_events.lock().unwrap().push("retry".to_string());
+                Ok(())
+            }),
+        );
+    }
+    {
+        let degrade_notices = Arc::clone(&degrade_notices);
+        event_bus.on(
+            wire::WIRE_LLM_NOTICE,
+            Box::new(move |ctx: EventContext| {
+                if let Some(message) = ctx.payload.get("message").and_then(serde_json::Value::as_str)
+                {
+                    degrade_notices.lock().unwrap().push(message.to_string());
+                }
+                Ok(())
+            }),
+        );
+    }
+    let config = AgentLoopConfig {
+        max_attempts: 4,
+        retry_base_delay_ms: 0,
+        model: "gpt-4".to_string(),
+        session_id: "s-unsupported-file".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let result = loop_.run(vec![pdf_user_message()]).await.unwrap();
+
+    assert_eq!(result.final_text, "DEGRADED_OK");
+    assert_eq!(
+        retry_events.lock().unwrap().len(),
+        2,
+        "first failure should raw-retry once, second failure should start the degraded retry",
+    );
+    assert_eq!(
+        degrade_notices.lock().unwrap().as_slice(),
+        ["本轮附件未被当前端点接受，已按纯文本发送"],
+    );
+
+    let recorded = requests.0.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 3, "expected original + raw retry + degraded retry");
+    for raw_request in &recorded[..2] {
+        let user_message = raw_request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+            .expect("user message");
+        let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
+            panic!("expected multimodal user parts, got {:?}", user_message.content);
+        };
+        assert!(
+            parts.iter().any(|part| matches!(part, ChatMessageContentPart::InputFile { .. })),
+            "the first two attempts must keep the original input_file: {parts:?}"
+        );
+    }
+    let degraded_user_message = recorded[2]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+        .expect("degraded user message");
+    let Some(ChatMessageContent::Parts(parts)) = &degraded_user_message.content else {
+        panic!(
+            "expected degraded user parts, got {:?}",
+            degraded_user_message.content
+        );
+    };
+    assert!(
+        parts.iter().all(|part| !matches!(part, ChatMessageContentPart::InputFile { .. })),
+        "degraded retry must strip input_file parts: {parts:?}"
+    );
+    assert!(
+        parts.iter().any(|part| {
+            matches!(
+                part,
+                ChatMessageContentPart::InputText { text }
+                    if text.contains(UNSUPPORTED_FILE_INPUT_PLACEHOLDER)
+            )
+        }),
+        "degraded retry must include the placeholder text: {parts:?}"
+    );
+}
+
+#[tokio::test]
+async fn run_unsupported_file_exhausts_full_retry_budget_before_failing() {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        unsupported_file_stream(),
+        unsupported_file_stream(),
+        unsupported_file_stream(),
+        unsupported_file_stream(),
+    ]);
+    let llm = Arc::new(provider);
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let retry_events = Arc::clone(&retry_events);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |_ctx: EventContext| {
+                retry_events.lock().unwrap().push("retry".to_string());
+                Ok(())
+            }),
+        );
+    }
+    let config = AgentLoopConfig {
+        max_attempts: 4,
+        retry_base_delay_ms: 0,
+        model: "gpt-4".to_string(),
+        session_id: "s-unsupported-file-fatal".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let outcome = loop_.run(vec![pdf_user_message()]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Failed(_)),
+        "four refusals should still end as one final failure",
+    );
+    assert_eq!(retry_events.lock().unwrap().len(), 3);
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        4,
+        "unsupported multimodal fallback must still honor the configured retry budget",
+    );
 }
 
 #[tokio::test(start_paused = true)]

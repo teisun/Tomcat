@@ -18,23 +18,30 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::agent_loop::error_classifier::handle_overflow_retry;
+use crate::core::agent_loop::error_classifier::{
+    handle_overflow_retry, handle_unsupported_multimodal_retry,
+};
 use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
-use crate::core::llm::{ChatMessage, ModelCatalog};
+use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, ModelCatalog};
 use crate::core::skill::{Skill, SkillSet, SkillSource};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::tools::web_fetch::{types::WebFetchOutput, WebFetchFormat, WebFetchRuntime};
 use crate::core::tools::web_search::types::{Hit, Stats, WebSearchArgs, WebSearchOutput};
 use crate::core::tools::web_search::WebSearchRuntime;
-use crate::infra::error::{llm_http_status_error, AppError};
-use crate::infra::DefaultEventBus;
+use crate::core::session::manager::ContextState;
+use crate::infra::error::{llm_http_status_error, llm_stream_terminal_error, AppError};
+use crate::infra::{wire, DefaultEventBus, EventBus};
 use crate::AppConfig;
 use parking_lot::{Mutex, RwLock};
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
 
 fn make_agent() -> AgentLoop {
+    make_agent_with_bus().0
+}
+
+fn make_agent_with_bus() -> (AgentLoop, Arc<DefaultEventBus>) {
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
@@ -43,7 +50,26 @@ fn make_agent() -> AgentLoop {
         session_id: "s-submod".to_string(),
         ..Default::default()
     };
-    AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new())
+    (
+        AgentLoop::new(llm, primitive, event_bus.clone(), config, CancellationToken::new()),
+        event_bus,
+    )
+}
+
+fn make_context_state_with_transcript(path: std::path::PathBuf) -> ContextState {
+    ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: 0,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: path,
+        latest_plan_event: None,
+        preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }
 }
 
 struct SkillFilePrimitive;
@@ -198,6 +224,124 @@ async fn handle_overflow_retry_skipped_when_no_context_state() {
         stats
     );
     assert_eq!(messages.len(), 1, "messages must be left untouched");
+}
+
+#[tokio::test]
+async fn handle_unsupported_multimodal_retry_degrades_input_file_and_keeps_transcript_unchanged() {
+    let (mut agent, bus) = make_agent_with_bus();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("session.jsonl");
+    std::fs::write(&transcript_path, "sentinel transcript bytes").expect("seed transcript");
+    let before = std::fs::read(&transcript_path).expect("read before");
+    agent.set_context_state(Some(make_context_state_with_transcript(
+        transcript_path.clone(),
+    )));
+
+    let observed: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_LLM_NOTICE,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    let mut messages = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("prefix"),
+        ChatMessageContentPart::file_base64_data(
+            "brief.pdf",
+            "application/pdf",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"%PDF-1.4\n%%EOF\n",
+            ),
+        )
+        .expect("build inline file part"),
+        ChatMessageContentPart::text("suffix"),
+    ])];
+    let err = llm_stream_terminal_error(
+        "fcodex",
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.",
+        Some("invalid_request_error".into()),
+    );
+
+    let stats = handle_unsupported_multimodal_retry(&mut agent, &mut messages, 2, &err);
+    assert!(stats.applied);
+    assert!(stats.degraded_files);
+    assert!(!stats.degraded_vision);
+
+    let Some(ChatMessageContent::Parts(parts)) = &messages[0].content else {
+        panic!("degraded message should still be parts");
+    };
+    let texts: Vec<String> = parts
+        .iter()
+        .filter_map(|part| match part {
+            ChatMessageContentPart::InputText { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            "prefix".to_string(),
+            "[文件已省略：当前模型不支持文件输入]".to_string(),
+            "suffix".to_string()
+        ]
+    );
+
+    let notice = observed.lock().unwrap();
+    assert_eq!(notice.len(), 1);
+    assert_eq!(
+        notice[0]["message"].as_str(),
+        Some("本轮附件未被当前端点接受，已按纯文本发送")
+    );
+
+    let after = std::fs::read(&transcript_path).expect("read after");
+    assert_eq!(before, after, "降级只改 in-memory messages，不应回写 transcript");
+}
+
+#[tokio::test]
+async fn handle_unsupported_multimodal_retry_skips_when_not_matched() {
+    let (mut agent, bus) = make_agent_with_bus();
+    let observed: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_LLM_NOTICE,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    let mut messages = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("prefix"),
+        ChatMessageContentPart::file_base64_data(
+            "brief.pdf",
+            "application/pdf",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"%PDF-1.4\n%%EOF\n",
+            ),
+        )
+        .expect("build inline file part"),
+    ])];
+    let before = serde_json::to_string(&messages).expect("serialize before");
+    let err = llm_http_status_error("openai", 429, "rate limit");
+
+    let stats = handle_unsupported_multimodal_retry(&mut agent, &mut messages, 1, &err);
+    assert!(!stats.applied);
+    assert_eq!(
+        before,
+        serde_json::to_string(&messages).expect("serialize after"),
+        "未命中时消息不应被改写"
+    );
+    assert!(
+        observed.lock().unwrap().is_empty(),
+        "未命中时不应发 notice"
+    );
 }
 
 /// unknown 工具名：execute_tool 返回 `is_error == true`，content 含 unknown 提示。

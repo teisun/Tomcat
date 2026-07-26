@@ -51,6 +51,57 @@ impl LlmProvider for MockLlmProvider {
     }
 }
 
+#[derive(Clone, Default)]
+pub(super) struct RecordedStreamRequests(pub(super) Arc<Mutex<Vec<ChatRequest>>>);
+
+/// 记录 `chat_stream` 请求的 Mock，用于断言 attempt ladder 是否真的重新出站。
+pub(super) struct RecordingStreamLlmProvider {
+    streams: Mutex<Vec<Vec<Result<StreamEvent, AppError>>>>,
+    requests: RecordedStreamRequests,
+}
+
+impl RecordingStreamLlmProvider {
+    pub(super) fn new(
+        streams: Vec<Vec<Result<StreamEvent, AppError>>>,
+    ) -> (Self, RecordedStreamRequests) {
+        let requests = RecordedStreamRequests::default();
+        (
+            Self {
+                streams: Mutex::new(streams),
+                requests: requests.clone(),
+            },
+            requests,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for RecordingStreamLlmProvider {
+    fn provider_name(&self) -> &str {
+        "mock_recording_stream"
+    }
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        Err(AppError::Llm("mock chat not used".to_string()))
+    }
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        self.requests.0.lock().unwrap().push(req);
+        let mut guard = self.streams.lock().unwrap();
+        let events = guard.remove(0);
+        drop(guard);
+        let stream = tokio_stream::iter(events);
+        Ok(Box::new(stream))
+    }
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
 /// `chat_stream` 直接返回 Err（用于 Fatal 401 / 503 等"系统错误"测试）。
 pub(super) struct MockLlmProviderFatal {
     pub(super) err: Box<dyn Fn() -> AppError + Send + Sync>,

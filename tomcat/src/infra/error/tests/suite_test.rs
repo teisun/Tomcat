@@ -55,6 +55,15 @@ fn llm_http_status_error_with_stage_sets_both_fields() {
 }
 
 #[test]
+fn llm_stream_terminal_error_preserves_code_without_status_or_stage() {
+    let err = llm_stream_terminal_error("fcodex", "boom", Some("invalid_request_error".into()));
+    assert_eq!(llm_http_status(&err), None);
+    assert_eq!(llm_stage(&err), None);
+    assert_eq!(llm_summary(&err).as_deref(), Some("boom"));
+    assert_eq!(llm_code(&err).as_deref(), Some("invalid_request_error"));
+}
+
+#[test]
 fn is_retryable_llm_error_matches_truth_table() {
     for status in [429, 500, 502, 503, 504] {
         assert!(
@@ -149,4 +158,52 @@ fn is_context_overflow_matches_truth_table() {
     assert!(!is_context_overflow(&llm_http_status_error(
         "openai", 400, ""
     )));
+}
+
+#[test]
+fn is_unsupported_multimodal_text_matches_truth_table() {
+    for sample in [
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.",
+        "[invalid_enum_value] Invalid value: 'input_image'. Supported values are: 'input_text'.",
+        "The selected model does not support image input for this request.",
+        "unsupported content type",
+    ] {
+        assert!(
+            is_unsupported_multimodal_text(sample),
+            "sample 应命中 unsupported multimodal: {sample}"
+        );
+    }
+
+    for sample in [
+        "context_length_exceeded",
+        r#"{"error":{"message":"invalid model"}}"#,
+        "",
+        "content_filter",
+    ] {
+        assert!(
+            !is_unsupported_multimodal_text(sample),
+            "sample 不应命中 unsupported multimodal: {sample}"
+        );
+    }
+}
+
+#[test]
+fn is_deterministic_stream_refusal_text_matches_truth_table() {
+    assert!(is_deterministic_stream_refusal_text("content_filter"));
+    assert!(is_deterministic_stream_refusal_text(
+        "response incomplete because of content_filter policy"
+    ));
+
+    for sample in [
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.",
+        "unsupported content type",
+        "context_length_exceeded",
+        r#"{"error":{"message":"invalid model"}}"#,
+        "",
+    ] {
+        assert!(
+            !is_deterministic_stream_refusal_text(sample),
+            "sample 不应命中 deterministic refusal: {sample}"
+        );
+    }
 }

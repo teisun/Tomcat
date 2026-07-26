@@ -18,18 +18,73 @@
 use tracing::info;
 
 use crate::core::compaction::force_drop_oldest_to_target;
-use crate::core::llm::{ChatMessage, ChatMessageRole};
+use crate::core::llm::{
+    degrade_unsupported_multimodal, Capabilities, ChatMessage, ChatMessageRole,
+};
 use crate::core::session::manager::{build_context_from_state, estimated_tokens_from_chars};
 use crate::infra::error::{
-    is_context_overflow, is_retryable_llm_error, llm_http_status, llm_stage, AppError,
+    is_context_overflow, is_deterministic_stream_refusal_text, is_retryable_llm_error,
+    is_unsupported_multimodal_text, llm_http_status, llm_stage, llm_summary, AppError,
     LlmErrorStage,
 };
 use crate::infra::events::AgentEvent;
 
-use super::types::{AgentLoop, LoopError, OverflowTrimStats};
+use super::types::{
+    AgentLoop, LoopError, OverflowTrimStats, UnsupportedMultimodalRetryStats,
+};
 
 fn err_snippet(s: &str) -> String {
     s.chars().take(200).collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnsupportedMultimodalKind {
+    Vision,
+    Files,
+    Both,
+}
+
+fn is_stream_terminal_error(err: &AppError) -> bool {
+    matches!(err, AppError::LlmDetailed(_))
+        && llm_stage(err).is_none()
+        && llm_http_status(err).is_none()
+}
+
+fn unsupported_multimodal_kind_from_text(text: &str) -> Option<UnsupportedMultimodalKind> {
+    if !is_unsupported_multimodal_text(text) {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let hits_vision = lower.contains("input_image")
+        || lower.contains("image input")
+        || lower.contains("image_url");
+    let hits_files = lower.contains("input_file")
+        || lower.contains("file input")
+        || lower.contains("file_data")
+        || lower.contains(".pdf")
+        || lower.contains(" pdf");
+    Some(match (hits_vision, hits_files) {
+        (true, false) => UnsupportedMultimodalKind::Vision,
+        (false, true) => UnsupportedMultimodalKind::Files,
+        _ => UnsupportedMultimodalKind::Both,
+    })
+}
+
+fn temporary_capabilities_for(kind: UnsupportedMultimodalKind) -> Capabilities {
+    let mut capabilities = Capabilities {
+        vision: true,
+        files: true,
+        ..Capabilities::default()
+    };
+    match kind {
+        UnsupportedMultimodalKind::Vision => capabilities.vision = false,
+        UnsupportedMultimodalKind::Files => capabilities.files = false,
+        UnsupportedMultimodalKind::Both => {
+            capabilities.vision = false;
+            capabilities.files = false;
+        }
+    }
+    capabilities
 }
 
 /// 错误分类：把 `AppError` 映射为 `LoopError::Retryable` / `LoopError::Fatal`。
@@ -49,6 +104,7 @@ fn err_snippet(s: &str) -> String {
 pub(super) fn classify_error(err: AppError) -> LoopError {
     let s = err.to_string();
     let snippet = err_snippet(&s);
+    let summary = llm_summary(&err).unwrap_or_else(|| s.clone());
     if let Some(stage) = llm_stage(&err) {
         let branch = match stage {
             LlmErrorStage::Connect
@@ -90,6 +146,34 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
             target: "tomcat_chat_diag",
             phase = "classify_error",
             branch = "retryable_context_overflow",
+            snippet = %snippet
+        );
+        return LoopError::Retryable(err);
+    }
+    // 这两条分支必须在 generic 400 之前：
+    //
+    // - `content_filter` 之类是“端点明确拒绝”，重试只会重复同样的拒绝；
+    // - 其余流内终局错误（无 stage / 无 http_status）则正是本役要补救的缺口，
+    //   需要进入 Attempt Loop，统一享受指数退避与后续降级策略。
+    if is_stream_terminal_error(&err) && is_deterministic_stream_refusal_text(&summary) {
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "classify_error",
+            branch = "fatal_deterministic_stream_refusal",
+            snippet = %snippet
+        );
+        return LoopError::Fatal(err);
+    }
+    if is_stream_terminal_error(&err) {
+        let branch = if is_unsupported_multimodal_text(&summary) {
+            "retryable_stream_terminal_unsupported_multimodal"
+        } else {
+            "retryable_stream_terminal_error"
+        };
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "classify_error",
+            branch,
             snippet = %snippet
         );
         return LoopError::Retryable(err);
@@ -257,4 +341,56 @@ pub(super) fn handle_overflow_retry(
         ratio_after,
         applied: true,
     }
+}
+
+pub(super) fn handle_unsupported_multimodal_retry(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    attempt: u32,
+    err: &AppError,
+) -> UnsupportedMultimodalRetryStats {
+    let summary = llm_summary(err).unwrap_or_else(|| err.to_string());
+    let Some(kind) = unsupported_multimodal_kind_from_text(&summary) else {
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "unsupported_multimodal_retry_skipped_not_matched",
+            attempt
+        );
+        return UnsupportedMultimodalRetryStats::default();
+    };
+
+    let degraded = degrade_unsupported_multimodal(messages, &temporary_capabilities_for(kind));
+    let std::borrow::Cow::Owned(next_messages) = degraded else {
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "unsupported_multimodal_retry_skipped_no_change",
+            attempt
+        );
+        return UnsupportedMultimodalRetryStats::default();
+    };
+
+    *messages = next_messages;
+    let stats = UnsupportedMultimodalRetryStats {
+        applied: true,
+        degraded_vision: matches!(
+            kind,
+            UnsupportedMultimodalKind::Vision | UnsupportedMultimodalKind::Both
+        ),
+        degraded_files: matches!(
+            kind,
+            UnsupportedMultimodalKind::Files | UnsupportedMultimodalKind::Both
+        ),
+    };
+    agent.emit_event(AgentEvent::LlmNotice {
+        finish_reason: "unsupported_multimodal_degraded".to_string(),
+        message: "本轮附件未被当前端点接受，已按纯文本发送".to_string(),
+    });
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "unsupported_multimodal_retry_applied",
+        attempt,
+        degraded_vision = stats.degraded_vision,
+        degraded_files = stats.degraded_files
+    );
+    stats
 }

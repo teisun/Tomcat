@@ -18,10 +18,13 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use tokio_stream::StreamExt;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::core::llm::{ChatRequest, StreamEvent};
-use crate::infra::error::{llm_source_chain, llm_stage, llm_summary};
+use crate::core::llm::{
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
+    StreamEvent,
+};
+use crate::infra::error::{llm_source_chain, llm_stage, llm_stream_terminal_error, llm_summary};
 use crate::infra::events::{AgentEvent, AssistantMessageEvent, Message};
 
 use super::error_classifier::classify_error;
@@ -61,10 +64,104 @@ pub(crate) fn extract_path_from_partial_args(args: &str) -> Option<String> {
     serde_json::from_str::<String>(&format!("\"{}\"", raw)).ok()
 }
 
+fn compress_shape_tokens(tokens: &[&'static str]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let token = tokens[idx];
+        let mut count = 1usize;
+        while idx + count < tokens.len() && tokens[idx + count] == token {
+            count += 1;
+        }
+        if count == 1 {
+            out.push(token.to_string());
+        } else {
+            out.push(format!("{token} x{count}"));
+        }
+        idx += count;
+    }
+    out.join(",")
+}
+
+fn describe_message_shape(message: &ChatMessage) -> String {
+    let role = match message.role {
+        ChatMessageRole::System => "system",
+        ChatMessageRole::User => "user",
+        ChatMessageRole::Assistant => "assistant",
+        ChatMessageRole::Tool => "tool",
+    };
+    let mut tokens: Vec<&'static str> = Vec::new();
+    match message.role {
+        ChatMessageRole::System => tokens.push("input_text"),
+        ChatMessageRole::User => match &message.content {
+            Some(ChatMessageContent::Text(_)) | None => tokens.push("input_text"),
+            Some(ChatMessageContent::Parts(parts)) => {
+                let has_text = parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        ChatMessageContentPart::InputText { .. }
+                            | ChatMessageContentPart::InputReference { .. }
+                    )
+                });
+                if has_text || parts.is_empty() {
+                    tokens.push("input_text");
+                }
+                for part in parts {
+                    match part {
+                        ChatMessageContentPart::InputImage { .. } => tokens.push("input_image"),
+                        ChatMessageContentPart::InputFile { .. } => tokens.push("input_file"),
+                        ChatMessageContentPart::InputText { .. }
+                        | ChatMessageContentPart::InputReference { .. } => {}
+                    }
+                }
+            }
+        },
+        ChatMessageRole::Assistant => {
+            let has_text = match &message.content {
+                Some(ChatMessageContent::Text(text)) => !text.is_empty(),
+                Some(ChatMessageContent::Parts(parts)) => parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        ChatMessageContentPart::InputText { .. }
+                            | ChatMessageContentPart::InputReference { .. }
+                    )
+                }),
+                None => false,
+            };
+            if has_text {
+                tokens.push("output_text");
+            }
+            for _ in message.tool_calls.as_deref().unwrap_or(&[]) {
+                tokens.push("function_call");
+            }
+        }
+        ChatMessageRole::Tool => tokens.push("function_call_output"),
+    }
+    if tokens.is_empty() {
+        tokens.push("empty");
+    }
+    format!("{role}[{}]", compress_shape_tokens(&tokens))
+}
+
+fn describe_request_shape(req: &ChatRequest) -> String {
+    req.messages
+        .iter()
+        .map(describe_message_shape)
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
 pub(super) async fn run_chat_stream(
     agent: &mut AgentLoop,
     req: ChatRequest,
+    attempt: u32,
+    max_attempts: u32,
 ) -> Result<StreamOutcome, LoopError> {
+    // 诊断日志只记录“形状”（角色、part 类型与个数），绝不记录任何正文 / base64，
+    // 否则会把图片/PDF 的大字节写进日志，违反 image-attachments 文档里的写放大约束。
+    let request_shape = describe_request_shape(&req);
+    let request_input_items = req.messages.len();
+    let request_model = req.model.clone();
     // 提前 clone 跨 await 持有的 Arc / token，解除 &mut agent 借用。
     let cancel = agent.cancel_token.clone();
     let llm = Arc::clone(&agent.llm);
@@ -111,6 +208,7 @@ pub(super) async fn run_chat_stream(
     let mut content_buf = String::new();
     let mut tool_calls_buf: Vec<ToolCallAccumulator> = Vec::new();
     let mut finish_reason: Option<String> = None;
+    let mut error_reason: Option<String> = None;
     let mut error_message: Option<String> = None;
     let mut error_code: Option<String> = None;
     let mut thinking_text: Option<String> = None;
@@ -232,13 +330,9 @@ pub(super) async fn run_chat_stream(
                 if finish_reason.is_none() {
                     finish_reason = Some(reason.clone());
                 }
+                error_reason = Some(reason);
                 error_message = Some(message.clone());
                 error_code = code.clone();
-                agent.emit_event(AgentEvent::LlmError {
-                    reason,
-                    error_code: code,
-                    error_message: message,
-                });
             }
             Ok(StreamEvent::LlmNotice {
                 finish_reason: notice_reason,
@@ -292,6 +386,59 @@ pub(super) async fn run_chat_stream(
                 );
                 return Err(classify_error(e));
             }
+        }
+    }
+
+    let has_usable_output = !content_buf.is_empty() || !tool_calls_buf.is_empty();
+    if let Some(message) = error_message.clone() {
+        let reason = error_reason
+            .clone()
+            .or_else(|| finish_reason.clone())
+            .unwrap_or_else(|| "error".to_string());
+        if has_usable_output {
+            warn!(
+                target: "tomcat_chat_diag",
+                phase = "stream_terminal_error",
+                model = %request_model,
+                provider = agent.llm.provider_name(),
+                code = ?error_code,
+                message = %message,
+                input_items = request_input_items,
+                shape = %request_shape,
+                will_retry = false,
+                attempt
+            );
+            agent.emit_event(AgentEvent::LlmError {
+                reason,
+                error_code: error_code.clone(),
+                error_message: message,
+            });
+        } else {
+            let loop_err = classify_error(llm_stream_terminal_error(
+                agent.llm.provider_name().to_string(),
+                message.clone(),
+                error_code.clone(),
+            ));
+            let will_retry =
+                matches!(&loop_err, LoopError::Retryable(_)) && attempt < max_attempts;
+            warn!(
+                target: "tomcat_chat_diag",
+                phase = "stream_terminal_error",
+                model = %request_model,
+                provider = agent.llm.provider_name(),
+                code = ?error_code,
+                message = %message,
+                input_items = request_input_items,
+                shape = %request_shape,
+                will_retry,
+                attempt
+            );
+            agent.emit_event(AgentEvent::MessageEnd {
+                message: Message(serde_json::json!({})),
+                assistant_message_id: assistant_message_id.clone(),
+            });
+            agent.clear_pending_assistant_entry_id();
+            return Err(loop_err);
         }
     }
 

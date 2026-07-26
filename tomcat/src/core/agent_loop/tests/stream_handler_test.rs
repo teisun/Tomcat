@@ -2,14 +2,16 @@
 //!
 //! 直接打 `run_chat_stream`，验证流尾语义不会在 `FinishReason` 处提前截断。
 
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt;
 
 use crate::core::agent_loop::stream_handler::{extract_path_from_partial_args, run_chat_stream};
-use crate::core::agent_loop::{AgentLoop, AgentLoopConfig};
-use crate::core::llm::{ChatMessage, ChatRequest, StreamEvent};
+use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, LoopError};
+use crate::core::llm::{ChatMessage, ChatMessageContentPart, ChatRequest, StreamEvent};
 use crate::core::session::manager::ContextState;
 use crate::infra::error::AppError;
 use crate::infra::{wire, DefaultEventBus, EventBus};
@@ -72,6 +74,20 @@ fn make_request() -> ChatRequest {
     }
 }
 
+#[derive(Clone)]
+struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn run_chat_stream_preserves_finish_reason_and_trailing_usage() {
     let stream = vec![
@@ -90,7 +106,7 @@ async fn run_chat_stream_preserves_finish_reason_and_trailing_usage() {
     let mut agent = make_agent(vec![stream]);
     agent.set_context_state(Some(make_context_state()));
 
-    let outcome = run_chat_stream(&mut agent, make_request())
+    let outcome = run_chat_stream(&mut agent, make_request(), 1, 4)
         .await
         .expect("stream_handler should consume trailing usage");
 
@@ -110,7 +126,7 @@ async fn run_chat_stream_preserves_finish_reason_and_trailing_usage() {
 }
 
 #[tokio::test]
-async fn run_chat_stream_surfaces_structured_llm_error() {
+async fn run_chat_stream_empty_llm_error_returns_err_without_event() {
     let stream = vec![
         Ok(StreamEvent::LlmError {
             reason: "error:boom".to_string(),
@@ -133,17 +149,158 @@ async fn run_chat_stream_surfaces_structured_llm_error() {
         }),
     );
 
-    let outcome = run_chat_stream(&mut agent, make_request())
-        .await
-        .expect("stream_handler should preserve structured llm error");
+    let err = match run_chat_stream(&mut agent, make_request(), 1, 4).await {
+        Ok(_) => panic!("empty llm error should be promoted to Err"),
+        Err(err) => err,
+    };
 
-    assert_eq!(outcome.finish_reason.as_deref(), Some("error:boom"));
+    assert!(matches!(err, LoopError::Retryable(_)));
+    assert!(
+        observed.lock().unwrap().is_empty(),
+        "no output 时不应发 LlmError 事件"
+    );
+}
+
+#[tokio::test]
+async fn run_chat_stream_with_text_and_llm_error_keeps_structured_event() {
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "partial".to_string(),
+        }),
+        Ok(StreamEvent::LlmError {
+            reason: "error:server_error".to_string(),
+            message: "boom".to_string(),
+            code: Some("server_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error:server_error".to_string(),
+        }),
+    ];
+    let (mut agent, bus) = make_agent_with_bus(vec![stream]);
+    agent.set_context_state(Some(make_context_state()));
+    let observed: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_LLM_ERROR,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    let outcome = run_chat_stream(&mut agent, make_request(), 1, 4)
+        .await
+        .expect("text + llm error should keep partial output");
+
+    assert_eq!(outcome.content_buf, "partial");
+    assert_eq!(outcome.finish_reason.as_deref(), Some("error:server_error"));
     assert_eq!(outcome.error_message.as_deref(), Some("boom"));
     assert_eq!(outcome.error_code.as_deref(), Some("server_error"));
     let observed = observed.lock().unwrap();
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0]["errorMessage"].as_str(), Some("boom"));
     assert_eq!(observed[0]["errorCode"].as_str(), Some("server_error"));
+}
+
+#[tokio::test]
+async fn run_chat_stream_with_tool_calls_and_llm_error_keeps_tool_branch() {
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_1".to_string()),
+            name: Some("write".to_string()),
+            arguments_delta: Some(r#"{"path":"/tmp/a.txt","content":"x"}"#.to_string()),
+        }),
+        Ok(StreamEvent::LlmError {
+            reason: "error:server_error".to_string(),
+            message: "boom".to_string(),
+            code: Some("server_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let (mut agent, bus) = make_agent_with_bus(vec![stream]);
+    let observed: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_LLM_ERROR,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    let outcome = run_chat_stream(&mut agent, make_request(), 1, 4)
+        .await
+        .expect("tool calls + llm error should still keep tool branch");
+
+    assert_eq!(outcome.tool_calls_buf.len(), 1);
+    assert_eq!(outcome.tool_calls_buf[0].name, "write");
+    assert_eq!(outcome.error_message.as_deref(), Some("boom"));
+    assert_eq!(observed.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn run_chat_stream_warn_log_never_contains_base64_payload() {
+    let stream = vec![
+        Ok(StreamEvent::LlmError {
+            reason: "error:server_error".to_string(),
+            message: "boom".to_string(),
+            code: Some("server_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error:server_error".to_string(),
+        }),
+    ];
+    let mut agent = make_agent(vec![stream]);
+    let pdf_sentinel = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"UNIQUE_LOG_SENTINEL_PDF",
+    );
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user_with_parts(vec![
+            ChatMessageContentPart::text("hi"),
+            ChatMessageContentPart::file_base64_data("brief.pdf", "application/pdf", &pdf_sentinel)
+                .expect("build inline pdf part"),
+        ])],
+        ..make_request()
+    };
+
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer({
+            let logs = logs.clone();
+            move || SharedLogWriter(logs.clone())
+        })
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let _ = run_chat_stream(&mut agent, req, 1, 4).await;
+
+    let rendered = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+    assert!(
+        rendered.contains("stream_terminal_error"),
+        "应捕获到 stream_terminal_error warn：{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("input_file"),
+        "形状日志应只暴露 part 类型：{}",
+        rendered
+    );
+    assert!(
+        !rendered.contains(&pdf_sentinel),
+        "warn 日志不应包含 base64 原文：{}",
+        rendered
+    );
+    assert!(
+        !rendered.contains("data:application/pdf;base64"),
+        "warn 日志不应包含 data url 前缀：{}",
+        rendered
+    );
 }
 
 #[tokio::test]
@@ -176,7 +333,7 @@ async fn run_chat_stream_emits_llm_notice_after_message_end() {
         let _ = _listener;
     }
 
-    let outcome = run_chat_stream(&mut agent, make_request())
+    let outcome = run_chat_stream(&mut agent, make_request(), 1, 4)
         .await
         .expect("stream_handler should emit llm notice");
 
@@ -237,7 +394,7 @@ async fn run_chat_stream_emits_tool_call_streaming_for_write_once() {
         }),
     );
 
-    let outcome = run_chat_stream(&mut agent, make_request())
+    let outcome = run_chat_stream(&mut agent, make_request(), 1, 4)
         .await
         .expect("stream_handler should emit tool_call_streaming");
 
@@ -272,7 +429,7 @@ async fn run_chat_stream_tool_call_streaming_carries_path_preview_when_available
         }),
     );
 
-    run_chat_stream(&mut agent, make_request())
+    run_chat_stream(&mut agent, make_request(), 1, 4)
         .await
         .expect("stream_handler should emit tool_call_streaming with preview");
 
@@ -314,7 +471,7 @@ async fn run_chat_stream_tool_call_streaming_skips_small_tools() {
         }),
     );
 
-    run_chat_stream(&mut agent, make_request())
+    run_chat_stream(&mut agent, make_request(), 1, 4)
         .await
         .expect("small tools should not emit streaming preview");
 
