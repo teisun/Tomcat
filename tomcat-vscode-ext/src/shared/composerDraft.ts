@@ -67,6 +67,13 @@ export interface DraftAttachmentRef {
   providerSha?: string | null;
   /** SVG source handed to the model when rasterisation was not possible. */
   providerText?: string | null;
+  /**
+   * Original disk path, when the attachment came from a URI/picker rather than paste.
+   *
+   * Optional on purpose: adding a display-only field must not invalidate every older
+   * draft on disk. Older builds simply do not write it; newer builds read that as null.
+   */
+  sourcePath?: string | null;
 }
 
 export interface ComposerDraft {
@@ -126,6 +133,7 @@ function parseAttachment(value: unknown): DraftAttachmentRef | null {
     mimeType: value.mimeType,
     providerSha: typeof value.providerSha === "string" ? value.providerSha : null,
     providerText: typeof value.providerText === "string" ? value.providerText : null,
+    sourcePath: typeof value.sourcePath === "string" ? value.sourcePath : null,
   };
 }
 

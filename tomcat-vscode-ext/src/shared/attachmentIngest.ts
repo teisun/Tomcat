@@ -39,6 +39,8 @@ export interface AttachmentUpload {
   providerMimeType?: string;
   /** SVG source to send as text when rasterisation was not possible. */
   providerText?: string;
+  /** Original disk path, when this came from drag/drop or the file picker. */
+  sourcePath?: string | null;
   thumbBase64?: string;
 }
 
@@ -109,6 +111,7 @@ export async function ingestAttachment(
       mimeType: payload.mimeType,
       providerSha: payload.providerSha ?? null,
       providerText: upload.providerText ?? null,
+      sourcePath: upload.sourcePath ?? null,
     },
   };
 }

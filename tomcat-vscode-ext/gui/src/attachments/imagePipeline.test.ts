@@ -128,6 +128,17 @@ describe("svgSourceIsUninformative", () => {
 });
 
 describe("prepareAttachment degradation", () => {
+  it("preserves the original sourcePath as display metadata", async () => {
+    const prepared = await prepareAttachment({
+      bytes: bytesOf("%PDF"),
+      filename: "brief.pdf",
+      mimeType: "application/pdf",
+      sourcePath: "/workspace/docs/brief.pdf",
+    });
+
+    expect(prepared.sourcePath).toBe("/workspace/docs/brief.pdf");
+  });
+
   it("always returns the original bytes even when every derived artefact fails", async () => {
     // jsdom cannot rasterise, so this run exercises the all-failures path for free.
     const source = '<svg viewBox="0 0 10 10"><path d="M0 0 L10 10"/></svg>';
@@ -135,10 +146,12 @@ describe("prepareAttachment degradation", () => {
       bytes: bytesOf(source),
       filename: "icon.svg",
       mimeType: "image/svg+xml",
+      sourcePath: "/workspace/icons/icon.svg",
     });
 
     expect(atob(prepared.dataBase64)).toBe(source);
     expect(prepared.mimeType).toBe("image/svg+xml");
+    expect(prepared.sourcePath).toBe("/workspace/icons/icon.svg");
     expect(prepared.warnings.length).toBeGreaterThan(0);
   });
 

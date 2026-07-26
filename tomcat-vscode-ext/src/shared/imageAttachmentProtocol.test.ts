@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   IMAGE_MAX_BYTES,
+  PDF_MAX_BYTES,
   decodeBase64Strict,
   safeAttachmentFilename,
-  validateImageCandidate,
-} from "./imageAttachmentProtocol";
+  validateAttachmentCandidate,
+} from "./attachmentProtocol";
 
-describe("imageAttachmentProtocol utilities", () => {
+describe("attachmentProtocol utilities", () => {
   it("strictly decodes canonical base64 and rejects malformed input", () => {
     expect(decodeBase64Strict(Buffer.from("hello").toString("base64"))?.toString()).toBe(
       "hello",
@@ -40,7 +41,7 @@ describe("imageAttachmentProtocol utilities", () => {
     ];
     for (const svg of designToolSvgs) {
       expect(
-        validateImageCandidate({
+        validateAttachmentCandidate({
           dataBase64: Buffer.from(svg).toString("base64"),
           filename: "icon.svg",
           mimeType: "image/svg+xml",
@@ -50,25 +51,44 @@ describe("imageAttachmentProtocol utilities", () => {
   });
 
   it("validates MIME, base64 shape and decoded byte size", () => {
-    const png = validateImageCandidate({
+    const png = validateAttachmentCandidate({
       dataBase64: Buffer.from([1, 2, 3]).toString("base64"),
       filename: null,
       mimeType: "image/png",
     });
-    expect(png).toMatchObject({ filename: "pasted-image.png", ok: true });
+    expect(png).toMatchObject({ filename: "pasted-image.png", kind: "image", ok: true });
+
+    const pdf = validateAttachmentCandidate({
+      dataBase64: Buffer.from("%PDF-1.7").toString("base64"),
+      filename: null,
+      mimeType: "application/pdf",
+    });
+    expect(pdf).toMatchObject({
+      filename: "attachment.pdf",
+      kind: "file",
+      mimeType: "application/pdf",
+      ok: true,
+    });
 
     expect(
-      validateImageCandidate({
+      validateAttachmentCandidate({
         dataBase64: Buffer.from([1]).toString("base64"),
         mimeType: "image/bmp",
       }),
-    ).toMatchObject({ ok: false });
+    ).toMatchObject({ error: "unsupported type image/bmp", ok: false });
 
     expect(
-      validateImageCandidate({
+      validateAttachmentCandidate({
         dataBase64: Buffer.alloc(IMAGE_MAX_BYTES + 1).toString("base64"),
         mimeType: "image/png",
       }),
     ).toMatchObject({ error: "exceeds 4.5 MB", ok: false });
+
+    expect(
+      validateAttachmentCandidate({
+        dataBase64: Buffer.alloc(PDF_MAX_BYTES + 1).toString("base64"),
+        mimeType: "application/pdf",
+      }),
+    ).toMatchObject({ error: "PDF exceeds 25 MB", ok: false });
   });
 });

@@ -52,6 +52,8 @@ export interface PreparedAttachment {
   dataBase64: string;
   filename: string | null;
   mimeType: string;
+  /** Original local path, when Chromium exposed one on the File. */
+  sourcePath?: string | null;
   /** Downsampled preview, base64. Absent when generation failed. */
   thumbBase64?: string;
   /** Provider-friendly rendering (PNG) for formats providers reject, base64. */
@@ -73,6 +75,7 @@ export interface RawAttachment {
   bytes: ArrayBuffer;
   filename: string | null;
   mimeType: string;
+  sourcePath?: string | null;
 }
 
 function toBase64(bytes: ArrayBuffer | Uint8Array): string {
@@ -360,8 +363,13 @@ export async function prepareAttachment(
     dataBase64: toBase64(raw.bytes),
     filename: raw.filename,
     mimeType: raw.mimeType,
+    sourcePath: raw.sourcePath ?? null,
     warnings,
   };
+
+  if (!raw.mimeType.startsWith("image/")) {
+    return prepared;
+  }
 
   try {
     prepared.thumbBase64 = await blobToBase64(await makeThumbnail(raw.bytes, raw.mimeType));

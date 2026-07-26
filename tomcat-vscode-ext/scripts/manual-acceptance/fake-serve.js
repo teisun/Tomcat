@@ -576,7 +576,7 @@ function handleCacheAttachmentThumbnail(frame) {
 }
 
 /**
- * Turn the reference-only attachments on a prompt into transcript image parts.
+ * Turn the reference-only attachments on a prompt into transcript attachment parts.
  *
  * The wire carries hashes, so the transcript records hashes too — the bytes are
  * already on disk from `ingest_attachment` and are never copied again.
@@ -585,8 +585,11 @@ function buildPromptHistoryContent(frame, promptText) {
   const attachments = Array.isArray(frame?.params?.attachments)
     ? frame.params.attachments
     : [];
-  const imageParts = attachments.flatMap((attachment, index) => {
-    if (attachment?.kind !== "image" || typeof attachment.blobSha !== "string") {
+  const parts = attachments.flatMap((attachment, index) => {
+    if (
+      (attachment?.kind !== "image" && attachment?.kind !== "file")
+      || typeof attachment.blobSha !== "string"
+    ) {
       return [];
     }
     const blobPath = path.join(BLOBS_DIR, attachment.blobSha);
@@ -597,25 +600,35 @@ function buildPromptHistoryContent(frame, promptText) {
       // A hash with no bytes behind it is exactly the "unavailable attachment"
       // degradation path, so record it and let the UI show that state.
     }
+    const mimeType =
+      typeof attachment.mimeType === "string"
+        ? attachment.mimeType
+        : attachment.kind === "file"
+          ? "application/pdf"
+          : "image/png";
     return [{
       blobSha: attachment.blobSha,
       bytes,
       filename:
         typeof attachment.filename === "string"
           ? attachment.filename
-          : `attached-image-${index + 1}.png`,
-      hasThumb: fs.existsSync(path.join(THUMBS_DIR, attachment.blobSha)),
-      mime_type:
-        typeof attachment.mimeType === "string" ? attachment.mimeType : "image/png",
-      type: "input_image",
+          : attachment.kind === "file"
+            ? `attached-file-${index + 1}.pdf`
+            : `attached-image-${index + 1}.png`,
+      ...(attachment.kind === "image"
+        ? { hasThumb: fs.existsSync(path.join(THUMBS_DIR, attachment.blobSha)) }
+        : {}),
+      ...(typeof attachment.sourcePath === "string" ? { path: attachment.sourcePath } : {}),
+      mime_type: mimeType,
+      type: attachment.kind === "file" ? "input_file" : "input_image",
     }];
   });
-  if (imageParts.length === 0) {
+  if (parts.length === 0) {
     return promptText;
   }
   return [
     ...(promptText ? [{ text: promptText, type: "input_text" }] : []),
-    ...imageParts,
+    ...parts,
   ];
 }
 

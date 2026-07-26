@@ -105,7 +105,7 @@ describe("ComposerDraftStore persistence", () => {
     const store = newStore(0);
     store.update(SESSION, (draft) => ({
       ...draft,
-      attachments: [attachment()],
+      attachments: [attachment({ sourcePath: "/workspace/assets/shot.png" })],
       text: "look at this",
     }));
     await vi.runAllTimersAsync();
@@ -113,7 +113,7 @@ describe("ComposerDraftStore persistence", () => {
 
     const persisted = __testing.readFile(draftPath()) ?? "";
     expect(JSON.parse(persisted)).toMatchObject({
-      attachments: [{ blobSha: "a".repeat(64), hasThumb: true }],
+      attachments: [{ blobSha: "a".repeat(64), hasThumb: true, sourcePath: "/workspace/assets/shot.png" }],
       text: "look at this",
     });
     // The contract that keeps a draft ~200 bytes instead of ~4MB per image.
@@ -179,6 +179,7 @@ describe("ComposerDraftStore hydration", () => {
     expect(draft.text).toBe("about @main.rs");
     expect(draft.segments).toHaveLength(1);
     expect(draft.attachments[0]?.blobSha).toBe("a".repeat(64));
+    expect(draft.attachments[0]?.sourcePath).toBeNull();
   });
 
   it("quarantines an unreadable draft and still hands back a usable composer", async () => {
@@ -218,6 +219,27 @@ describe("ComposerDraftStore hydration", () => {
     // Losing one image must not cost the paragraph written around it.
     expect(draft.text).toBe("five minutes of typing");
     expect(draft.attachments).toHaveLength(1);
+  });
+
+  it("restores sourcePath when present and nulls out dirty non-string values", async () => {
+    __testing.registerFile(
+      draftPath(),
+      JSON.stringify({
+        attachments: [
+          attachment({ sourcePath: "/workspace/assets/shot.png" }),
+          { ...attachment({ id: "att-2" }), sourcePath: { nope: true } },
+        ],
+        schemaVersion: 2,
+        segments: [],
+        text: "files",
+        updatedAt: Date.now(),
+      }),
+    );
+
+    const draft = await newStore().hydrate(SESSION);
+
+    expect(draft.attachments[0]?.sourcePath).toBe("/workspace/assets/shot.png");
+    expect(draft.attachments[1]?.sourcePath).toBeNull();
   });
 
   it("drops a dangling draft whose session no longer exists", async () => {

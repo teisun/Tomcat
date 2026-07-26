@@ -611,7 +611,7 @@ describe("webview provider integration", () => {
         kind: "image",
         label: "diagram.png",
         mimeType: "image/png",
-        path: null,
+        path: "/workspace/diagram.png",
       }),
     ]);
     // The contract this replaced an assertion on inline base64 with: the snapshot the
@@ -826,9 +826,80 @@ describe("webview provider integration", () => {
         kind: "image",
         label: "mockup.png",
         mimeType: "image/png",
-        path: null,
+        path: "/workspace/assets/mockup.png",
       }),
     ]);
+
+    provider.dispose();
+  });
+
+  it("keeps sourcePath on clipboard-ingested PDFs in pending and optimistic history without leaking it to serve", async () => {
+    const { messenger, provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-pdf-source-path",
+      type: "ready",
+    });
+
+    await provider.dispatchTestIntent({
+      data: {
+        files: [
+          {
+            dataBase64: Buffer.from("%PDF-1.7\nAcceptance PDF\n", "utf8").toString("base64"),
+            filename: "brief.pdf",
+            mimeType: "application/pdf",
+            sourcePath: "/workspace/docs/brief.pdf",
+          },
+        ],
+        sessionId: "session-1",
+      },
+      messageId: "attach-pdf-source-path",
+      type: "attachFiles",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
+      expect.objectContaining({
+        filename: "brief.pdf",
+        kind: "file",
+        mimeType: "application/pdf",
+        path: "/workspace/docs/brief.pdf",
+      }),
+    ]);
+
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        text: "Read this PDF",
+      },
+      messageId: "prompt-pdf-source-path",
+      type: "prompt",
+    });
+
+    const promptRequest = messenger.requestCalls.find((call) => call.type === "prompt") as
+      | undefined
+      | { params?: { attachments?: Array<Record<string, unknown>> } };
+    expect(promptRequest?.params?.attachments?.[0]).toEqual(
+      expect.objectContaining({
+        filename: "brief.pdf",
+        kind: "file",
+        mimeType: "application/pdf",
+      }),
+    );
+    expect(promptRequest?.params?.attachments?.[0]).not.toHaveProperty("sourcePath");
+
+    const sentUserMessage = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.kind === "user" && item.text === "Read this PDF",
+    );
+    expect(sentUserMessage).toEqual(
+      expect.objectContaining({
+        attachments: [
+          expect.objectContaining({
+            filename: "brief.pdf",
+            path: "/workspace/docs/brief.pdf",
+          }),
+        ],
+      }),
+    );
 
     provider.dispose();
   });

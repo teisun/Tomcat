@@ -50,6 +50,10 @@ fn png_bytes() -> Vec<u8> {
     ]
 }
 
+fn pdf_bytes() -> Vec<u8> {
+    b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<<>>\n%%EOF\n".to_vec()
+}
+
 /// 一张真实设计工具会导出的 SVG —— 带 `style=`、`<style>` 与 `url(#grad)`。
 ///
 /// 旧实现的文本黑名单会把这一类全部误杀（`" style="` / `"<style"` / `"url("` 都在名单上），
@@ -105,6 +109,18 @@ fn image_input(bytes: &[u8], mime: &str) -> IngestAttachmentInput {
     IngestAttachmentInput {
         kind: ServeAttachmentKind::Image,
         filename: Some("pic.png".to_string()),
+        mime_type: mime.to_string(),
+        data_base64: b64(bytes),
+        thumb_base64: None,
+        provider_base64: None,
+        provider_mime_type: None,
+    }
+}
+
+fn file_input(bytes: &[u8], mime: &str) -> IngestAttachmentInput {
+    IngestAttachmentInput {
+        kind: ServeAttachmentKind::File,
+        filename: Some("brief.pdf".to_string()),
         mime_type: mime.to_string(),
         data_base64: b64(bytes),
         thumb_base64: None,
@@ -182,6 +198,31 @@ async fn ingest_attachment_deduplicates_identical_bytes() {
     .unwrap()
     .count();
     assert_eq!(blobs, 1, "同一张图粘两次只该占一份磁盘");
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn ingest_file_deduplicates_identical_bytes() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, _requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
+    let bytes = pdf_bytes();
+
+    let first = ingest(&state, &buffer, &slot, "dedup-file-1", file_input(&bytes, "application/pdf")).await;
+    let second =
+        ingest(&state, &buffer, &slot, "dedup-file-2", file_input(&bytes, "application/pdf")).await;
+
+    assert_eq!(first["payload"]["blobSha"], second["payload"]["blobSha"]);
+    let blobs = std::fs::read_dir(
+        slot.ctx
+            .session_runtime
+            .session
+            .attachment_store()
+            .blobs_dir(),
+    )
+    .unwrap()
+    .count();
+    assert_eq!(blobs, 1, "同一份 PDF 粘两次只该占一份磁盘");
 }
 
 #[tokio::test]
@@ -499,6 +540,51 @@ async fn prompt_rejects_a_blob_sha_that_was_never_ingested() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn prompt_rejects_a_file_blob_sha_that_was_never_ingested() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, _requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("forged-file".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "sneaky pdf".to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::File,
+                    filename: Some("brief.pdf".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    blob_sha: Some("b".repeat(64)),
+                    provider_sha: None,
+                    file_id: None,
+                }],
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("forged-file")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("forged-file"))
+        .expect("forged file sha response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    let error = response["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("unknown attachment blob") && error.contains("ingest_attachment"),
+        "实际错误：{error}"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn prompt_rejects_a_malformed_blob_sha() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot, _requests) =
@@ -572,6 +658,42 @@ async fn seed_session_with_one_image(
                     file_id: None,
                 }],
                 user_message_id: Some("seed-msg".to_string()),
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let _ = wait_for_line(buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+}
+
+async fn seed_session_with_one_file(
+    state: &Arc<ServeState>,
+    buffer: &SharedWriterBuffer,
+    slot: &Arc<SessionSlot>,
+    bytes: &[u8],
+) {
+    let ingested = ingest(state, buffer, slot, "seed-file-ingest", file_input(bytes, "application/pdf")).await;
+    let blob_sha = ingested["payload"]["blobSha"].as_str().unwrap().to_string();
+    handle_command(
+        Arc::clone(state),
+        ServeCommand::Prompt {
+            id: Some("seed-file-prompt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "read this pdf".to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::File,
+                    filename: Some("brief.pdf".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    blob_sha: Some(blob_sha),
+                    provider_sha: None,
+                    file_id: None,
+                }],
+                user_message_id: Some("seed-file-msg".to_string()),
                 ..ServeMessageParams::default()
             },
         },
@@ -660,6 +782,61 @@ async fn get_messages_reference_mode_returns_hashes_instead_of_bytes() {
     assert!(serialized.contains("hasThumb"), "必须告知缩略图是否已就绪");
 
     // 引用真的指得到字节。
+    let sha = serialized
+        .split("\"blobSha\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("blobSha in payload")
+        .to_string();
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .attachment_store()
+            .get(&sha)
+            .unwrap()
+            .as_deref(),
+        Some(bytes.as_slice())
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn get_messages_reference_mode_returns_pdf_hashes_instead_of_bytes() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, _requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
+    let bytes = pdf_bytes();
+    seed_session_with_one_file(&state, &buffer, &slot, &bytes).await;
+    let transcript = std::fs::read_to_string(
+        slot.ctx
+            .session_runtime
+            .session
+            .transcript_path(&slot.session_id),
+    )
+    .unwrap();
+    assert!(transcript.contains(&b64(&bytes)), "transcript 必须保留用户发出的 PDF 原始字节");
+    assert!(
+        transcript.contains("application/pdf"),
+        "transcript 必须保留 PDF MIME，后续拉历史才能正确渲染"
+    );
+
+    let payload =
+        get_messages_payload(&state, &buffer, &slot, "gm-pdf-ref", AttachmentMode::Reference)
+            .await;
+    let serialized = serde_json::to_string(&payload).unwrap();
+
+    assert!(
+        !serialized.contains(&b64(&bytes)),
+        "reference 模式下宿主绝不该收到 PDF base64"
+    );
+    assert!(!serialized.contains("file_b64"), "PDF 内联字段必须被移除");
+    assert!(serialized.contains("blobSha"), "必须回引用");
+    assert!(
+        serialized.contains("\"mimeType\":\"application/pdf\""),
+        "必须回传 MIME 供宿主渲染 PDF"
+    );
+
     let sha = serialized
         .split("\"blobSha\":\"")
         .nth(1)

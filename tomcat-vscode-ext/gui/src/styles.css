@@ -128,6 +128,28 @@ input:focus-visible {
   outline: 2px solid var(--vscode-focusBorder);
   outline-offset: 1px;
 }
+.tc-attachment-strip__file-chip {
+  flex-direction: column;
+  gap: 2px;
+  color: var(--vscode-foreground);
+}
+button.tc-attachment-strip__file-chip {
+  cursor: pointer;
+}
+span.tc-attachment-strip__file-chip {
+  cursor: default;
+}
+.tc-attachment-strip__file-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+.tc-attachment-strip__file-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
 .tc-attachment-strip__img {
   width: 100%;
   height: 100%;
@@ -1857,6 +1879,33 @@ input:focus-visible {
   font-size: 0.9em;
 }
 
+.tc-inline-image {
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.24));
+  border-radius: 8px;
+  cursor: zoom-in;
+  display: block;
+  margin: 8px 0;
+  max-height: 320px;
+  max-width: min(100%, 720px);
+  object-fit: contain;
+}
+
+.tc-blocked-image {
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+  display: inline-flex;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.tc-blocked-image:hover,
+.tc-blocked-image:focus-visible {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
 .tc-code-card .hljs {
   color: var(--vscode-editor-foreground, var(--vscode-foreground));
 }
@@ -3420,6 +3469,58 @@ input:focus-visible {
 
 .tc-confirm-dialog__button--primary .tc-confirm-dialog__shortcut {
   color: color-mix(in srgb, var(--vscode-button-foreground, #fff) 72%, transparent);
+}
+
+.tc-image-lightbox__overlay {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.64);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 45;
+}
+
+.tc-image-lightbox {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  max-height: calc(100vh - 48px);
+  max-width: calc(100vw - 48px);
+  padding: 40px 20px 20px;
+  position: relative;
+  width: 100%;
+}
+
+.tc-image-lightbox__image {
+  border-radius: 10px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.36);
+  cursor: default;
+  display: block;
+  max-height: calc(100vh - 96px);
+  max-width: min(92vw, 1200px);
+}
+
+.tc-image-lightbox__close {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  height: 32px;
+  justify-content: center;
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 32px;
+}
+
+.tc-image-lightbox__close:hover,
+.tc-image-lightbox__close:focus-visible {
+  background: rgba(0, 0, 0, 0.5);
 }
 
 .tc-composer__editor {

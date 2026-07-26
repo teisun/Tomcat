@@ -7,7 +7,7 @@ import type { WebviewPendingAttachment } from "../types";
  *
  * Used in both the Composer (pending) and history messages (read-only).
  * Images: 48px square thumbnails, object-fit: cover, with optional delete button.
- * PDFs: file chips with filename label.
+ * PDFs: 48px square chips with a PDF icon and tooltip.
  * Empty list: returns null (zero height).
  *
  * The strip only ever loads `thumbUri`. A 48px square has no use for a 4000x3000
@@ -23,7 +23,7 @@ export function AttachmentStrip({
 }: {
   attachments: WebviewPendingAttachment[];
   onRemove?(attachmentId: string): void;
-  onOpen?(attachmentId: string): void;
+  onOpen?(attachment: WebviewPendingAttachment): void;
   readonly?: boolean;
 }) {
   if (!attachments.length) {
@@ -126,7 +126,7 @@ export function AttachmentStrip({
                 aria-label={`Open ${attachment.label}`}
                 className="tc-attachment-strip__thumb"
                 data-testid={readonly ? "history-attachment-thumb" : "attachment-thumb"}
-                onClick={() => onOpen?.(attachment.id)}
+                onClick={() => onOpen?.(attachment)}
                 onKeyDown={removeOnDeleteKey}
                 title={attachment.label}
                 type="button"
@@ -146,27 +146,72 @@ export function AttachmentStrip({
         }
 
         // Non-image attachments (PDFs, etc)
+        const tooltip = attachment.path ?? describeAttachment(attachment);
+        const chipContents = (
+          <>
+            <span
+              aria-hidden="true"
+              className={`tc-attachment-strip__file-icon codicon ${isPdf ? "codicon-file-pdf" : "codicon-file"}`}
+            />
+            <span aria-hidden="true" className="tc-attachment-strip__file-label">PDF</span>
+          </>
+        );
+        const isClickable = Boolean(attachment.path && onOpen);
         return (
           <div
             key={attachment.id}
             className="tc-attachment-strip__item"
             role="listitem"
           >
-            <button
-              aria-label={`Open ${attachment.label}`}
-              className="tc-chip tc-chip--attachment"
-              data-testid={readonly ? "history-attachment-chip" : "attachment-chip"}
-              onClick={() => onOpen?.(attachment.id)}
-              onKeyDown={removeOnDeleteKey}
-              type="button"
-            >
-              <span className="tc-chip__icon">{isPdf ? "📄" : "📎"}</span>
-              <span>{attachment.label}</span>
-            </button>
+            {isClickable ? (
+              <button
+                aria-label={`Open ${attachment.label}`}
+                className="tc-attachment-strip__thumb tc-attachment-strip__file-chip"
+                data-testid={readonly ? "history-attachment-chip" : "attachment-chip"}
+                onClick={() => onOpen?.(attachment)}
+                onKeyDown={removeOnDeleteKey}
+                title={tooltip}
+                type="button"
+              >
+                {chipContents}
+              </button>
+            ) : (
+              <span
+                aria-label={attachment.label}
+                className="tc-attachment-strip__thumb tc-attachment-strip__file-chip"
+                data-testid={readonly ? "history-attachment-chip" : "attachment-chip"}
+                title={tooltip}
+              >
+                {chipContents}
+              </span>
+            )}
             {removeButton}
           </div>
         );
       })}
     </section>
   );
+}
+
+function describeAttachment(attachment: WebviewPendingAttachment): string {
+  const size = formatAttachmentSize(attachment.bytes);
+  return size ? `${attachment.label} · ${size}` : attachment.label;
+}
+
+function formatAttachmentSize(bytes: number | undefined): string | null {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) {
+    return null;
+  }
+  if (bytes >= 1024 * 1024) {
+    return formatSizeUnit(bytes / (1024 * 1024), "MB");
+  }
+  if (bytes >= 1024) {
+    return formatSizeUnit(bytes / 1024, "KB");
+  }
+  return `${bytes} B`;
+}
+
+function formatSizeUnit(value: number, unit: "KB" | "MB"): string {
+  const rounded = value >= 10 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)} ${unit}`;
 }

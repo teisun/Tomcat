@@ -63,7 +63,7 @@ type AppendMessageOptions = {
   detailText?: string | null;
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
-  imageAttachments?: NonNullable<WebviewMessageBlock["imageAttachments"]>;
+  attachments?: NonNullable<WebviewMessageBlock["attachments"]>;
   preferredId?: string | null;
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
@@ -551,12 +551,11 @@ function contentToMessageSegments(
           break;
         case "input_image":
         case "image":
-          // Images are extracted separately as imageAttachments on the block.
+          // Attachments are extracted separately onto the block.
           // Skip placeholder text here — thumbnails are rendered by MessageBubble.
           break;
         case "input_file":
         case "file":
-          pushTextSegment(segments, "[file attachment]");
           break;
         default:
           if (typeof entry.text === "string") {
@@ -610,7 +609,10 @@ function extractMessageText(content: unknown): string | undefined {
   return Array.isArray(content) ? undefined : asText(content);
 }
 
-function imageFilename(index: number, mimeType: string): string {
+function attachmentFilename(index: number, mimeType: string): string {
+  if (mimeType === "application/pdf") {
+    return `attachment-${index + 1}.pdf`;
+  }
   const extension =
     mimeType === "image/jpeg"
       ? "jpg"
@@ -621,7 +623,7 @@ function imageFilename(index: number, mimeType: string): string {
 }
 
 /**
- * Read image references out of a transcript message.
+ * Read attachment references out of a transcript message.
  *
  * The backend is asked for history with `attachmentMode: "reference"`, so every
  * `input_image` part arrives carrying a `blobSha` and no bytes. This function used to
@@ -633,40 +635,57 @@ function imageFilename(index: number, mimeType: string): string {
  * something asked for inline mode by mistake, and quietly reviving the base64 path
  * would hide the mistake instead of surfacing it.
  */
-function extractImageAttachments(
+function extractAttachments(
   content: unknown,
   messageId: string,
 ): WebviewAttachmentView[] {
   if (!Array.isArray(content)) {
     return [];
   }
-  const images: WebviewAttachmentView[] = [];
+  const attachments: WebviewAttachmentView[] = [];
   for (let index = 0; index < content.length; index += 1) {
     const entry = content[index];
     if (!isRecord(entry)) continue;
-    if (entry.type !== "input_image" && entry.type !== "image") continue;
+    if (
+      entry.type !== "input_image" &&
+      entry.type !== "image" &&
+      entry.type !== "input_file" &&
+      entry.type !== "file"
+    ) {
+      continue;
+    }
     if (typeof entry.blobSha !== "string" || !/^[0-9a-f]{64}$/.test(entry.blobSha)) {
       continue;
     }
+    const kind = entry.type === "input_file" || entry.type === "file" ? "file" : "image";
     const mimeType =
       typeof entry.mime_type === "string"
         ? entry.mime_type
         : typeof entry.mimeType === "string"
           ? entry.mimeType
-          : "image/png";
-    images.push({
+          : kind === "file"
+            ? "application/pdf"
+            : "image/png";
+    attachments.push({
       blobSha: entry.blobSha,
       bytes: typeof entry.bytes === "number" ? entry.bytes : undefined,
       filename:
         typeof entry.filename === "string"
           ? entry.filename
-          : imageFilename(index, mimeType),
+          : attachmentFilename(index, mimeType),
       hasThumb: entry.hasThumb === true,
-      id: `${messageId}:image:${index}`,
+      id: `${messageId}:${kind}:${index}`,
+      kind,
       mimeType,
+      path:
+        typeof entry.sourcePath === "string"
+          ? entry.sourcePath
+          : typeof entry.path === "string"
+            ? entry.path
+            : null,
     });
   }
-  return images;
+  return attachments;
 }
 
 function extractThinkingText(
@@ -1315,7 +1334,7 @@ function applyHistoryEntry(
         return;
       }
       const segments = contentToMessageSegments(entry.message.content);
-      const imageAttachments = extractImageAttachments(entry.message.content, id);
+      const attachments = extractAttachments(entry.message.content, id);
       const block: WebviewMessageBlock = {
         id,
         kind: "user",
@@ -1323,8 +1342,8 @@ function applyHistoryEntry(
         text: text ?? "",
         type: "message",
       };
-      if (imageAttachments.length > 0) {
-        block.imageAttachments = imageAttachments;
+      if (attachments.length > 0) {
+        block.attachments = attachments;
       }
       session.timeline.push(block);
       return;
@@ -1736,9 +1755,9 @@ function pushMessage(
   if (options.deliveryState) {
     next.deliveryState = options.deliveryState;
   }
-  if (options.imageAttachments?.length) {
-    next.imageAttachments = options.imageAttachments.map((image) => ({
-      ...image,
+  if (options.attachments?.length) {
+    next.attachments = options.attachments.map((attachment) => ({
+      ...attachment,
     }));
   }
   if (options.retryable !== undefined) {
@@ -2130,8 +2149,8 @@ export class WebviewStateStore {
     patch: { hasThumb: boolean; thumbUri: string | null },
   ): void {
     for (const item of this.ensureSession(sessionId).timeline) {
-      if (item.type !== "message" || !item.imageAttachments) continue;
-      item.imageAttachments = item.imageAttachments.map((attachment) =>
+      if (item.type !== "message" || !item.attachments) continue;
+      item.attachments = item.attachments.map((attachment) =>
         attachment.blobSha === blobSha ? { ...attachment, ...patch } : attachment,
       );
     }
@@ -2235,7 +2254,7 @@ export class WebviewStateStore {
     sessionId: string,
     text: string,
     options: {
-      imageAttachments?: NonNullable<WebviewMessageBlock["imageAttachments"]>;
+      attachments?: NonNullable<WebviewMessageBlock["attachments"]>;
       messageId: string;
       segments?: WebviewMessageSegment[];
       submitKind: UserSubmitKind;
@@ -2245,7 +2264,7 @@ export class WebviewStateStore {
     const runtime = this.ensureRuntime(sessionId);
     pushMessage(session, "user", text, options.messageId, {
       deliveryState: "pending",
-      imageAttachments: options.imageAttachments,
+      attachments: options.attachments,
       segments: options.segments,
       submitKind: options.submitKind,
     });
@@ -2327,8 +2346,8 @@ export class WebviewStateStore {
       frame.type === "__test.dom_action" ||
       frame.type === "contextSearchResult" ||
       frame.type === "insertReference" ||
-      frame.type === "attachImagesResult" ||
-      frame.type === "imageAttachmentFeedback" ||
+      frame.type === "attachFilesResult" ||
+      frame.type === "attachmentFeedback" ||
       frame.type === "preview.ready" ||
       frame.type === "preview.select" ||
       frame.type === "preview.save" ||
@@ -2860,8 +2879,8 @@ export class WebviewStateStore {
     const resolve = this.attachmentUriResolver;
     if (!resolve) return;
     for (const item of session.timeline) {
-      if (item.type !== "message" || !item.imageAttachments?.length) continue;
-      item.imageAttachments = item.imageAttachments.map((attachment) => ({
+      if (item.type !== "message" || !item.attachments?.length) continue;
+      item.attachments = item.attachments.map((attachment) => ({
         ...attachment,
         ...resolve(attachment),
       }));

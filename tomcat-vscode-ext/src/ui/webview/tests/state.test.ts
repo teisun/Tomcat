@@ -3124,3 +3124,49 @@ describe("openFile intent protocol", () => {
     ).toBeUndefined();
   });
 });
+
+describe("history attachment extraction", () => {
+  it("hydrates file attachments as attachments instead of placeholder text", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-file-1",
+          message: {
+            content: [
+              { text: "Read ", type: "text" },
+              {
+                blobSha: "a".repeat(64),
+                bytes: 7,
+                filename: "brief.pdf",
+                mimeType: "application/pdf",
+                path: "/workspace/docs/brief.pdf",
+                type: "input_file",
+              },
+            ],
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const message = store
+      .snapshot()
+      .sessionViews.s1?.timeline.find((item): item is WebviewMessageBlock => item.type === "message");
+    expect(message?.text).toBe("Read ");
+    expect(message?.segments).toEqual([{ text: "Read ", type: "text" }]);
+    expect(message?.attachments).toEqual([
+      expect.objectContaining({
+        blobSha: "a".repeat(64),
+        bytes: 7,
+        filename: "brief.pdf",
+        kind: "file",
+        mimeType: "application/pdf",
+        path: "/workspace/docs/brief.pdf",
+      }),
+    ]);
+  });
+});

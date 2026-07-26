@@ -37,10 +37,8 @@ import {
   type DraftAttachmentRef,
 } from "../../shared/composerDraft";
 import {
-  PDF_MAX_BYTES,
-  safeAttachmentFilename,
-  validateImageCandidate,
-} from "../../shared/imageAttachmentProtocol";
+  validateAttachmentCandidate,
+} from "../../shared/attachmentProtocol";
 import type { PreviewSection } from "../../shared/imagePreviewProtocol";
 import {
   createHostFrameMessageId,
@@ -54,6 +52,7 @@ import {
   type WebviewMessageBlock,
   type WebviewAttachmentView,
   type WebviewMessageSegment,
+  type WebviewMediaRoot,
   type WebviewPendingAttachment,
   type WebviewIntent,
   type WebviewPlanFileCard,
@@ -257,10 +256,6 @@ function guessMimeType(filePath: string): string {
   }
 }
 
-function inferAttachmentKind(mimeType: string): "file" | "image" {
-  return mimeType.startsWith("image/") ? "image" : "file";
-}
-
 type PickedUriKind = "attachment" | "reference";
 
 type PickedUriMetadata = {
@@ -447,6 +442,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private readonly stateStore: WebviewStateStore;
   private readonly stateBroadcaster: StateBroadcaster;
   private readonly eventSubscription: { dispose(): void };
+  private readonly workspaceFolderSubscription: vscode.Disposable;
   private readonly sessionPatchFramesEnabled =
     process.env.TOMCAT_DISABLE_SESSION_PATCHES !== "1";
   /** Plan paths already auto-opened after review, so repeats don't reopen. */
@@ -485,6 +481,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           console.error("Tomcat webview failed to process serve event", error);
         });
     });
+    const onDidChangeWorkspaceFolders =
+      (vscode.workspace as typeof vscode.workspace & {
+        onDidChangeWorkspaceFolders?: (
+          listener: (event: vscode.WorkspaceFoldersChangeEvent) => void,
+        ) => vscode.Disposable;
+      }).onDidChangeWorkspaceFolders;
+    this.workspaceFolderSubscription =
+      typeof onDidChangeWorkspaceFolders === "function"
+        ? onDidChangeWorkspaceFolders(() => {
+            this.handleWorkspaceFolderChange();
+          })
+        : new vscode.Disposable(() => undefined);
   }
 
   dispose(): void {
@@ -494,6 +502,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.messageSubscription?.dispose();
     this.visibilitySubscription?.dispose();
     this.eventSubscription.dispose();
+    this.workspaceFolderSubscription.dispose();
     this.stateBroadcaster.dispose();
     this.domSnapshots.rejectAll(new Error("Tomcat webview disposed"));
     for (const waiter of [...this.readyWaiters]) {
@@ -510,10 +519,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     // Attachment URLs are webview-scoped, so the mapping is only valid once there is a
     // webview to scope them to, and has to be replaced whenever this one is.
     this.stateStore.setAttachmentUriResolver(this.historyAttachmentResolver());
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: this.resourceRoots(),
-    };
+    view.webview.options = this.webviewOptions();
     view.webview.html = this.renderHtml(view.webview);
     // Deliberately not awaited: the first paint should not wait on the backend. But it is
     // started here, as early as possible, because settling the attachment root can reload
@@ -640,11 +646,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   currentState() {
-    return this.stateStore.snapshot();
+    return this.decorateStateSnapshot(this.stateStore.snapshot());
   }
 
   private peekState(): Readonly<WebviewStateSnapshot> {
     return this.stateStore.view();
+  }
+
+  private decorateStateSnapshot(snapshot: WebviewStateSnapshot): WebviewStateSnapshot {
+    return {
+      ...snapshot,
+      mediaRoots: this.view ? this.mediaRootsForWebview(this.view.webview) : [],
+    };
   }
 
   private findToolCard(
@@ -777,7 +790,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             ? errors.join("; ")
             : `${accepted.length} attachment${accepted.length === 1 ? "" : "s"} added`,
       },
-      type: "imageAttachmentFeedback",
+      type: "attachmentFeedback",
     });
   }
 
@@ -802,17 +815,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     // Every attachment URL is built from this root, so history images resolved before it
     // arrived have to be resolved again.
     this.stateStore.setAttachmentUriResolver(this.historyAttachmentResolver());
-    if (this.view) {
-      // The document is about to be torn down and rebuilt, so the webview is no longer
-      // ready. Without this the provider keeps posting into a dying document and the
-      // messages vanish without a trace.
-      this.isReady = false;
-      this.stateStore.setReady(false);
-      this.view.webview.options = {
-        enableScripts: true,
-        localResourceRoots: this.resourceRoots(),
-      };
-    }
+    this.reloadWebviewResourceRoots();
   }
 
   private lookupRetryableUserMessage(
@@ -861,10 +864,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     } else {
       this.stateStore.appendLocalUserMessage(sessionId, text, {
         // The optimistic bubble shows the same references the strip was showing, so the
-        // image appears instantly without a byte moving anywhere.
-        imageAttachments: attachments
-          .filter((attachment) => attachment.kind === "image")
-          .map((attachment) => this.toAttachmentView(attachment)),
+        // attachment appears instantly without a byte moving anywhere.
+        attachments: attachments.map((attachment) => this.toAttachmentView(attachment)),
         messageId: userMessageId,
         segments,
         submitKind,
@@ -939,7 +940,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       fullUri: uris?.fullUri ?? null,
       hasThumb: Boolean(attachment.hasThumb),
       id: attachment.id,
+      kind: attachment.kind,
       mimeType: attachment.mimeType,
+      path: attachment.sourcePath ?? null,
       thumbUri: uris?.thumbUri ?? null,
     };
   }
@@ -1193,34 +1196,35 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         return;
       }
-      case "attachImages": {
-        const { sessionId, images } = intent.data;
-        if (!sessionId || images.length === 0) return;
+      case "attachFiles": {
+        const { sessionId, files } = intent.data;
+        if (!sessionId || files.length === 0) return;
 
         const uploads: AttachmentUpload[] = [];
         const errors: string[] = [];
-        for (const image of images) {
+        for (const file of files) {
           // Validate before the bytes go any further. The backend validates again — this
           // pass exists so the user hears about an oversized paste immediately.
-          const validation = validateImageCandidate(image);
+          const validation = validateAttachmentCandidate(file);
           if (!validation.ok) {
-            errors.push(`${image.filename ?? "image"}: ${validation.error}`);
+            errors.push(`${file.filename ?? "attachment"}: ${validation.error}`);
             continue;
           }
           uploads.push({
-            dataBase64: image.dataBase64,
+            dataBase64: file.dataBase64,
             filename: validation.filename,
-            kind: "image",
+            kind: validation.kind,
             mimeType: validation.mimeType,
-            providerBase64: image.providerBase64,
-            providerMimeType: image.providerMimeType,
-            providerText: image.providerText,
-            thumbBase64: image.thumbBase64,
+            providerBase64: file.providerBase64,
+            providerMimeType: file.providerMimeType,
+            providerText: file.providerText,
+            sourcePath: typeof file.sourcePath === "string" ? file.sourcePath : null,
+            thumbBase64: file.thumbBase64,
           });
           // The webview reports what it could not derive (a thumbnail, an SVG raster).
           // These are degradations, not failures, but the user should still know.
           errors.push(
-            ...(image.warnings ?? []).map(
+            ...(file.warnings ?? []).map(
               (warning) => `${validation.filename}: ${warning}`,
             ),
           );
@@ -1233,7 +1237,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             id: reference.id,
             mimeType: reference.mimeType,
           })),
-          type: "attachImagesResult",
+          type: "attachFilesResult",
         });
         await this.reportAttachmentOutcome(accepted, errors);
         return;
@@ -1780,7 +1784,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!this.view || !this.isReady) {
       return;
     }
-    const snapshot = await this.enrichPlanCards(this.stateStore.snapshot());
+    const snapshot = this.decorateStateSnapshot(
+      await this.enrichPlanCards(this.stateStore.snapshot()),
+    );
     await this.postMessage({
       channel: "state",
       content: snapshot,
@@ -2220,7 +2226,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       kind: attachment.kind,
       label: attachment.filename,
       mimeType: attachment.mimeType,
-      path: null,
+      path: attachment.sourcePath ?? null,
       thumbUri: uris?.thumbUri ?? null,
       ...(unavailable ? { unavailable: true } : {}),
     };
@@ -2356,12 +2362,16 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const pendingIds = new Set(pendingPictures.map((picture) => picture.id));
 
     const historySections = session.timeline.flatMap((item, messageIndex) => {
-      if (item.type !== "message" || item.kind !== "user" || !item.imageAttachments?.length) {
+      if (item.type !== "message" || item.kind !== "user" || !item.attachments?.length) {
         return [];
       }
-      const pictures = item.imageAttachments
+      const pictures = item.attachments
         .filter(
-          (image) => !pendingIds.has(image.id) && !image.unavailable && image.fullUri,
+          (attachment) =>
+            attachment.kind === "image" &&
+            !pendingIds.has(attachment.id) &&
+            !attachment.unavailable &&
+            attachment.fullUri,
         )
         .map(toPicture);
       return pictures.length > 0
@@ -2425,33 +2435,21 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   ): Promise<AttachmentUpload> {
     const bytes = Buffer.from(await vscode.workspace.fs.readFile(uri));
     const basename = path.basename(uri.fsPath || uri.path);
-    const kind = inferAttachmentKind(mimeType);
-    let filename: string;
-    if (kind === "image") {
-      const validation = validateImageCandidate({
-        dataBase64: bytes.toString("base64"),
-        filename: basename,
-        mimeType,
-      });
-      if (!validation.ok) {
-        throw new Error(`${basename}: ${validation.error}`);
-      }
-      filename = validation.filename;
-      mimeType = validation.mimeType;
-    } else {
-      if (mimeType !== "application/pdf") {
-        throw new Error(`${basename}: unsupported attachment type ${mimeType}`);
-      }
-      if (bytes.length > PDF_MAX_BYTES) {
-        throw new Error(`${basename}: PDF exceeds 25 MB`);
-      }
-      filename = safeAttachmentFilename(basename, "attachment.pdf");
+    const dataBase64 = bytes.toString("base64");
+    const validation = validateAttachmentCandidate({
+      dataBase64,
+      filename: basename,
+      mimeType,
+    });
+    if (!validation.ok) {
+      throw new Error(`${basename}: ${validation.error}`);
     }
     return {
-      dataBase64: bytes.toString("base64"),
-      filename,
-      kind,
-      mimeType,
+      dataBase64,
+      filename: validation.filename,
+      kind: validation.kind,
+      mimeType: validation.mimeType,
+      sourcePath: uri.fsPath || uri.path,
     };
   }
 
@@ -2471,8 +2469,51 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return [
       vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist"),
       vscode.Uri.joinPath(this.deps.extensionUri, "media"),
+      ...this.workspaceMediaRootUris(),
+      vscode.Uri.file(os.tmpdir()),
       ...attachmentResourceRoots(this.attachmentRoot),
     ];
+  }
+
+  private webviewOptions(): vscode.WebviewOptions {
+    return {
+      enableScripts: true,
+      localResourceRoots: this.resourceRoots(),
+    };
+  }
+
+  private workspaceMediaRootUris(): vscode.Uri[] {
+    return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri);
+  }
+
+  private mediaRootsForWebview(webview: vscode.Webview): WebviewMediaRoot[] {
+    const deduped = new Map<string, WebviewMediaRoot>();
+    for (const root of [...this.workspaceMediaRootUris(), vscode.Uri.file(os.tmpdir())]) {
+      const fsPath = root.fsPath;
+      if (!fsPath || deduped.has(fsPath)) {
+        continue;
+      }
+      deduped.set(fsPath, {
+        fsPath,
+        webviewBase: webview.asWebviewUri(root).toString(),
+      });
+    }
+    return [...deduped.values()];
+  }
+
+  private reloadWebviewResourceRoots(): void {
+    if (!this.view) {
+      return;
+    }
+    // Changing local resource roots rebuilds the document. Mirror first-mount state so
+    // nothing keeps talking to a document VS Code is about to throw away.
+    this.isReady = false;
+    this.stateStore.setReady(false);
+    this.view.webview.options = this.webviewOptions();
+  }
+
+  private handleWorkspaceFolderChange(): void {
+    this.reloadWebviewResourceRoots();
   }
 
   /**

@@ -24,16 +24,19 @@ function image(id: string): WebviewPendingAttachment {
   };
 }
 
-const pdf: WebviewPendingAttachment = {
-  blobSha: sha("pdf"),
-  bytes: 1024,
-  filename: "brief.pdf",
-  id: "pdf-1",
-  kind: "file",
-  label: "brief.pdf",
-  mimeType: "application/pdf",
-  path: null,
-};
+function pdf(overrides: Partial<WebviewPendingAttachment> = {}): WebviewPendingAttachment {
+  return {
+    blobSha: sha("pdf"),
+    bytes: 1024,
+    filename: "brief.pdf",
+    id: "pdf-1",
+    kind: "file",
+    label: "brief.pdf",
+    mimeType: "application/pdf",
+    path: null,
+    ...overrides,
+  };
+}
 
 describe("AttachmentStrip", () => {
   it("renders nothing for an empty collection", () => {
@@ -42,11 +45,16 @@ describe("AttachmentStrip", () => {
   });
 
   it("renders image thumbnails and PDF chips in one list", () => {
-    render(<AttachmentStrip attachments={[image("one"), pdf]} />);
+    render(<AttachmentStrip attachments={[image("one"), pdf()]} />);
     expect(screen.getByTestId("attachment-thumb").getAttribute("aria-label")).toBe(
       "Open one.png",
     );
-    expect(screen.getByTestId("attachment-chip").textContent).toContain("brief.pdf");
+    const chip = screen.getByTestId("attachment-chip");
+    expect(chip.textContent).toBe("PDF");
+    expect(screen.queryByText("brief.pdf")).toBeNull();
+    expect(chip.querySelector(".codicon-file-pdf")).toBeTruthy();
+    expect(chip.getAttribute("title")).toBe("brief.pdf · 1 KB");
+    expect(chip.tagName).toBe("SPAN");
     expect(screen.getByRole("list").getAttribute("data-attachment-source")).toBe(
       "draft",
     );
@@ -66,7 +74,24 @@ describe("AttachmentStrip", () => {
     expect(onRemove).toHaveBeenCalledWith("one");
     expect(onOpen).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("attachment-thumb"));
-    expect(onOpen).toHaveBeenCalledWith("one");
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: "one" }));
+  });
+
+  it("renders a clickable PDF chip with the full path as tooltip when available", () => {
+    const onOpen = vi.fn();
+    render(
+      <AttachmentStrip
+        attachments={[pdf({ path: "/tmp/brief.pdf" })]}
+        onOpen={onOpen}
+      />,
+    );
+    const chip = screen.getByTestId("attachment-chip");
+    expect(chip.tagName).toBe("BUTTON");
+    expect(chip.getAttribute("title")).toBe("/tmp/brief.pdf");
+    fireEvent.click(chip);
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "pdf-1", path: "/tmp/brief.pdf" }),
+    );
   });
 
   it("renders eleven read-only history images without delete controls", () => {
@@ -162,5 +187,22 @@ describe("AttachmentStrip", () => {
       key: "Delete",
     });
     expect(onRemove).not.toHaveBeenCalled();
+  });
+
+  it("keeps PDF chips visually consistent between draft and readonly history modes", () => {
+    const withPath = render(
+      <AttachmentStrip attachments={[pdf({ path: "/tmp/brief.pdf" })]} />,
+    );
+    expect(withPath.getByTestId("attachment-chip").className).toContain(
+      "tc-attachment-strip__file-chip",
+    );
+    withPath.unmount();
+
+    render(
+      <AttachmentStrip attachments={[pdf()]} readonly />,
+    );
+    expect(screen.getByTestId("history-attachment-chip").className).toContain(
+      "tc-attachment-strip__file-chip",
+    );
   });
 });

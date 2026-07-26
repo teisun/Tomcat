@@ -1603,21 +1603,42 @@ fn dereference_page_attachments(
             let Some(object) = part.as_object_mut() else {
                 continue;
             };
-            if object.get("type").and_then(|t| t.as_str()) != Some("input_image") {
-                continue;
-            }
-            let Some(encoded) = object.get("image_b64").and_then(|d| d.as_str()) else {
-                continue;
-            };
+            let (encoded_field, encoded, mime_type, has_thumb) =
+                match object.get("type").and_then(|t| t.as_str()) {
+                    Some("input_image") => {
+                        let Some(encoded) = object.get("image_b64").and_then(|d| d.as_str()) else {
+                            continue;
+                        };
+                        ("image_b64", encoded, None, true)
+                    }
+                    Some("input_file") => {
+                        let Some(encoded) = object.get("file_b64").and_then(|d| d.as_str()) else {
+                            continue;
+                        };
+                        let mime_type = object
+                            .get("mime_type")
+                            .and_then(|value| value.as_str())
+                            .or_else(|| object.get("mimeType").and_then(|value| value.as_str()))
+                            .unwrap_or("application/pdf")
+                            .to_string();
+                        ("file_b64", encoded, Some(mime_type), false)
+                    }
+                    _ => continue,
+                };
             let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
                 continue;
             };
             match store.materialize_from_transcript(&bytes) {
                 Ok(sha) => {
-                    object.remove("image_b64");
+                    object.remove(encoded_field);
                     object.insert("blobSha".to_string(), json!(sha));
                     object.insert("bytes".to_string(), json!(bytes.len()));
-                    object.insert("hasThumb".to_string(), json!(store.has_thumbnail(&sha)));
+                    if has_thumb {
+                        object.insert("hasThumb".to_string(), json!(store.has_thumbnail(&sha)));
+                    }
+                    if let Some(mime_type) = mime_type {
+                        object.insert("mimeType".to_string(), json!(mime_type));
+                    }
                     touched = true;
                 }
                 Err(error) => {

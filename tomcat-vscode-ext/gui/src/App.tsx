@@ -9,6 +9,7 @@ import { AttachmentChips } from "./components/AttachmentChips";
 import { AttachmentStrip } from "./components/AttachmentStrip";
 import { injectCheckpointMarkers } from "./components/checkpointMarkers";
 import { Composer, type ComposerDraft, type ComposerHandle } from "./components/Composer";
+import { ImageLightbox, type ZoomedImage } from "./components/ImageLightbox";
 import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
@@ -41,6 +42,7 @@ const EMPTY_STATE: WebviewStateSnapshot = {
   availableModelCapabilities: {},
   availableModelReasoningLevels: {},
   availableModels: [],
+  mediaRoots: [],
   modelAdminSupported: false,
   ready: false,
   sessionViews: {},
@@ -427,9 +429,19 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   // thumbnails arrive a moment after the attachments do.
   const pendingAttachmentItemCount =
     pendingAttachmentStrip?.querySelectorAll(".tc-attachment-strip__item").length ?? 0;
+  const pendingPdfChipTitles = [
+    ...document.querySelectorAll<HTMLElement>(
+      '[data-attachment-source="draft"] .tc-attachment-strip__file-chip',
+    ),
+  ].map((node) => node.getAttribute("title") ?? "");
   const historyAttachmentThumbCount = document.querySelectorAll(
     '[data-testid="history-attachment-thumb"]',
   ).length;
+  const historyPdfChipTitles = [
+    ...document.querySelectorAll<HTMLElement>(
+      '[data-attachment-source="history"] .tc-attachment-strip__file-chip',
+    ),
+  ].map((node) => node.getAttribute("title") ?? "");
   /**
    * What the attachment strip actually costs in bitmap memory, measured rather than argued.
    *
@@ -449,6 +461,18 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     (total, bitmap) => total + bitmap.width * bitmap.height * 4,
     0,
   );
+  const inlineImages = [...document.querySelectorAll<HTMLImageElement>('[data-testid="inline-image"]')].map(
+    (image) => ({
+      cursor: getComputedStyle(image).cursor,
+      naturalHeight: image.naturalHeight,
+      naturalWidth: image.naturalWidth,
+      src: image.currentSrc || image.src,
+    }),
+  );
+  const blockedInlineImageTexts = [
+    ...document.querySelectorAll<HTMLElement>('[data-testid="blocked-inline-image"]'),
+  ].map((node) => node.textContent ?? "");
+  const lightboxImage = document.querySelector<HTMLImageElement>('[data-testid="image-lightbox-image"]');
   const assistantCodeCardCount = document.querySelectorAll('[data-testid="assistant-code-card"]').length;
   const assistantClickablePathCount = document.querySelectorAll(
     '[data-testid="assistant-clickable-path"]',
@@ -629,7 +653,14 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
       pendingAttachmentStrip.scrollWidth > pendingAttachmentStrip.clientWidth,
     pendingAttachmentStripScrollWidth: pendingAttachmentStrip?.scrollWidth ?? 0,
     pendingAttachmentItemCount,
+    pendingPdfChipTitles,
     pendingAttachmentThumbCount,
+    historyPdfChipTitles,
+    inlineImages,
+    blockedInlineImageTexts,
+    lightboxVisible: !!document.querySelector('[data-testid="image-lightbox"]'),
+    lightboxImageNaturalWidth: lightboxImage?.naturalWidth ?? 0,
+    lightboxImageSrc: lightboxImage?.currentSrc || lightboxImage?.src || null,
   };
 }
 
@@ -832,6 +863,50 @@ async function probeFullResolutionMemory(rawSources: string | null): Promise<voi
 }
 
 function runDomAction(action: WebviewDomAction): void {
+  const decodeBase64Bytes = (input: string): Uint8Array => {
+    const decoded = atob(input);
+    const bytes = new Uint8Array(decoded.length);
+    for (let index = 0; index < decoded.length; index += 1) {
+      bytes[index] = decoded.charCodeAt(index);
+    }
+    return bytes;
+  };
+  const buildClipboardFilePayload = (files: NonNullable<WebviewDomAction["files"]>) => {
+    const clipboardFiles = files.map((file) => {
+      const clipboardFile = new File(
+        [decodeBase64Bytes(file.dataBase64)],
+        file.filename ?? "attachment.bin",
+        {
+          type: file.mimeType,
+        },
+      );
+      if (typeof file.sourcePath === "string" && file.sourcePath.length > 0) {
+        Object.defineProperty(clipboardFile, "path", {
+          configurable: true,
+          value: file.sourcePath,
+        });
+        Object.defineProperty(clipboardFile, "sourcePath", {
+          configurable: true,
+          value: file.sourcePath,
+        });
+      }
+      return clipboardFile;
+    });
+    return {
+      files: clipboardFiles,
+      getData(_format: string) {
+        return "";
+      },
+      items: clipboardFiles.map((file) => ({
+        getAsFile() {
+          return file;
+        },
+        kind: "file" as const,
+        type: file.type,
+      })),
+      types: clipboardFiles.map((file) => file.type),
+    };
+  };
   const dispatchTestComposerValue = (value: string) => {
     window.dispatchEvent(
       new CustomEvent("tomcat:test:set-composer-value", {
@@ -841,6 +916,28 @@ function runDomAction(action: WebviewDomAction): void {
         },
       }),
     );
+  };
+  const isEditableElement = (target: HTMLElement | null): boolean =>
+    Boolean(
+      target && (target.isContentEditable || target.getAttribute("contenteditable") === "true"),
+    );
+  const createPasteEvent = (clipboardData: Record<string, unknown>): ClipboardEvent => {
+    const event = (
+      typeof ClipboardEvent === "function"
+        ? new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+          })
+        : new Event("paste", {
+            bubbles: true,
+            cancelable: true,
+          })
+    ) as ClipboardEvent;
+    Object.defineProperty(event, "clipboardData", {
+      configurable: true,
+      value: clipboardData,
+    });
+    return event;
   };
   const resolveActionTarget = (): HTMLElement | null => {
     const nodes = [...document.querySelectorAll<HTMLElement>(`[data-testid="${action.testId ?? ""}"]`)];
@@ -909,24 +1006,30 @@ function runDomAction(action: WebviewDomAction): void {
       target.dispatchEvent(new Event("change", { bubbles: true }));
       return;
     }
-    if (target?.isContentEditable) {
+    if (isEditableElement(target)) {
       target.focus();
-      const pasteEvent = new Event("paste", {
-        bubbles: true,
-        cancelable: true,
-      }) as ClipboardEvent;
-      Object.defineProperty(pasteEvent, "clipboardData", {
-        configurable: true,
-        value: {
+      target.dispatchEvent(
+        createPasteEvent({
           getData(format: string) {
             return format === "text/plain" ? nextValue : "";
           },
-        },
-      });
-      target.dispatchEvent(pasteEvent);
+        }),
+      );
       return;
     }
     dispatchTestComposerValue(nextValue);
+    return;
+  }
+
+  if (action.kind === "pasteClipboardFiles") {
+    const target = document.querySelector<HTMLElement>(
+      `[data-testid="${action.testId ?? "composer-input"}"]`,
+    );
+    if (!isEditableElement(target)) {
+      return;
+    }
+    target.focus();
+    target.dispatchEvent(createPasteEvent(buildClipboardFilePayload(action.files ?? [])));
     return;
   }
 
@@ -1031,6 +1134,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [pendingRestoreDialog, setPendingRestoreDialog] = useState<PendingRestoreDialogState | null>(
     null,
   );
+  const [zoomedImage, setZoomedImage] = useState<ZoomedImage | null>(null);
   const [imageAttachmentFeedback, setImageAttachmentFeedback] = useState<{
     hasErrors: boolean;
     message: string;
@@ -1197,6 +1301,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     setPendingRestoreDialog((current) =>
       current && current.sessionId !== (activeSession?.sessionId ?? "") ? null : current,
     );
+    setZoomedImage(null);
     if (
       pendingRestoreRefillRef.current &&
       pendingRestoreRefillRef.current.sessionId !== (activeSession?.sessionId ?? "")
@@ -1301,7 +1406,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     for (const attachment of session.pendingAttachments) consider(attachment);
     for (const item of session.timeline) {
       if (item.type !== "message") continue;
-      for (const attachment of item.imageAttachments ?? []) consider(attachment);
+      for (const attachment of item.attachments ?? []) consider(attachment);
     }
     if (!next) return;
 
@@ -1471,7 +1576,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           typeof frame.content === "object" &&
           frame.content !== null &&
           "type" in frame.content &&
-          frame.content.type === "imageAttachmentFeedback" &&
+          frame.content.type === "attachmentFeedback" &&
           "data" in frame.content &&
           typeof frame.content.data === "object" &&
           frame.content.data !== null &&
@@ -1632,6 +1737,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     },
     [activeSession?.sessionId, vscodeApi],
   );
+  const handleZoomImage = useCallback((image: ZoomedImage) => {
+    setZoomedImage(image);
+  }, []);
 
   const handleContextSearchOpen = () => {
     setContextSearch({
@@ -1865,6 +1973,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 buildModel={state.buildModel ?? ""}
                 busy={!!activeSession.busy}
                 bottomSpacerHeight={bottomSpacerHeight}
+                mediaRoots={state.mediaRoots}
                 onAnswer={handleAnswerQuestion}
                 onSetBuildModel={handleSetBuildModel}
                 checkpoints={activeSession.checkpoints ?? []}
@@ -1882,6 +1991,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 sessionTodos={activeSession.sessionTodos ?? []}
                 timeline={activeSession.timeline}
                 transcriptRef={transcriptRef}
+                onZoomImage={handleZoomImage}
               />
             ) : (
               <div className="tc-empty-state">
@@ -1923,12 +2033,18 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       <AttachmentStrip
         attachments={activeSession?.pendingAttachments ?? []}
-        onOpen={(attachmentId) =>
-          postIntent(vscodeApi, "openImagePreview", {
-            attachmentId,
-            sessionId: activeSession?.sessionId ?? "",
-          })
-        }
+        onOpen={(attachment) => {
+          if (attachment.kind === "image") {
+            postIntent(vscodeApi, "openImagePreview", {
+              attachmentId: attachment.id,
+              sessionId: activeSession?.sessionId ?? "",
+            });
+            return;
+          }
+          if (attachment.path) {
+            handleOpenFile(attachment.path);
+          }
+        }}
         onRemove={(attachmentId) =>
           postIntent(vscodeApi, "removeDraftAttachment", {
             attachmentId,
@@ -1965,6 +2081,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           onRevert={() => handleConfirmRestore(true)}
         />
       ) : null}
+      <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
 
       <Composer
         availableModels={state.availableModels}
@@ -2022,17 +2139,18 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId: activeSession.sessionId,
           });
         }}
-        onAttachImages={(images) => {
+        onAttachFiles={(files) => {
           if (activeSession) {
-            postIntent(vscodeApi, "attachImages", {
+            postIntent(vscodeApi, "attachFiles", {
               sessionId: activeSession.sessionId,
-              images,
+              files,
             });
             // Show non-blocking feedback about vision capability
             const hasVision = activeModelCapabilities?.includes("vision");
-            if (!hasVision && images.length > 0) {
+            const hasImage = files.some((file) => file.mimeType.startsWith("image/"));
+            if (!hasVision && hasImage) {
               postIntent(vscodeApi, "showWarningMessage", {
-                message: `Added ${images.length} image(s). The current model may not support vision — images will still be sent but might not be processed.`,
+                message: `Added ${files.length} attachment(s). The current model may not support vision — images will still be sent but might not be processed.`,
               });
             }
           }

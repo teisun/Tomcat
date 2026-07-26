@@ -5,6 +5,7 @@ import { ReferenceChip } from "./ReferenceChip";
 import { ChatMarkdown } from "./markdown/ChatMarkdown";
 import type {
   WebviewMessageBlock,
+  WebviewMediaRoot,
   WebviewMessageSegment,
   WebviewPendingAttachment,
 } from "../types";
@@ -20,16 +21,20 @@ const NOOP_OPEN_FILE = () => undefined;
 
 type MessageBubbleProps = {
   item: WebviewMessageBlock;
+  mediaRoots?: WebviewMediaRoot[];
   onOpenFile?: (path: string, line?: number) => void;
   onOpenImagePreview?: (imageId: string) => void;
   onRetry?: (messageId: string) => void;
+  onZoomImage?: (image: { alt: string; src: string }) => void;
 };
 
 function MessageBubbleComponent({
   item,
+  mediaRoots,
   onOpenFile,
   onOpenImagePreview,
   onRetry,
+  onZoomImage,
 }: MessageBubbleProps) {
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -44,12 +49,11 @@ function MessageBubbleComponent({
   const canToggleRawError = rawErrorDetail !== null && rawErrorDetail.trim() !== item.text.trim();
   const segments: WebviewMessageSegment[] =
     item.segments?.length ? item.segments : [{ text: item.text, type: "text" }];
-  const historyAttachments: WebviewPendingAttachment[] = (item.imageAttachments ?? []).map(
-    (image) => ({
-      ...image,
-      kind: "image",
-      label: image.filename,
-      path: null,
+  const historyAttachments: WebviewPendingAttachment[] = (item.attachments ?? []).map(
+    (attachment) => ({
+      ...attachment,
+      label: attachment.filename,
+      path: attachment.path ?? null,
     }),
   );
 
@@ -90,7 +94,9 @@ function MessageBubbleComponent({
         {item.kind === "assistant" ? (
           <ChatMarkdown
             markdown={item.text}
+            mediaRoots={mediaRoots}
             onOpenFile={onOpenFile ?? NOOP_OPEN_FILE}
+            onZoomImage={onZoomImage}
           />
         ) : (
           segments.map((segment, index) =>
@@ -110,7 +116,15 @@ function MessageBubbleComponent({
       </div>
       <AttachmentStrip
         attachments={historyAttachments}
-        onOpen={onOpenImagePreview}
+        onOpen={(attachment) => {
+          if (attachment.kind === "image") {
+            onOpenImagePreview?.(attachment.id);
+            return;
+          }
+          if (attachment.path) {
+            onOpenFile?.(attachment.path);
+          }
+        }}
         readonly
       />
       {canToggleRawError ? (
@@ -178,10 +192,12 @@ function MessageBubbleComponent({
 
 function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbleProps): boolean {
   return (
+    prev.mediaRoots === next.mediaRoots &&
     prev.item === next.item &&
     prev.onOpenFile === next.onOpenFile &&
     prev.onOpenImagePreview === next.onOpenImagePreview &&
-    prev.onRetry === next.onRetry
+    prev.onRetry === next.onRetry &&
+    prev.onZoomImage === next.onZoomImage
   );
 }
 

@@ -21,6 +21,7 @@ import {
 
 import { prepareAttachment, type PreparedAttachment } from "../attachments/imagePipeline";
 import { referenceIdentity } from "../contextReferences";
+import { isSupportedAttachmentMime } from "../../../src/shared/attachmentProtocol";
 import type {
   ContextSearchMatch,
   WebviewPlanState,
@@ -108,6 +109,45 @@ function buildDropHint(capabilities: string[] | undefined, uris: string[]): stri
   }
   if (includesPdf && !supportsFiles) {
     return "当前模型不支持 PDF 附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
+  }
+  return null;
+}
+
+function buildPasteHint(capabilities: string[] | undefined, files: File[]): string | null {
+  if (!capabilities) {
+    return null;
+  }
+  const supportsVision = hasCapability(capabilities, "vision");
+  const supportsFiles = hasCapability(capabilities, "files");
+  if (supportsVision && supportsFiles) {
+    return null;
+  }
+  const includesImage = files.some((file) => file.type.startsWith("image/"));
+  const includesPdf = files.some((file) => file.type === "application/pdf");
+  if (includesImage && !supportsVision && includesPdf && !supportsFiles) {
+    return "当前模型不支持图片/PDF 附件；粘贴后会先加入待发送列表，发送时会提示切换模型。";
+  }
+  if (includesImage && !supportsVision) {
+    return "当前模型未声明 vision 能力；图片会保留在草稿中，请切换支持图片的模型后发送。";
+  }
+  if (includesPdf && !supportsFiles) {
+    return "当前模型不支持 PDF 附件；PDF 会保留在草稿中，请切换支持文件的模型后发送。";
+  }
+  return null;
+}
+
+type FileWithSourcePath = File & {
+  path?: string;
+  sourcePath?: string;
+};
+
+function extractFileSourcePath(file: File): string | null {
+  const withSourcePath = file as FileWithSourcePath;
+  if (typeof withSourcePath.sourcePath === "string" && withSourcePath.sourcePath.trim()) {
+    return withSourcePath.sourcePath;
+  }
+  if (typeof withSourcePath.path === "string" && withSourcePath.path.trim()) {
+    return withSourcePath.path;
   }
   return null;
 }
@@ -457,7 +497,7 @@ interface ComposerProps {
   onContextSearchQueryChange(query: string): void;
   supportedReasoningLevels?: string[] | undefined;
   thinkingLevelValue: string;
-  onAttachImages?(images: PreparedAttachment[]): void;
+  onAttachFiles?(files: PreparedAttachment[]): void;
   onPickContext(): void;
   onDraftChange(draft: ComposerDraft): void;
   onModeChange(value: "chat" | "plan"): void;
@@ -483,7 +523,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   modelCapabilities,
   modeValue,
   modelValue,
-  onAttachImages,
+  onAttachFiles,
   onContextSearchClose,
   onContextSearchOpen,
   onContextSearchQueryChange,
@@ -517,11 +557,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const effortMenuRef = useRef<HTMLDivElement | null>(null);
   const latestAttachmentHandlersRef = useRef({
     modelCapabilities,
-    onAttachImages,
+    onAttachFiles,
   });
   latestAttachmentHandlersRef.current = {
     modelCapabilities,
-    onAttachImages,
+    onAttachFiles,
   };
   const latestContextSearchHandlersRef = useRef({
     onClose: onContextSearchClose,
@@ -624,43 +664,45 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
       },
       handlePaste(view, event) {
-        // First check for images in clipboard
-        const imageFiles: File[] = [];
+        const attachmentFiles: File[] = [];
         const items = event.clipboardData?.items ?? [];
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
-          if (item.kind === "file" && item.type.startsWith("image/")) {
+          if (item.kind === "file" && isSupportedAttachmentMime(item.type)) {
             const file = item.getAsFile();
             if (file) {
-              imageFiles.push(file);
+              attachmentFiles.push(file);
             }
           }
         }
-        if (imageFiles.length > 0) {
+        if (attachmentFiles.length > 0) {
           event.preventDefault();
-          if (!latestAttachmentHandlersRef.current.modelCapabilities?.includes("vision")) {
-            setCapabilityHint(
-              "当前模型未声明 vision 能力；图片会保留在草稿中，请切换支持图片的模型后发送。",
-            );
+          const hint = buildPasteHint(
+            latestAttachmentHandlersRef.current.modelCapabilities,
+            attachmentFiles,
+          );
+          if (hint) {
+            setCapabilityHint(hint);
           }
           // Downsample and rasterise here, before the bytes leave the webview. This is
           // the only process in the system with a decoder that can resize during decode,
           // so a 4000x3000 paste is turned into a 192px thumbnail without ever
           // allocating the 48MB full-size bitmap.
           Promise.all(
-            imageFiles.map(async (file) =>
+            attachmentFiles.map(async (file) =>
               prepareAttachment({
                 bytes: await file.arrayBuffer(),
                 filename: file.name || null,
                 mimeType: file.type,
+                sourcePath: extractFileSourcePath(file),
               }),
             ),
           )
-            .then((images) => {
-              latestAttachmentHandlersRef.current.onAttachImages?.(images);
+            .then((files) => {
+              latestAttachmentHandlersRef.current.onAttachFiles?.(files);
             })
             .catch(() => {
-              // Fallback: paste as text if image processing fails
+              // Fallback: paste as text if attachment processing fails
               const text = event.clipboardData?.getData("text/plain");
               if (text) {
                 view.dispatch(view.state.tr.insertText(text));

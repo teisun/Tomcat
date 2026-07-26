@@ -646,11 +646,11 @@ suite("Tomcat manual acceptance", () => {
 
     await api.__testing.sendWebviewIntent({
       data: {
-        images: [acceptanceImages[0]],
+        files: [acceptanceImages[0]],
         sessionId: imageSessionId,
       },
       messageId: "manual-acceptance-attach-single-image",
-      type: "attachImages",
+      type: "attachFiles",
     });
     const singleImageDraft = await waitForDom(
       api,
@@ -662,11 +662,11 @@ suite("Tomcat manual acceptance", () => {
 
     await api.__testing.sendWebviewIntent({
       data: {
-        images: acceptanceImages.slice(1),
+        files: acceptanceImages.slice(1),
         sessionId: imageSessionId,
       },
       messageId: "manual-acceptance-attach-ten-images",
-      type: "attachImages",
+      type: "attachFiles",
     });
     await sendDomAction(api, {
       kind: "setRootWidth",

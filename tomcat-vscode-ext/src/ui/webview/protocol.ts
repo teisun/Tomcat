@@ -9,7 +9,11 @@ import type {
   ServeEvent,
 } from "../../serveClient/wire";
 import type { ParticipantPlanState } from "../../shared/planState";
-import type { ImageAttachmentResultItem } from "../../shared/imageAttachmentProtocol";
+import type {
+  AttachmentCandidate,
+  AttachmentResultItem,
+} from "../../shared/attachmentProtocol";
+import { isSupportedAttachmentMime } from "../../shared/attachmentProtocol";
 import type {
   PreviewClose,
   PreviewReady,
@@ -34,6 +38,7 @@ export interface WebviewDomAction {
     | "dragOverTestId"
     | "dragLeaveTestId"
     | "focusTestId"
+    | "pasteClipboardFiles"
     | "pressKeyOnTestId"
     | "probeAttachmentFetch"
     | "probeFullResolutionMemory"
@@ -43,6 +48,7 @@ export interface WebviewDomAction {
     | "setInputValue"
     | "setRootWidth";
   edge?: "bottom" | "top";
+  files?: AttachmentCandidate[];
   index?: number;
   scrollBlock?: "center" | "end" | "nearest" | "start";
   testId?: string;
@@ -64,7 +70,7 @@ export interface WebviewMessageBlock {
    * transcript cost hundreds of megabytes: every snapshot pinned another copy on the
    * JavaScript heap.
    */
-  imageAttachments?: WebviewAttachmentView[];
+  attachments?: WebviewAttachmentView[];
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
@@ -266,7 +272,10 @@ export interface WebviewAttachmentView {
   /** True once a downsampled version exists in the backend. */
   hasThumb?: boolean;
   id: string;
+  kind: ServeAttachment["kind"];
   mimeType: string;
+  /** Original local path when the host still knows it. */
+  path?: string | null;
   /** Downsampled URL, or the full one when no thumbnail exists yet. */
   thumbUri?: string | null;
   /**
@@ -286,7 +295,6 @@ export interface WebviewAttachmentView {
  * show, and `unavailable` for the case where the backend no longer has the bytes.
  */
 export interface WebviewPendingAttachment extends WebviewAttachmentView {
-  kind: ServeAttachment["kind"];
   label: string;
   path?: string | null;
 }
@@ -325,12 +333,18 @@ export interface WebviewSessionTab {
   updatedAt: number | null;
 }
 
+export interface WebviewMediaRoot {
+  fsPath: string;
+  webviewBase: string;
+}
+
 export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   buildModel?: string;
+  mediaRoots?: WebviewMediaRoot[];
   modelAdminSupported: boolean;
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
@@ -385,11 +399,11 @@ export type HostEventFrameContent =
       type: "__test.capture_dom";
     }
   | {
-      type: "attachImagesResult";
-      items: ImageAttachmentResultItem[];
+      type: "attachFilesResult";
+      items: AttachmentResultItem[];
     }
   | {
-      type: "imageAttachmentFeedback";
+      type: "attachmentFeedback";
       data: {
         message: string;
         hasErrors: boolean;
@@ -567,23 +581,10 @@ export type WebviewIntent =
        * because a webview is the only place in this system with a decoder that can
        * resize during decode rather than after it.
        */
-      type: "attachImages";
+      type: "attachFiles";
       data: {
         sessionId: string;
-        images: {
-          dataBase64: string;
-          filename?: string | null;
-          mimeType: string;
-          /** PNG rendering for formats providers reject. Base64. */
-          providerBase64?: string;
-          providerMimeType?: string;
-          /** SVG source to send as text when rasterisation was not possible. */
-          providerText?: string;
-          /** Downsampled preview, PNG, base64. Absent when generation failed. */
-          thumbBase64?: string;
-          /** Non-fatal notes from the webview pipeline, surfaced to the user. */
-          warnings?: string[];
-        }[];
+        files: AttachmentCandidate[];
       };
     }
   | {
@@ -1026,14 +1027,17 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         Array.isArray(value.data.segments) &&
         value.data.segments.every(isWebviewMessageSegmentShape)
       );
-    case "attachImages":
+    case "attachFiles":
       return (
         isRecord(value.data) &&
         isString(value.data.sessionId) &&
-        Array.isArray(value.data.images) &&
-        (value.data.images as unknown[]).every(
-          (img) =>
-            isRecord(img) && isString(img.dataBase64) && isString(img.mimeType),
+        Array.isArray(value.data.files) &&
+        (value.data.files as unknown[]).every(
+          (file) =>
+            isRecord(file) &&
+            isString(file.dataBase64) &&
+            isString(file.mimeType) &&
+            isSupportedAttachmentMime(file.mimeType),
         )
       );
     case "openImagePreview":

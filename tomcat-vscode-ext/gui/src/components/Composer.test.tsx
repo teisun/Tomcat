@@ -22,13 +22,16 @@ function pastedFile(bytes: number[], name: string, type: string): File {
 // here. Stub it: these tests are about the paste plumbing, and the pixel work is covered
 // against real bytes in imagePipeline.test.ts.
 vi.mock("../attachments/imagePipeline", () => ({
-  prepareAttachment: vi.fn(async (raw: { filename: string | null; mimeType: string }) => ({
+  prepareAttachment: vi.fn(
+    async (raw: { filename: string | null; mimeType: string; sourcePath?: string | null }) => ({
     dataBase64: "c3R1Yg==",
     filename: raw.filename,
     mimeType: raw.mimeType,
+      sourcePath: raw.sourcePath ?? null,
     thumbBase64: "dGh1bWI=",
     warnings: [],
-  })),
+    }),
+  ),
 }));
 
 function renderComposer({
@@ -43,7 +46,7 @@ function renderComposer({
   modelCapabilities = ["vision", "files"],
   modelValue = "gpt-5.4",
   modeValue = "plan",
-  onAttachImages = vi.fn(),
+  onAttachFiles = vi.fn(),
   onContextSearchClose = vi.fn(),
   onContextSearchOpen = vi.fn(),
   onContextSearchQueryChange = vi.fn(),
@@ -82,7 +85,7 @@ function renderComposer({
   modelCapabilities?: string[];
   modelValue?: string;
   modeValue?: "chat" | "plan";
-  onAttachImages?: (images: Array<{
+  onAttachFiles?: (files: Array<{
     dataBase64: string;
     filename?: string | null;
     mimeType: string;
@@ -120,7 +123,7 @@ function renderComposer({
       modelValue={modelValue}
       supportedReasoningLevels={supportedReasoningLevels}
       thinkingLevelValue={thinkingLevelValue}
-      onAttachImages={onAttachImages}
+      onAttachFiles={onAttachFiles}
       onContextSearchClose={onContextSearchClose}
       onContextSearchOpen={onContextSearchOpen}
       onContextSearchQueryChange={onContextSearchQueryChange}
@@ -139,7 +142,7 @@ function renderComposer({
   );
   return {
     ...renderResult,
-    onAttachImages,
+    onAttachFiles,
     onDraftChange,
     onModeChange,
     onResolveDrop,
@@ -784,8 +787,8 @@ describe("Composer", () => {
   });
 
   it("extracts multiple clipboard image Files without inserting placeholder text", async () => {
-    const onAttachImages = vi.fn();
-    renderComposer({ onAttachImages });
+    const onAttachFiles = vi.fn();
+    renderComposer({ onAttachFiles });
     const textbox = screen.getByTestId("composer-input");
     const files = [
       pastedFile([1, 2, 3], "one.png", "image/png"),
@@ -801,17 +804,94 @@ describe("Composer", () => {
         })),
       },
     });
-    await waitFor(() => expect(onAttachImages).toHaveBeenCalledTimes(1));
-    expect(onAttachImages.mock.calls[0][0]).toEqual([
+    await waitFor(() => expect(onAttachFiles).toHaveBeenCalledTimes(1));
+    expect(onAttachFiles.mock.calls[0][0]).toEqual([
       expect.objectContaining({ filename: "one.png", mimeType: "image/png" }),
       expect.objectContaining({ filename: "two.webp", mimeType: "image/webp" }),
     ]);
     expect(textbox.textContent).not.toContain("image attachment");
   });
 
+  it("pastes PDF and image files together through the shared attachment path", async () => {
+    const onAttachFiles = vi.fn();
+    renderComposer({ onAttachFiles });
+    const textbox = screen.getByTestId("composer-input");
+    const files = [
+      pastedFile([1, 2, 3], "one.png", "image/png"),
+      pastedFile([0x25, 0x50, 0x44, 0x46], "brief.pdf", "application/pdf"),
+    ];
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: () => "",
+        items: files.map((file) => ({
+          getAsFile: () => file,
+          kind: "file",
+          type: file.type,
+        })),
+      },
+    });
+    await waitFor(() => expect(onAttachFiles).toHaveBeenCalledTimes(1));
+    expect(onAttachFiles.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ filename: "one.png", mimeType: "image/png" }),
+      expect.objectContaining({ filename: "brief.pdf", mimeType: "application/pdf" }),
+    ]);
+  });
+
+  it("preserves a clipboard file path when Chromium exposes one", async () => {
+    const onAttachFiles = vi.fn();
+    renderComposer({ onAttachFiles });
+    const textbox = screen.getByTestId("composer-input");
+    const pdf = pastedFile([0x25, 0x50, 0x44, 0x46], "brief.pdf", "application/pdf");
+    Object.defineProperty(pdf, "path", {
+      configurable: true,
+      value: "/workspace/docs/brief.pdf",
+    });
+
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: () => "",
+        items: [
+          {
+            getAsFile: () => pdf,
+            kind: "file",
+            type: pdf.type,
+          },
+        ],
+      },
+    });
+
+    await waitFor(() => expect(onAttachFiles).toHaveBeenCalledTimes(1));
+    expect(onAttachFiles.mock.calls[0]?.[0]).toEqual([
+      expect.objectContaining({
+        filename: "brief.pdf",
+        mimeType: "application/pdf",
+        sourcePath: "/workspace/docs/brief.pdf",
+      }),
+    ]);
+  });
+
+  it("falls back to plain-text paste when no supported attachment mime types exist", async () => {
+    renderComposer();
+    const textbox = screen.getByTestId("composer-input");
+    const zip = pastedFile([1, 2, 3], "archive.zip", "application/zip");
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: (type: string) => (type === "text/plain" ? "plain fallback" : ""),
+        items: [
+          {
+            getAsFile: () => zip,
+            kind: "file",
+            type: zip.type,
+          },
+        ],
+      },
+    });
+    await waitFor(() => expect(textbox.textContent).toContain("plain fallback"));
+  });
+
   it("warns when pasted images are attached to a model without vision", async () => {
-    const onAttachImages = vi.fn();
-    renderComposer({ modelCapabilities: [], onAttachImages });
+    const onAttachFiles = vi.fn();
+    renderComposer({ modelCapabilities: [], onAttachFiles });
     const file = pastedFile([1], "shot.png", "image/png");
     fireEvent.paste(screen.getByTestId("composer-input"), {
       clipboardData: {
@@ -826,7 +906,7 @@ describe("Composer", () => {
       },
     });
     expect(await screen.findByText(/未声明 vision 能力/)).toBeTruthy();
-    await waitFor(() => expect(onAttachImages).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onAttachFiles).toHaveBeenCalledTimes(1));
   });
 
   it("clears drop highlighting on dragend", () => {

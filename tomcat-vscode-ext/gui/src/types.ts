@@ -1,3 +1,5 @@
+import type { AttachmentCandidate } from "../../src/shared/attachmentProtocol";
+
 export type WebviewReferenceKind = "selection" | "file";
 
 export type WebviewMessageSegment =
@@ -31,6 +33,7 @@ export interface WebviewDomAction {
     | "dragOverTestId"
     | "dragLeaveTestId"
     | "focusTestId"
+    | "pasteClipboardFiles"
     | "pressKeyOnTestId"
     | "probeAttachmentFetch"
     | "probeFullResolutionMemory"
@@ -40,6 +43,7 @@ export interface WebviewDomAction {
     | "setInputValue"
     | "setRootWidth";
   edge?: "bottom" | "top";
+  files?: AttachmentCandidate[];
   index?: number;
   scrollBlock?: "center" | "end" | "nearest" | "start";
   testId?: string;
@@ -60,7 +64,7 @@ export interface WebviewMessageBlock {
    * protocol, so scrolling back through a long transcript costs DOM nodes, not
    * megabytes of base64 pinned on the JavaScript heap.
    */
-  imageAttachments?: WebviewAttachmentView[];
+  attachments?: WebviewAttachmentView[];
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
@@ -279,6 +283,7 @@ export interface WebviewAttachmentView {
   /** True once a downsampled version exists in the backend. */
   hasThumb?: boolean;
   id: string;
+  kind: "file" | "image";
   mimeType: string;
   /** Downsampled URL, or null until a thumbnail has been generated. */
   thumbUri?: string | null;
@@ -293,7 +298,6 @@ export interface WebviewAttachmentView {
 }
 
 export interface WebviewPendingAttachment extends WebviewAttachmentView {
-  kind: "file" | "image";
   label: string;
   path?: string | null;
 }
@@ -332,12 +336,18 @@ export interface WebviewSessionTab {
   updatedAt: number | null;
 }
 
+export interface WebviewMediaRoot {
+  fsPath: string;
+  webviewBase: string;
+}
+
 export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   buildModel?: string;
+  mediaRoots?: WebviewMediaRoot[];
   modelAdminSupported: boolean;
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
@@ -531,22 +541,9 @@ export type WebviewIntent =
        * after — which is the difference between a 4000x3000 paste costing 48 KB and
        * costing 48 MB.
        */
-      type: "attachImages";
+      type: "attachFiles";
       data: {
-        images: Array<{
-          dataBase64: string;
-          filename?: string | null;
-          mimeType: string;
-          /** PNG rendering for formats providers reject. Base64. */
-          providerBase64?: string;
-          providerMimeType?: string;
-          /** SVG source to send as text when rasterisation was not possible. */
-          providerText?: string;
-          /** Downsampled preview, PNG, base64. Absent when generation failed. */
-          thumbBase64?: string;
-          /** Non-fatal notes from the image pipeline, surfaced to the user. */
-          warnings?: string[];
-        }>;
+        files: AttachmentCandidate[];
         sessionId: string;
       };
     }

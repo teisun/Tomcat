@@ -102,6 +102,23 @@ describe("webview protocol helpers", () => {
     expect(
       isWebviewIntent({
         data: {
+          files: [
+            {
+              dataBase64: "UERG",
+              filename: "brief.pdf",
+              mimeType: "application/pdf",
+            },
+          ],
+          sessionId: "s1",
+        },
+        messageId: "attach-1",
+        type: "attachFiles",
+      }),
+    ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
           kind: "file",
           query: "app",
           requestId: "req-1",
@@ -226,6 +243,22 @@ describe("webview protocol helpers", () => {
         },
         messageId: "drop-2",
         type: "resolveDrop",
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewIntent({
+        data: {
+          files: [
+            {
+              dataBase64: "AA==",
+              filename: "archive.zip",
+              mimeType: "application/zip",
+            },
+          ],
+          sessionId: "s1",
+        },
+        messageId: "attach-bad-mime",
+        type: "attachFiles",
       }),
     ).toBe(false);
     expect(

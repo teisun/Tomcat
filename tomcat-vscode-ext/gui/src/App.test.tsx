@@ -564,7 +564,7 @@ describe("Tomcat webview App", () => {
       "login-refactor.plan.md",
     );
     expect(screen.getByTestId("build-plan").textContent).toContain("Build");
-    expect(screen.getByTestId("attachment-chip").textContent).toContain(
+    expect(screen.getByTestId("attachment-chip").getAttribute("aria-label")).toContain(
       "README.md",
     );
     expect(screen.getByTestId("context-ratio").textContent).toContain(
@@ -1469,8 +1469,8 @@ describe("Tomcat webview App", () => {
     expect(
       postMessage.mock.calls.some(
         ([message]) =>
-          message.type === "openImagePreview" &&
-          message.data?.attachmentId === "att-1",
+          message.type === "openFile" &&
+          message.data?.path === "/workspace/README.md",
       ),
     ).toBe(true);
     expect(
@@ -3586,4 +3586,5 @@ describe("Tomcat webview App", () => {
       vi.useRealTimers();
     }
   });
+
 });
