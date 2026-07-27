@@ -94,7 +94,9 @@ fn default_plan_max_review_rounds() -> u32 {
 }
 
 fn default_plan_max_code_review_rounds() -> u32 {
-    1
+    // 一轮意味着 reviewer 只要提一次问题，计划就再也没机会被复审。
+    // 预算给到 8 轮，让「改完再 review」这个循环真的能跑起来。
+    8
 }
 
 fn default_plan_verify_gate() -> String {

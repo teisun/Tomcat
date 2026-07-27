@@ -125,6 +125,7 @@ export function TranscriptView({
   planId,
   planState,
   planTodos = [],
+  sessionModel = "",
   sessionTodos = [],
   timeline,
   mediaRoots,
@@ -149,6 +150,7 @@ export function TranscriptView({
   planId?: string | null;
   planState?: WebviewPlanState | null;
   planTodos?: WebviewTodo[];
+  sessionModel?: string;
   sessionTodos?: WebviewTodo[];
   timeline: WebviewTimelineItem[];
   mediaRoots?: WebviewMediaRoot[];
@@ -222,6 +224,7 @@ export function TranscriptView({
               onOpenPlanFile={onOpenPlanFile}
               onSetBuildModel={onSetBuildModel}
               planTodos={planTodos}
+              sessionModel={sessionModel}
             />
           );
         case "plan":
@@ -278,6 +281,7 @@ export function TranscriptView({
                     onOpenPlanFile={onOpenPlanFile}
                     onSetBuildModel={onSetBuildModel}
                     planTodos={planTodos}
+                    sessionModel={sessionModel}
                   />
                 );
               }

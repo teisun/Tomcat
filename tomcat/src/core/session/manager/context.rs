@@ -24,7 +24,8 @@ use super::session_impl::SessionManager;
 use crate::core::compaction::preheat::Preheat;
 
 use super::types::{
-    estimate_msg_chars, CompactionResult, ContextState, PlanEventRef, SessionContextObservation,
+    estimate_msg_chars, CompactionResult, ContextState, PlanEventRef, PlanModeTransition,
+    ResumeControlState, SessionContextObservation,
 };
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
@@ -50,6 +51,7 @@ impl HydrateTraceMode {
 struct HydrateLoadOutcome {
     entries: Vec<TranscriptEntry>,
     latest_plan_event: Option<PlanEventRef>,
+    resume_control: ResumeControlState,
     io_stats: ResumeIndexIoStats,
     trace_mode: HydrateTraceMode,
     plan_source: &'static str,
@@ -196,9 +198,11 @@ fn full_hydration_entries(
             "init_context_state scanned at least MAX_PLAN_SCAN transcript entries"
         );
     }
+    let resume_control = extract_resume_control(&entries);
     Ok(HydrateLoadOutcome {
         entries,
         latest_plan_event: latest_plan_event.clone(),
+        resume_control,
         io_stats,
         trace_mode: HydrateTraceMode::Full,
         plan_source: if latest_plan_event.is_some() {
@@ -267,6 +271,7 @@ fn targeted_hydration_entries_with_load(
     Ok(HydrateLoadOutcome {
         entries: std::mem::take(&mut entries),
         latest_plan_event: latest_plan_event.clone(),
+        resume_control: index.resume_control_state(),
         io_stats,
         trace_mode: HydrateTraceMode::Tail,
         plan_source: if latest_plan_event.is_some() {
@@ -496,6 +501,19 @@ fn extract_latest_plan_event(entries: &[TranscriptEntry]) -> Option<PlanEventRef
     })
 }
 
+/// 全量扫描路径（无 sidecar 可用时）折出与 sidecar 等价的控制态。
+fn extract_resume_control(entries: &[TranscriptEntry]) -> ResumeControlState {
+    let mut control = ResumeControlState::default();
+    for entry in entries {
+        if let TranscriptEntry::Custom(custom) = entry {
+            if let Some(transition) = PlanModeTransition::from_custom_event(&custom.extra) {
+                control.apply(transition);
+            }
+        }
+    }
+    control
+}
+
 fn fold_entries_to_messages(
     entries: &[TranscriptEntry],
     system_text_len: usize,
@@ -662,6 +680,7 @@ fn empty_context_state(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: ResumeControlState::default(),
         preheat: Preheat::new(),
         session_obs,
         live: super::types::ContextLiveMetrics::default(),
@@ -731,6 +750,7 @@ pub fn init_context_state(
 
     let entries = load_outcome.entries;
     let latest_plan_event = load_outcome.latest_plan_event;
+    let resume_control = load_outcome.resume_control;
     let fold_start = compute_fold_start(&entries, today, DEFAULT_CONTEXT_CAP);
     let fold_out = fold_entries_to_messages(&entries[fold_start..], system_text.len());
     let selected = filter_messages_by_day(fold_out.messages, today, DEFAULT_CONTEXT_CAP);
@@ -765,6 +785,7 @@ pub fn init_context_state(
         post_usage_appended_chars: 0,
         transcript_path: path,
         latest_plan_event,
+        resume_control,
         preheat,
         session_obs,
         live: super::types::ContextLiveMetrics::default(),

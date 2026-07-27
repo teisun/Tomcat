@@ -129,6 +129,94 @@ impl PlanEventRef {
 }
 
 // ---------------------------------------------------------------------------
+// AgentMode / 控制态恢复
+// ---------------------------------------------------------------------------
+
+/// 用户可见的三种模式。`PlanState` 的 Pending / Executing / Completed 都属于 `Exec`，
+/// 它们之间的区别由计划文件的 `frontmatter.state` 决定，不在这里重复表达。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMode {
+    Chat,
+    Plan,
+    Exec,
+}
+
+impl AgentMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Plan => "plan",
+            Self::Exec => "exec",
+        }
+    }
+}
+
+/// 一条 transcript 事件对控制态的影响。字段为 `None` 表示该事件不改动这一项。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanModeTransition {
+    pub mode: Option<AgentMode>,
+    pub plan_id: Option<String>,
+    pub path: Option<PathBuf>,
+}
+
+impl PlanModeTransition {
+    /// 与 [`PlanEventRef::from_custom_event`] 的区别：这里对缺字段是宽容的。
+    /// `plan.enter` 发生时计划文件往往还不存在，既没有 plan_id 也没有 path，
+    /// 但"进了 PLAN 模式"这件事必须被记住。
+    pub fn from_custom_event(extra: &serde_json::Value) -> Option<Self> {
+        let obj = extra.as_object()?;
+        let event = obj.get("event")?.as_str()?;
+        let mode = match event {
+            wire::WIRE_PLAN_ENTER => Some(AgentMode::Plan),
+            wire::WIRE_PLAN_EXIT => Some(AgentMode::Chat),
+            wire::WIRE_PLAN_BUILD | wire::WIRE_PLAN_PENDING | wire::WIRE_PLAN_COMPLETE => {
+                Some(AgentMode::Exec)
+            }
+            // create / update 只绑定计划，不改模式。
+            wire::WIRE_PLAN_CREATE | wire::WIRE_PLAN_UPDATE => None,
+            _ => return None,
+        };
+        Some(Self {
+            mode,
+            plan_id: obj
+                .get("plan_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            path: obj
+                .get("path")
+                .and_then(|v| v.as_str())
+                .and_then(|raw| crate::infra::platform::normalize_path(raw).ok()),
+        })
+    }
+}
+
+/// 会话恢复时交给 `plan_runtime` 的控制态。由 resume-index sidecar 直接提供，
+/// 无需每次遍历 transcript。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumeControlState {
+    /// `None` 表示 sidecar 里没有这项信息（旧版本 / 全量扫描路径），走推断兜底。
+    pub mode: Option<AgentMode>,
+    pub plan_path: Option<PathBuf>,
+    pub plan_id: Option<String>,
+}
+
+impl ResumeControlState {
+    /// 折叠一条事件的影响。
+    pub fn apply(&mut self, transition: PlanModeTransition) {
+        if let Some(mode) = transition.mode {
+            self.mode = Some(mode);
+        }
+        if transition.plan_id.is_some() {
+            self.plan_id = transition.plan_id;
+        }
+        if transition.path.is_some() {
+            self.plan_path = transition.path;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ContextState
 // ---------------------------------------------------------------------------
 
@@ -144,6 +232,8 @@ pub struct ContextState {
     pub transcript_path: PathBuf,
     /// 单次反向扫描识别出的最近一条 `plan.*` transcript 自定义事件。
     pub latest_plan_event: Option<PlanEventRef>,
+    /// 会话恢复时的模式与计划绑定，优先由 resume-index sidecar 提供。
+    pub resume_control: ResumeControlState,
     /// 异步预热状态机（替代旧 `Option<CompactionSummary>`）。
     pub preheat: Preheat,
     /// 会话累计（刷盘子集）。

@@ -120,6 +120,8 @@ export interface PlanPreviewEditorProviderDeps {
   extensionUri: vscode.Uri;
   /** Current global build model (`tomcat.plan.buildModel`), "" when unset. */
   getBuildModel(): string;
+  /** Model the chat session is on, "" when there is no session yet. */
+  getSessionModel(): string;
   messenger: TomcatMessenger;
   openExternal(href: string): Promise<void> | void;
   openFile(filePath: string, line?: number): Promise<void> | void;
@@ -433,6 +435,7 @@ export class PlanPreviewEditorProvider
       path: planPath,
       planId: parsed.planId,
       raw: parsed.raw,
+      sessionModel: this.deps.getSessionModel(),
       state: parsed.state,
       title: parsed.title,
       todos: parsed.todos,

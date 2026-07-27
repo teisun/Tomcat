@@ -62,6 +62,7 @@ async fn collapse_summary_uses_compaction_provider_cross_provider() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

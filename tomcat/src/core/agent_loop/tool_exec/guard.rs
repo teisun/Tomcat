@@ -29,6 +29,15 @@ pub(super) fn reviewer_allowed_tools_description(
     desc
 }
 
+/// Explorer 只读：写工具、plan 工具一律不可用；也不能再套娃派发 explorer。
+pub(super) fn is_explorer_whitelisted_tool(name: &str) -> bool {
+    crate::core::plan_runtime::explorer::EXPLORER_ALLOWED_TOOLS.contains(&name)
+}
+
+pub(super) fn explorer_allowed_tools_description() -> String {
+    crate::core::plan_runtime::explorer::EXPLORER_ALLOWED_TOOLS.join("/")
+}
+
 pub(super) fn is_verifier_whitelisted_tool(name: &str, expose_skills: bool) -> bool {
     matches!(
         name,

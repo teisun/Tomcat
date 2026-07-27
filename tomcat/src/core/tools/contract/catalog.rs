@@ -116,7 +116,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "read",
         label: "Read",
-        description: "Read a UTF-8 text file. Read a file before editing it. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of a raw decode error.\n",
+        description: "Read a UTF-8 text file. Read a file before editing it. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of a raw decode error. A wide read costs the same round trip as a narrow one, so when you are new to a file read a window that actually covers it rather than paging through it 40 lines at a time. Use `paths` to read several files in one call.\n",
         display_summary: Some("Read a file from an authorized path."),
         parameters: read_parameters,
         scope: PermissionScope::Read,
@@ -164,7 +164,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "edit",
         label: "Edit File",
-        description: "Edit an existing text file by replacing exact text. Two input shapes:\n  Shape A (single): { path, old_content, new_content, replace_all? }\n  Shape B (preferred, multiple): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }\nWhen both appear, `edits` wins. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.\n",
+        description: "Edit existing text files by replacing exact text. Three input shapes:\n  Shape A (single segment): { path, old_content, new_content, replace_all? }\n  Shape B (preferred, multiple segments in one file): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }\n  Shape C (several files at once): { files: [ { path, edits: [...] }, ... ] }\nWhen both appear on one file, `edits` wins. In Shape C every file is validated first and only the files that pass are written, so read the per-file result: a failure means that one file was left untouched, not that the batch rolled back. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.\n",
         display_summary: Some("Replace exact text in an existing file (multi-segment, original-snapshot)."),
         parameters: edit_parameters,
         scope: PermissionScope::Write,
@@ -337,6 +337,21 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: false,
         destructive: true,
         search_hint: Some("config set workspace roots path rules model"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "dispatch_agent",
+        label: "Dispatch Agent",
+        description: "Delegate read-only codebase investigation to one or more explorer subagents, running in parallel. Pass `tasks`: 1-6 entries of `{ id, prompt }`, where `prompt` is a self-contained question (the subagent sees none of this conversation) and `id` is a short label used to match answers back to questions. Each subagent may only read (`read` / `search_files` / `list_dir` / read-only `bash`) and returns findings as `path:line` references plus a conclusion — never raw file contents. Everything it read is discarded with it, so your context grows by a few hundred words per task instead of by every file. Use it for open-ended investigation across areas you have not read yet; read files yourself when you already know exactly which lines you need.\n",
+        display_summary: Some("Run parallel read-only explorer subagents that return findings, not file contents."),
+        parameters: dispatch_agent_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("dispatch agent explorer subagent investigate parallel findings"),
         prompt_guidelines: &[],
         plan_only: false,
         requires_user_interaction: false,
@@ -624,7 +639,21 @@ fn shared_todo_op_item_schema(status_description: &str) -> Value {
 fn read_parameters() -> Value {
     object_schema(
         serde_json::json!({
-            "path": { "type": "string", "description": "Absolute or relative file path to read as UTF-8 text." },
+            "path": { "type": "string", "description": "Absolute or relative file path to read as UTF-8 text. Provide exactly one of `path` or `paths`." },
+            "paths": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "description": "Read several files in one call. Mutually exclusive with `path`. Entries are read in order and share one output budget; anything that does not fit is reported as SKIPPED with a resume call rather than dropped silently. Keep a batch to 3-5 files so the combined result stays small enough to remain inline.",
+                "items": object_schema(
+                    serde_json::json!({
+                        "path": { "type": "string", "description": "File to read." },
+                        "offset": { "type": "integer", "minimum": 1, "description": "Optional 1-based start line for this entry." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 10000, "description": "Optional max lines for this entry." }
+                    }),
+                    &["path"],
+                )
+            },
             "offset": {
                 "type": "integer",
                 "minimum": 1,
@@ -638,14 +667,14 @@ fn read_parameters() -> Value {
             },
             "line_numbers": {
                 "type": "boolean",
-                "description": "Render `cat -n` style line numbers (default true). These prefixes are display-only — do not paste `  N\\t...` into edit.old_content."
+                "description": "Render `cat -n` style line numbers (default true). Applies to every entry when using `paths`. These prefixes are display-only — do not paste `  N\\t...` into edit.old_content."
             },
             "hashline": {
                 "type": "boolean",
                 "description": "Render each line as `{line}#{2-char hash}:{content}` for use with hashline_edit. Display-only prefix — do not paste into edit.old_content. Mutually exclusive with line_numbers (hashline wins). Default false."
             }
         }),
-        &["path"],
+        &[],
     )
 }
 
@@ -679,7 +708,7 @@ fn write_parameters() -> Value {
 fn edit_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Edit a file (read -> edit). Provide Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
+        "description": "Edit files (read -> edit). Shape A (top-level old_content/new_content), Shape B (edits[]) for one file, or Shape C (files[]) for several files in one call; when both appear on one file, `edits` wins. All segments match each file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
         "properties": {
             "path": {
                 "type": "string",
@@ -720,9 +749,40 @@ fn edit_parameters() -> Value {
                     "required": ["old_content", "new_content"],
                     "additionalProperties": false
                 }
+            },
+            "files": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "description": "Shape C: edit several files in one call. Mutually exclusive with `path`. Each file must appear at most once — merge its segments instead of listing it twice. Every file is checked first, then only the ones that pass are written; a file that fails is left untouched on disk and reported individually, so a partial batch is a normal outcome you must read the per-file result for.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File to edit." },
+                        "old_content": { "type": "string", "description": "Single-segment form for this file." },
+                        "new_content": { "type": "string", "description": "Replacement text for the single-segment form." },
+                        "replace_all": { "type": "boolean", "description": "Replace every occurrence in the single-segment form. Defaults to false." },
+                        "edits": {
+                            "type": "array",
+                            "minItems": 1,
+                            "description": "Multi-segment form for this file; same semantics as the top-level `edits`.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_content": { "type": "string" },
+                                    "new_content": { "type": "string" },
+                                    "replace_all": { "type": "boolean" }
+                                },
+                                "required": ["old_content", "new_content"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
             }
-        },
-        "required": ["path"]
+        }
     })
 }
 
@@ -850,6 +910,33 @@ fn hashline_edit_parameters() -> Value {
     })
 }
 
+fn dispatch_agent_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "tasks": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 6,
+                "description": "Investigation tasks to run in parallel. Keep each one scoped to a single area; split unrelated questions into separate tasks instead of writing one broad prompt.",
+                "items": object_schema(
+                    serde_json::json!({
+                        "id": {
+                            "type": "string",
+                            "description": "Short unique label such as `webview-paste`. Used to match the returned report back to this task. Defaults to `task-<n>` when omitted."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Self-contained question. The subagent cannot see this conversation, so state the goal, the area to look at, and what a useful answer contains."
+                        }
+                    }),
+                    &["prompt"],
+                )
+            }
+        }),
+        &["tasks"],
+    )
+}
+
 fn search_files_parameters() -> Value {
     object_schema(
         serde_json::json!({
@@ -882,7 +969,7 @@ fn search_files_parameters() -> Value {
             "context": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "[content only] Surrounding context lines when output_mode=content. Ignored otherwise."
+                "description": "[content only] Surrounding context lines when output_mode=content. Defaults to 3 so you can judge a hit without a follow-up read; pass 0 for matched lines only. Ignored otherwise."
             },
             "head_limit": {
                 "anyOf": [

@@ -622,11 +622,8 @@ impl ChatContext {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(config.reviewer.max_turns);
-        let reviewer_model = config
-            .reviewer
-            .model_override
-            .clone()
-            .unwrap_or_else(|| config.llm.default_model.clone());
+        // 只捕获 override；为空时由 dispatcher 在每次派发时取当前会话模型。
+        let reviewer_model_override = config.reviewer.model_override.clone();
         let (child_agent_context_config, child_agent_compaction_provider) =
             resolve_child_agent_compaction_runtime(
                 llm_resolver.as_ref(),
@@ -658,7 +655,8 @@ impl ChatContext {
                 audit: audit.clone(),
                 bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
-                model: reviewer_model.clone(),
+                model_override: reviewer_model_override.clone(),
+                fallback_model: config.llm.default_model.clone(),
                 max_turns: reviewer_max_turns,
             },
         );
@@ -685,12 +683,43 @@ impl ChatContext {
                 audit: audit.clone(),
                 bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
-                model: reviewer_model,
+                model_override: reviewer_model_override,
+                fallback_model: config.llm.default_model.clone(),
+                max_turns: reviewer_max_turns,
+            },
+        );
+        let prod_explorer = plan_runtime::prod_reviewer::ProdExplorerDispatcher::new(
+            "chat_context",
+            plan_runtime::prod_reviewer::ProdReviewerDeps {
+                agent_registry: agent_registry.clone(),
+                parent_session_id: current_session_entry.session_id.clone(),
+                llm: llm.clone(),
+                compaction_provider: child_agent_compaction_provider.clone(),
+                primitive: primitive.clone(),
+                event_bus: event_bus.clone(),
+                agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+                checkpoint_store: checkpoint_store.clone(),
+                context_config: child_agent_context_config.clone(),
+                read_file_state: read_file_state.clone(),
+                openai_files_runtime: openai_files_runtime.clone(),
+                agent_workspace_dir: agent_workspace_dir.clone(),
+                skill_set: skill_set.clone(),
+                skills_config: config.skills.clone(),
+                bash_config: config.tools.bash.clone(),
+                gate: gate.clone(),
+                confirmation: confirmation.clone(),
+                audit: audit.clone(),
+                bash_ast: bash_ast.clone(),
+                plan_runtime: Arc::downgrade(&plan_runtime),
+                // explorer 没有独立模型配置，始终跟随会话模型。
+                model_override: None,
+                fallback_model: config.llm.default_model.clone(),
                 max_turns: reviewer_max_turns,
             },
         );
         plan_runtime.attach_plan_reviewer(Arc::new(prod_plan_reviewer));
         plan_runtime.attach_code_reviewer(Arc::new(prod_code_reviewer));
+        plan_runtime.attach_explorer(Arc::new(prod_explorer));
         let prod_verifier = plan_runtime::verify::ProdVerifierDispatcher::new(
             "chat_context",
             plan_runtime::verify::ProdVerifierDeps {
@@ -715,7 +744,9 @@ impl ChatContext {
                 audit: audit.clone(),
                 bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
-                model: config.llm.default_model.clone(),
+                // verifier 没有独立的 model_override 配置，直接跟随会话模型。
+                model_override: None,
+                fallback_model: config.llm.default_model.clone(),
             },
         );
         plan_runtime.attach_verifier(Arc::new(prod_verifier));

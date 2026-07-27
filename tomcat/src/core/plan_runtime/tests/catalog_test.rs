@@ -24,7 +24,7 @@ fn chat_mode_excludes_create_plan_only() {
 }
 
 #[test]
-fn planning_mode_exposes_full_set_including_writers_and_bash() {
+fn planning_mode_hides_whole_file_writers_but_keeps_plan_editing() {
     let tools = visible_tools_for_mode(&PlanState::Planning);
     let n = names(&tools);
     for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
@@ -33,27 +33,48 @@ fn planning_mode_exposes_full_set_including_writers_and_bash() {
             "PLANNING must expose {plan_tool}, got: {n:?}"
         );
     }
-    for kept in ["write", "edit", "bash"] {
+    for hidden in ["write", "delete"] {
         assert!(
-            n.contains(kept),
-            "PLANNING must NOT hide writer/bash at catalog layer (path policy guards it): {kept}, got: {n:?}"
+            !n.contains(hidden),
+            "PLANNING must hide {hidden} at catalog layer, got: {n:?}"
         );
+    }
+    // 改计划正文还得靠 edit；bash 仍需要用于勘察。
+    for kept in ["edit", "bash"] {
+        assert!(n.contains(kept), "PLANNING must keep {kept}, got: {n:?}");
     }
 }
 
 #[test]
-fn executing_mode_excludes_create_plan_and_ask_question() {
+fn executing_mode_leaves_update_plan_as_the_only_progress_authority() {
     let tools = visible_tools_for_mode(&PlanState::Executing {
         plan_id: "demo".into(),
     });
     let n = names(&tools);
     assert!(n.contains("update_plan"), "EXEC must keep update_plan");
-    assert!(n.contains("todos"), "EXEC must keep todos");
-    for hidden in ["create_plan", "ask_question"] {
+    // todos 会开出第二份进度清单，与计划文件互相矛盾；EXEC 下只留 update_plan。
+    for hidden in ["create_plan", "ask_question", "todos"] {
         assert!(!n.contains(hidden), "EXEC must hide {hidden}, got: {n:?}");
     }
     assert!(n.contains("write"), "EXEC must keep write at catalog layer");
     assert!(n.contains("bash"), "EXEC must keep bash");
+}
+
+#[test]
+fn todos_stays_available_outside_exec() {
+    for mode in [
+        PlanState::Chat,
+        PlanState::Planning,
+        PlanState::Pending {
+            plan_id: "demo".into(),
+        },
+        PlanState::Completed {
+            plan_id: "demo".into(),
+        },
+    ] {
+        let n = names(&visible_tools_for_mode(&mode));
+        assert!(n.contains("todos"), "{mode:?} must expose todos, got: {n:?}");
+    }
 }
 
 #[test]

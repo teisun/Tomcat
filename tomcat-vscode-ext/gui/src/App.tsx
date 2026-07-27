@@ -1988,6 +1988,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 planState={activeSession.planState}
                 planTodos={activeSession.planTodos ?? []}
                 onRestoreCheckpoint={handleOpenRestoreDialog}
+                sessionModel={activeSession.model ?? ""}
                 sessionTodos={activeSession.sessionTodos ?? []}
                 timeline={activeSession.timeline}
                 transcriptRef={transcriptRef}

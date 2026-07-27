@@ -145,6 +145,7 @@ function makeDeps(
       .mockResolvedValue(initResult(["set_plan_mode", "list_models"])),
     extensionUri: vscode.Uri.file("/workspace/extension"),
     getBuildModel: vi.fn().mockReturnValue(""),
+    getSessionModel: vi.fn().mockReturnValue(""),
     messenger: {
       sendListModels: vi.fn().mockResolvedValue({
         payload: { models: [{ id: "gpt-5.4", keyPresent: true }] },

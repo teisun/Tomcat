@@ -50,7 +50,7 @@ describe("settings panel html asset resolution", () => {
     });
     const panel = new SettingsPanel({
       ensureInitialized: async () => ({} as never),
-      expectedCliVersion: "0.1.19",
+      expectedCliVersion: "0.1.20",
       extensionUri,
       extensionVersion: "0.1.24",
       messenger: {} as never,
@@ -79,7 +79,7 @@ describe("settings panel html asset resolution", () => {
     });
     const panel = new SettingsPanel({
       ensureInitialized: async () => ({} as never),
-      expectedCliVersion: "0.1.19",
+      expectedCliVersion: "0.1.20",
       extensionUri,
       extensionVersion: "0.1.24",
       messenger: {} as never,
@@ -135,10 +135,10 @@ describe("settings panel model management flow", () => {
             "upsert_model",
           ],
           protocolVersion: 1,
-          serverVersion: "0.1.19",
+          serverVersion: "0.1.20",
           sessionId: null,
         })),
-      expectedCliVersion: overrides?.expectedCliVersion ?? "0.1.19",
+      expectedCliVersion: overrides?.expectedCliVersion ?? "0.1.20",
       extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
       extensionVersion: overrides?.extensionVersion ?? "0.1.24",
       messenger: messenger as never,
@@ -238,8 +238,8 @@ describe("settings panel model management flow", () => {
     } satisfies SettingsIntent);
 
     expect(panel.__testingSnapshot().state.extensionVersion).toBe("0.1.24");
-    expect(panel.__testingSnapshot().state.expectedCliVersion).toBe("0.1.19");
-    expect(panel.__testingSnapshot().state.serverVersion).toBe("0.1.19");
+    expect(panel.__testingSnapshot().state.expectedCliVersion).toBe("0.1.20");
+    expect(panel.__testingSnapshot().state.serverVersion).toBe("0.1.20");
   });
 
   it("keeps previous models and exposes list failures", async () => {

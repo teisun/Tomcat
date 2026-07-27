@@ -24,7 +24,7 @@ describe("TomcatMessenger control roundtrip", () => {
         payload: {
           capabilities: ["prompt", "ask_question"],
           protocolVersion: 1,
-          serverVersion: "0.1.19",
+          serverVersion: "0.1.20",
           sessionId: "s-bootstrap",
         },
         requestId: command.requestId,
@@ -37,7 +37,7 @@ describe("TomcatMessenger control roundtrip", () => {
       attachmentRoot: null,
       capabilities: ["prompt", "ask_question"],
       protocolVersion: 1,
-      serverVersion: "0.1.19",
+      serverVersion: "0.1.20",
       sessionId: "s-bootstrap",
     });
   });

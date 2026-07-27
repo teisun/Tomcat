@@ -138,6 +138,24 @@ export interface WebviewToolDisplayFile {
   removed?: number | null;
 }
 
+export type WebviewToolDisplayFileStatus = "applied" | "failed" | "skipped";
+
+export interface WebviewToolDisplayFileEntry {
+  added?: number | null;
+  diff?: FileDiffLine[] | null;
+  file: string;
+  note?: string | null;
+  range?: string | null;
+  removed?: number | null;
+  status?: WebviewToolDisplayFileStatus | null;
+}
+
+export interface WebviewToolDisplayFiles {
+  files: WebviewToolDisplayFileEntry[];
+  kind: "files";
+  summary: string;
+}
+
 export interface WebviewToolDisplayPlan {
   kind: "plan";
   plan: string;
@@ -149,7 +167,10 @@ export interface WebviewToolDisplayText {
 }
 
 export type WebviewToolDisplay =
-  WebviewToolDisplayFile | WebviewToolDisplayPlan | WebviewToolDisplayText;
+  | WebviewToolDisplayFile
+  | WebviewToolDisplayFiles
+  | WebviewToolDisplayPlan
+  | WebviewToolDisplayText;
 
 export type WebviewToolStatus =
   "complete" | "interrupted" | "running" | "streaming";

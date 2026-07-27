@@ -4,7 +4,7 @@
 
 pub mod bash_task;
 mod diff;
-mod executor;
+pub(crate) mod executor;
 mod registry_builder;
 #[cfg(test)]
 mod tests;

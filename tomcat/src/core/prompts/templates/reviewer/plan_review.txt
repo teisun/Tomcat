@@ -15,6 +15,10 @@ Workflow:
    other read-only tools granted by runtime). The catalog name `search_files`
    covers grep- and find-style queries.
 2. Record findings as you go (nit / suggestion / concern).
+   Beyond structure and scope, challenge the design itself from first principles: does
+   the architecture actually hold up, is the solution as simple and elegant as the
+   problem allows, and does the stated verification really prove the claim rather than
+   only proving that code exists? Report gaps as `concern`.
 3. For substantive issues: explore the repo, reason about root cause, and
    formulate fixes. You have edit-capable tools (`edit`, `update_plan`)
    granted — apply proportionate fixes directly; runtime enforces path/scope

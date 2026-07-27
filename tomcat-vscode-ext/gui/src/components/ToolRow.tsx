@@ -7,6 +7,7 @@ import type {
   WebviewPlanState,
   WebviewTodo,
   WebviewToolCard,
+  WebviewToolDisplayFileEntry,
 } from "../types";
 import { AnswerCard } from "./AnswerCard";
 import { DiffView } from "./DiffView";
@@ -1030,6 +1031,160 @@ function renderExpandedBody(item: WebviewToolCard): ReactNode {
   return renderPlainBody(item);
 }
 
+function fileEntryIconClass(
+  entry: WebviewToolDisplayFileEntry,
+): string | null {
+  switch (entry.status) {
+    case "applied":
+      return "codicon-check";
+    case "failed":
+      return "codicon-error";
+    case "skipped":
+      return "codicon-circle-slash";
+    default:
+      return null;
+  }
+}
+
+/**
+ * 批量卡片里的一行。有 diff 的行可以再点开看这一个文件的改动 —— 一次展开整批的
+ * 全部 diff 会把卡片撑得没法读。
+ */
+function FileEntryRow({
+  entry,
+  onOpenFile,
+}: {
+  entry: WebviewToolDisplayFileEntry;
+  onOpenFile: (path: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const iconClass = fileEntryIconClass(entry);
+  const hasDiff = (entry.diff?.length ?? 0) > 0;
+  const hasStat =
+    typeof entry.added === "number" || typeof entry.removed === "number";
+  return (
+    <li
+      className="tc-tool-row__file"
+      data-status={entry.status ?? "ok"}
+      data-testid="tool-row-file-entry"
+    >
+      <div className="tc-tool-row__file-head">
+        {iconClass ? (
+          <span aria-hidden="true" className={`codicon ${iconClass}`} />
+        ) : null}
+        <FileChip onOpenFile={onOpenFile} path={entry.file} />
+        {hasStat ? (
+          <span className="tc-tool-row__diff-badges">
+            <span className="tc-tool-row__diff-badge tc-tool-row__diff-badge--added">
+              +{entry.added ?? 0}
+            </span>
+            <span className="tc-tool-row__diff-badge tc-tool-row__diff-badge--removed">
+              -{entry.removed ?? 0}
+            </span>
+          </span>
+        ) : null}
+        {entry.range ? (
+          <span
+            className="tc-tool-row__file-range"
+            data-testid="tool-row-file-range"
+          >
+            {entry.range}
+          </span>
+        ) : null}
+        {entry.note ? (
+          <span
+            className="tc-tool-row__file-note"
+            data-testid="tool-row-file-note"
+          >
+            {entry.note}
+          </span>
+        ) : null}
+        {hasDiff ? (
+          <button
+            aria-expanded={expanded}
+            aria-label={expanded ? "Collapse diff" : "Expand diff"}
+            className="tc-tool-row__toggle"
+            data-testid="tool-row-file-toggle"
+            onClick={() => setExpanded((value) => !value)}
+            type="button"
+          >
+            <span className="tc-tool-row__caret">{expanded ? "▾" : "▸"}</span>
+          </button>
+        ) : null}
+      </div>
+      {expanded && hasDiff ? <DiffView diff={entry.diff ?? undefined} /> : null}
+    </li>
+  );
+}
+
+function renderFileEntries(
+  entries: WebviewToolDisplayFileEntry[],
+  onOpenFile: (path: string) => void,
+): ReactNode {
+  return (
+    <ul className="tc-tool-row__files" data-testid="tool-row-files">
+      {entries.map((entry, index) => (
+        <FileEntryRow
+          entry={entry}
+          key={`${entry.file}-${index}`}
+          onOpenFile={onOpenFile}
+        />
+      ))}
+    </ul>
+  );
+}
+
+/** `Edited 5 files` / `Read 3 files`：动词沿用单文件卡片，数量来自 display。 */
+function buildFilesLabel(item: WebviewToolCard, count: number): string {
+  const verb = buildFlatLabel(item).replace(/ files?$/, "");
+  return `${verb} ${count} ${count === 1 ? "file" : "files"}`;
+}
+
+/**
+ * `3 applied · 2 failed`。批量 edit 的部分成功必须在折叠态就能看见，否则
+ * 「报了错是不是一个都没改」这个问题只能靠展开才能回答。
+ */
+function buildFilesStatusLabel(
+  entries: WebviewToolDisplayFileEntry[],
+): string | null {
+  const counts = entries.reduce(
+    (acc, entry) => {
+      if (entry.status) {
+        acc[entry.status] += 1;
+      }
+      return acc;
+    },
+    { applied: 0, failed: 0, skipped: 0 },
+  );
+  const parts: string[] = [];
+  if (counts.applied > 0) {
+    parts.push(`${counts.applied} applied`);
+  }
+  if (counts.failed > 0) {
+    parts.push(`${counts.failed} failed`);
+  }
+  if (counts.skipped > 0) {
+    parts.push(`${counts.skipped} skipped`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function sumFilesDiffStat(
+  entries: WebviewToolDisplayFileEntry[],
+): WebviewToolCard["diffStat"] | null {
+  let added = 0;
+  let removed = 0;
+  let seen = false;
+  for (const entry of entries) {
+    if (typeof entry.added === "number" || typeof entry.removed === "number") {
+      seen = true;
+      added += entry.added ?? 0;
+      removed += entry.removed ?? 0;
+    }
+  }
+  return seen ? { added, removed } : null;
+}
+
 function renderDiffBadges(item: WebviewToolCard): ReactNode {
   if (!item.diffStat) {
     return null;
@@ -1085,6 +1240,7 @@ type ToolRowProps = {
   onOpenPlanFile?(path: string): void;
   onSetBuildModel?(modelId: string): void;
   planTodos?: WebviewTodo[];
+  sessionModel?: string;
   variant?: "grouped" | "standalone";
 };
 
@@ -1101,6 +1257,7 @@ function ToolRowComponent({
   onOpenPlanFile,
   onSetBuildModel,
   planTodos = [],
+  sessionModel = "",
   variant = "standalone",
 }: ToolRowProps) {
   const category = toolCategory(item.toolName);
@@ -1171,6 +1328,7 @@ function ToolRowComponent({
         onOpenPlanFile={(path) => onOpenPlanFile?.(path)}
         onSetBuildModel={onSetBuildModel}
         planTodos={planTodos}
+        sessionModel={sessionModel}
       />
     );
   }
@@ -1204,8 +1362,20 @@ function ToolRowComponent({
     Boolean(
       item.diffStat && (item.diffStat.added > 0 || item.diffStat.removed > 0),
     );
+  const filesDisplay = item.display?.kind === "files" ? item.display : null;
+  const filesDiffStat = filesDisplay
+    ? sumFilesDiffStat(filesDisplay.files)
+    : null;
+  const filesStatusLabel = filesDisplay
+    ? buildFilesStatusLabel(filesDisplay.files)
+    : null;
+  // 有文件失败就默认展开：折叠态只有一个计数，看不到是哪个文件为什么失败。
+  const hasFailedFileEntry = Boolean(
+    filesDisplay?.files.some((entry) => entry.status === "failed"),
+  );
   const usesDisclosureCard =
     (category === "command" && contentVisible) ||
+    filesDisplay !== null ||
     (category === "edit" &&
       item.display?.kind === "file" &&
       (hasStructuredDiff || hasLargeDiffFallback));
@@ -1238,6 +1408,39 @@ function ToolRowComponent({
                 data-testid="tool-row-cmd-tags"
               >
                 {commandBinaries(fullCommandText(item)).join(", ")}
+              </span>
+            ) : null}
+          </>
+        ) : filesDisplay ? (
+          <>
+            <span className="tc-tool-row__text">
+              {buildFilesLabel(item, filesDisplay.files.length)}
+            </span>
+            {filesDiffStat ? (
+              <span
+                className="tc-tool-row__diff-badges"
+                data-testid="tool-row-diff-badges"
+              >
+                <span
+                  className="tc-tool-row__diff-badge tc-tool-row__diff-badge--added"
+                  data-testid="tool-row-diff-added"
+                >
+                  +{filesDiffStat.added}
+                </span>
+                <span
+                  className="tc-tool-row__diff-badge tc-tool-row__diff-badge--removed"
+                  data-testid="tool-row-diff-removed"
+                >
+                  -{filesDiffStat.removed}
+                </span>
+              </span>
+            ) : null}
+            {filesStatusLabel ? (
+              <span
+                className="tc-tool-row__files-status"
+                data-testid="tool-row-files-status"
+              >
+                {filesStatusLabel}
               </span>
             ) : null}
           </>
@@ -1286,11 +1489,11 @@ function ToolRowComponent({
         {usesDisclosureCard ? (
           <DisclosureCard
             bodyTestId="tool-row-body"
-            defaultExpanded={shouldExpandByDefault}
+            defaultExpanded={shouldExpandByDefault || hasFailedFileEntry}
             header={disclosureHeader}
             leadingIcon={disclosureLeadingIcon}
             preview={
-              category === "command" ? (
+              filesDisplay ? null : category === "command" ? (
                 <TerminalOutput
                   command={fullCommandText(item)}
                   preview
@@ -1304,7 +1507,9 @@ function ToolRowComponent({
             statusVariant={disclosureStatusVariant}
             toggleTestId="tool-row-toggle"
           >
-            {category === "command" ? (
+            {filesDisplay ? (
+              renderFileEntries(filesDisplay.files, onOpenFile)
+            ) : category === "command" ? (
               <>
                 <TerminalOutput
                   command={fullCommandText(item)}
@@ -1381,6 +1586,7 @@ function areToolRowPropsEqual(prev: ToolRowProps, next: ToolRowProps): boolean {
     prev.onOpenPlanFile === next.onOpenPlanFile &&
     prev.onSetBuildModel === next.onSetBuildModel &&
     prev.planTodos === next.planTodos &&
+    prev.sessionModel === next.sessionModel &&
     prev.variant === next.variant
   );
 }

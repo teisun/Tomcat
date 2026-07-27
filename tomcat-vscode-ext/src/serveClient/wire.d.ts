@@ -202,6 +202,12 @@ export type ServePlanEvent = {
   type: "plan.review.warning";
 } | {
   planId?: null | string;
+  rounds?: null | number;
+  sessionId?: null | string;
+  type: "plan.code_review.exhausted";
+  unresolvedFindings?: null | string[];
+} | {
+  planId?: null | string;
   sessionId?: null | string;
   todos?: ServeTodoItem[] | null;
   type: "plan.todos";
@@ -256,12 +262,27 @@ export type ToolDisplay = {
   kind: "file";
   removed?: null | number;
 } | {
+  files: ToolDisplayFileEntry[];
+  kind: "files";
+  summary: string;
+} | {
   kind: "plan";
   plan: string;
 } | {
   kind: "text";
   text: string;
 };
+
+export interface ToolDisplayFileEntry {
+  added?: null | number;
+  diff?: FileDiffLine[] | null;
+  file: string;
+  note?: null | string;
+  range?: null | string;
+  removed?: null | number;
+  status?: ToolDisplayFileStatus | null;
+}
+export type ToolDisplayFileStatus = "applied" | "failed" | "skipped";
 
 export type ToolOutput = any;
 

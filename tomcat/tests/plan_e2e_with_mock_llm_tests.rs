@@ -125,7 +125,12 @@ impl QueueCodeReviewer {
 
 #[async_trait]
 impl CodeReviewerDispatcher for QueueCodeReviewer {
-    async fn dispatch(&self, _plan_id: &str, _plan_text: &str) -> CodeReviewSummary {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        _open_findings: &[tomcat::core::plan_runtime::review::Finding],
+    ) -> CodeReviewSummary {
         self.call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut summaries = self.summaries.lock();
@@ -870,7 +875,7 @@ async fn h8_code_review_pass_completes_without_verifier() {
 }
 
 #[tokio::test]
-async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_completes() {
+async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_back() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
@@ -955,13 +960,15 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_complete
     .unwrap();
     assert_eq!(second["code_review"], serde_json::Value::Null);
     assert!(second.get("verify").is_none());
-    assert_eq!(second["plan_state_after"], "completed");
+    // 复审说了 fail 却没列出 finding，轮次又用尽了 —— 这不是「没有已知问题」，
+    // 不能当成通过收口，只能保持 executing 并交还用户。
+    assert_eq!(second["plan_state_after"], "executing");
     assert!(second["warnings"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(serde_json::Value::as_str)
-        .any(|w| w.contains("code review rounds 已用尽")));
+        .any(|w| w.contains("轮次预算已用尽") && w.contains("交还用户决定")));
     assert_eq!(
         reviewer
             .call_count
@@ -1090,7 +1097,8 @@ summary: verifier child completed
             audit: Arc::new(TracingAuditRecorder),
             bash_ast: BashAstChecker::default(),
             plan_runtime: Arc::downgrade(&rt),
-            model: "gpt-5.4-xhigh".into(),
+            model_override: None,
+            fallback_model: "gpt-5.4-xhigh".into(),
         },
     );
 
@@ -1267,7 +1275,8 @@ summary: verifier observed long fake cargo to completion
             audit: Arc::new(TracingAuditRecorder),
             bash_ast: BashAstChecker::default(),
             plan_runtime: Arc::downgrade(&rt),
-            model: "gpt-5.4-xhigh".into(),
+            model_override: None,
+            fallback_model: "gpt-5.4-xhigh".into(),
         },
     );
 
@@ -1368,7 +1377,8 @@ applied_changes: false
             audit: Arc::new(TracingAuditRecorder),
             bash_ast: BashAstChecker::default(),
             plan_runtime: Arc::downgrade(&rt),
-            model: "gpt-5.4-xhigh".into(),
+            model_override: None,
+            fallback_model: "gpt-5.4-xhigh".into(),
             max_turns: 8,
         },
     );
@@ -1395,7 +1405,8 @@ applied_changes: false
             audit: Arc::new(TracingAuditRecorder),
             bash_ast: BashAstChecker::default(),
             plan_runtime: Arc::downgrade(&rt),
-            model: "gpt-5.4-xhigh".into(),
+            model_override: None,
+            fallback_model: "gpt-5.4-xhigh".into(),
             max_turns: 8,
         },
     );
@@ -1404,7 +1415,7 @@ applied_changes: false
         .dispatch(plan_id, "## Goal\nship reviewer\n", true)
         .await;
     let code_summary = code_dispatcher
-        .dispatch(plan_id, "## Goal\nship reviewer\n")
+        .dispatch(plan_id, "## Goal\nship reviewer\n", &[])
         .await;
 
     assert_eq!(code_summary.verdict.as_deref(), Some("pass"));

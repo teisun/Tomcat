@@ -392,9 +392,9 @@ pub async fn build_initialized_state_with_provider(
     if let Err(err) = ctx
         .session_runtime
         .plan_runtime
-        .attach_from_event(context_state.latest_plan_event.clone())
+        .attach_from_resume_state(context_state.resume_control.clone())
     {
-        tracing::warn!(error = %err, "plan_runtime attach_from_event failed during serve slot init");
+        tracing::warn!(error = %err, "plan_runtime attach_from_resume_state failed during serve slot init");
     }
 
     let slot = Arc::new(SessionSlot::new(

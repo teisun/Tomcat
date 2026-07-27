@@ -21,8 +21,18 @@ const __testing = (
       registerDirectory(dirPath: string): void;
       registerFile(filePath: string, text: string): void;
       reset(): void;
+      setConfiguration(key: string, value: unknown): void;
       setOpenDialogHandler(
         handler: ((options: unknown) => vscode.Uri[] | Promise<vscode.Uri[] | undefined> | undefined) | undefined,
+      ): void;
+      setWarningMessageHandler(
+        handler:
+          | ((
+              message: string,
+              items: string[],
+              options?: { detail?: string; modal?: boolean },
+            ) => string | undefined)
+          | undefined,
       ): void;
     };
   }
@@ -2270,6 +2280,75 @@ describe("webview provider integration", () => {
       "build",
       "exit",
     ]);
+
+    provider.dispose();
+  });
+
+  it("asks before building on a model other than the session's", async () => {
+    const { messenger, provider } = buildProvider();
+    __testing.setConfiguration("tomcat.plan.buildModel", "deepseek-v4-flash");
+    const prompts: Array<{ detail?: string; message: string }> = [];
+    __testing.setWarningMessageHandler((message, _items, options) => {
+      prompts.push({ detail: options?.detail, message });
+      return "Continue Build";
+    });
+
+    await provider.dispatchTestIntent({ messageId: "ready-1", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { action: "build", planId: "plan-1", sessionId: "session-1" },
+      messageId: "plan-build-1",
+      type: "setPlanMode",
+    });
+
+    // 只陈述事实：两个模型分别是什么、这个值是从哪来的。
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].message).toContain("deepseek-v4-flash");
+    expect(prompts[0].detail).toContain("Session model: gpt-5.4");
+    expect(prompts[0].detail).toContain("This build will use: deepseek-v4-flash");
+    expect(prompts[0].detail).toContain("tomcat.plan.buildModel");
+    expect(messenger.setPlanModeCalls.map((call) => call.action)).toEqual(["build"]);
+    expect(provider.currentState().sessionViews["session-1"]?.model).toBe("deepseek-v4-flash");
+
+    provider.dispose();
+  });
+
+  it("cancelling the build-model prompt neither builds nor switches the model", async () => {
+    const { messenger, provider } = buildProvider();
+    __testing.setConfiguration("tomcat.plan.buildModel", "deepseek-v4-flash");
+    __testing.setWarningMessageHandler(() => undefined);
+
+    await provider.dispatchTestIntent({ messageId: "ready-1", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { action: "build", planId: "plan-1", sessionId: "session-1" },
+      messageId: "plan-build-cancel",
+      type: "setPlanMode",
+    });
+
+    expect(messenger.setPlanModeCalls).toEqual([]);
+    expect(provider.currentState().sessionViews["session-1"]?.model).toBe("gpt-5.4");
+    expect(provider.currentState().sessionViews["session-1"]?.planState).not.toBe("executing");
+
+    provider.dispose();
+  });
+
+  it("does not prompt when the build model already matches the session model", async () => {
+    const { messenger, provider } = buildProvider();
+    __testing.setConfiguration("tomcat.plan.buildModel", "gpt-5.4");
+    let prompted = false;
+    __testing.setWarningMessageHandler(() => {
+      prompted = true;
+      return "Continue Build";
+    });
+
+    await provider.dispatchTestIntent({ messageId: "ready-1", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { action: "build", planId: "plan-1", sessionId: "session-1" },
+      messageId: "plan-build-same",
+      type: "setPlanMode",
+    });
+
+    expect(prompted).toBe(false);
+    expect(messenger.setPlanModeCalls.map((call) => call.action)).toEqual(["build"]);
 
     provider.dispose();
   });

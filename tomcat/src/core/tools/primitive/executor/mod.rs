@@ -99,7 +99,7 @@ mod gate;
 pub(crate) mod hashline_edit;
 mod helpers;
 pub(crate) mod output_accum;
-mod read;
+pub(crate) mod read;
 mod search;
 mod write_edit;
 

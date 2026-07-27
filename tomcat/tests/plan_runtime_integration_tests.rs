@@ -114,7 +114,12 @@ impl PlanReviewerDispatcher for AcceptPlanReviewer {
 struct AcceptCodeReviewer;
 #[async_trait::async_trait]
 impl CodeReviewerDispatcher for AcceptCodeReviewer {
-    async fn dispatch(&self, _plan_id: &str, _plan_text: &str) -> CodeReviewSummary {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        _open_findings: &[tomcat::core::plan_runtime::review::Finding],
+    ) -> CodeReviewSummary {
         CodeReviewSummary {
             aborted: false,
             verdict: Some("pass".into()),

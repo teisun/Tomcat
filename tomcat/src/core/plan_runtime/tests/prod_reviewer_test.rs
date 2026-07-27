@@ -20,7 +20,7 @@ async fn prod_plan_reviewer_stub_returns_aborted_with_origin() {
 #[tokio::test]
 async fn prod_code_reviewer_stub_returns_aborted_with_origin() {
     let d = ProdCodeReviewerDispatcher::stub("test_origin");
-    let r = d.dispatch("demo", "noop").await;
+    let r = d.dispatch("demo", "noop", &[]).await;
     assert!(r.aborted);
     assert_eq!(r.verdict.as_deref(), Some("aborted"));
     assert!(r.summary.contains("test_origin"));
@@ -129,4 +129,40 @@ fn review_prompt_uses_active_external_plan_path() {
         crate::normalize_path(&external_path.to_string_lossy()).unwrap()
     );
     assert!(prompt.contains(&resolved_display));
+}
+
+/// D2：`[reviewer].model_override` 为空时，子 Agent 跟随当前会话模型；
+/// 会话中途换模型，下一次派发就换过去。
+#[test]
+fn dispatch_model_prefers_override_then_session_then_fallback() {
+    use crate::core::plan_runtime::prod_reviewer::resolve_dispatch_model;
+
+    assert_eq!(
+        resolve_dispatch_model(Some("reviewer-model"), Some("session-model"), "default-model"),
+        "reviewer-model"
+    );
+    assert_eq!(
+        resolve_dispatch_model(None, Some("session-model"), "default-model"),
+        "session-model"
+    );
+    assert_eq!(
+        resolve_dispatch_model(Some(""), Some(""), "default-model"),
+        "default-model"
+    );
+    assert_eq!(
+        resolve_dispatch_model(None, None, "default-model"),
+        "default-model"
+    );
+}
+
+#[test]
+fn plan_runtime_session_model_tracks_latest_turn() {
+    let rt = crate::core::plan_runtime::PlanRuntime::new("sess-model");
+    assert_eq!(rt.session_model(), None);
+    rt.set_session_model("model-a");
+    assert_eq!(rt.session_model().as_deref(), Some("model-a"));
+    rt.set_session_model("");
+    assert_eq!(rt.session_model().as_deref(), Some("model-a"), "空值不覆盖");
+    rt.set_session_model("model-b");
+    assert_eq!(rt.session_model().as_deref(), Some("model-b"));
 }

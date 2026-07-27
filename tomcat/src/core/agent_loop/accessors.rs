@@ -70,6 +70,7 @@ impl AgentLoop {
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
             context_tail_start: 0,
+            completion_guard_injections: 0,
         }
     }
 
@@ -212,6 +213,7 @@ impl AgentLoop {
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
             context_tail_start: 0,
+            completion_guard_injections: 0,
         }
     }
 

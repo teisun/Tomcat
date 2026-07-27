@@ -21,7 +21,15 @@ let quickPickHandler: ((items: QuickPickItem[]) => any) | undefined;
 let inputBoxHandler: ((options: InputBoxOptions) => any) | undefined;
 let errorMessageHandler: ((message: string, items: string[]) => any) | undefined;
 let infoMessageHandler: ((message: string, items: string[]) => any) | undefined;
-let warningMessageHandler: ((message: string, items: string[]) => any) | undefined;
+let warningMessageHandler:
+  | ((message: string, items: string[], options?: MessageOptionsLike) => any)
+  | undefined;
+
+/** Subset of `vscode.MessageOptions` the extension actually uses. */
+export interface MessageOptionsLike {
+  detail?: string;
+  modal?: boolean;
+}
 let openDialogHandler: ((options: unknown) => Uri[] | Promise<Uri[] | undefined> | undefined) | undefined;
 let lastDiffCommand:
   | {
@@ -665,8 +673,15 @@ export const window = {
   async showInformationMessage(message: string, ...items: string[]): Promise<string | undefined> {
     return infoMessageHandler?.(message, items);
   },
-  async showWarningMessage(message: string, ...items: string[]): Promise<string | undefined> {
-    return warningMessageHandler?.(message, items);
+  // 真实 API 有 (message, options, ...items) 的重载，模态确认框走的就是这一支。
+  async showWarningMessage(
+    message: string,
+    ...rest: Array<MessageOptionsLike | string>
+  ): Promise<string | undefined> {
+    const [first, ...others] = rest;
+    const options = typeof first === "object" && first !== null ? first : undefined;
+    const items = (options ? others : rest) as string[];
+    return warningMessageHandler?.(message, items, options);
   },
   async showOpenDialog(options: unknown): Promise<Uri[] | undefined> {
     return openDialogHandler?.(options);

@@ -734,6 +734,21 @@ pub enum ServePlanEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         rounds: Option<u32>,
     },
+    /// 轮次预算用尽但仍有未清 finding：计划保持 executing，控制权交还用户。
+    #[serde(rename = "plan.code_review.exhausted")]
+    PlanCodeReviewExhausted {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rounds: Option<u32>,
+        #[serde(
+            rename = "unresolvedFindings",
+            skip_serializing_if = "Option::is_none"
+        )]
+        unresolved_findings: Option<Vec<String>>,
+    },
     #[serde(rename = "plan.complete")]
     PlanComplete {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]

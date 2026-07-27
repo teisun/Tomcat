@@ -363,7 +363,8 @@ fn resume_cli_corrupt_index_rebuilds_on_startup() {
     );
     let repaired: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
-    assert_eq!(repaired["schema_version"], serde_json::json!(1));
+    // 重建写的是当前版本；随 resume_index.rs 的 RESUME_INDEX_SCHEMA_VERSION 一起改。
+    assert_eq!(repaired["schema_version"], serde_json::json!(2));
 }
 
 #[test]

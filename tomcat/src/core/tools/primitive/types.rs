@@ -159,19 +159,21 @@ pub struct SearchFilesArgs {
     pub glob: Option<String>,
     #[serde(default, rename = "type", deserialize_with = "empty_string_as_none")]
     pub file_type: Option<String>,
-    #[serde(default)]
+    // 工具 schema 给模型的是 snake_case，这个结构体序列化用 camelCase：多词字段必须两种
+    // 拼法都收，否则模型传的 `output_mode` 会被静默丢弃、悄悄退回默认值。
+    #[serde(default, alias = "output_mode")]
     pub output_mode: SearchFilesOutputMode,
     pub context: Option<usize>,
     /// `None` = schema field omitted (use target default);
     /// `Some(None)` = explicit JSON null (unlimited);
     /// `Some(Some(n))` = explicit limit.
-    #[serde(default)]
+    #[serde(default, alias = "head_limit")]
     pub head_limit: Option<Option<usize>>,
     #[serde(default)]
     pub offset: usize,
-    #[serde(default)]
+    #[serde(default, alias = "case_insensitive")]
     pub case_insensitive: bool,
-    #[serde(default)]
+    #[serde(default, alias = "include_hidden")]
     pub include_hidden: bool,
 }
 

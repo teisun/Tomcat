@@ -116,9 +116,13 @@ async fn tool_exec_read_second_call_returns_unchanged_stub() {
 
     let (second, err2, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!err2, "second read should not flag is_error");
-    assert_eq!(
-        second, FILE_UNCHANGED_STUB,
-        "second identical read must return the FILE_UNCHANGED stub verbatim"
+    assert!(
+        second.starts_with(FILE_UNCHANGED_STUB),
+        "second identical read must return the FILE_UNCHANGED stub, got {second:?}"
+    );
+    assert!(
+        second.contains("earlier read covered L1-2"),
+        "命中要写清是被哪一段覆盖的，否则窄窗口请求无从确认: {second:?}"
     );
 }
 

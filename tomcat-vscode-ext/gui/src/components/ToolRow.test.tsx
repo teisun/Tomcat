@@ -1277,4 +1277,118 @@ describe("ToolRow", () => {
       "stderr: warning",
     );
   });
+
+  it("batch edit card summarises applied and failed files and keeps failures visible", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          display: {
+            files: [
+              {
+                added: 18,
+                file: "/workspace/provider.ts",
+                removed: 4,
+                status: "applied",
+              },
+              {
+                file: "/workspace/protocol.ts",
+                note: "第 2 段匹配到 3 处",
+                status: "failed",
+              },
+            ],
+            kind: "files",
+            summary: "1 个文件已落盘，1 个失败且未写入",
+          },
+          toolName: "edit",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Edited 2 files",
+    );
+    expect(screen.getByTestId("tool-row-diff-added").textContent).toBe("+18");
+    expect(screen.getByTestId("tool-row-diff-removed").textContent).toBe("-4");
+    expect(screen.getByTestId("tool-row-files-status").textContent).toBe(
+      "1 applied · 1 failed",
+    );
+
+    // 有失败项时默认展开：折叠态只有一个计数，看不出是哪个文件、为什么失败。
+    const entries = screen.getAllByTestId("tool-row-file-entry");
+    expect(entries).toHaveLength(2);
+    expect(entries[1].getAttribute("data-status")).toBe("failed");
+    expect(screen.getByTestId("tool-row-file-note").textContent).toBe(
+      "第 2 段匹配到 3 处",
+    );
+  });
+
+  it("batch read card shows per-file ranges and skipped entries", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          display: {
+            files: [
+              { file: "/workspace/provider.ts", range: "L1-900 (900 lines)" },
+              {
+                file: "/workspace/state.ts",
+                note: "output budget exhausted; resume: read(path=\"/workspace/state.ts\")",
+                status: "skipped",
+              },
+            ],
+            kind: "files",
+            summary: "已读取 1 个文件，1 个因输出预算跳过",
+          },
+          toolName: "read",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Read 2 files",
+    );
+    expect(screen.getByTestId("tool-row-files-status").textContent).toBe(
+      "1 skipped",
+    );
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-file-range").textContent).toBe(
+      "L1-900 (900 lines)",
+    );
+    expect(screen.getByTestId("tool-row-file-note").textContent).toContain(
+      "output budget exhausted",
+    );
+  });
+
+  it("batch card lets each file open its own diff", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          display: {
+            files: [
+              {
+                added: 1,
+                diff: [
+                  { newLine: 1, oldLine: null, tag: "add", text: "added()" },
+                ],
+                file: "/workspace/a.rs",
+                removed: 0,
+                status: "applied",
+              },
+            ],
+            kind: "files",
+            summary: "已编辑 1 个文件，全部落盘",
+          },
+          toolName: "edit",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.queryByText("added()")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-row-file-toggle"));
+    expect(screen.getByText("added()")).toBeTruthy();
+  });
 });

@@ -53,9 +53,9 @@ use tracing::warn;
 use super::config_backend::SharedConfigBackend;
 use super::types::{BackgroundCompletionRoutes, ToolCallInfo};
 use guard::{
-    is_code_reviewer_whitelisted_tool, is_plan_reviewer_whitelisted_tool,
-    is_verifier_whitelisted_tool, reviewer_allowed_tools_description,
-    verifier_allowed_tools_description,
+    explorer_allowed_tools_description, is_code_reviewer_whitelisted_tool,
+    is_explorer_whitelisted_tool, is_plan_reviewer_whitelisted_tool, is_verifier_whitelisted_tool,
+    reviewer_allowed_tools_description, verifier_allowed_tools_description,
 };
 
 /// Agent Loop 直接触发的工具调用使用的固定 `plugin_id` 标签。
@@ -355,6 +355,19 @@ async fn execute_tool_tuple_full(
             Vec::new(),
         );
     }
+    if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Explorer
+        && !is_explorer_whitelisted_tool(tc.name.as_str())
+    {
+        return (
+            format!(
+                "explorer 子 Agent 只读，禁止调用工具 `{}`（仅允许 {}；写工具与 dispatch_agent 永不可用）",
+                tc.name,
+                explorer_allowed_tools_description(),
+            ),
+            true,
+            Vec::new(),
+        );
+    }
     if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Verifier
         && !is_verifier_whitelisted_tool(tc.name.as_str(), ctx.expose_skills_to_reviewer)
     {
@@ -415,7 +428,7 @@ async fn execute_tool_tuple_full(
     let mut follow_up_parts: Vec<crate::core::llm::ChatMessageContentPart> = Vec::new();
 
     let out = match tc.name.as_str() {
-        "read" => match branches::handle_read(ctx, &args).await {
+        "read" => match branches::handle_read(ctx, &args, display_out).await {
             Ok((text, parts)) => {
                 follow_up_parts = parts;
                 Ok(text)
@@ -438,6 +451,7 @@ async fn execute_tool_tuple_full(
         "web_search" => branches::handle_web_search(ctx, &args).await,
         "config_get" => branches::handle_config_get(ctx, &args).await,
         "config_set" => branches::handle_config_set(ctx, &args, display_out).await,
+        "dispatch_agent" => branches::handle_dispatch_agent(ctx, &args).await,
         other => Err(format!("未知工具: {}", other)),
     };
 

@@ -110,11 +110,11 @@ fn code_review_summary_serializes_findings_and_turns() {
         summary: "needs a null check".into(),
         changes_summary: "none".into(),
         applied_changes: false,
-        findings: vec![super::super::review::Finding {
-            severity: "concern".into(),
-            area: "logic".into(),
-            note: "missing null check".into(),
-        }],
+        findings: vec![super::super::review::Finding::new(
+            "concern".into(),
+            "logic".into(),
+            "missing null check".into(),
+        )],
         reviewer_turns_used: 2,
         reviewer_turns_limit: 64,
         reviewer_stop_reason: "completed".into(),
@@ -168,6 +168,7 @@ fn build_code_review_prompt_includes_diff_context() {
         Some(Path::new("/repo/root")),
         " src/lib.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
         &["src/lib.rs".into(), "tests/lib.rs".into()],
+        &[],
     );
     assert!(prompt.contains("git diff --stat HEAD"));
     assert!(prompt.contains("src/lib.rs"));

@@ -36,7 +36,7 @@ fn l1_turn_boundary_with_steering_messages() {
         keep_recent_turns: 5,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
 
     // Turns 0-2 are in compactable zone (3 real turns before the protected 5)
     // Their tool results should be replaced
@@ -73,7 +73,7 @@ fn l1_keep_recent_turns_reads_config_value() {
         keep_recent_turns: 2,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
     assert!(
         reduced > 0,
         "older turns should become compactable once keep_recent_turns shrinks"

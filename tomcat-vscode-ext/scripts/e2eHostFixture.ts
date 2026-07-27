@@ -137,7 +137,7 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.19";
+const serverVersion = "0.1.20";
 
 if (process.argv[2] === "--version") {
   process.stdout.write("tomcat fake " + serverVersion + "\\n");

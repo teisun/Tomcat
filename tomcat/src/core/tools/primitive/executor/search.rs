@@ -80,8 +80,22 @@ fn search_root_and_arg(path: &Path) -> (PathBuf, String) {
     (root, arg)
 }
 
+/// rg 默认用 `:` 分隔命中行字段、`-` 分隔上下文行字段，而这两个字符在路径里都合法，
+/// 分不清 `a:b.txt:12:...` 是「路径含冒号」还是「第 12 行」。改成 ASCII 单元/记录分隔符
+/// 后解析没有歧义，也才谈得上把上下文行归到对应的命中行上。
+const RG_FIELD_MATCH_SEP: &str = "\u{1f}";
+const RG_FIELD_CONTEXT_SEP: &str = "\u{1e}";
+
 fn parse_rg_match_line(line: &str) -> Option<SearchFileMatch> {
-    let mut parts = line.splitn(4, ':');
+    // 分隔符是我们要求 rg 用的，但只要它没照做（旧版本、被 shim 顶替），
+    // 按分隔符切就会一条都切不出来 —— 那会以「没有匹配」的样子返回，
+    // 比解析失败更糟。切不动就退回 rg 的默认 `:` 格式。
+    let sep = if line.contains(RG_FIELD_MATCH_SEP) {
+        RG_FIELD_MATCH_SEP
+    } else {
+        ":"
+    };
+    let mut parts = line.splitn(4, sep);
     let path = parts.next()?.to_string();
     let line_no = parts.next()?.parse::<u64>().ok()?;
     let _column = parts.next()?;
@@ -93,6 +107,47 @@ fn parse_rg_match_line(line: &str) -> Option<SearchFileMatch> {
         before: Vec::new(),
         after: Vec::new(),
     })
+}
+
+/// `path␞line␞text` 的上下文行。
+///
+/// 没有分隔符时不做退化解析：rg 默认的上下文格式是 `path-line-text`，而 `-` 在路径和
+/// 正文里都合法，猜错会把正文当成行号。宁可丢掉上下文，也不要编造。
+fn parse_rg_context_line(line: &str) -> Option<String> {
+    let mut parts = line.splitn(3, RG_FIELD_CONTEXT_SEP);
+    let _path = parts.next()?;
+    parts.next()?.parse::<u64>().ok()?;
+    Some(parts.next().unwrap_or("").to_string())
+}
+
+/// 把 rg 的 `-C` 输出还原成「命中行 + 它前后的上下文」。
+///
+/// 一条上下文行夹在两个命中行中间时只挂到**前一条**的 `after` 上，不再复制一份到后一条的
+/// `before`：命中行按行号有序排列，读的人顺着往下看就能看到那一行，复制只会让输出翻倍。
+fn parse_rg_content_output(stdout: &str) -> Vec<SearchFileMatch> {
+    let mut matches: Vec<SearchFileMatch> = Vec::new();
+    let mut pending_before: Vec<String> = Vec::new();
+    let mut open_match: Option<usize> = None;
+    for line in stdout.lines() {
+        if line == "--" {
+            pending_before.clear();
+            open_match = None;
+            continue;
+        }
+        if let Some(mut hit) = parse_rg_match_line(line) {
+            hit.before = std::mem::take(&mut pending_before);
+            matches.push(hit);
+            open_match = Some(matches.len() - 1);
+            continue;
+        }
+        if let Some(text) = parse_rg_context_line(line) {
+            match open_match {
+                Some(idx) => matches[idx].after.push(text),
+                None => pending_before.push(text),
+            }
+        }
+    }
+    matches
 }
 
 fn parse_rg_count_line(line: &str) -> Option<SearchFileCount> {
@@ -792,7 +847,11 @@ pub(super) async fn search_files_impl(
                             .arg("--with-filename")
                             .arg("--no-heading")
                             .arg("--max-columns")
-                            .arg("500");
+                            .arg("500")
+                            .arg("--field-match-separator")
+                            .arg(RG_FIELD_MATCH_SEP)
+                            .arg("--field-context-separator")
+                            .arg(RG_FIELD_CONTEXT_SEP);
                         if let Some(context) = args.context.filter(|context| *context > 0) {
                             cmd.arg("-C").arg(context.to_string());
                         }
@@ -889,10 +948,7 @@ pub(super) async fn search_files_impl(
                         }
                     }
                     SearchFilesOutputMode::Content => {
-                        let matches = stdout
-                            .lines()
-                            .filter_map(parse_rg_match_line)
-                            .collect::<Vec<_>>();
+                        let matches = parse_rg_content_output(&stdout);
                         let (matches, skipped) = filter_denied_matches(&root, matches, &deny_rules);
                         if skipped > 0 {
                             warnings.push(format!("skipped {} paths due to read deny", skipped));
@@ -951,4 +1007,59 @@ pub(super) async fn search_files_impl(
     });
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(path: &str, line: u64, col: u64, text: &str) -> String {
+        format!("{path}\u{1f}{line}\u{1f}{col}\u{1f}{text}")
+    }
+
+    fn ctx(path: &str, line: u64, text: &str) -> String {
+        format!("{path}\u{1e}{line}\u{1e}{text}")
+    }
+
+    #[test]
+    fn content_output_attaches_context_around_each_hit() {
+        let stdout = [
+            ctx("a.txt", 1, "before one"),
+            ctx("a.txt", 2, "before two"),
+            hit("a.txt", 3, 1, "needle"),
+            ctx("a.txt", 4, "after one"),
+            "--".to_string(),
+            ctx("b.txt", 9, "b before"),
+            hit("b.txt", 10, 1, "needle again"),
+        ]
+        .join("\n");
+
+        let matches = parse_rg_content_output(&stdout);
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].path, "a.txt");
+        assert_eq!(matches[0].line, 3);
+        assert_eq!(matches[0].before, vec!["before one", "before two"]);
+        assert_eq!(matches[0].after, vec!["after one"]);
+        // `--` 是 rg 的组边界：跨组的上下文不能粘到上一条命中行上。
+        assert_eq!(matches[1].path, "b.txt");
+        assert_eq!(matches[1].before, vec!["b before"]);
+        assert!(matches[1].after.is_empty());
+    }
+
+    #[test]
+    fn content_output_survives_paths_containing_colons_and_dashes() {
+        let stdout = [
+            ctx("weird:name-1.txt", 4, "ctx"),
+            hit("weird:name-1.txt", 5, 2, "needle"),
+        ]
+        .join("\n");
+
+        let matches = parse_rg_content_output(&stdout);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].path, "weird:name-1.txt");
+        assert_eq!(matches[0].line, 5);
+        assert_eq!(matches[0].before, vec!["ctx"]);
+    }
 }

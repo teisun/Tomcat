@@ -97,6 +97,9 @@ pub struct Layer0CleanupOutcome {
     pub persist_chars_freed: usize,
     /// compactable zone 占位符替换减少的字符数。
     pub placeholder_chars_freed: usize,
+    /// 正文已经从上下文里消失的那些 tool_call_id（落盘 + 占位符两批）。
+    /// 调用方据此让对应的 read stamp 失效，避免 dedup 指向一段看不见的内容。
+    pub evicted_tool_call_ids: Vec<String>,
 }
 
 /// Layer 0 步骤 A：超大 tool result 落盘 + preview 占位符。
@@ -150,19 +153,26 @@ pub fn layer0_persist_large_results(
 // Layer 1: Tool result placeholder replacement
 // ---------------------------------------------------------------------------
 
+/// [`compact_tool_results`] 的结果：省下多少字符，以及正文被抹掉的是哪几次工具调用。
+#[derive(Debug, Clone, Default)]
+pub struct PlaceholderOutcome {
+    pub chars_freed: usize,
+    pub tool_call_ids: Vec<String>,
+}
+
 /// Layer 1：从 compactable zone（排除最近 `config.keep_recent_turns` 个 turns）中，
 /// 将长度 **大于** `ContextConfig::layer0_placeholder_threshold_chars`（默认 10_000）的 tool result 替换为占位符。
-pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig) -> usize {
+pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig) -> PlaceholderOutcome {
     let threshold = config.layer0_placeholder_threshold_chars;
     let protected_turns = config.keep_recent_turns;
 
     // Find the start of the protected tail turns.
     let protected_start = find_protected_turn_start(&state.messages, protected_turns);
     if protected_start == 0 {
-        return 0;
+        return PlaceholderOutcome::default();
     }
 
-    let mut total_reduced = 0usize;
+    let mut outcome = PlaceholderOutcome::default();
 
     for msg in state.messages[..protected_start].iter_mut() {
         if msg.role != ChatMessageRole::Tool {
@@ -185,9 +195,12 @@ pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig) ->
         let reduced = old_len - TOOL_RESULT_PLACEHOLDER.len();
         *content = TOOL_RESULT_PLACEHOLDER.to_string();
         state.estimate_context_chars = state.estimate_context_chars.saturating_sub(reduced);
-        total_reduced += reduced;
+        outcome.chars_freed += reduced;
+        if let Some(id) = msg.tool_call_id.clone() {
+            outcome.tool_call_ids.push(id);
+        }
     }
-    total_reduced
+    outcome
 }
 
 /// 返回「最后 m 个 turns」的起始消息索引（即第 `(total_turns - m)` 个 turn-start 的位置）。
@@ -230,10 +243,17 @@ pub fn run_layer0_cleanup(
 ) -> Layer0CleanupOutcome {
     let (persisted, persist_chars_freed) =
         layer0_persist_large_results(state, config, work_dir, session_id);
-    let placeholder_chars_freed = compact_tool_results(state, config);
+    let placeholder = compact_tool_results(state, config);
+    let evicted_tool_call_ids = persisted
+        .iter()
+        .map(|p| p.tool_call_id.clone())
+        .chain(placeholder.tool_call_ids.iter().cloned())
+        .filter(|id| !id.is_empty())
+        .collect();
     Layer0CleanupOutcome {
         persisted,
         persist_chars_freed,
-        placeholder_chars_freed,
+        placeholder_chars_freed: placeholder.chars_freed,
+        evicted_tool_call_ids,
     }
 }

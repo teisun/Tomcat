@@ -112,7 +112,7 @@ fn make_anchor(id: &str, ordinal: usize) -> ResumeAnchor {
 
 fn base_resume_index(total_entries: usize) -> ResumeIndex {
     ResumeIndex {
-        schema_version: 1,
+        schema_version: 2,
         transcript_size: 0,
         transcript_mtime_ms: 0,
         total_entries,
@@ -121,6 +121,9 @@ fn base_resume_index(total_entries: usize) -> ResumeIndex {
         recent_turn_starts: Vec::new(),
         latest_day_first_entry: None,
         latest_plan_event: None,
+        agent_mode: None,
+        active_plan_path: None,
+        active_plan_id: None,
     }
 }
 
@@ -925,6 +928,7 @@ fn build_context_from_state_flattens_turns() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

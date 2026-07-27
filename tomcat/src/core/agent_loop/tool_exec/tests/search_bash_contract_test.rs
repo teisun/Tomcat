@@ -161,3 +161,51 @@ async fn bash_contract_stops_pipe_holder_without_hanging_when_no_registry() {
         "marker 出现表示等待到期后的后台 child 仍在继续跑"
     );
 }
+
+#[tokio::test]
+async fn search_files_content_mode_defaults_to_three_context_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let body: String = (1..=11)
+        .map(|i| if i == 6 { "needle\n".to_string() } else { format!("line {i}\n") })
+        .collect();
+    std::fs::write(root.join("a.txt"), body).unwrap();
+    let primitive = make_executor(&root);
+
+    let with_default = ToolCallInfo {
+        id: "tc-search-default-context".to_string(),
+        name: "search_files".to_string(),
+        arguments: serde_json::json!({
+            "pattern": "needle",
+            "path": root.display().to_string(),
+            "output_mode": "content"
+        })
+        .to_string(),
+    };
+    let (text, is_error, _) = execute_tool(&primitive, &None, &None, None, &with_default).await;
+    assert!(!is_error, "search_files 应成功: {}", text);
+    // 命中行单独看往往不够判断，默认带 ±3 行省掉紧跟着的那次 read。
+    for line in ["line 3", "line 5", "needle", "line 7", "line 9"] {
+        assert!(text.contains(line), "缺少 {line}，实际: {text}");
+    }
+    assert!(!text.contains("line 2"), "上下文不应超过 3 行: {text}");
+
+    let opted_out = ToolCallInfo {
+        id: "tc-search-no-context".to_string(),
+        name: "search_files".to_string(),
+        arguments: serde_json::json!({
+            "pattern": "needle",
+            "path": root.display().to_string(),
+            "output_mode": "content",
+            "context": 0
+        })
+        .to_string(),
+    };
+    let (text, is_error, _) = execute_tool(&primitive, &None, &None, None, &opted_out).await;
+    assert!(!is_error, "search_files 应成功: {}", text);
+    assert!(text.contains("needle"));
+    assert!(
+        !text.contains("line 5") && !text.contains("line 7"),
+        "显式 context=0 必须能关掉默认上下文: {text}"
+    );
+}

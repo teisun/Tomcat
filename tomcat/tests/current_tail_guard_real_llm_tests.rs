@@ -113,7 +113,7 @@ async fn build_collapse_summary_artifacts_or_skip(
             llm,
             COMPACTION_MODEL,
             Some(&fixture.plan_runtime),
-            Some(&fixture.latest_plan_event),
+            Some(COMPACTION_MODEL),
         )
         .await
         {
@@ -262,7 +262,7 @@ fn keepalive_resume_system_prompt() -> String {
 You are resuming an executing plan after context collapse.
 The only available tool is update_plan.
 Do not answer in prose.
-Treat the `## Execution Keepalive` block inside the compaction summary as the source of truth for:
+Treat the `<control_state>` and `## Progress` blocks inside the compaction summary as the source of truth for:
 - which step is currently active
 - which remaining step should become next in progress
 Use the provided plan file text only to recover the matching todo ids.
@@ -281,7 +281,7 @@ fn keepalive_resume_user_prompt(fixture: &PlanFixture) -> String {
         "\
 Current active plan file: `{path}`
 
-Use the Execution Keepalive block to identify the current step and the next pending step.
+Use the `## Progress` block to identify the current step and the next pending step.
 Then map those contents back to todo ids in the plan file below and call `update_plan` exactly once:
 
 ```md
@@ -476,25 +476,24 @@ async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
         artifacts.summary_message.kind,
         MessageKind::CompactionSummary
     );
+    // 机器区块必须在最前面，且内容来自 runtime 而非模型。
+    assert!(artifacts.summary_text.starts_with("<control_state>\n"));
+    assert!(artifacts.summary_text.contains("mode: exec"));
     assert!(artifacts
         .summary_text
-        .starts_with("## Structured Summary\n"));
+        .contains(&format!("plan_path: {}", fixture.plan_path.display())));
     assert!(artifacts
         .summary_text
-        .contains("\n\n## Execution Keepalive\n"));
-    assert!(artifacts.summary_text.contains("- mode: executing"));
+        .contains(&format!("plan_id: {}", fixture.plan_id)));
+    assert!(artifacts.summary_text.contains("<verbatim_user_messages>"));
+    // Progress 节由计划文件渲染，不看模型怎么写。
     assert!(artifacts.summary_text.contains(&format!(
-        "- active_plan_path: {}",
-        fixture.plan_path.display()
+        "- [in_progress] {}: {}",
+        fixture.active_id, fixture.active_content
     )));
-    assert!(artifacts
-        .summary_text
-        .contains(&format!("- current_step: {}", fixture.active_content)));
-    assert!(artifacts.summary_text.contains(&fixture.next_content));
     assert!(artifacts.summary_text.contains(&format!(
-        "latest_plan_event: build:{}:{}",
-        fixture.plan_id,
-        fixture.plan_path.display()
+        "- [pending] {}: {}",
+        fixture.next_id, fixture.next_content
     )));
     match &artifacts.transcript_entry {
         tomcat::TranscriptEntry::BranchSummary(entry) => {
@@ -594,14 +593,14 @@ async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
             .any(|msg| msg.kind == MessageKind::CompactionSummary
                 && msg
                     .text_content()
-                    .is_some_and(|text| text.contains("## Execution Keepalive"))),
-        "reload 后应仍保留 execution keepalive"
+                    .is_some_and(|text| text.contains("<control_state>"))),
+        "reload 后应仍保留机器区块"
     );
 
     let restored_runtime = PlanRuntime::new_with_session_id(SESSION_KEY, SESSION_ID);
     restored_runtime
-        .attach_from_event(state.latest_plan_event.clone())
-        .expect("attach_from_event 失败");
+        .attach_from_resume_state(state.resume_control.clone())
+        .expect("attach_from_resume_state 失败");
     assert_eq!(
         restored_runtime.mode(),
         PlanState::Executing {

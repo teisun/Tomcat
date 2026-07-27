@@ -741,6 +741,7 @@ fn expand_path_for_terminal(path: &str) -> String {
 fn display_summary(display: &ToolDisplay) -> String {
     match display {
         ToolDisplay::File { file, .. } => expand_path_for_terminal(file),
+        ToolDisplay::Files { summary, .. } => summary.trim().to_string(),
         ToolDisplay::Plan { plan } => expand_path_for_terminal(plan),
         ToolDisplay::Text { text } => text.trim().to_string(),
     }

@@ -28,6 +28,19 @@ impl PlanState {
         }
     }
 
+    /// 折叠到用户可见的三种模式。计划文件状态（pending/executing/completed）
+    /// 是 EXEC 内部的细分，不构成第四种模式。
+    pub fn agent_mode(&self) -> crate::core::session::AgentMode {
+        use crate::core::session::AgentMode;
+        match self {
+            PlanState::Chat => AgentMode::Chat,
+            PlanState::Planning => AgentMode::Plan,
+            PlanState::Executing { .. } | PlanState::Pending { .. } | PlanState::Completed { .. } => {
+                AgentMode::Exec
+            }
+        }
+    }
+
     /// 取 active plan id（仅 `Executing` / `Pending` / `Completed` 有值）。
     pub fn active_plan_id(&self) -> Option<&str> {
         match self {

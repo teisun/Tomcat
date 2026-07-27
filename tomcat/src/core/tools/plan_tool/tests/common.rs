@@ -7,13 +7,14 @@ pub(crate) use crate::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, validate_frontmatter_invariants, write_plan, PlanFile,
     PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
+pub(crate) use crate::core::plan_runtime::review::Finding;
 pub(crate) use crate::core::plan_runtime::todo_runtime::TodosRuntime;
 pub(crate) use crate::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 pub(crate) use crate::core::plan_runtime::{
     state::PlanState, CodeReviewSummary, CodeReviewerDispatcher, PlanReviewSummary,
     PlanReviewerDispatcher, PlanRuntime, PlanRuntimeError, VerifierDispatcher,
 };
-pub(crate) use crate::core::session::manager::{PlanEventKind, PlanEventRef};
+pub(crate) use crate::core::session::manager::{AgentMode, ResumeControlState};
 pub(crate) use crate::core::tools::plan_tool::{
     ask_question, create_plan, shared_todo_ops, todos, update_plan, ToolError,
 };
@@ -128,6 +129,8 @@ pub struct MockCodeReviewerDispatcher {
     summaries: parking_lot::Mutex<Vec<CodeReviewSummary>>,
     pub call_count: AtomicUsize,
     pub delay: Option<Duration>,
+    /// 每轮收到的 open findings，供 D1-d 核销断言使用。
+    open_findings_per_round: parking_lot::Mutex<Vec<Vec<Finding>>>,
 }
 
 impl MockCodeReviewerDispatcher {
@@ -136,14 +139,27 @@ impl MockCodeReviewerDispatcher {
             summaries: parking_lot::Mutex::new(summaries),
             call_count: AtomicUsize::new(0),
             delay: None,
+            open_findings_per_round: parking_lot::Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn open_findings_per_round(&self) -> Vec<Vec<Finding>> {
+        self.open_findings_per_round.lock().clone()
     }
 }
 
 #[async_trait]
 impl CodeReviewerDispatcher for MockCodeReviewerDispatcher {
-    async fn dispatch(&self, _plan_id: &str, _plan_text: &str) -> CodeReviewSummary {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        open_findings: &[Finding],
+    ) -> CodeReviewSummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
+        self.open_findings_per_round
+            .lock()
+            .push(open_findings.to_vec());
         if let Some(d) = self.delay {
             tokio::time::sleep(d).await;
         }

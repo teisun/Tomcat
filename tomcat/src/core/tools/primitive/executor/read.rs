@@ -33,7 +33,7 @@ const READ_DEFAULT_LIMIT_LINES: u64 = 2000;
 /// 与 metadata 阶段的 `read_max_bytes` 不同，这一条限制的是**最终渲染回模型的文本体量**：
 /// 在分块读 + 行级拼装过程中累计输出字节，达到 128 KiB 后就在完整行边界停下，
 /// 并返回 `offset=<next>` 续读提示，避免单个 `read` 窗口直接把上下文顶爆。
-const READ_POST_OUTPUT_BUDGET_BYTES: usize = 128 * 1024;
+pub(crate) const READ_POST_OUTPUT_BUDGET_BYTES: usize = 128 * 1024;
 
 fn rendered_prefix_len(line_no: u64, line_numbers: bool, hashline: bool) -> usize {
     let width = std::cmp::max(6, line_no.to_string().len());

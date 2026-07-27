@@ -166,6 +166,11 @@ pub mod wire {
     pub const WIRE_PLAN_PANEL: &str = "plan.panel";
     /// PlanRuntime `mode → completed` 派生时落痕。
     pub const WIRE_PLAN_COMPLETE: &str = "plan.complete";
+    /// 会话恢复时模式判定走了兜底推断（sidecar 无 agent_mode，或记录的计划文件已不可读），
+    /// 记录最终落到哪个模式以及依据，便于用户在 UI 上看见"为什么不是我离开时那个模式"。
+    pub const WIRE_PLAN_RESTORE: &str = "plan.restore";
+    /// code review 轮次预算用尽但仍有未清 finding，交还用户。
+    pub const WIRE_PLAN_CODE_REVIEW_EXHAUSTED: &str = "plan.code_review.exhausted";
     /// session 标题异步 LLM 覆盖后推送。
     pub const WIRE_SESSION_TITLE_UPDATED: &str = "session.title_updated";
     /// `todos` 工具写入 session scratchpad 后推送。
@@ -235,12 +240,51 @@ pub enum ToolDisplay {
         #[serde(skip_serializing_if = "Option::is_none")]
         diff: Option<Vec<FileDiffLine>>,
     },
+    /// 一次调用碰了多个文件（批量 `read` / `edit`）。折叠时看 summary，展开时逐文件；
+    /// 失败项必须留在列表里 —— 只报成功的那几个会让人以为整批都成了。
+    Files {
+        summary: String,
+        files: Vec<ToolDisplayFileEntry>,
+    },
     Plan {
         plan: String,
     },
     Text {
         text: String,
     },
+}
+
+/// [`ToolDisplay::Files`] 里的单个文件条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ToolDisplayFileEntry {
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<Vec<FileDiffLine>>,
+    /// 批量 `read` 用：这一段的行号区间，例如 `L1-900 (900 lines)`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+    /// 缺省表示「正常，无需强调」（批量 read 的普通条目）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ToolDisplayFileStatus>,
+    /// 失败原因或跳过原因。`status` 为 `Failed` / `Skipped` 时必有值。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// [`ToolDisplayFileEntry::status`]：这个文件在这次调用里的结局。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDisplayFileStatus {
+    /// 改动已落盘。
+    Applied,
+    /// 这个文件失败了，磁盘内容保持原样。
+    Failed,
+    /// 没轮到它（批量 read 的输出预算用尽）。
+    Skipped,
 }
 
 /// transcript `Custom` 行里 plan.* 事件共用的最小 payload。

@@ -11,11 +11,35 @@ use crate::core::agent_loop::AgentRunResult;
 use crate::core::llm::ChatMessage;
 
 /// 单条 finding（reviewer.md §5.3）。
+///
+/// `id` 由内容派生而非自增：同一个问题在下一轮 review 里必须拿到同一个 id，
+/// 否则没法判断"这条修好了没有"。severity 不参与派生 —— 同一问题被升级严重程度
+/// 仍然是同一个问题。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
+    #[serde(default)]
+    pub id: String,
     pub severity: String,
     pub area: String,
     pub note: String,
+}
+
+impl Finding {
+    pub fn new(severity: String, area: String, note: String) -> Self {
+        let id = finding_id(&area, &note);
+        Self {
+            id,
+            severity,
+            area,
+            note,
+        }
+    }
+}
+
+/// 稳定 finding id：`f-` + area/note 的 FNV-1a 短哈希。
+pub fn finding_id(area: &str, note: &str) -> String {
+    let seed = format!("{}\n{}", area.trim(), note.trim());
+    format!("f-{}", &crate::core::session::fnv1a_hex(seed.as_bytes())[..8])
 }
 
 /// `<review>` 块的中性解析结果。
@@ -151,11 +175,11 @@ pub fn parse_finding_line(line: &str) -> Option<Finding> {
             _ => {}
         }
     }
-    Some(Finding {
-        severity: severity.unwrap_or_else(|| "suggestion".into()),
-        area: area.unwrap_or_default(),
-        note: note?,
-    })
+    Some(Finding::new(
+        severity.unwrap_or_else(|| "suggestion".into()),
+        area.unwrap_or_default(),
+        note?,
+    ))
 }
 
 pub fn split_top_level_commas(s: &str) -> Vec<&str> {

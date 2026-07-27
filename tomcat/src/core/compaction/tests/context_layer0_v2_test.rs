@@ -77,7 +77,7 @@ fn compact_tool_results_skips_already_persisted() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
     assert_eq!(
         reduced, 0,
         "already persisted results should not be replaced"
@@ -96,7 +96,7 @@ fn compact_tool_results_skips_placeholder() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
     assert_eq!(
         reduced, 0,
         "already replaced results should not be re-replaced"
@@ -113,7 +113,7 @@ fn compact_tool_results_respects_placeholder_threshold_from_config() {
         layer0_placeholder_threshold_chars: 30_000,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &high_threshold);
+    let reduced = compact_tool_results(&mut state, &high_threshold).chars_freed;
     assert_eq!(
         reduced, 0,
         "content below custom threshold should not be replaced"

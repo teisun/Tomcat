@@ -506,3 +506,48 @@ async fn reviewer_edit_precheck_accepts_tilde_plan_path() {
         .model_text
         .contains("已编辑: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));
 }
+
+#[tokio::test]
+async fn explorer_blocks_every_write_and_nesting_tool() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    for (name, arguments) in [
+        ("write", r#"{"path":"/tmp/demo.txt","content":"hi"}"#),
+        (
+            "edit",
+            r#"{"path":"/tmp/demo.txt","old_string":"a","new_string":"b"}"#,
+        ),
+        ("update_plan", "{}"),
+        ("dispatch_agent", r#"{"tasks":[{"prompt":"nested"}]}"#),
+    ] {
+        let tc = ToolCallInfo {
+            id: format!("tc_{name}"),
+            name: name.into(),
+            arguments: arguments.into(),
+        };
+        let outcome = execute_tool_full(
+            &primitive,
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            SubagentType::Explorer,
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+            None,
+            None,
+        )
+        .await;
+        assert!(outcome.is_error, "{name} 应被 explorer 白名单拒绝");
+        assert!(
+            outcome
+                .model_text
+                .contains(&format!("explorer 子 Agent 只读，禁止调用工具 `{name}`")),
+            "{name} 拒绝文案异常: {}",
+            outcome.model_text
+        );
+    }
+}

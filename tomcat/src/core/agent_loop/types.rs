@@ -67,6 +67,8 @@ pub enum SubagentType {
     CodeReviewer,
     /// verifier 内联子 Agent。详见 `docs/architecture/plan-exec-code-verification.md`。
     Verifier,
+    /// 只读勘察子 Agent：替主 Agent 读代码，只回结论不回原文。
+    Explorer,
 }
 
 impl SubagentType {
@@ -88,6 +90,7 @@ impl SubagentType {
             SubagentType::PlanReviewer => "plan_reviewer",
             SubagentType::CodeReviewer => "code_reviewer",
             SubagentType::Verifier => "verifier",
+            SubagentType::Explorer => "explorer",
         }
     }
 }
@@ -339,6 +342,9 @@ pub struct AgentLoop {
     /// 首次进入 `run()` 时 `messages` 中自该下标起（含）为**不得被 L3 rebuild 覆盖**的尾部
     ///（当前用户句 / steering + 后续 assistant/tool）。用于 overflow 后只替换 transcript 段。
     pub(super) context_tail_start: usize,
+    /// completion guard 连续注入次数。模型一旦重新调用工具就归零；
+    /// 触顶后停止注入并交还用户，避免在同一个坎上无限打转。
+    pub(super) completion_guard_injections: u32,
 }
 
 pub(super) fn unix_ts_ms() -> i64 {

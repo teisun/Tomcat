@@ -66,6 +66,7 @@ fn make_context_state_with_transcript(path: std::path::PathBuf) -> ContextState 
         post_usage_appended_chars: 0,
         transcript_path: path,
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

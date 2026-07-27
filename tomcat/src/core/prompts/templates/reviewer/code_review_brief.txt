@@ -1,7 +1,7 @@
 Review the finished implementation for PlanFile `{plan_id}` before verifier runs.
 Artifact paths (use these first; do not guess alternate locations):
 - Exact plan file path: `{plan_path}`
-{workspace_hint}{diff_section}{changed_files_section}Scope:
+{workspace_hint}{diff_section}{changed_files_section}{open_findings_section}Scope:
 - Treat all plan todos as already marked completed; check whether the actual implementation appears consistent with that claim.
 - Review changed files first, then inspect neighboring implementation only as needed.
 - You are STRICTLY read-only: do not edit plan files, todos, or repository files.

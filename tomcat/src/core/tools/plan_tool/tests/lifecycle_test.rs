@@ -212,15 +212,15 @@ fn plan_build_atomic_rollback_on_write_failure() {
 }
 
 #[test]
-fn attach_from_event_missing_path_falls_back_to_chat() {
+fn attach_exec_with_missing_plan_file_falls_back_to_chat() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new_with_session_id("session-a", "run-new");
-    rt.attach_from_event(Some(PlanEventRef {
-        kind: PlanEventKind::Build,
-        plan_id: "orphan-plan".into(),
-        path: plan_path_for_id("orphan-plan").unwrap(),
-    }))
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Exec),
+        plan_path: Some(plan_path_for_id("orphan-plan").unwrap()),
+        plan_id: Some("orphan-plan".into()),
+    })
     .unwrap();
 
     assert!(matches!(rt.mode(), PlanState::Chat));
@@ -228,26 +228,41 @@ fn attach_from_event_missing_path_falls_back_to_chat() {
 }
 
 #[test]
-fn attach_from_event_create_restores_active_planning_plan_id() {
+fn attach_plan_mode_survives_without_plan_file() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    let path = plan_path_for_id("draft-plan").unwrap();
-    rt.attach_from_event(Some(PlanEventRef {
-        kind: PlanEventKind::Create,
-        plan_id: "draft-plan".into(),
-        path,
-    }))
+    // 进 PLAN 时计划文件往往还不存在，这正是旧实现会静默掉回 CHAT 的场景。
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Plan),
+        plan_path: None,
+        plan_id: None,
+    })
     .unwrap();
 
-    assert!(matches!(rt.mode(), PlanState::Chat));
-    assert_eq!(rt.active_planning_plan_id().as_deref(), Some("draft-plan"));
-    assert!(rt.active_plan_path().is_none());
+    assert!(matches!(rt.mode(), PlanState::Planning));
     cleanup_home(&home);
 }
 
 #[test]
-fn attach_from_event_restores_executing_from_latest_plan_event() {
+fn attach_plan_mode_restores_active_planning_plan_id() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Plan),
+        plan_path: None,
+        plan_id: Some("draft-plan".into()),
+    })
+    .unwrap();
+
+    assert!(matches!(rt.mode(), PlanState::Planning));
+    assert_eq!(rt.active_planning_plan_id().as_deref(), Some("draft-plan"));
+    cleanup_home(&home);
+}
+
+#[test]
+fn attach_exec_restores_executing_from_plan_file() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let plan_id = "owned-plan";
@@ -259,11 +274,11 @@ fn attach_from_event_restores_executing_from_latest_plan_event() {
     write_plan(&path, &p, 2000).unwrap();
 
     let rt = PlanRuntime::new_with_session_id("session-a", "run-a");
-    rt.attach_from_event(Some(PlanEventRef {
-        kind: PlanEventKind::Build,
-        plan_id: plan_id.into(),
-        path: path.clone(),
-    }))
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Exec),
+        plan_path: Some(path.clone()),
+        plan_id: Some(plan_id.into()),
+    })
     .unwrap();
 
     match rt.mode() {
@@ -275,23 +290,65 @@ fn attach_from_event_restores_executing_from_latest_plan_event() {
 }
 
 #[test]
-fn attach_from_event_completed_disk_state_rehydrates_chat_with_retain() {
+fn attach_without_mode_infers_from_plan_file() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let plan_id = "completed-plan";
     write_disk_plan(plan_id, PlanFileState::Completed);
     let path = plan_path_for_id(plan_id).unwrap();
 
+    // 旧 sidecar / 全量扫描路径：没有 agent_mode，只能靠计划文件状态推断。
     let rt = PlanRuntime::new("session-a");
-    rt.attach_from_event(Some(PlanEventRef {
-        kind: PlanEventKind::Update,
-        plan_id: plan_id.into(),
-        path: path.clone(),
-    }))
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: None,
+        plan_path: Some(path.clone()),
+        plan_id: Some(plan_id.into()),
+    })
     .unwrap();
 
-    assert!(matches!(rt.mode(), PlanState::Chat));
+    match rt.mode() {
+        PlanState::Completed { plan_id: ref pid } => assert_eq!(pid, plan_id),
+        other => panic!("expected Completed, got {other:?}"),
+    }
     assert_eq!(rt.active_plan_path(), Some(path));
+    cleanup_home(&home);
+}
+
+#[test]
+fn attach_without_any_information_falls_back_to_chat() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_from_resume_state(ResumeControlState::default())
+        .unwrap();
+
+    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert!(rt.active_plan_path().is_none());
+    cleanup_home(&home);
+}
+
+#[test]
+fn control_snapshot_reports_three_valued_mode_and_file_state() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let plan_id = "snapshot-plan";
+    write_disk_plan(plan_id, PlanFileState::Executing);
+    let path = plan_path_for_id(plan_id).unwrap();
+
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Exec),
+        plan_path: Some(path.clone()),
+        plan_id: Some(plan_id.into()),
+    })
+    .unwrap();
+
+    let snap = rt.control_snapshot(Some("gpt-5.6-sol"));
+    assert_eq!(snap.mode, AgentMode::Exec);
+    assert_eq!(snap.plan_file_state.as_deref(), Some("executing"));
+    assert_eq!(snap.plan_path, Some(path));
+    assert_eq!(snap.plan_id.as_deref(), Some(plan_id));
+    assert_eq!(snap.model.as_deref(), Some("gpt-5.6-sol"));
     cleanup_home(&home);
 }
 

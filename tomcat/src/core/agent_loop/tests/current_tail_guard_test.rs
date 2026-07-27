@@ -135,6 +135,7 @@ async fn mid_turn_guard_rewrites_tail_and_transcript() {
         post_usage_appended_chars: tail_chars,
         transcript_path: transcript.clone(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -258,6 +259,7 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
             plan_id: "plan_123".to_string(),
             path: PathBuf::from("/tmp/demo.plan.md"),
         }),
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -274,11 +276,9 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         crate::core::llm::MessageKind::CompactionSummary
     );
     let text = summary.text_content().unwrap_or("");
-    assert!(text.contains("## Execution Keepalive"));
-    assert!(text.contains("- mode: planning"));
-    assert!(text.contains("step active"));
-    assert!(text.contains("step pending"));
-    assert!(text.contains("build:plan_123:/tmp/demo.plan.md"));
+    assert!(text.starts_with("<control_state>"));
+    assert!(text.contains("mode: plan"));
+    assert!(text.contains("<verbatim_user_messages>"));
 
     let state = agent.context_state.as_ref().unwrap();
     assert_eq!(state.messages.len(), 1);
@@ -296,7 +296,7 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
                 .summary
                 .as_deref()
                 .unwrap_or("")
-                .contains("Execution Keepalive"));
+                .contains("<control_state>"));
         }
         other => panic!("expected collapse branch summary, got {other:?}"),
     }

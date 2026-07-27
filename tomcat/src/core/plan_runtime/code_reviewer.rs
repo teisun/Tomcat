@@ -20,6 +20,30 @@ pub fn code_review_system_prompt_text() -> &'static str {
     load_prompt(PromptKey::ReviewerCode)
 }
 
+/// 上一轮未清 finding 渲染成 prompt 片段：带上稳定 id，要求 reviewer 逐条核销。
+fn render_open_findings_section(open_findings: &[Finding]) -> String {
+    if open_findings.is_empty() {
+        return String::new();
+    }
+    let lines = open_findings
+        .iter()
+        .map(|f| {
+            format!(
+                "         - `{}` [{}] {}: {}",
+                f.id, f.severity, f.area, f.note
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "         Open findings from the previous review round (verify each one first):\n\
+         {lines}\n\
+         - For each id above, state whether it is now fixed. Report it again ONLY if it is still\n\
+         unfixed, reusing the same `area` and `note` wording so its id stays stable.\n\
+         - Do not re-report an issue you confirmed fixed, and do not renumber existing findings.\n"
+    )
+}
+
 pub fn build_code_review_prompt(
     plan_id: &str,
     plan_text: &str,
@@ -27,6 +51,7 @@ pub fn build_code_review_prompt(
     workspace_root: Option<&Path>,
     diff_stat: &str,
     changed_files: &[String],
+    open_findings: &[Finding],
 ) -> String {
     let plan_path = crate::infra::platform::format_home_path(plan_path);
     let workspace_hint = workspace_root
@@ -73,6 +98,10 @@ pub fn build_code_review_prompt(
             ("workspace_hint", &workspace_hint),
             ("diff_section", &diff_section),
             ("changed_files_section", &changed_files_section),
+            (
+                "open_findings_section",
+                &render_open_findings_section(open_findings),
+            ),
             ("plan_text", plan_text),
         ],
     )

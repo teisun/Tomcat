@@ -81,6 +81,7 @@ pub(super) fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

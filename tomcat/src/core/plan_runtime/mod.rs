@@ -39,6 +39,7 @@
 
 pub mod catalog;
 pub mod code_reviewer;
+pub mod explorer;
 pub mod file_store;
 pub mod ops;
 pub mod panels;
@@ -62,7 +63,7 @@ use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::session::manager::{PlanEventKind, PlanEventRef};
+use crate::core::session::manager::{AgentMode, ResumeControlState};
 
 pub use code_reviewer::CodeReviewSummary;
 pub use panels::{
@@ -73,6 +74,54 @@ pub use plan_reviewer::{PlanReviewSummary, REVIEWER_ALLOW_REVIEW_EDIT};
 pub use review::Finding;
 pub use state::PlanState;
 pub use verify::VerifySummary;
+
+/// 会话控制态快照。摘要的 `<control_state>` 机器区块（第 3 章）与恢复日志共用这一份取数，
+/// 保证"UI 看到的模式"和"喂给模型的模式"永远来自同一个地方。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlSnapshot {
+    /// chat | plan | exec
+    pub mode: AgentMode,
+    pub plan_path: Option<PathBuf>,
+    /// 计划文件 frontmatter 里的 state；读不到计划文件时为 None。
+    pub plan_file_state: Option<String>,
+    pub plan_id: Option<String>,
+    pub model: Option<String>,
+}
+
+/// 恢复时读计划文件；不存在或读不动都当作"没有计划"，由调用方决定兜底。
+fn read_plan_for_restore(path: &std::path::Path) -> Option<file_store::PlanFile> {
+    if !path.is_file() {
+        tracing::warn!(
+            target: "plan_runtime::recover",
+            path = %path.display(),
+            "resume 记录的 plan 文件不存在"
+        );
+        return None;
+    }
+    match file_store::read_plan(path) {
+        Ok(plan) => Some(plan),
+        Err(err) => {
+            tracing::warn!(
+                target: "plan_runtime::recover",
+                path = %path.display(),
+                error = %err,
+                "resume 记录的 plan 文件无法读取"
+            );
+            None
+        }
+    }
+}
+
+/// EXEC 内部由计划文件状态细分；文件说还在 planning 就按 planning 恢复（更严格的一侧）。
+fn plan_state_from_file(plan: &file_store::PlanFile) -> PlanState {
+    let plan_id = plan.frontmatter.plan_id.clone();
+    match plan.frontmatter.state {
+        file_store::PlanFileState::Planning => PlanState::Planning,
+        file_store::PlanFileState::Pending => PlanState::Pending { plan_id },
+        file_store::PlanFileState::Executing => PlanState::Executing { plan_id },
+        file_store::PlanFileState::Completed => PlanState::Completed { plan_id },
+    }
+}
 
 /// PLAN 模式 per-session 编排器骨架（P1）。
 ///
@@ -120,14 +169,24 @@ pub struct PlanRuntime {
     /// 可选 verifier 派发器。PR-V1 由 `ChatContext::from_config` 注入真实实现；
     /// 测试可注入 mock；未注入时 `update_plan(all_completed)` 返回 `aborted` 占位摘要。
     verifier: Mutex<Option<Arc<dyn VerifierDispatcher>>>,
+    /// 只读勘察子 Agent 派发器（`dispatch_agent` 工具的后端）。
+    explorer: Mutex<Option<Arc<dyn ExplorerDispatcher>>>,
     /// `[plan].verify_gate` 当前值：`soft`（默认）或 `gate`。
     verify_gate_mode: RwLock<String>,
-    /// verifier 前 code reviewer 的最大尝试轮次。默认 1；0 表示直接跳过 code review。
+    /// verifier 前 code reviewer 的最大尝试轮次。默认 8；0 表示直接跳过 code review。
     max_code_review_rounds: AtomicU32,
     /// 计数 reviewer 派发轮次（用于 `[reviewer] max_review_rounds` 软上限 warning）。
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// 计数 verifier 前 code reviewer 实际派发轮次。
     code_review_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// 上一轮 code review 留下的未清 finding。用于两处：下一轮把它们交给 reviewer 按 id
+    /// 核销已修项（D1-d），以及 completion guard 在"todo 全勾完但 review 打回"时告诉模型
+    /// 还差什么（C1）。
+    unresolved_findings:
+        parking_lot::Mutex<std::collections::HashMap<String, Vec<review::Finding>>>,
+    /// 当前会话正在用的主模型。run loop 每回合写入，reviewer / verifier 派发时读取——
+    /// 这样会话中途换模型，子 Agent 下一次派发就跟着换。
+    session_model: parking_lot::Mutex<Option<String>>,
     /// 可选 `ask_question` UI 后端（P5）。CLI 默认由 `ChatContext::from_config`
     /// 注入 `CliAskQuestionPanel`；宿主若要接 IDE / 测试 bridge，可通过 overrides
     /// 显式注入别的 `AskQuestionPanel`。未注入时 `ask_question` 工具返回
@@ -209,10 +268,13 @@ impl PlanRuntime {
             plan_reviewer: Mutex::new(None),
             code_reviewer: Mutex::new(None),
             verifier: Mutex::new(None),
+            explorer: Mutex::new(None),
             verify_gate_mode: RwLock::new("soft".into()),
-            max_code_review_rounds: AtomicU32::new(1),
+            max_code_review_rounds: AtomicU32::new(8),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             code_review_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            unresolved_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            session_model: parking_lot::Mutex::new(None),
             ask_question_panel: Mutex::new(None),
             ask_question_timeout_ms: std::sync::atomic::AtomicU64::new(0),
             active_todos_id: Mutex::new(None),
@@ -439,64 +501,106 @@ impl PlanRuntime {
         Ok(())
     }
 
-    /// 启动恢复：由 `init_context_state()` 的单次 transcript 反向扫描产出的最近一条
-    /// `plan.*` 事件驱动；盘 `frontmatter.state` 才是最终派生真理。
-    pub fn attach_from_event(&self, event: Option<PlanEventRef>) -> Result<(), PlanRuntimeError> {
+    /// 启动恢复：模式由 resume-index sidecar 记录的 `agent_mode` 直接决定，
+    /// 计划文件的 `frontmatter.state` 只用来在 EXEC 内部区分 pending / executing / completed。
+    ///
+    /// 兜底顺序（A1-d）：
+    /// 1. sidecar 有 `agent_mode` → 直接采信；
+    /// 2. 没有（旧 sidecar 或全量扫描路径）→ 用 `plan_path` 指向的计划文件状态推断；
+    /// 3. 仍判定不了 → 回落 chat，并写一条 `plan.restore` 事件说明依据。
+    pub fn attach_from_resume_state(
+        &self,
+        state: ResumeControlState,
+    ) -> Result<(), PlanRuntimeError> {
         *self.mode.write() = PlanState::Chat;
         *self.active_planning_plan_id.lock() = None;
         *self.active_plan_path.lock() = None;
 
-        let Some(event) = event else {
-            return Ok(());
+        let plan_on_disk = state.plan_path.as_ref().and_then(|path| {
+            let plan = read_plan_for_restore(path)?;
+            *self.active_plan_path.lock() = Some(path.clone());
+            Some(plan)
+        });
+
+        let (restored, basis) = match state.mode {
+            Some(AgentMode::Chat) => (PlanState::Chat, "sidecar:chat"),
+            Some(AgentMode::Plan) => {
+                *self.active_planning_plan_id.lock() = state
+                    .plan_id
+                    .clone()
+                    .or_else(|| plan_on_disk.as_ref().map(|p| p.frontmatter.plan_id.clone()));
+                (PlanState::Planning, "sidecar:plan")
+            }
+            Some(AgentMode::Exec) => match plan_on_disk.as_ref() {
+                Some(plan) => (plan_state_from_file(plan), "sidecar:exec+plan_file"),
+                None => (PlanState::Chat, "sidecar:exec+plan_file_unreadable"),
+            },
+            None => match plan_on_disk.as_ref() {
+                Some(plan) => (plan_state_from_file(plan), "inferred:plan_file"),
+                None => (PlanState::Chat, "inferred:none"),
+            },
         };
 
-        match event.kind {
-            PlanEventKind::Create => {
-                *self.active_planning_plan_id.lock() = Some(event.plan_id);
-                Ok(())
-            }
-            PlanEventKind::Build | PlanEventKind::Update => {
-                if !event.path.is_file() {
-                    tracing::warn!(
-                        target: "plan_runtime::recover",
-                        path = %event.path.display(),
-                        "最近 plan 事件指向的 plan 文件不存在；退化为 Chat"
-                    );
-                    return Ok(());
-                }
-                let plan = match file_store::read_plan(&event.path) {
-                    Ok(plan) => plan,
-                    Err(err) => {
-                        tracing::warn!(
-                            target: "plan_runtime::recover",
-                            path = %event.path.display(),
-                            error = %err,
-                            "最近 plan 事件指向的 plan 文件无法读取；退化为 Chat"
-                        );
-                        return Ok(());
-                    }
-                };
-                let plan_id = plan.frontmatter.plan_id.clone();
-                *self.active_plan_path.lock() = Some(event.path);
-                match plan.frontmatter.state {
-                    file_store::PlanFileState::Pending => {
-                        *self.mode.write() = PlanState::Pending { plan_id };
-                    }
-                    file_store::PlanFileState::Executing => {
-                        *self.mode.write() = PlanState::Executing { plan_id };
-                    }
-                    file_store::PlanFileState::Planning | file_store::PlanFileState::Completed => {
-                        // 默认保持 Chat，并保留 path 作为 retain 候选。
-                    }
-                }
-                Ok(())
-            }
+        let degraded = state.mode == Some(AgentMode::Exec) && plan_on_disk.is_none();
+        if degraded {
+            tracing::warn!(
+                target: "plan_runtime::recover",
+                path = ?state.plan_path,
+                "sidecar 记录为 exec 但计划文件不可读；回落 chat"
+            );
+        }
+        // 只在"本可以更精确、但只能靠推断"时留痕。干净的 chat 会话没什么可说的，
+        // 不该每次启动都往 transcript 里塞一条事件。
+        let inferred = state.mode.is_none() && state.plan_path.is_some();
+        if degraded || inferred {
+            self.write_transcript_custom(serde_json::json!({
+                "event": crate::infra::wire::WIRE_PLAN_RESTORE,
+                "state": restored.as_str(),
+                "basis": basis,
+            }));
+        }
+
+        *self.mode.write() = restored;
+        Ok(())
+    }
+
+    /// 记录当前会话主模型。run loop 每回合解析完 `LlmScene::Main` 后调用。
+    pub fn set_session_model(&self, model: &str) {
+        if model.is_empty() {
+            return;
+        }
+        *self.session_model.lock() = Some(model.to_string());
+    }
+
+    /// 当前会话主模型；会话还没跑过任何一回合时为 None。
+    pub fn session_model(&self) -> Option<String> {
+        self.session_model.lock().clone()
+    }
+
+    /// 当前控制态快照。`model` 由调用方注入（PlanRuntime 不持有模型信息）。
+    pub fn control_snapshot(&self, model: Option<&str>) -> ControlSnapshot {
+        let mode = self.mode();
+        let plan_path = self.active_plan_path();
+        let plan_file_state = plan_path
+            .as_deref()
+            .and_then(read_plan_for_restore)
+            .map(|plan| plan.frontmatter.state.as_str().to_string());
+        let plan_id = mode
+            .active_plan_id()
+            .map(str::to_string)
+            .or_else(|| self.active_planning_plan_id());
+        ControlSnapshot {
+            mode: mode.agent_mode(),
+            plan_path,
+            plan_file_state,
+            plan_id,
+            model: model.map(str::to_string),
         }
     }
 
     /// 兼容旧调用口：v4-g 起 recover 不再扫盘，仅保持默认 Chat。
     pub fn recover(&self) -> Result<(), PlanRuntimeError> {
-        self.attach_from_event(None)
+        self.attach_from_resume_state(ResumeControlState::default())
     }
 
     /// E7：`/restore` 命令完成 git 树恢复后，重新读取磁盘上的 active plan
@@ -639,6 +743,28 @@ impl PlanRuntime {
     /// 测试可注入 mock / 自定义实现）。
     pub fn attach_verifier(&self, dispatcher: Arc<dyn VerifierDispatcher>) {
         *self.verifier.lock() = Some(dispatcher);
+    }
+
+    /// 注入 explorer 派发器（`dispatch_agent` 的后端）。未注入时该工具直接报错，
+    /// 不做静默降级——让模型自己去读，比返回一份空结论更诚实。
+    pub fn attach_explorer(&self, dispatcher: Arc<dyn ExplorerDispatcher>) {
+        *self.explorer.lock() = Some(dispatcher);
+    }
+
+    /// 并行派发一批 Explorer。任何一个失败只影响它自己那条报告，其余照常返回。
+    pub async fn dispatch_explorers(
+        &self,
+        tasks: &[explorer::ExplorerTask],
+    ) -> Result<Vec<explorer::ExplorerReport>, PlanRuntimeError> {
+        let Some(dispatcher) = self.explorer.lock().clone() else {
+            return Err(PlanRuntimeError::Io(
+                "dispatch_agent 不可用：explorer 子 Agent 派发器未注入".into(),
+            ));
+        };
+        Ok(
+            futures_util::future::join_all(tasks.iter().map(|task| dispatcher.dispatch(task)))
+                .await,
+        )
     }
 
     /// 设置 `[plan].verify_gate` 当前值。仅接受 `soft` / `gate`；其它值回落为 `soft`。
@@ -794,7 +920,12 @@ impl PlanRuntime {
             }
         };
 
-        dispatcher.dispatch(plan_id, &plan_text).await
+        // 上一轮未清的 finding 一并交给 reviewer：它按 id 逐条核销，修好的不再重复报，
+        // 没修的沿用同一个 id 报回来——否则 8 轮预算会被同一个问题的不同措辞烧光。
+        let open_findings = self.unresolved_findings(plan_id);
+        dispatcher
+            .dispatch(plan_id, &plan_text, &open_findings)
+            .await
     }
 
     /// 同步派发 verifier。语义与 reviewer 类似，但无 round 概念：
@@ -926,18 +1057,20 @@ impl PlanRuntime {
         self.write_transcript_custom(payload);
     }
 
-    pub(crate) fn write_code_review_warning_transcript(
+    /// 轮次预算用尽但仍有未清 finding：留痕并交还用户。计划保持 `executing`，
+    /// 不做 best-effort 收口 —— 没拿到通过结论就不能声称完成。
+    pub(crate) fn write_code_review_exhausted_transcript(
         &self,
         plan_id: &str,
-        reason: &str,
         rounds: u32,
+        unresolved_findings: &[String],
     ) {
         self.write_transcript_custom(serde_json::json!({
-            "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_WARNING,
+            "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_EXHAUSTED,
             "plan_id": plan_id,
-            "reason": reason,
             "rounds": rounds,
             "max_code_review_rounds": self.max_code_review_rounds(),
+            "unresolved_findings": unresolved_findings,
         }));
     }
 
@@ -969,6 +1102,33 @@ impl PlanRuntime {
 
     pub fn reset_code_review_rounds(&self, plan_id: &str) {
         self.code_review_rounds.lock().remove(plan_id);
+        self.unresolved_findings.lock().remove(plan_id);
+    }
+
+    /// 记录本轮 code review 之后仍未清掉的 finding（`pass` 时传空 Vec 即可清空）。
+    pub fn set_unresolved_findings(&self, plan_id: &str, findings: Vec<review::Finding>) {
+        let mut guard = self.unresolved_findings.lock();
+        if findings.is_empty() {
+            guard.remove(plan_id);
+        } else {
+            guard.insert(plan_id.to_string(), findings);
+        }
+    }
+
+    pub fn unresolved_findings(&self, plan_id: &str) -> Vec<review::Finding> {
+        self.unresolved_findings
+            .lock()
+            .get(plan_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn unresolved_finding_ids(&self, plan_id: &str) -> Vec<String> {
+        self.unresolved_findings
+            .lock()
+            .get(plan_id)
+            .map(|findings| findings.iter().map(|f| f.id.clone()).collect())
+            .unwrap_or_default()
     }
 
     pub fn code_review_rounds(&self, plan_id: &str) -> u32 {
@@ -1193,6 +1353,9 @@ impl PlanRuntime {
         };
         *self.active_planning_plan_id.lock() = None;
         *self.active_plan_path.lock() = Some(path.clone());
+        // 一次 build 就是一次交付尝试，code review 轮数预算按次发放而不是按计划终身发放。
+        // 少了这一步，同一进程里二次 build 同一个计划会因为计数器没清而直接跳过 review。
+        self.reset_code_review_rounds(&plan_id);
 
         // E6：`[plan].auto_checkpoint_on_build`（默认 false）→ 写 `Manual{label="plan_build:..."}`。
         // record 失败仅 warning（盘异常不阻 EXEC 推进，D 防御）。
@@ -1363,8 +1526,22 @@ pub trait PlanReviewerDispatcher: Send + Sync {
 
 /// code reviewer 子 Agent 派发器 trait。
 #[async_trait]
+pub trait ExplorerDispatcher: Send + Sync {
+    /// 同步跑完一个只读勘察子 Agent 并回传结论。失败一律以 `aborted` 报告表达，
+    /// 不返回 Err——一个勘察任务失败不该让整批调用失败。
+    async fn dispatch(&self, task: &explorer::ExplorerTask) -> explorer::ExplorerReport;
+}
+
+#[async_trait::async_trait]
 pub trait CodeReviewerDispatcher: Send + Sync {
-    async fn dispatch(&self, plan_id: &str, plan_text: &str) -> code_reviewer::CodeReviewSummary;
+    /// `open_findings` 是上一轮未清的 finding；实现应把它们渲染进 prompt，
+    /// 让 reviewer 按 id 核销而不是重新发明问题编号。
+    async fn dispatch(
+        &self,
+        plan_id: &str,
+        plan_text: &str,
+        open_findings: &[review::Finding],
+    ) -> code_reviewer::CodeReviewSummary;
 }
 
 /// verifier 子 Agent 派发器 trait（解耦真实 LLM + AgentRegistry）。

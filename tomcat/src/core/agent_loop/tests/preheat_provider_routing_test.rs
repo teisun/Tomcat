@@ -68,6 +68,7 @@ fn build_context_state(messages: Vec<ChatMessage>) -> ContextState {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -253,6 +254,7 @@ async fn timing5_try_restart_uses_compaction_provider_after_exhausted_pending() 
             failing_provider,
             &agent.config.context_config,
             Arc::clone(&event_emitter),
+            None,
         ));
     }
     tokio::time::sleep(Duration::from_millis(1_700)).await;

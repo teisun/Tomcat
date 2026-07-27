@@ -182,44 +182,79 @@ pub async fn execute_for_tool(
             );
             code_review_json = code_review_summary.to_json();
 
+            // 只有 pass 才收口。其余一律保持 executing —— 包括 aborted 与无法识别的
+            // verdict：拿不到"通过"的证据就不能当作通过，否则 reviewer 形同虚设。
             match code_review_summary.verdict.as_deref() {
                 Some("pass") => {
+                    runtime.set_unresolved_findings(&target_plan_id, Vec::new());
                     finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
                     PlanFileState::Completed
                 }
-                Some("fail") | Some("partial") => {
-                    warnings.extend(non_pass_code_review_guidance(&code_review_summary));
-                    PlanFileState::Executing
-                }
-                Some("aborted") => {
+                // 压根没接 reviewer（嵌入方未注入 dispatcher）是"没有这道关"，
+                // 不是"这道关没放行"；不存在的门禁不能永久扣住计划。
+                Some("aborted") if code_review_summary.reviewer_stop_reason == "not_dispatched" => {
                     warnings.push(
-                        "code review 中止(aborted)，本次按 best-effort 直接收口 completed".into(),
+                        "未配置 code reviewer，跳过代码复审直接收口；如需门禁请注入 reviewer"
+                            .into(),
                     );
                     finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
                     PlanFileState::Completed
                 }
-                _ => {
+                Some("aborted") => {
                     warnings.push(
-                        "code review 未返回可识别 verdict，已按 partial 处理；plan 保持 executing"
+                        "code review 中止(aborted)：未拿到通过结论，plan 保持 executing，请重试复审"
                             .into(),
+                    );
+                    PlanFileState::Executing
+                }
+                verdict => {
+                    if !matches!(verdict, Some("fail") | Some("partial")) {
+                        warnings.push(
+                            "code review 未返回可识别 verdict，按未通过处理；plan 保持 executing"
+                                .into(),
+                        );
+                    }
+                    runtime.set_unresolved_findings(
+                        &target_plan_id,
+                        code_review_summary.findings.clone(),
                     );
                     warnings.extend(non_pass_code_review_guidance(&code_review_summary));
                     PlanFileState::Executing
                 }
             }
         } else {
-            warnings.push(format!(
-                "code review rounds 已用尽（{}/{}），本次不再复审，按 best-effort 直接收口 completed",
-                runtime.code_review_rounds(&target_plan_id),
-                runtime.max_code_review_rounds()
-            ));
-            runtime.write_code_review_warning_transcript(
-                &target_plan_id,
-                "rounds_exhausted",
-                runtime.code_review_rounds(&target_plan_id),
-            );
-            finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
-            PlanFileState::Completed
+            let rounds = runtime.code_review_rounds(&target_plan_id);
+            let unresolved = runtime.unresolved_finding_ids(&target_plan_id);
+            if rounds == 0 {
+                // 一轮都没跑过 = 复审被关掉了（max_code_review_rounds = 0）。
+                // 不存在的门禁不能扣住计划，但要说出来，别让用户以为它复审过了。
+                warnings.push(format!(
+                    "code review 未启用（max_code_review_rounds = {}），未经复审直接收口",
+                    runtime.max_code_review_rounds()
+                ));
+                finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
+                PlanFileState::Completed
+            } else {
+                // 跑过复审但一次都没拿到 pass，而轮次已经用完：交还用户，让人来决定放行还是继续。
+                // reviewer 说了 fail 却没列出 finding，那是它没写清楚，不是问题不存在 ——
+                // 按「没有已知问题」收口，等于让一句没有明细的 fail 直接变成交付。
+                let unresolved_note = if unresolved.is_empty() {
+                    "且最后一轮未返回通过结论".to_string()
+                } else {
+                    format!("仍有 {} 项未清 finding", unresolved.len())
+                };
+                warnings.push(format!(
+                    "code review 轮次预算已用尽（{}/{}），{unresolved_note}；plan 保持 executing，交还用户决定",
+                    rounds,
+                    runtime.max_code_review_rounds(),
+                ));
+                runtime.write_code_review_exhausted_transcript(
+                    &target_plan_id,
+                    rounds,
+                    &unresolved,
+                );
+                PlanFileState::Executing
+            }
         }
     } else {
         plan.frontmatter.state

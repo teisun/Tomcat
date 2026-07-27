@@ -543,6 +543,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -552,7 +553,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
     assert!(reduced > 0);
 
     if state.usage_ratio() >= 0.50 {
@@ -701,6 +702,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -783,6 +785,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -838,6 +841,7 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -902,6 +906,7 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -965,6 +970,7 @@ fn test_compact_tool_results_estimate_precise() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -974,7 +980,7 @@ fn test_compact_tool_results_estimate_precise() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
 
     let expected_reduced = content_len - PLACEHOLDER.len();
     assert_eq!(
@@ -1031,6 +1037,7 @@ async fn test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1155,6 +1162,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1434,6 +1442,7 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1536,6 +1545,7 @@ fn test_force_drop_estimate_consistent_after_l3() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1667,6 +1677,7 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1767,6 +1778,7 @@ fn test_check_after_reply_stale_emits_compaction_error() {
         post_usage_appended_chars: 0,
         transcript_path: path.clone(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1829,6 +1841,7 @@ async fn test_check_before_request_emits_boundary_switched() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1937,6 +1950,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -2117,6 +2131,7 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

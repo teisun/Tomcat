@@ -323,9 +323,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     if let Err(err) = ctx
         .session_runtime
         .plan_runtime
-        .attach_from_event(context_state.latest_plan_event.clone())
+        .attach_from_resume_state(context_state.resume_control.clone())
     {
-        tracing::warn!(error = %err, "plan_runtime attach_from_event failed; continuing with Chat mode");
+        tracing::warn!(error = %err, "plan_runtime attach_from_resume_state failed; continuing with Chat mode");
     }
     let session_id = ctx
         .session_runtime
@@ -574,6 +574,15 @@ pub async fn run_chat_turn_with_message(
         .map(|c| c.model.clone())
         .unwrap_or_default();
     let thinking_model_id = ctx.effective_model(entry.as_ref());
+    // 让 reviewer / verifier 在下一次派发时跟上会话当前的模型。
+    //
+    // 记的必须是 catalog id（`fcodex/claude-opus-4-8`），不是 `main_call.model` 那个
+    // 发给 provider 的线上模型名（`claude-opus-4-8`）。子 Agent 派发时会拿这个字符串
+    // 回 catalog 查 provider，线上名要么查不到、要么撞上同名的另一个 provider 条目 ——
+    // 实测就是后者：复审子 Agent 拿着 `claude-opus-4-8` 打到了别的账号组，404 起不来。
+    ctx.session_runtime
+        .plan_runtime
+        .set_session_model(&thinking_model_id);
     let thinking_level = Some(ctx.resolve_thinking_level(&thinking_model_id));
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
@@ -653,6 +662,11 @@ pub async fn run_chat_turn_with_message(
         compaction_provider.clone(),
         &context_config,
         Arc::clone(&root_event_emitter),
+        Some(
+            ctx.session_runtime
+                .plan_runtime
+                .control_snapshot(Some(&model)),
+        ),
     );
     check_before_request(context_state, &root_event_emitter).await;
     info!(

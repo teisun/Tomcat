@@ -136,6 +136,7 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
         post_usage_appended_chars: tail_chars,
         transcript_path: transcript.clone(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -238,6 +239,7 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
             plan_id: plan_id.clone(),
             path: plan_path.clone(),
         }),
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -250,7 +252,10 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
     let summary = &messages[1];
     let text = summary.text_content().unwrap_or("");
     assert_eq!(summary.kind, MessageKind::CompactionSummary);
-    assert!(text.contains("- mode: executing"));
+    assert!(text.starts_with("<control_state>"));
+    assert!(text.contains("mode: exec"));
+    assert!(text.contains("plan_file_state: executing"));
+    // Progress 由计划文件渲染，模型说什么都覆盖不掉。
     assert!(text.contains("step active"));
     assert!(text.contains("step pending"));
 
@@ -312,6 +317,7 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -322,8 +328,9 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         .unwrap();
 
     let text = messages[1].text_content().unwrap_or("");
-    assert!(text.contains("- mode: pending"));
-    assert!(text.contains("current_step: first pending"));
+    assert!(text.contains("mode: exec"));
+    assert!(text.contains("plan_file_state: pending"));
+    assert!(text.contains("first pending"));
 
     cleanup_plan_file(&plan_path);
 }

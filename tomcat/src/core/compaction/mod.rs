@@ -7,6 +7,7 @@
 
 pub mod apply;
 mod cascade;
+pub mod machine_block;
 pub mod preheat;
 mod truncation;
 

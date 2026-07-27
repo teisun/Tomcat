@@ -2840,6 +2840,46 @@ span.tc-attachment-strip__file-chip {
   width: 100%;
 }
 
+.tc-tool-row__files-status,
+.tc-tool-row__file-range,
+.tc-tool-row__file-note {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-tool-row__files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tc-tool-row__file-head {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tc-tool-row__file[data-status="applied"] .codicon-check {
+  color: var(--vscode-charts-green, #3fb950);
+}
+
+.tc-tool-row__file[data-status="failed"] .codicon-error,
+.tc-tool-row__file[data-status="failed"] .tc-tool-row__file-note {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.tc-tool-row__file[data-status="skipped"] .codicon-circle-slash {
+  color: var(--vscode-descriptionForeground);
+}
+
 .tc-tool-row__action-link {
   align-items: center;
   background: transparent;

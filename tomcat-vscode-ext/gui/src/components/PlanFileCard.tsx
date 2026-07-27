@@ -51,6 +51,7 @@ function PlanFileCardComponent({
   onOpenPlanFile,
   onSetBuildModel,
   planTodos = [],
+  sessionModel = "",
 }: {
   availableModels?: string[];
   buildModel?: string;
@@ -61,6 +62,7 @@ function PlanFileCardComponent({
   onOpenPlanFile(path: string): void;
   onSetBuildModel?(modelId: string): void;
   planTodos?: WebviewTodo[];
+  sessionModel?: string;
 }) {
   const fileName = basename(item.path);
   const title = derivePlanTitle(item, fileName);
@@ -126,6 +128,7 @@ function PlanFileCardComponent({
             availableModels={availableModels}
             label="Model"
             onChange={onSetBuildModel}
+            sessionModel={sessionModel}
             testId="plan-card-build-model"
             value={buildModel}
           />
@@ -157,6 +160,7 @@ function arePlanFileCardPropsEqual(
     previous.onBuild === next.onBuild &&
     previous.onOpenPlanFile === next.onOpenPlanFile &&
     previous.onSetBuildModel === next.onSetBuildModel &&
+    previous.sessionModel === next.sessionModel &&
     previous.planTodos === next.planTodos
   );
 }

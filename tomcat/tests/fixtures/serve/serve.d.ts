@@ -3,6 +3,12 @@
 
 export type AssistantMessageEvent = any;
 
+export type AttachmentMode = "inline" | "reference";
+
+export interface CacheThumbnailInput {
+  sourceSha: string;
+  thumbBase64: string;
+}
 export interface Capabilities {
   files?: boolean;
   reasoning?: boolean;
@@ -19,9 +25,19 @@ export interface FileDiffLine {
   text: string;
 }
 export interface GetMessagesParams {
+  attachmentMode?: AttachmentMode;
   cursor?: null | string;
   lastNTurns?: null | number;
   limit?: null | number;
+}
+export interface IngestAttachmentInput {
+  dataBase64: string;
+  filename?: null | string;
+  kind: ServeAttachmentKind;
+  mimeType: string;
+  providerBase64?: null | string;
+  providerMimeType?: null | string;
+  thumbBase64?: null | string;
 }
 export type ListSessionsScope = "live" | "disk";
 
@@ -60,11 +76,12 @@ export interface NewSessionParams {
   mode?: ServeSessionMode | null;
 }
 export interface ServeAttachment {
-  dataBase64?: null | string;
+  blobSha?: null | string;
   fileId?: null | string;
   filename?: null | string;
   kind: ServeAttachmentKind;
   mimeType?: null | string;
+  providerSha?: null | string;
 }
 export type ServeAttachmentKind = "image" | "file";
 
@@ -85,6 +102,11 @@ export type ServeContextRefKind = "selection" | "file";
 
 export type ServeEvent = ServePlanEvent | ServeSessionEvent | ServeToolEvent | ServeTurnEvent | WireEvent;
 
+export interface ServeFinding {
+  area: string;
+  note: string;
+  severity: string;
+}
 export interface ServeMessageParams {
   attachments?: ServeAttachment[];
   segments?: ServeContentSegment[];
@@ -92,10 +114,18 @@ export interface ServeMessageParams {
 }
 export type ServePlanEvent = {
   aborted?: boolean | null;
+  changesSummary?: null | string;
+  childSessionId?: null | string;
+  findings?: ServeFinding[] | null;
   planId?: null | string;
+  reviewAttemptId?: null | string;
+  round?: null | number;
+  rounds?: null | number;
   sessionId?: null | string;
   summary?: null | string;
+  toolCallId?: null | string;
   type: "plan.code_review";
+  verdict?: null | string;
 } | {
   aborted?: boolean | null;
   planId?: null | string;
@@ -108,6 +138,14 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   type: "plan.verify";
   verdict?: null | string;
+} | {
+  childSessionId?: null | string;
+  planId?: null | string;
+  reviewAttemptId?: null | string;
+  round?: null | number;
+  sessionId?: null | string;
+  toolCallId?: null | string;
+  type: "plan.code_review.started";
 } | {
   path?: null | string;
   planId?: null | string;
@@ -164,6 +202,12 @@ export type ServePlanEvent = {
   type: "plan.review.warning";
 } | {
   planId?: null | string;
+  rounds?: null | number;
+  sessionId?: null | string;
+  type: "plan.code_review.exhausted";
+  unresolvedFindings?: null | string[];
+} | {
+  planId?: null | string;
   sessionId?: null | string;
   todos?: ServeTodoItem[] | null;
   type: "plan.todos";
@@ -187,6 +231,13 @@ export interface ServeTodoItem {
   status: string;
 }
 export type ServeToolEvent = {
+  command?: null | string;
+  exitCode: number;
+  logPath?: null | string;
+  sessionId?: null | string;
+  taskId: string;
+  type: "background_task_finished";
+} | {
   sessionId?: null | string;
   summaryTitle?: null | string;
   toolCallId: string;
@@ -211,12 +262,27 @@ export type ToolDisplay = {
   kind: "file";
   removed?: null | number;
 } | {
+  files: ToolDisplayFileEntry[];
+  kind: "files";
+  summary: string;
+} | {
   kind: "plan";
   plan: string;
 } | {
   kind: "text";
   text: string;
 };
+
+export interface ToolDisplayFileEntry {
+  added?: null | number;
+  diff?: FileDiffLine[] | null;
+  file: string;
+  note?: null | string;
+  range?: null | string;
+  removed?: null | number;
+  status?: ToolDisplayFileStatus | null;
+}
+export type ToolDisplayFileStatus = "applied" | "failed" | "skipped";
 
 export type ToolOutput = any;
 
@@ -238,6 +304,14 @@ export type ControlFrame = {
   type: "control_response";
 };
 
+export interface IngestAttachmentResponse {
+  blobSha: string;
+  bytes: number;
+  filename: string;
+  hasThumb: boolean;
+  mimeType: string;
+  providerSha?: null | string;
+}
 export interface ListModelsPayload {
   models: ModelView[];
 }
@@ -273,6 +347,11 @@ export type ServeCommand = {
   planId?: null | string;
   sessionId?: null | string;
   type: "set_plan_mode";
+} | {
+  attachment: IngestAttachmentInput;
+  id?: null | string;
+  sessionId?: null | string;
+  type: "ingest_attachment";
 } | {
   checkpointId: string;
   dryRun?: boolean | null;
@@ -339,6 +418,11 @@ export type ServeCommand = {
   id?: null | string;
   sessionId: string;
   type: "switch_session";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
+  thumbnail: CacheThumbnailInput;
+  type: "cache_attachment_thumbnail";
 } | {
   id?: null | string;
   sessionId?: null | string;

@@ -11,11 +11,10 @@ use crate::core::compaction::{
     TOOL_RESULT_PLACEHOLDER,
 };
 use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider, MessageKind};
-use crate::core::plan_runtime::file_store::{read_plan, TodoItem, TodoStatus};
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars,
-    generate_entry_id, CompactionResult, ContextState, PlanEventRef,
+    generate_entry_id, CompactionResult, ContextState,
 };
 use crate::core::session::transcript::{
     insert_entry_after_message_id, rewrite_message_text_entries_by_id, BranchSummaryEntry,
@@ -289,11 +288,14 @@ fn reduce_before_next_llm(
         let Some(ctx_state) = agent.context_state.as_mut() else {
             return Ok(result);
         };
-        let reduced = compact_tool_results(ctx_state, &agent.config.context_config);
-        if reduced > 0 {
+        let placeholder = compact_tool_results(ctx_state, &agent.config.context_config);
+        if placeholder.chars_freed > 0 {
             ctx_state.invalidate_api_usage();
         }
-        reduced
+        for tool_call_id in &placeholder.tool_call_ids {
+            agent.config.read_file_state.invalidate_tool_call(tool_call_id);
+        }
+        placeholder.chars_freed
     };
     if history_reduced > 0 {
         result.freed_chars += history_reduced;
@@ -336,6 +338,8 @@ fn reduce_current_tail_messages(
     let mut transcript_rewrites = Vec::new();
     let mut result = TailReductionResult::default();
     let mut step0_reduced = false;
+    // 正文被换成引用/占位符的那些工具调用：这一轮结束前必须让它们的 read stamp 失效。
+    let mut evicted_tool_call_ids: Vec<String> = Vec::new();
 
     let initial_candidates = collect_tail_candidates(
         messages,
@@ -365,6 +369,7 @@ fn reduce_current_tail_messages(
             ) {
                 result.freed_chars += freed;
                 step0_reduced = true;
+                evicted_tool_call_ids.push(tool_call_id.clone());
                 ctx_state.rewrite_local_tail_chars(content.len(), text.len());
                 ctx_state.session_obs.tool_result_chars_persisted += persisted.original_chars;
                 if let Some(message_id) = &candidate.message_id {
@@ -389,6 +394,7 @@ fn reduce_current_tail_messages(
             candidates_after_step0,
             &mut transcript_rewrites,
             &mut result.freed_chars,
+            &mut evicted_tool_call_ids,
         );
         result
             .after_each_wave
@@ -417,6 +423,7 @@ fn reduce_current_tail_messages(
             candidates,
             &mut transcript_rewrites,
             &mut result.freed_chars,
+            &mut evicted_tool_call_ids,
         );
         result
             .after_each_wave
@@ -424,6 +431,9 @@ fn reduce_current_tail_messages(
     }
 
     rewrite_transcript_best_effort(&ctx_state.transcript_path, transcript_rewrites);
+    for tool_call_id in &evicted_tool_call_ids {
+        agent.config.read_file_state.invalidate_tool_call(tool_call_id);
+    }
     Ok(result)
 }
 
@@ -568,10 +578,7 @@ async fn collapse_to_branch_summary(
     messages: &mut Vec<ChatMessage>,
 ) -> Result<(), AppError> {
     let plan_runtime = agent.config.plan_runtime.clone();
-    let latest_plan_event = agent
-        .context_state
-        .as_ref()
-        .and_then(|state| state.latest_plan_event.clone());
+    let session_model = agent.config.model.clone();
     let mut working: Vec<ChatMessage> = messages
         .iter()
         .filter(|msg| msg.role != ChatMessageRole::System)
@@ -584,7 +591,7 @@ async fn collapse_to_branch_summary(
         compaction_provider.as_ref(),
         &agent.config.context_config.compaction_model,
         plan_runtime.as_deref(),
-        latest_plan_event.as_ref(),
+        Some(session_model.as_str()),
     )
     .await?;
     let Some(ctx_state) = agent.context_state.as_mut() else {
@@ -629,7 +636,7 @@ pub async fn build_collapse_summary_artifacts_for_test(
     llm: &dyn LlmProvider,
     compaction_model: &str,
     plan_runtime: Option<&PlanRuntime>,
-    latest_plan_event: Option<&PlanEventRef>,
+    session_model: Option<&str>,
 ) -> Result<CollapseSummaryArtifacts, AppError> {
     let working: Vec<ChatMessage> = messages
         .iter()
@@ -638,12 +645,17 @@ pub async fn build_collapse_summary_artifacts_for_test(
         .collect();
     let (covered_start_id, covered_end_id) = collapse_bounds(&working)
         .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
-    let summary = generate_summary(&working, None, llm, compaction_model).await?;
-    let summary_text = format!(
-        "## Structured Summary\n{}\n\n## Execution Keepalive\n{}",
-        summary.trim(),
-        build_keepalive_snapshot(plan_runtime, latest_plan_event)
-    );
+    // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
+    // 这里不再自己拼一份 keepalive —— 两份机器区块只会互相矛盾。
+    let control = plan_runtime.map(|rt| rt.control_snapshot(session_model));
+    let summary_text = generate_summary(
+        &working,
+        None,
+        llm,
+        compaction_model,
+        control.as_ref(),
+    )
+    .await?;
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
     let covered_count = working
         .iter()
@@ -710,6 +722,7 @@ fn apply_collapse_summary(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -766,9 +779,13 @@ fn apply_placeholder_wave(
     candidates: Vec<TailCandidate>,
     transcript_rewrites: &mut Vec<MessageTextRewrite>,
     freed_chars: &mut usize,
+    evicted_tool_call_ids: &mut Vec<String>,
 ) {
     let wave = std::cmp::max(1, candidates.len() / 2);
     for candidate in candidates.into_iter().take(wave) {
+        if let Some(id) = messages[candidate.msg_idx].tool_call_id.clone() {
+            evicted_tool_call_ids.push(id);
+        }
         let Some(text) = text_content_mut(&mut messages[candidate.msg_idx]) else {
             continue;
         };
@@ -816,81 +833,9 @@ fn log_aggregate_precheck_decision(decision: &AggregatePrecheckDecision) {
     );
 }
 
-fn build_keepalive_snapshot(
-    plan_runtime: Option<&PlanRuntime>,
-    latest_plan_event: Option<&PlanEventRef>,
-) -> String {
-    let Some(plan_runtime) = plan_runtime else {
-        return format!(
-            "- mode: chat\n- active_plan_path: (none)\n- active_plan_id: (none)\n- current_step: (none)\n- pending_work: (none)\n- latest_plan_event: {}",
-            format_plan_event(latest_plan_event)
-        );
-    };
-    let mode = plan_runtime.mode();
-    let active_plan_path = plan_runtime
-        .active_plan_path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "(none)".to_string());
-    let active_plan_id = mode
-        .active_plan_id()
-        .map(str::to_string)
-        .or_else(|| plan_runtime.active_planning_plan_id())
-        .unwrap_or_else(|| "(none)".to_string());
-    let todos = match mode {
-        crate::core::plan_runtime::PlanState::Planning => plan_runtime.snapshot_session_todos(),
-        crate::core::plan_runtime::PlanState::Executing { .. }
-        | crate::core::plan_runtime::PlanState::Pending { .. } => plan_runtime
-            .active_plan_path()
-            .and_then(|path| read_plan(&path).ok())
-            .map(|plan| plan.frontmatter.todos)
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    format!(
-        "- mode: {}\n- active_plan_path: {}\n- active_plan_id: {}\n- current_step: {}\n- pending_work: {}\n- latest_plan_event: {}",
-        mode.as_str(),
-        active_plan_path,
-        active_plan_id,
-        pick_current_step(&todos),
-        format_pending_work(&todos),
-        format_plan_event(latest_plan_event)
-    )
-}
 
-fn pick_current_step(todos: &[TodoItem]) -> String {
-    todos
-        .iter()
-        .find(|todo| todo.status == TodoStatus::InProgress)
-        .or_else(|| todos.iter().find(|todo| todo.status == TodoStatus::Pending))
-        .map(|todo| todo.content.clone())
-        .unwrap_or_else(|| "(none)".to_string())
-}
 
-fn format_pending_work(todos: &[TodoItem]) -> String {
-    let items: Vec<String> = todos
-        .iter()
-        .filter(|todo| matches!(todo.status, TodoStatus::Pending | TodoStatus::InProgress))
-        .take(5)
-        .map(|todo| format!("{} [{}]", todo.content, todo.status.as_str()))
-        .collect();
-    if items.is_empty() {
-        "(none)".to_string()
-    } else {
-        items.join(" | ")
-    }
-}
 
-fn format_plan_event(event: Option<&crate::core::session::manager::PlanEventRef>) -> String {
-    let Some(event) = event else {
-        return "(none)".to_string();
-    };
-    let kind = match event.kind {
-        crate::core::session::manager::PlanEventKind::Create => "create",
-        crate::core::session::manager::PlanEventKind::Build => "build",
-        crate::core::session::manager::PlanEventKind::Update => "update",
-    };
-    format!("{kind}:{}:{}", event.plan_id, event.path.display())
-}
 
 fn text_content_mut(msg: &mut ChatMessage) -> Option<&mut String> {
     match msg.content.as_mut() {

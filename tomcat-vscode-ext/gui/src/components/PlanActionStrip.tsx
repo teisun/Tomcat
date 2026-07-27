@@ -12,18 +12,21 @@ export function PlanActionStrip({
   canBuild,
   onBuild,
   onSetBuildModel,
+  sessionModel,
 }: {
   availableModels: string[];
   buildModel: string;
   canBuild: boolean;
   onBuild(): void;
   onSetBuildModel(modelId: string): void;
+  sessionModel: string;
 }) {
   return (
     <div className="tc-plan-action-strip" data-testid="plan-action-strip">
       <PlanBuildModelSelect
         availableModels={availableModels}
         onChange={onSetBuildModel}
+        sessionModel={sessionModel}
         value={buildModel}
       />
       <button

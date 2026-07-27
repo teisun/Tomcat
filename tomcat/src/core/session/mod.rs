@@ -14,8 +14,9 @@ pub mod transcript;
 pub(crate) use append_message_chain::find_dangling_tail_tool_call_ids;
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use manager::{
-    build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state, ApiUsage,
-    CompactionResult, ContextState, MessageAppendSink, PlanEventKind, PlanEventRef, SessionManager,
+    build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state, AgentMode,
+    ApiUsage, CompactionResult, ContextState, MessageAppendSink, PlanEventKind, PlanEventRef,
+    ResumeControlState, SessionManager,
 };
 pub use model_thinking::ModelThinkingStore;
 pub use scope::{

@@ -245,7 +245,19 @@ pub struct ProdVerifierDeps {
     pub audit: Arc<dyn crate::infra::AuditRecorder>,
     pub bash_ast: crate::core::permission::BashAstChecker,
     pub plan_runtime: Weak<PlanRuntime>,
-    pub model: String,
+    /// `[verifier].model_override`；语义同 [`super::prod_reviewer::ProdReviewerDeps`]。
+    pub model_override: Option<String>,
+    pub fallback_model: String,
+}
+
+impl ProdVerifierDeps {
+    fn resolve_model(&self, plan_runtime: &PlanRuntime) -> String {
+        super::prod_reviewer::resolve_dispatch_model(
+            self.model_override.as_deref(),
+            plan_runtime.session_model().as_deref(),
+            &self.fallback_model,
+        )
+    }
 }
 
 impl ProdVerifierDispatcher {
@@ -318,7 +330,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             None
         };
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let model = deps.model.clone();
+        let model = deps.resolve_model(&plan_runtime);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;

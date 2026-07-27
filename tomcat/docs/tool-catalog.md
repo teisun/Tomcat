@@ -15,7 +15,7 @@
 - Destructive: `false`
 - Search hint: `read file text utf-8 inspect`
 
-Read a UTF-8 text file. Read a file before editing it. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of a raw decode error.
+Read a UTF-8 text file. Read a file before editing it. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of a raw decode error. A wide read costs the same round trip as a narrow one, so when you are new to a file read a window that actually covers it rather than paging through it 40 lines at a time. Use `paths` to read several files in one call.
 
 Guidelines:
 - Use read to inspect a file before editing it.
@@ -38,7 +38,7 @@ Parameters:
       "type": "integer"
     },
     "line_numbers": {
-      "description": "Render `cat -n` style line numbers (default true). These prefixes are display-only — do not paste `  N\\t...` into edit.old_content.",
+      "description": "Render `cat -n` style line numbers (default true). Applies to every entry when using `paths`. These prefixes are display-only — do not paste `  N\\t...` into edit.old_content.",
       "type": "boolean"
     },
     "offset": {
@@ -47,13 +47,40 @@ Parameters:
       "type": "integer"
     },
     "path": {
-      "description": "Absolute or relative file path to read as UTF-8 text.",
+      "description": "Absolute or relative file path to read as UTF-8 text. Provide exactly one of `path` or `paths`.",
       "type": "string"
+    },
+    "paths": {
+      "description": "Read several files in one call. Mutually exclusive with `path`. Entries are read in order and share one output budget; anything that does not fit is reported as SKIPPED with a resume call rather than dropped silently. Keep a batch to 3-5 files so the combined result stays small enough to remain inline.",
+      "items": {
+        "properties": {
+          "limit": {
+            "description": "Optional max lines for this entry.",
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Optional 1-based start line for this entry.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "File to read.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array"
     }
   },
-  "required": [
-    "path"
-  ],
+  "required": [],
   "type": "object"
 }
 ```
@@ -144,10 +171,11 @@ Parameters:
 - Destructive: `true`
 - Search hint: `edit replace old_content new_content file`
 
-Edit an existing text file by replacing exact text. Two input shapes:
-  Shape A (single): { path, old_content, new_content, replace_all? }
-  Shape B (preferred, multiple): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }
-When both appear, `edits` wins. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
+Edit existing text files by replacing exact text. Three input shapes:
+  Shape A (single segment): { path, old_content, new_content, replace_all? }
+  Shape B (preferred, multiple segments in one file): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }
+  Shape C (several files at once): { files: [ { path, edits: [...] }, ... ] }
+When both appear on one file, `edits` wins. In Shape C every file is validated first and only the files that pass are written, so read the per-file result: a failure means that one file was left untouched, not that the batch rolled back. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
 
 Guidelines:
 - Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit.
@@ -159,7 +187,7 @@ Parameters:
 
 ```json
 {
-  "description": "Edit a file (read -> edit). Provide Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
+  "description": "Edit files (read -> edit). Shape A (top-level old_content/new_content), Shape B (edits[]) for one file, or Shape C (files[]) for several files in one call; when both appear on one file, `edits` wins. All segments match each file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
   "properties": {
     "edits": {
       "description": "Shape B (preferred): edit segments applied to the file's ORIGINAL snapshot. Overlapping spans are rejected.",
@@ -188,6 +216,61 @@ Parameters:
       "minItems": 1,
       "type": "array"
     },
+    "files": {
+      "description": "Shape C: edit several files in one call. Mutually exclusive with `path`. Each file must appear at most once — merge its segments instead of listing it twice. Every file is checked first, then only the ones that pass are written; a file that fails is left untouched on disk and reported individually, so a partial batch is a normal outcome you must read the per-file result for.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "edits": {
+            "description": "Multi-segment form for this file; same semantics as the top-level `edits`.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "new_content": {
+                  "type": "string"
+                },
+                "old_content": {
+                  "type": "string"
+                },
+                "replace_all": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "old_content",
+                "new_content"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "new_content": {
+            "description": "Replacement text for the single-segment form.",
+            "type": "string"
+          },
+          "old_content": {
+            "description": "Single-segment form for this file.",
+            "type": "string"
+          },
+          "path": {
+            "description": "File to edit.",
+            "type": "string"
+          },
+          "replace_all": {
+            "description": "Replace every occurrence in the single-segment form. Defaults to false.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array"
+    },
     "new_content": {
       "description": "Shape A: replacement text.",
       "type": "string"
@@ -205,9 +288,6 @@ Parameters:
       "type": "boolean"
     }
   },
-  "required": [
-    "path"
-  ],
   "type": "object"
 }
 ```
@@ -335,7 +415,7 @@ Parameters:
       "type": "boolean"
     },
     "context": {
-      "description": "[content only] Surrounding context lines when output_mode=content. Ignored otherwise.",
+      "description": "[content only] Surrounding context lines when output_mode=content. Defaults to 3 so you can judge a hit without a follow-up read; pass 0 for matched lines only. Ignored otherwise.",
       "minimum": 0,
       "type": "integer"
     },
@@ -1062,6 +1142,52 @@ Parameters:
   },
   "required": [
     "url"
+  ],
+  "type": "object"
+}
+```
+
+### `dispatch_agent`
+
+- Label: Dispatch Agent
+- Category: `exec`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `dispatch agent explorer subagent investigate parallel findings`
+
+Delegate read-only codebase investigation to one or more explorer subagents, running in parallel. Pass `tasks`: 1-6 entries of `{ id, prompt }`, where `prompt` is a self-contained question (the subagent sees none of this conversation) and `id` is a short label used to match answers back to questions. Each subagent may only read (`read` / `search_files` / `list_dir` / read-only `bash`) and returns findings as `path:line` references plus a conclusion — never raw file contents. Everything it read is discarded with it, so your context grows by a few hundred words per task instead of by every file. Use it for open-ended investigation across areas you have not read yet; read files yourself when you already know exactly which lines you need.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "tasks": {
+      "description": "Investigation tasks to run in parallel. Keep each one scoped to a single area; split unrelated questions into separate tasks instead of writing one broad prompt.",
+      "items": {
+        "properties": {
+          "id": {
+            "description": "Short unique label such as `webview-paste`. Used to match the returned report back to this task. Defaults to `task-<n>` when omitted.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "Self-contained question. The subagent cannot see this conversation, so state the goal, the area to look at, and what a useful answer contains.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "maxItems": 6,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "tasks"
   ],
   "type": "object"
 }

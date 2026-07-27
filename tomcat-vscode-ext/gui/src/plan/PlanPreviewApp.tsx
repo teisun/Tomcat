@@ -351,6 +351,7 @@ export function PlanPreviewApp({
           onSetBuildModel={(modelId) =>
             send(vscodeApi, { data: { modelId }, type: "setBuildModel" })
           }
+          sessionModel={state.sessionModel}
         />
       ) : null}
       <div className="tc-plan-preview__content" data-testid="plan-content" ref={contentRef}>

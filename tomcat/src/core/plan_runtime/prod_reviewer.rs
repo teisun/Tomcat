@@ -12,6 +12,10 @@ use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcom
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::system_prompt::render_available_skills_prompt;
 use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::plan_runtime::explorer::{
+    build_explorer_prompt, explorer_system_prompt_text, ExplorerReport, ExplorerTask,
+    EXPLORER_ALLOWED_TOOLS,
+};
 use crate::core::plan_runtime::code_reviewer::{
     build_code_review_prompt, code_review_system_prompt_text,
     code_reviewer_allowed_tools_with_policy, collect_git_diff_context, CodeReviewSummary,
@@ -23,7 +27,9 @@ use crate::core::plan_runtime::plan_reviewer::{
 use crate::core::plan_runtime::review::{
     count_assistant_turns, extract_review_text, parse_review_block, resolve_internal_tools,
 };
-use crate::core::plan_runtime::{CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime};
+use crate::core::plan_runtime::{
+    CodeReviewerDispatcher, ExplorerDispatcher, PlanReviewerDispatcher, PlanRuntime,
+};
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::CheckpointStore;
@@ -65,9 +71,40 @@ pub struct ProdReviewerDeps {
     pub bash_ast: crate::core::permission::BashAstChecker,
     /// Weak 引用避免与 `PlanRuntime` 内部 dispatcher 字段形成 cycle。
     pub plan_runtime: Weak<PlanRuntime>,
-    pub model: String,
+    /// `[reviewer].model_override`。为空时在**每次派发**时取当前会话模型，
+    /// 而不是启动时定死 `config.llm.default_model`——否则你在 UI 上换了模型，
+    /// reviewer 还在用旧的那个。
+    pub model_override: Option<String>,
+    /// 会话模型也拿不到时（例如第一回合之前就派发）的最后兜底。
+    pub fallback_model: String,
     /// 子 AgentLoop `max_tool_rounds`（`TOMCAT_REVIEWER_MAX_TURNS` 默认 64）。
     pub max_turns: u32,
+}
+
+impl ProdReviewerDeps {
+    fn resolve_model(&self, plan_runtime: &PlanRuntime) -> String {
+        resolve_dispatch_model(
+            self.model_override.as_deref(),
+            plan_runtime.session_model().as_deref(),
+            &self.fallback_model,
+        )
+    }
+}
+
+/// 子 Agent 派发模型的解析顺序：显式 override > 当前会话模型 > 启动兜底。
+///
+/// 会话模型放在配置兜底之前，是因为你在 UI 上换模型是当下的、明确的意图；
+/// 启动时读到的 `llm.default_model` 只是缺省值。空字符串一律当作"没配"。
+pub(crate) fn resolve_dispatch_model(
+    model_override: Option<&str>,
+    session_model: Option<&str>,
+    fallback: &str,
+) -> String {
+    model_override
+        .filter(|m| !m.is_empty())
+        .or(session_model.filter(|m| !m.is_empty()))
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 impl ProdPlanReviewerDispatcher {
@@ -136,7 +173,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
             None
         };
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let model = deps.model.clone();
+        let model = deps.resolve_model(&plan_runtime);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
@@ -272,7 +309,12 @@ impl ProdCodeReviewerDispatcher {
 
 #[async_trait]
 impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
-    async fn dispatch(&self, plan_id: &str, plan_text: &str) -> CodeReviewSummary {
+    async fn dispatch(
+        &self,
+        plan_id: &str,
+        plan_text: &str,
+        open_findings: &[crate::core::plan_runtime::review::Finding],
+    ) -> CodeReviewSummary {
         let Some(deps) = self.deps.as_ref() else {
             return CodeReviewSummary::aborted_with(format!(
                 "[{}] 生产 code reviewer 子 Agent 未注入依赖（stub 模式）",
@@ -300,6 +342,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             workspace_root,
             &diff_stat,
             &changed_files,
+            open_findings,
         );
         let turns_limit = deps.max_turns.max(1);
 
@@ -331,7 +374,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             None
         };
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let model = deps.model.clone();
+        let model = deps.resolve_model(&plan_runtime);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
@@ -573,6 +616,244 @@ fn build_code_summary_from_outcome(
             s.reviewer_stop_reason = "spawn_error".into();
             s.child_session_id = child_session_id.to_string();
             (s, SubagentOutcomeLabel::Failed)
+        }
+    }
+}
+
+/// 生产 explorer dispatcher（`dispatch_agent` 的后端）。装配点：`ChatContext::from_config`。
+pub struct ProdExplorerDispatcher {
+    origin: &'static str,
+    deps: Option<ProdReviewerDeps>,
+}
+
+impl ProdExplorerDispatcher {
+    pub fn stub(origin: &'static str) -> Self {
+        Self { origin, deps: None }
+    }
+
+    pub fn new(origin: &'static str, deps: ProdReviewerDeps) -> Self {
+        Self {
+            origin,
+            deps: Some(deps),
+        }
+    }
+}
+
+#[async_trait]
+impl ExplorerDispatcher for ProdExplorerDispatcher {
+    async fn dispatch(&self, task: &ExplorerTask) -> ExplorerReport {
+        let Some(deps) = self.deps.as_ref() else {
+            return ExplorerReport::aborted_with(
+                &task.id,
+                format!("[{}] explorer 子 Agent 未注入依赖（stub 模式）", self.origin),
+            );
+        };
+        let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
+            return ExplorerReport::aborted_with(
+                &task.id,
+                format!("[{}] PlanRuntime 已被 drop，explorer 取消派发", self.origin),
+            );
+        };
+
+        let workspace_root = Some(deps.agent_workspace_dir.as_path());
+        let initial_user_message = build_explorer_prompt(task, workspace_root);
+        let turns_limit = deps.max_turns.max(1);
+
+        let llm = Arc::clone(&deps.llm);
+        let compaction_provider = deps.compaction_provider.clone();
+        let primitive = Arc::clone(&deps.primitive);
+        let event_bus = Arc::clone(&deps.event_bus);
+        let agent_trail_dir = deps.agent_trail_dir.clone();
+        let checkpoint_store = Arc::clone(&deps.checkpoint_store);
+        let context_config = deps.context_config.clone();
+        let read_file_state = Arc::clone(&deps.read_file_state);
+        let openai_files_runtime = deps.openai_files_runtime.clone();
+        let bash_config = deps.bash_config.clone();
+        let gate = Arc::clone(&deps.gate);
+        let confirmation = Arc::clone(&deps.confirmation);
+        let audit = Arc::clone(&deps.audit);
+        let bash_ast = deps.bash_ast.clone();
+        let tool_defs = resolve_internal_tools(EXPLORER_ALLOWED_TOOLS);
+        let plan_runtime_for_loop = Arc::clone(&plan_runtime);
+        let model = deps.resolve_model(&plan_runtime);
+        let parent_session_id = deps.parent_session_id.clone();
+        let parent_session_id_for_closure = parent_session_id.clone();
+        let origin = self.origin;
+        let task_id = task.id.clone();
+        let task_id_for_closure = task_id.clone();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<ExplorerReport>();
+
+        let spawn_result = deps
+            .agent_registry
+            .spawn_subagent_internal(
+                &parent_session_id,
+                SubagentType::Explorer,
+                move |spawn_ctx| async move {
+                    let child_session_id = spawn_ctx.child_session_id.clone();
+                    let cancel_token = spawn_ctx.cancel_token.clone();
+                    let transcript_root = agent_trail_dir.clone();
+                    let bash_task_registry =
+                        crate::core::tools::primitive::build_bash_task_registry(
+                            &bash_config,
+                            std::path::PathBuf::from(&transcript_root)
+                                .join("tool-results")
+                                .join(format!("subagent-{}", spawn_ctx.subagent_type.as_str()))
+                                .join(&child_session_id),
+                            gate.clone(),
+                            confirmation.clone(),
+                            audit.clone(),
+                            bash_ast.clone(),
+                        );
+                    let transcript_sink =
+                        crate::core::session::subagent_transcript::open_subagent_transcript(
+                            &transcript_root,
+                            &child_session_id,
+                            SubagentType::Explorer,
+                            &model,
+                            &parent_session_id_for_closure,
+                        );
+
+                    let system_text = format!(
+                        "{}\n(max_turns budget: {} reasoning turns)\n",
+                        explorer_system_prompt_text(),
+                        turns_limit
+                    );
+                    let cfg = AgentLoopConfig {
+                        max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        max_tool_rounds: turns_limit as usize,
+                        retry_base_delay_ms:
+                            crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
+                        model,
+                        thinking_level: None,
+                        session_id: child_session_id.clone(),
+                        tool_definitions: tool_defs,
+                        context_config,
+                        compaction_provider,
+                        title_provider: None,
+                        title_model: String::new(),
+                        agent_trail_dir,
+                        read_file_state,
+                        openai_files_runtime,
+                        checkpoint_store,
+                        message_append_sink: transcript_sink,
+                        parent_session_id: Some(parent_session_id_for_closure.clone()),
+                        spawn_depth: spawn_ctx.spawn_depth,
+                        subagent_type: SubagentType::Explorer,
+                        plan_runtime: Some(plan_runtime_for_loop),
+                        skill_set: None,
+                    };
+                    let mut agent_loop =
+                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
+                            .with_bash_task_registry(bash_task_registry);
+                    let initial_messages = vec![
+                        ChatMessage::system(&system_text),
+                        ChatMessage::user(&initial_user_message),
+                    ];
+                    let run_outcome = agent_loop.run(initial_messages).await;
+
+                    let (report, label) = build_explorer_report_from_outcome(
+                        origin,
+                        &task_id_for_closure,
+                        &child_session_id,
+                        turns_limit,
+                        run_outcome,
+                    );
+                    let _ = tx.send(report.clone());
+
+                    SubagentOutcome {
+                        child_session_id: child_session_id.clone(),
+                        subagent_type: SubagentType::Explorer,
+                        outcome_label: label,
+                        error_message: if report.aborted {
+                            Some(report.report.clone())
+                        } else {
+                            None
+                        },
+                    }
+                },
+            )
+            .await;
+
+        match spawn_result {
+            Ok(_) => match rx.await {
+                Ok(report) => report,
+                Err(_) => ExplorerReport::aborted_with(
+                    &task_id,
+                    format!(
+                        "[{}] explorer 子 Agent 退出但 report channel 提前关闭",
+                        self.origin
+                    ),
+                ),
+            },
+            Err(e) => {
+                let mut r = ExplorerReport::aborted_with(
+                    &task_id,
+                    format!("[{}] explorer spawn 失败：{e}", self.origin),
+                );
+                r.turns_limit = turns_limit;
+                r.stop_reason = "spawn_error".into();
+                r
+            }
+        }
+    }
+}
+
+fn build_explorer_report_from_outcome(
+    origin: &'static str,
+    task_id: &str,
+    child_session_id: &str,
+    turns_limit: u32,
+    outcome: AgentRunOutcome,
+) -> (ExplorerReport, SubagentOutcomeLabel) {
+    match outcome {
+        AgentRunOutcome::Completed(result) => {
+            let turns_used = count_assistant_turns(&result.new_messages);
+            let text = extract_review_text(&result);
+            let report = ExplorerReport {
+                id: task_id.to_string(),
+                aborted: text.trim().is_empty(),
+                report: if text.trim().is_empty() {
+                    format!("[{origin}] explorer 未产出任何结论（child={child_session_id}）")
+                } else {
+                    text
+                },
+                turns_used,
+                turns_limit,
+                stop_reason: if turns_used >= turns_limit {
+                    "max_turns".into()
+                } else {
+                    "completed".into()
+                },
+                child_session_id: child_session_id.to_string(),
+            };
+            let label = if report.aborted {
+                SubagentOutcomeLabel::Failed
+            } else {
+                SubagentOutcomeLabel::Completed
+            };
+            (report, label)
+        }
+        AgentRunOutcome::Interrupted(result) => {
+            let mut r = ExplorerReport::aborted_with(
+                task_id,
+                format!("[{origin}] explorer 被父 abort / cancel（child={child_session_id}）"),
+            );
+            r.turns_used = count_assistant_turns(&result.new_messages);
+            r.turns_limit = turns_limit;
+            r.stop_reason = "parent_abort".into();
+            r.child_session_id = child_session_id.to_string();
+            (r, SubagentOutcomeLabel::Interrupted)
+        }
+        AgentRunOutcome::Failed(e) => {
+            let mut r = ExplorerReport::aborted_with(
+                task_id,
+                format!("[{origin}] explorer 子 Agent 失败：{e}"),
+            );
+            r.turns_limit = turns_limit;
+            r.stop_reason = "spawn_error".into();
+            r.child_session_id = child_session_id.to_string();
+            (r, SubagentOutcomeLabel::Failed)
         }
     }
 }

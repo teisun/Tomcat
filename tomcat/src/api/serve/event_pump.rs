@@ -55,6 +55,7 @@ pub(super) const EVENT_NAMES: &[&str] = &[
     wire::WIRE_PLAN_VERIFY,
     wire::WIRE_PLAN_REVIEW_WARNING,
     wire::WIRE_PLAN_CODE_REVIEW_WARNING,
+    wire::WIRE_PLAN_CODE_REVIEW_EXHAUSTED,
     wire::WIRE_PLAN_COMPLETE,
     wire::WIRE_PLAN_TODOS,
     wire::WIRE_SESSION_TITLE_UPDATED,

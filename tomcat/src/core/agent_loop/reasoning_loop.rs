@@ -149,7 +149,8 @@ pub(super) async fn run_reasoning_loop(
 
         if tool_calls.is_empty() {
             // 收束分支：text-only 回合的 timing ⑤ 与 TurnEnd 由 turn_finalize 处理。
-            turn_finalize::finalize_turn_after_text(
+            // completion guard 命中时回合并未结束，继续下一轮而不是返回。
+            let outcome = turn_finalize::finalize_turn_after_text(
                 agent,
                 messages,
                 &content_buf,
@@ -163,8 +164,14 @@ pub(super) async fn run_reasoning_loop(
             )
             .await
             .map_err(LoopError::Fatal)?;
-            return Ok(final_text);
+            match outcome {
+                turn_finalize::TurnOutcome::Finished => return Ok(final_text),
+                turn_finalize::TurnOutcome::Continue => continue,
+            }
         }
+
+        // 模型重新动手了，连续注入计数归零。
+        agent.completion_guard_injections = 0;
 
         // tool_calls 调度（block / steering / cancel / 事件配对 / 计费 / push）
         // 整块委托给 tool_dispatcher::run_tool_calls；函数内部严格保持原事件顺序：

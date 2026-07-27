@@ -1918,12 +1918,55 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
   }
 
+  /** The model the given session is currently running on ("" when unknown). */
+  sessionModel(sessionId: string): string {
+    return this.stateStore.snapshotSession(sessionId)?.model ?? "";
+  }
+
+  /** Same, for the session the user is looking at (plan preview has no sessionId). */
+  activeSessionModel(): string {
+    const activeSessionId = this.stateStore.view().activeSessionId;
+    return activeSessionId ? this.sessionModel(activeSessionId) : "";
+  }
+
+  /**
+   * Ask before building on a model other than the one the session is on.
+   *
+   * `tomcat.plan.buildModel` is a *global* setting, so a value someone picked
+   * weeks ago in another window silently decides which model executes the plan.
+   * The dialog only states facts — the two models and where the value came from
+   * — and leaves the judgement to the user. Returns false when they cancel.
+   */
+  private async confirmBuildModel(buildModel: string, sessionModel: string): Promise<boolean> {
+    if (!buildModel || !sessionModel || buildModel === sessionModel) {
+      return true;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `Build this plan with ${buildModel}?`,
+      {
+        detail: [
+          `Session model: ${sessionModel}`,
+          `This build will use: ${buildModel}`,
+          "",
+          `Source: setting ${TOMCAT_CONFIG_SECTION}.plan.buildModel`,
+        ].join("\n"),
+        modal: true,
+      },
+      "Continue Build",
+    );
+    return choice === "Continue Build";
+  }
+
   /**
    * Single build path shared by the chat PlanFileCard and the plan preview
    * editor: apply the global build model (when set) before entering build mode.
    */
   private async runPlanBuild(sessionId: string, planId?: string | null): Promise<void> {
     const buildModel = this.readBuildModelConfig();
+    if (!(await this.confirmBuildModel(buildModel, this.sessionModel(sessionId)))) {
+      // 取消就是彻底取消：既不 build，也不动会话模型。
+      return;
+    }
     try {
       if (buildModel) {
         const modelResponse = await this.deps.messenger.sendSetModel(sessionId, buildModel);

@@ -69,7 +69,7 @@ fn compact_tool_results_reduces_budget() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
     assert!(reduced > 0);
 }
 
@@ -83,7 +83,7 @@ fn compact_tool_results_protects_recent() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
     assert_eq!(reduced, 0);
 }
 
@@ -100,7 +100,7 @@ fn compact_tool_results_skips_small() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let reduced = compact_tool_results(&mut state, &config).chars_freed;
     assert_eq!(reduced, 0);
 }
 
@@ -248,6 +248,7 @@ async fn preheat_retries_with_exponential_backoff() {
         provider,
         &cfg,
         Arc::clone(&event_emitter),
+        None,
     );
     assert!(
         did_start,
@@ -340,6 +341,7 @@ async fn preheat_exhausted_writes_failure_entry_to_transcript() {
         provider,
         &cfg,
         Arc::clone(&event_emitter),
+        None,
     );
     assert!(did_start);
     let outcome = preheat.await_result(Duration::from_secs(60)).await;

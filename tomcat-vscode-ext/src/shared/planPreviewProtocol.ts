@@ -37,6 +37,8 @@ export interface PlanPreviewStateSnapshot {
   path: string;
   planId: string | null;
   raw: string;
+  /** Model the chat session is currently on; the build-model dropdown falls back to it. */
+  sessionModel: string;
   state: PlanFileState | null;
   title: string | null;
   todos: PlanTodo[];

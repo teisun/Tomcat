@@ -7,14 +7,16 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::core::session::manager::{PlanEventKind, PlanEventRef};
+use crate::core::session::manager::{
+    AgentMode, PlanEventKind, PlanEventRef, PlanModeTransition, ResumeControlState,
+};
 use crate::core::session::transcript::{
     read_entries_tail_with_stats, TranscriptEntry, TranscriptReadStats,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
-const RESUME_INDEX_SCHEMA_VERSION: u32 = 1;
+const RESUME_INDEX_SCHEMA_VERSION: u32 = 2;
 const RECENT_TURN_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -211,6 +213,13 @@ pub(crate) struct ResumeIndex {
     pub recent_turn_starts: Vec<ResumeAnchor>,
     pub latest_day_first_entry: Option<ResumeDayAnchor>,
     pub latest_plan_event: Option<StoredPlanEventRef>,
+    /// schema v2：会话当前所处的模式。旧 sidecar 没有这项，恢复时走推断兜底。
+    #[serde(default)]
+    pub agent_mode: Option<AgentMode>,
+    #[serde(default)]
+    pub active_plan_path: Option<String>,
+    #[serde(default)]
+    pub active_plan_id: Option<String>,
 }
 
 impl ResumeIndex {
@@ -218,6 +227,17 @@ impl ResumeIndex {
         self.latest_plan_event
             .as_ref()
             .and_then(StoredPlanEventRef::to_plan_event_ref)
+    }
+
+    pub(crate) fn resume_control_state(&self) -> ResumeControlState {
+        ResumeControlState {
+            mode: self.agent_mode,
+            plan_path: self
+                .active_plan_path
+                .as_deref()
+                .and_then(|raw| crate::infra::platform::normalize_path(raw).ok()),
+            plan_id: self.active_plan_id.clone(),
+        }
     }
 }
 
@@ -286,6 +306,13 @@ fn is_boundary(entry: &TranscriptEntry) -> bool {
 fn maybe_plan_event(entry: &TranscriptEntry) -> Option<PlanEventRef> {
     match entry {
         TranscriptEntry::Custom(custom) => PlanEventRef::from_custom_event(&custom.extra),
+        _ => None,
+    }
+}
+
+fn maybe_plan_mode_transition(entry: &TranscriptEntry) -> Option<PlanModeTransition> {
+    match entry {
+        TranscriptEntry::Custom(custom) => PlanModeTransition::from_custom_event(&custom.extra),
         _ => None,
     }
 }
@@ -362,6 +389,17 @@ fn apply_entry(index: &mut ResumeIndex, entry: &TranscriptEntry, ordinal: usize)
         index.latest_plan_event =
             Some(StoredPlanEventRef::from_plan_event_ref(plan_event, &anchor));
     }
+    if let Some(transition) = maybe_plan_mode_transition(entry) {
+        if let Some(mode) = transition.mode {
+            index.agent_mode = Some(mode);
+        }
+        if let Some(plan_id) = transition.plan_id {
+            index.active_plan_id = Some(plan_id);
+        }
+        if let Some(path) = transition.path {
+            index.active_plan_path = Some(path.to_string_lossy().to_string());
+        }
+    }
 }
 
 fn build_empty_index(transcript_path: &Path) -> Result<ResumeIndex, AppError> {
@@ -376,6 +414,9 @@ fn build_empty_index(transcript_path: &Path) -> Result<ResumeIndex, AppError> {
         recent_turn_starts: Vec::new(),
         latest_day_first_entry: None,
         latest_plan_event: None,
+        agent_mode: None,
+        active_plan_path: None,
+        active_plan_id: None,
     })
 }
 

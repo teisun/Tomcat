@@ -903,6 +903,7 @@ export async function activate(
       vscode.workspace
         .getConfiguration(TOMCAT_CONFIG_SECTION)
         .get<string>("plan.buildModel", "") ?? "",
+    getSessionModel: () => webviewProvider.activeSessionModel(),
     messenger,
     openExternal: async (href) => {
       await vscode.env.openExternal(vscode.Uri.parse(href));
@@ -938,21 +939,15 @@ export async function activate(
   const planSelectBuildModelCommand = vscode.commands.registerCommand(
     TOMCAT_PLAN_SELECT_BUILD_MODEL_COMMAND,
     async () => {
-      const current = planPreviewProvider.getBuildModel();
+      const current =
+        planPreviewProvider.getBuildModel() || webviewProvider.activeSessionModel();
       const available = await planPreviewProvider.getAvailableModels();
       type ModelQuickPickItem = vscode.QuickPickItem & { modelId: string };
-      const items: ModelQuickPickItem[] = [
-        {
-          description: current === "" ? "$(check)" : undefined,
-          label: "Session default",
-          modelId: "",
-        },
-        ...available.map<ModelQuickPickItem>((model) => ({
-          description: model === current ? "$(check)" : undefined,
-          label: model,
-          modelId: model,
-        })),
-      ];
+      const items: ModelQuickPickItem[] = available.map<ModelQuickPickItem>((model) => ({
+        description: model === current ? "$(check)" : undefined,
+        label: model,
+        modelId: model,
+      }));
       const picked = await vscode.window.showQuickPick(items, {
         placeHolder: "Select the model used when building plans",
         title: "Tomcat: Build Model",

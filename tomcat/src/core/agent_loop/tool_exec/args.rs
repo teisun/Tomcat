@@ -37,47 +37,112 @@ pub(super) fn parse_edit_args(
     let path = args
         .get("path")
         .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
         .ok_or_else(|| "edit: 缺少必填字段 `path`".to_string())?;
 
-    if let Some(edits_v) = args.get("edits") {
+    let ops = parse_edit_ops(args, "edit")?;
+    Ok((path, ops))
+}
+
+/// 一条什么都不改的编辑段：`old_content` 与 `new_content` 相同。
+///
+/// 走 strict schema 的模型会把它用不到的那套字段也一并填上 —— 用 `files` 批量改 5 个
+/// 文件时，顶层照样得给个 `edits`。实测它有两种填法，都是 no-op：两边留空，或者两边
+/// 都写字面量 `"placeholder"`。这种空壳必须在判定形态之前丢掉，否则「`path`/`edits`
+/// 与 `files` 互斥」这条校验会把每一次批量编辑都判死（实测 16 次连续失败）。
+///
+/// 用 `old == new` 而不是「两边都空」当判据，是因为它说的正是「这段不改任何东西」，
+/// 与模型拿什么字符串来填无关。删除内容是 `old` 非空、`new` 为空，不会命中。
+fn is_placeholder_segment(seg: &serde_json::Value) -> bool {
+    let text = |key: &str| seg.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    text("old_content") == text("new_content")
+}
+
+/// 这层参数里的编辑段：`edits` 数组形态，或单段的 `old_content` / `new_content`。
+pub(super) fn edit_segments(args: &serde_json::Value) -> Vec<&serde_json::Value> {
+    match args.get("edits").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().collect(),
+        None => vec![args],
+    }
+}
+
+/// 一条编辑段的身份：改什么、改成什么。用于判断两处写的是不是同一个意图。
+pub(super) fn segment_identity(seg: &serde_json::Value) -> (String, String) {
+    let text = |key: &str| {
+        seg.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    (text("old_content"), text("new_content"))
+}
+
+/// `edits` 数组里有没有非空壳的段。
+fn has_real_edits_in(edits: &serde_json::Value) -> bool {
+    edits
+        .as_array()
+        .is_some_and(|arr| arr.iter().any(|seg| !is_placeholder_segment(seg)))
+}
+
+/// 这层参数里有没有**真的**编辑内容（用于形态判定，不做校验）。
+pub(super) fn has_real_edits(args: &serde_json::Value) -> bool {
+    args.get("edits").is_some_and(has_real_edits_in) || !is_placeholder_segment(args)
+}
+
+/// 解析一个文件的编辑段：`edits` 数组形态，或单段的 `old_content` / `new_content`。
+/// `scope` 只用于错误信息定位（单文件是 `edit`，批量是 `files[i]`）。
+pub(super) fn parse_edit_ops(
+    args: &serde_json::Value,
+    scope: &str,
+) -> Result<Vec<EditOperation>, String> {
+    // 非数组要留给下面的类型错误报出来，只有「是数组但全是空壳」才当没给。
+    if let Some(edits_v) = args
+        .get("edits")
+        .filter(|v| !v.is_array() || has_real_edits_in(v))
+    {
         let arr = edits_v
             .as_array()
-            .ok_or_else(|| "edit: `edits` 必须是数组".to_string())?;
+            .ok_or_else(|| format!("edit: `{scope}.edits` 必须是数组"))?;
         if arr.is_empty() {
-            return Err("edit: `edits` 至少需要一条编辑段".to_string());
+            return Err(format!("edit: `{scope}.edits` 至少需要一条编辑段"));
         }
         let mut ops = Vec::with_capacity(arr.len());
-        for (i, seg) in arr.iter().enumerate() {
+        for (i, seg) in arr
+            .iter()
+            .enumerate()
+            .filter(|(_, seg)| !is_placeholder_segment(seg))
+        {
             let old = seg
                 .get("old_content")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("edit: edits[{}].old_content 缺失或非字符串", i))?;
+                .ok_or_else(|| format!("edit: {scope}.edits[{i}].old_content 缺失或非字符串"))?;
             let new_c = seg
                 .get("new_content")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("edit: edits[{}].new_content 缺失或非字符串", i))?;
+                .ok_or_else(|| format!("edit: {scope}.edits[{i}].new_content 缺失或非字符串"))?;
             let replace_all = seg
                 .get("replace_all")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             ops.push(make_edit_op(old, new_c, replace_all));
         }
-        return Ok((path, ops));
+        return Ok(ops);
     }
 
     let old = args
         .get("old_content")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "edit: 缺少 `old_content`（或 `edits`）".to_string())?;
+        .ok_or_else(|| format!("edit: {scope} 缺少 `old_content`（或 `edits`）"))?;
     let new_c = args
         .get("new_content")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "edit: 缺少 `new_content`".to_string())?;
+        .ok_or_else(|| format!("edit: {scope} 缺少 `new_content`"))?;
     let replace_all = args
         .get("replace_all")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    Ok((path, vec![make_edit_op(old, new_c, replace_all)]))
+    Ok(vec![make_edit_op(old, new_c, replace_all)])
 }
 
 fn make_edit_op(old: &str, new_c: &str, replace_all: bool) -> EditOperation {

@@ -1,6 +1,7 @@
 pub(super) mod background_unavailable;
 pub(super) mod bash;
 pub(super) mod config;
+pub(super) mod dispatch_agent;
 pub(super) mod edit;
 pub(super) mod hashline_edit;
 pub(super) mod list_dir;
@@ -17,6 +18,7 @@ pub(super) mod write;
 
 pub(super) use bash::handle_bash;
 pub(super) use config::{handle_config_get, handle_config_set};
+pub(super) use dispatch_agent::handle_dispatch_agent;
 pub(super) use edit::handle_edit;
 pub(super) use hashline_edit::handle_hashline_edit;
 pub(super) use list_dir::handle_list_dir;

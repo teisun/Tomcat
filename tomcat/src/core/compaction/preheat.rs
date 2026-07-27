@@ -70,6 +70,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, MessageKind};
+use crate::core::plan_runtime::ControlSnapshot;
 use crate::core::session::manager::{
     compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, CompactionResult,
 };
@@ -81,6 +82,7 @@ use crate::infra::error::AppError;
 use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::AgentEvent;
 
+use super::machine_block;
 use super::truncation::floor_char_boundary;
 
 const MAX_PREHEAT_RETRIES: u32 = 3;
@@ -95,8 +97,8 @@ const MAX_PREHEAT_RETRIES: u32 = 3;
 //      在摘要场景误调工具，与 generate_summary 中 ChatRequest.tools = None 形成双保险。
 //   2. 指令区追加 `First reason internally, then output the final summary.` —— Two-pass
 //      decision freeze（关闭 #T-044）的替代策略，让模型走内部隐式推理，避免双轮草稿翻倍 token。
-//   3. 9 节结构 + Recent User Messages 保留最近 10 条用户原话 + Next Steps verbatim 引用，
-//      让下一轮 LLM 能从摘要直接接力，不再丢任务上下文。
+//   3. 分节结构 + Next Steps verbatim 引用，让下一轮 LLM 能从摘要直接接力。
+//      用户原话不再让模型复述（模型会编），改由 `machine_block` 在模型产出后由代码逐字拼接。
 //   4. 历史模板对齐 context-management.md §7.1 / §7.3 仍保留，Phase G 由
 //      `impl-G-arch-spec-doc` 在 `Compaction v2（T2-P0-002）` 小节统一记录。
 // ---------------------------------------------------------------------------
@@ -135,9 +137,6 @@ Use this EXACT format:
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
 
-## Recent User Messages
-- [Verbatim or near-verbatim quote of the 10 most recent non-tool user messages, to preserve task intent]
-
 ## Next Steps
 1. [Most immediate next step. Include a short quote from the latest conversation showing what was being worked on.]
 2. [Subsequent steps]
@@ -159,13 +158,13 @@ RULES:
 - PRESERVE information from the previous summary that is still relevant
 - ADD new progress, decisions, errors, and context from the new messages
 - UPDATE Progress: move items from "In Progress" to "Done" when completed
-- UPDATE "Next Steps" and "Recent User Messages" to reflect the latest state
+- UPDATE "Next Steps" to reflect the latest state
 - REMOVE information that is no longer relevant to free space
 - The complete updated summary should be under ~8K tokens
 - When the old summary is already large, compress older details to stay within budget
 - PRESERVE exact file paths, function names, and error messages
 
-Use the EXACT same format as the original summary (Goal / Constraints & Preferences / Progress / Errors Encountered / Key Decisions / Recent User Messages / Next Steps / Critical Context)."#;
+Use the EXACT same format as the original summary (Goal / Constraints & Preferences / Progress / Errors Encountered / Key Decisions / Next Steps / Critical Context)."#;
 
 // ---------------------------------------------------------------------------
 // PreheatState (internal — not pub)
@@ -330,6 +329,7 @@ impl Preheat {
     /// 返回 true = 已启动。
     ///
     /// 接受独立参数而非 `&ContextState`，避免与 `ctx.preheat` 的 `&mut self` 冲突。
+    #[allow(clippy::too_many_arguments)]
     pub fn try_start(
         &mut self,
         usage_ratio: f64,
@@ -338,6 +338,7 @@ impl Preheat {
         llm: Arc<dyn LlmProvider>,
         config: &ContextConfig,
         emitter: Arc<ScopedEventEmitter>,
+        control: Option<ControlSnapshot>,
     ) -> bool {
         if !self.is_idle() {
             return false;
@@ -374,6 +375,7 @@ impl Preheat {
                     existing_summary.as_deref(),
                     &*llm,
                     &compaction_model,
+                    control.as_ref(),
                 )
                 .await
                 {
@@ -530,6 +532,7 @@ impl Preheat {
 
     /// ExhaustedPending → Running（条件：ratio >= 0.50）。
     /// 内部先转 Idle 再调 try_start。
+    #[allow(clippy::too_many_arguments)]
     pub fn try_restart_if_pending(
         &mut self,
         usage_ratio: f64,
@@ -538,12 +541,21 @@ impl Preheat {
         llm: Arc<dyn LlmProvider>,
         config: &ContextConfig,
         emitter: Arc<ScopedEventEmitter>,
+        control: Option<ControlSnapshot>,
     ) -> bool {
         if !self.is_exhausted_pending() {
             return false;
         }
         self.state = PreheatState::Idle;
-        self.try_start(usage_ratio, messages, transcript_path, llm, config, emitter)
+        self.try_start(
+            usage_ratio,
+            messages,
+            transcript_path,
+            llm,
+            config,
+            emitter,
+            control,
+        )
     }
 
     /// 非阻塞获取结果。CachedCompleted → Idle + Completed；
@@ -640,16 +652,22 @@ impl Preheat {
 // ---------------------------------------------------------------------------
 
 /// 根据 messages snapshot 生成 LLM 摘要（首次或 UPDATE 模式）。
+///
+/// 模型只负责中间那段叙述。控制态与用户原话由 [`machine_block`] 在模型返回**之后**
+/// 拼到最前面，`## Progress` 在有 active plan 时也由代码按计划文件重写——
+/// 这三样东西不经过模型，也就不可能被模型编造。
 pub async fn generate_summary(
     snapshot: &[ChatMessage],
     previous_summary: Option<&str>,
     llm: &dyn LlmProvider,
     compaction_model: &str,
+    control: Option<&ControlSnapshot>,
 ) -> Result<String, AppError> {
     let batch_text = messages_to_text(snapshot);
 
     let prompt = if let Some(existing) = previous_summary {
-        UPDATE_SUMMARIZATION_PROMPT.replace("{existing_summary}", existing)
+        // 回灌前先剥掉机器区：上一版的控制态已经过期，用户原话下面会重新拼。
+        UPDATE_SUMMARIZATION_PROMPT.replace("{existing_summary}", &machine_block::strip(existing))
     } else {
         SUMMARIZATION_PROMPT.to_string()
     };
@@ -668,7 +686,7 @@ pub async fn generate_summary(
     };
 
     let resp = llm.chat(req).await?;
-    let text = resp
+    let mut text = resp
         .choices
         .first()
         .and_then(|c| c.message.text_content())
@@ -679,7 +697,15 @@ pub async fn generate_summary(
         return Err(AppError::internal("LLM returned empty summary"));
     }
 
-    Ok(text)
+    if let Some(plan) = control
+        .and_then(|c| c.plan_path.as_deref())
+        .and_then(|path| crate::core::plan_runtime::file_store::read_plan(path).ok())
+    {
+        text = machine_block::override_progress_section(&text, &plan);
+    }
+
+    let blocks = machine_block::render(control, &machine_block::collect_verbatim_user_messages(snapshot));
+    Ok(machine_block::prepend(&blocks, &text))
 }
 
 // ---------------------------------------------------------------------------

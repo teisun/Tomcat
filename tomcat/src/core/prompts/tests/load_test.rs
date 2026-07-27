@@ -25,14 +25,170 @@ fn executor_prompt_renders_plan_id() {
 }
 
 #[test]
-fn executor_prompt_describes_single_round_code_review_without_verifier_terms() {
+fn executor_prompt_says_a_non_pass_verdict_never_completes_the_plan() {
     let rendered = load(PromptKey::ExecutorReminderFmt);
-    assert!(rendered.contains("ONE review round"));
-    assert!(rendered.contains("review once, fix once"));
     assert!(rendered.contains("reopen an existing todo"));
     assert!(rendered.contains("add a fix todo"));
+    assert!(rendered.contains("The runtime will review again"));
+    assert!(rendered.contains("A non-pass verdict never completes the plan"));
+    assert!(rendered.contains("hands control back to the user"));
+    assert!(rendered.contains("Do not describe the plan as delivered"));
+    // 旧契约把「带着未修 finding 收工」写成了正式行为，与 D1 的运行时行为冲突。
+    assert!(!rendered.contains("ONE review round"));
+    assert!(!rendered.contains("best-effort"));
     assert!(!rendered.contains("Verifier"));
     assert!(!rendered.contains("adversarial"));
+}
+
+#[test]
+fn executor_prompt_requires_separating_regressions_from_pre_existing_failures() {
+    let s = load(PromptKey::ExecutorReminderFmt);
+    assert!(s.contains("separate new regressions caused by your change"));
+    assert!(s.contains("pre-existing failures and environment failures"));
+    assert!(s.contains("never let one block verification of your own change"));
+}
+
+#[test]
+fn planner_prompt_carries_a_generic_plan_structure_section() {
+    let s = load(PromptKey::PlannerReminder);
+    assert!(s.contains("## Plan structure"));
+    // 骨架约束的是「怎么论证」，对任何任务类型都成立，不绑定某一类场景。
+    assert!(s.contains("one self-contained section per substantive problem"));
+    assert!(s.contains("concrete evidence (file:line, command output, log excerpt)"));
+    assert!(s.contains("root cause -> the solution -> how it will be verified"));
+    assert!(s.contains("do not list every problem first and every solution afterwards"));
+    assert!(s.contains("as simple and elegant as the"));
+}
+
+#[test]
+fn plan_review_prompt_challenges_the_design_without_becoming_a_gate() {
+    let s = load(PromptKey::ReviewerPlan);
+    assert!(s.contains("challenge the design itself from first principles"));
+    assert!(s.contains("as simple and elegant as the"));
+    assert!(s.contains("does the stated verification really prove the claim"));
+    assert!(s.contains("Report gaps as `concern`"));
+    // advisory-only 定位不变：不引入 verdict / 门禁。
+    assert!(!s.contains("emit a verdict"));
+}
+
+#[test]
+fn paged_reading_separates_persisted_results_from_fresh_files() {
+    let s = load(PromptKey::SystemPagedReading);
+    assert!(s.contains("Do NOT re-read the whole persisted result"));
+    // 原文那句「不要整读」本意只针对已落盘结果，被当成通用读文件准则后
+    // 直接催生了几百次 20-60 行的窄读。
+    assert!(!s.contains("Do NOT re-read the entire file"));
+    assert!(s.contains("one read costs one round-trip no matter how"));
+    assert!(s.contains("300-1200"));
+    assert!(s.contains("Repeatedly reading 20-60 line windows"));
+}
+
+#[test]
+fn parallel_tools_gives_a_number_and_a_counter_example() {
+    let s = load(PromptKey::SystemParallelTools);
+    assert!(s.contains("4-8 independent read-only calls in one response"));
+    assert!(s.contains("Five consecutive turns that each contain a single `read` is a failure mode"));
+}
+
+#[test]
+fn dispatch_agent_is_described_rather_than_listed_bare() {
+    let planner = load(PromptKey::PlannerReminder);
+    let executor = load(PromptKey::ExecutorReminderFmt);
+    for (label, text) in [("planner", planner), ("executor", executor)] {
+        assert!(
+            text.contains("read-only explorer subagents"),
+            "{label} 应说明 dispatch_agent 是什么，而不是把它塞进一串工具名里"
+        );
+        assert!(
+            !text.contains("`dispatch_agent`and"),
+            "{label} 里的缺空格笔误应已修掉"
+        );
+    }
+}
+
+/// 幽灵工具守卫：模板里以反引号标出的工具名必须真的存在于 `BUILTIN_TOOL_CATALOG`。
+///
+/// 上一轮 `dispatch_agent` 就是这么混进 planner 提示词的 —— 提示词里写着，运行时
+/// 根本没有，模型每次照做都会撞上一个不存在的工具。
+#[test]
+fn every_tool_named_in_a_template_exists_in_the_catalog() {
+    /// 反引号里的非工具标识符：字段名、枚举值、外部命令。
+    const NON_TOOL_IDENTIFIERS: &[&str] = &[
+        "aborted",
+        "applied_changes",
+        "block",
+        "cancelled",
+        "changes_summary",
+        "code_review",
+        "completed",
+        "concern",
+        "content",
+        "exit_code",
+        "fail",
+        "false",
+        "finished",
+        "goal",
+        "in_progress",
+        "log_path",
+        "next_offset",
+        "none",
+        "partial",
+        "pass",
+        "plan_id",
+        "pytest",
+        "rg",
+        "since",
+        "task_id",
+        "verdict",
+        "wait_ms",
+        "workspace_roots",
+    ];
+
+    fn collect_txt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("templates dir readable") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                collect_txt(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "txt") {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/core/prompts/templates");
+    let mut files = Vec::new();
+    collect_txt(&root, &mut files);
+    assert!(!files.is_empty(), "should have found template files");
+
+    let mut checked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).expect("template readable");
+        for token in text.split('`').skip(1).step_by(2) {
+            let is_bare_identifier = !token.is_empty()
+                && token.starts_with(|c: char| c.is_ascii_lowercase())
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if !is_bare_identifier || NON_TOOL_IDENTIFIERS.contains(&token) {
+                continue;
+            }
+            assert!(
+                crate::core::tools::contract::catalog::builtin_tool_by_name(token).is_some(),
+                "{}: `{token}` 看起来像工具名，但 BUILTIN_TOOL_CATALOG 里没有它。\n                 要么这个工具不存在（幽灵工具，删掉或去实现它），\n                 要么它其实是字段名/枚举值，请加进 NON_TOOL_IDENTIFIERS。",
+                file.display()
+            );
+            checked.insert(token.to_string());
+        }
+    }
+
+    // 扫描器自己也要被扫描：抽不出 token 的实现同样会「全部通过」。
+    for expected in ["read", "edit", "update_plan", "dispatch_agent"] {
+        assert!(
+            checked.contains(expected),
+            "扫描器没有从模板里抽出 `{expected}`，说明它没在真正工作"
+        );
+    }
 }
 
 #[test]
