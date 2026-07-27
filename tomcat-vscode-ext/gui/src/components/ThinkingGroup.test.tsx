@@ -76,15 +76,25 @@ describe("ThinkingGroup", () => {
     expect(screen.queryAllByTestId("tool-row")).toHaveLength(0);
   });
 
-  it("shows a collapsed activity ticker for live groups with tools", () => {
+  it("keeps a long single-file title on the group header while the live ticker stays separate", () => {
+    const fileName = "plan_cli_vs_code_ci_release_guards_cargo_npm_c0ee6d86.plan.md";
+    const filePath = `/workspace/${fileName}`;
+    const titleText = `Read file ${fileName}`;
     const { container } = render(
       <ThinkingGroup
         group={buildGroup({
+          thinking: {
+            assistantMessageId: "assistant-1",
+            id: "think-1",
+            summaryTitle: null,
+            text: "Inspect workspace",
+            type: "thinking",
+          },
           tools: [
             {
-              args: { path: "/workspace/demo.ts" },
+              args: { path: filePath },
               assistantMessageId: "assistant-1",
-              display: { file: "/workspace/demo.ts", kind: "file" },
+              display: { file: filePath, kind: "file" },
               id: "tool-1",
               isError: false,
               status: "complete",
@@ -100,10 +110,22 @@ describe("ThinkingGroup", () => {
       />,
     );
 
-    expect(screen.getByTestId("group-activity-ticker")).toBeTruthy();
-    expect(screen.getByText("Read file demo.ts")).toBeTruthy();
+    const title = screen.getByTestId("thinking-group-title");
+    const ticker = screen.getByTestId("group-activity-ticker");
+    const toggle = screen.getByTestId("thinking-group-toggle");
+    expect(title.textContent).toBe(titleText);
+    expect(title.getAttribute("title")).toBe(titleText);
+    expect(title.className).toContain("tc-thinking-box__title");
+    expect(ticker.textContent).toContain(titleText);
+    expect(toggle.nextElementSibling).toBe(ticker);
     expect(container.querySelector(".tc-group-ticker__line")).toBeTruthy();
     expect(container.querySelector(".tc-group-ticker__icon")).toBeTruthy();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.queryByTestId("group-activity-ticker")).toBeNull();
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe(titleText);
+    expect(screen.getAllByTestId("tool-row")).toHaveLength(1);
   });
 
   it("renders thinking and tool rows when expanded", () => {
@@ -208,14 +230,15 @@ describe("ThinkingGroup", () => {
     expect(screen.getByTestId("thinking-group-title").textContent).toBe("Reviewed 2 files");
   });
 
-  it("renders a 'Used N tools for <purpose>' summary title verbatim (treated as clean)", () => {
+  it("keeps a long summary title verbatim with the single-line group title contract", () => {
+    const titleText = "Used 4 tools for finding coffee shops across Shenzhen and nearby districts";
     render(
       <ThinkingGroup
         group={buildGroup({
           thinking: {
             assistantMessageId: "assistant-1",
             id: "think-1",
-            summaryTitle: "Used 4 tools for finding coffee shops in Shenzhen",
+            summaryTitle: titleText,
             text: "Mixed batch of reads and edits.",
             type: "thinking",
           },
@@ -224,9 +247,10 @@ describe("ThinkingGroup", () => {
       />,
     );
 
-    expect(screen.getByTestId("thinking-group-title").textContent).toBe(
-      "Used 4 tools for finding coffee shops in Shenzhen",
-    );
+    const title = screen.getByTestId("thinking-group-title");
+    expect(title.textContent).toBe(titleText);
+    expect(title.getAttribute("title")).toBe(titleText);
+    expect(title.className).toContain("tc-thinking-box__title");
   });
 
   it("applies shimmer to a clean summary title only while the group is streaming", () => {

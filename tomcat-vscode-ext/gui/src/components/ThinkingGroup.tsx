@@ -94,8 +94,9 @@ function ThinkingGroupComponent({
               data-testid="thinking-group-status"
             />
             <span
-              className={`tc-thinking__title${header.shimmer ? " tc-thinking__title--shimmer tc-loading-shimmer" : ""}`}
+              className={`tc-thinking__title tc-thinking-box__title${header.shimmer ? " tc-thinking__title--shimmer tc-loading-shimmer" : ""}`}
               data-testid="thinking-group-title"
+              title={header.text}
             >
               {header.text}
             </span>

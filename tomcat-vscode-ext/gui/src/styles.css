@@ -2434,6 +2434,16 @@ span.tc-attachment-strip__file-chip {
   min-width: 0;
 }
 
+.tc-thinking-box__title {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tc-thinking-box__status {
   flex: 0 0 auto;
 }
