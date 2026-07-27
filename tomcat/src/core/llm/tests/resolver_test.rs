@@ -435,6 +435,64 @@ fn compaction_keeps_original_error_when_already_on_default_model() {
 
 #[test]
 #[serial(env_lock)]
+fn resolve_main_with_session_override_returns_provider_bound_to_that_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "deepseek-v4-flash"
+model_name = "deepseek-v4-flash"
+api = "openai"
+provider = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+
+[[models]]
+id = "fcodex/gpt-5.6-sol"
+model_name = "gpt-5.6-sol"
+api = "openai-responses"
+provider = "fcodex"
+api_key_env = "FCODEX_OPENAI_API_KEY"
+base_url = "https://fcodex.top"
+"#,
+    )
+    .unwrap();
+
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "deepseek-v4-flash".to_string();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    unsafe {
+        std::env::set_var("DEEPSEEK_API_KEY", "stub-deepseek");
+        std::env::set_var("FCODEX_OPENAI_API_KEY", "stub-fcodex");
+    }
+
+    let resolved = resolver
+        .resolve(LlmScene::Main, Some("fcodex/gpt-5.6-sol"))
+        .expect("session override should resolve to fcodex entry");
+    assert_eq!(resolved.provider, "fcodex");
+    assert_eq!(resolved.catalog_id, "fcodex/gpt-5.6-sol");
+    assert_eq!(resolved.model, "gpt-5.6-sol");
+    assert!(
+        resolved
+            .base_url
+            .as_deref()
+            .is_some_and(|u| u.contains("fcodex.top")),
+        "base_url={:?}",
+        resolved.base_url
+    );
+
+    unsafe {
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        std::env::remove_var("FCODEX_OPENAI_API_KEY");
+    }
+}
+
+#[test]
+#[serial(env_lock)]
 fn main_scene_is_unchanged_by_compaction_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");

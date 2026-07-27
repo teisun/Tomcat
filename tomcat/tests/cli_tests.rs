@@ -286,16 +286,15 @@ impl FixedResolver {
             reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
             web_search: false,
         };
-        ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: model.to_string(),
-            api: api.to_string(),
-            provider: provider.to_string(),
-            base_url: Some(base_url.to_string()),
-            key_source: "DEEPSEEK_API_KEY".to_string(),
-            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
-            capabilities,
-        }
+        let mut call =
+            ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.api = api.to_string();
+        call.provider = provider.to_string();
+        call.base_url = Some(base_url.to_string());
+        call.key_source = "DEEPSEEK_API_KEY".to_string();
+        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.capabilities = capabilities;
+        call
     }
 }
 
@@ -321,7 +320,6 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.global_services.llm = provider.clone();
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 

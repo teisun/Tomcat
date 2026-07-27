@@ -95,16 +95,15 @@ impl FixedResolver {
             reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
             web_search: false,
         };
-        ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: model.to_string(),
-            api: api.to_string(),
-            provider: provider.to_string(),
-            base_url: Some(base_url.to_string()),
-            key_source: "DEEPSEEK_API_KEY".to_string(),
-            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
-            capabilities,
-        }
+        let mut call =
+            ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.api = api.to_string();
+        call.provider = provider.to_string();
+        call.base_url = Some(base_url.to_string());
+        call.key_source = "DEEPSEEK_API_KEY".to_string();
+        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.capabilities = capabilities;
+        call
     }
 }
 
@@ -130,8 +129,11 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.global_services.llm = provider.clone();
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
+}
+
+fn loop_binding(provider: Arc<dyn LlmProvider>, model: &str) -> ResolvedCall {
+    ResolvedCall::from_parts_unchecked(provider, model, model)
 }
 
 struct RecordingMockLlm {
@@ -671,7 +673,6 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     );
 
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-ctx-overflow".to_string(),
         max_attempts: 3,
         retry_base_delay_ms: 0,
@@ -682,7 +683,13 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let mut old_user = ChatMessage::user("old question");
     old_user.timestamp = Some(TEST_TS.to_string());
@@ -1013,11 +1020,10 @@ async fn test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm() {
     let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 8_000 });
     let event_bus = Arc::new(DefaultEventBus::new());
     let mut agent = AgentLoop::new(
-        llm.clone(),
+        loop_binding(llm.clone(), "mock-model"),
         primitive,
         event_bus,
         AgentLoopConfig {
-            model: "mock-model".to_string(),
             session_id: "sess-mid-turn-run".to_string(),
             context_config: ContextConfig {
                 current_tail_compactable_min_chars: 1,
@@ -1295,14 +1301,19 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
     let event_bus = Arc::new(DefaultEventBus::new());
 
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-user-msg".to_string(),
         max_attempts: 1,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let messages = vec![ChatMessage::system("system"), ChatMessage::user("hello")];
 
@@ -1353,7 +1364,6 @@ async fn test_agent_loop_message_append_sink_persists_assistant_immediately(
     let event_bus = Arc::new(DefaultEventBus::new());
     let sink: Arc<dyn MessageAppendSink> = Arc::new(mgr.clone());
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-append-sink".to_string(),
         max_attempts: 1,
         retry_base_delay_ms: 0,
@@ -1361,7 +1371,13 @@ async fn test_agent_loop_message_append_sink_persists_assistant_immediately(
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let messages = vec![ChatMessage::system("system"), persisted_user];
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
@@ -1414,7 +1430,6 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
 
     let system_text = "system prompt for test";
     let config = AgentLoopConfig {
-        model: "mock".to_string(),
         session_id: "sess-phantom".to_string(),
         max_attempts: 3,
         retry_base_delay_ms: 0,
@@ -1425,7 +1440,13 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let mut old_user = ChatMessage::user("old question");
     old_user.timestamp = Some(TEST_TS.to_string());
@@ -2104,7 +2125,6 @@ async fn test_context_overflow_trim_events_have_correct_payload(
     );
 
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-overflow-payload".to_string(),
         max_attempts: 3,
         retry_base_delay_ms: 0,
@@ -2112,7 +2132,13 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let old_content = "old ".repeat(10_000); // ~40K chars
     let mut old_user = ChatMessage::user(old_content);

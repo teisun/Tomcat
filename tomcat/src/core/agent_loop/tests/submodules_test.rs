@@ -35,7 +35,7 @@ use crate::infra::{wire, DefaultEventBus, EventBus};
 use crate::AppConfig;
 use parking_lot::{Mutex, RwLock};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
 fn make_agent() -> AgentLoop {
     make_agent_with_bus().0
@@ -46,12 +46,17 @@ fn make_agent_with_bus() -> (AgentLoop, Arc<DefaultEventBus>) {
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-submod".to_string(),
         ..Default::default()
     };
     (
-        AgentLoop::new(llm, primitive, event_bus.clone(), config, CancellationToken::new()),
+        AgentLoop::new(
+            test_binding(llm, "gpt-4"),
+            primitive,
+            event_bus.clone(),
+            config,
+            CancellationToken::new(),
+        ),
         event_bus,
     )
 }

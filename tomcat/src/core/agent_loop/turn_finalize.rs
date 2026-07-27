@@ -150,7 +150,7 @@ pub(super) async fn finalize_turn_after_text(
         .config
         .plan_runtime
         .as_ref()
-        .map(|rt| rt.control_snapshot(Some(&agent.config.model)));
+        .map(|rt| rt.control_snapshot(Some(agent.wire_model())));
     let mut preheat_started: Option<(usize, f64)> = None;
     let mut layer0_release: Option<(usize, usize)> = None;
     if let Some(ref mut ctx_state) = agent.context_state {

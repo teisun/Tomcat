@@ -80,18 +80,15 @@ fn chunk_with_wake_reason(
 
 impl HostApiDispatcher {
     fn llm_for_request(&self, req: &ChatRequest) -> Result<Arc<dyn LlmProvider>, AppError> {
+        let resolver = self
+            .llm_resolver
+            .as_ref()
+            .ok_or_else(|| AppError::Plugin("LlmResolver not configured (007)".into()))?;
         let model = req.model.trim();
         if !model.is_empty() && model != "default" {
-            let resolver = self
-                .llm_resolver
-                .as_ref()
-                .ok_or_else(|| AppError::Plugin("LlmResolver not configured (007)".into()))?;
             return Ok(resolver.resolve(LlmScene::Main, Some(model))?.provider_impl);
         }
-
-        self.llm
-            .clone()
-            .ok_or_else(|| AppError::Plugin("LlmProvider not configured (004)".into()))
+        Ok(resolver.resolve(LlmScene::Main, None)?.provider_impl)
     }
 
     pub(super) async fn do_read_file(

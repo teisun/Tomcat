@@ -24,7 +24,7 @@ use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
 use crate::infra::{DefaultEventBus, EventContext};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor, SleepyMockPrimitive};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor, SleepyMockPrimitive};
 
 fn dangling_tool_call_ids(messages: &[ChatMessage]) -> Option<Vec<String>> {
     let recent = messages
@@ -73,12 +73,17 @@ async fn run_aborts_returns_interrupted() {
         }),
     );
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort_signal = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort_signal.clone());
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort_signal.clone(),
+    );
     let messages = vec![ChatMessage::user("read files")];
     let abort_for_thread = abort_signal.clone();
     std::thread::spawn(move || {
@@ -131,12 +136,17 @@ async fn run_interrupt_between_tools_retains_completed_tool_result() {
     );
 
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-int-tools".to_string(),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -214,12 +224,17 @@ async fn run_interrupt_during_active_tool_appends_synthetic_tool_result() {
     let primitive = Arc::new(SleepyMockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-int-active-tool".to_string(),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -281,12 +296,17 @@ async fn run_interrupt_during_parallel_tools_heals_all_remaining() {
     let primitive = Arc::new(SleepyMockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-int-three-tools".to_string(),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -380,12 +400,17 @@ async fn run_interrupt_during_stream_preserves_partial_text() {
     });
 
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-int-stream".to_string(),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -434,7 +459,6 @@ async fn token_rebuild_per_turn_allows_next_run() {
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config_a = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-rebuild".to_string(),
         ..Default::default()
     };
@@ -442,7 +466,7 @@ async fn token_rebuild_per_turn_allows_next_run() {
     let token_a = CancellationToken::new();
     token_a.cancel();
     let mut loop_a = AgentLoop::new(
-        llm.clone(),
+        test_binding(llm.clone(), "gpt-4"),
         primitive.clone(),
         event_bus.clone(),
         config_a,
@@ -455,7 +479,6 @@ async fn token_rebuild_per_turn_allows_next_run() {
     );
 
     let config_b = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-rebuild".to_string(),
         ..Default::default()
     };
@@ -464,7 +487,13 @@ async fn token_rebuild_per_turn_allows_next_run() {
         !token_b.is_cancelled(),
         "新 token 必须未被 cancel（否则证明 token 被跨回合复用）"
     );
-    let mut loop_b = AgentLoop::new(llm, primitive, event_bus, config_b, token_b);
+    let mut loop_b = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config_b,
+        token_b,
+    );
     let out_b = loop_b.run(vec![ChatMessage::user("second")]).await;
     assert!(out_b.is_ok(), "新回合应正常 Completed");
     let r = out_b.unwrap();

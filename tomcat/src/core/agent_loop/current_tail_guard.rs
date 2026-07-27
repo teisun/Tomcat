@@ -578,7 +578,7 @@ async fn collapse_to_branch_summary(
     messages: &mut Vec<ChatMessage>,
 ) -> Result<(), AppError> {
     let plan_runtime = agent.config.plan_runtime.clone();
-    let session_model = agent.config.model.clone();
+    let session_model = agent.wire_model().to_string();
     let mut working: Vec<ChatMessage> = messages
         .iter()
         .filter(|msg| msg.role != ChatMessageRole::System)

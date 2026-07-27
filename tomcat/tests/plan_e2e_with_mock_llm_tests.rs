@@ -54,12 +54,51 @@ use tomcat::core::{
 use tomcat::{
     AllowAllConfirmation, AppConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
     ContextConfig, DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, LlmProvider,
+    LlmResolver, LlmScene, ResolvedCall,
     NoopStore, PrimitiveExecutor, PrimitiveOperation, ReadResult, SearchFilesArgs,
     SearchFilesOutput, SessionHeader, StreamEvent, TracingAuditRecorder, TranscriptEntry,
     WriteFileResult,
 };
 
 // ─── 共享 fixture 与 spy ───────────────────────────────────────────────────
+
+
+struct FixedResolver {
+    provider: Arc<dyn LlmProvider>,
+    default_model: String,
+}
+
+impl FixedResolver {
+    fn new(provider: Arc<dyn LlmProvider>, default_model: impl Into<String>) -> Self {
+        Self {
+            provider,
+            default_model: default_model.into(),
+        }
+    }
+}
+
+impl LlmResolver for FixedResolver {
+    fn resolve(
+        &self,
+        _scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, AppError> {
+        let catalog_id = session_override
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or(&self.default_model)
+            .to_string();
+        let wire = catalog_id
+            .rsplit_once('/')
+            .map(|(_, wire)| wire.to_string())
+            .unwrap_or_else(|| catalog_id.clone());
+        Ok(ResolvedCall::from_parts_unchecked(
+            Arc::clone(&self.provider),
+            catalog_id,
+            wire,
+        ))
+    }
+}
+
 
 /// CapturePanel 把所有 panel snapshot 推入 Vec，便于测试断言"plan.panel × N"。
 #[derive(Default)]
@@ -1078,16 +1117,16 @@ summary: verifier child completed
         ProdVerifierDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-verifier".into(),
-            llm,
-            compaction_provider: None,
+            llm_resolver: Arc::new(FixedResolver::new(llm, "gpt-5.4-xhigh")),
+            llm_files_config: AppConfig::default().llm.files,
+            sessions_dir: agent_trail_dir.join("sessions"),
             primitive,
             event_bus,
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
             read_file_state: Arc::new(ReadFileState::default()),
-            openai_files_runtime: None,
-            web_fetch_runtime,
+                        web_fetch_runtime,
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
@@ -1256,16 +1295,16 @@ summary: verifier observed long fake cargo to completion
         ProdVerifierDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-verifier-long".into(),
-            llm,
-            compaction_provider: None,
+            llm_resolver: Arc::new(FixedResolver::new(llm, "gpt-5.4-xhigh")),
+            llm_files_config: AppConfig::default().llm.files,
+            sessions_dir: agent_trail_dir.join("sessions"),
             primitive,
             event_bus,
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
             read_file_state: Arc::new(ReadFileState::default()),
-            openai_files_runtime: None,
-            web_fetch_runtime,
+                        web_fetch_runtime,
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
@@ -1359,16 +1398,16 @@ applied_changes: false
         ProdReviewerDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-reviewer".into(),
-            llm: llm.clone(),
-            compaction_provider: None,
+            llm_resolver: Arc::new(FixedResolver::new(llm.clone(), "gpt-5.4-xhigh")),
+            llm_files_config: AppConfig::default().llm.files,
+            sessions_dir: agent_trail_dir.join("sessions"),
             primitive: primitive.clone(),
             event_bus: event_bus.clone(),
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
             read_file_state: Arc::new(ReadFileState::default()),
-            openai_files_runtime: None,
-            agent_workspace_dir: workspace.path().to_path_buf(),
+                        agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
             bash_config: AppConfig::default().tools.bash.clone(),
@@ -1387,16 +1426,16 @@ applied_changes: false
         ProdReviewerDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-reviewer".into(),
-            llm,
-            compaction_provider: None,
+            llm_resolver: Arc::new(FixedResolver::new(llm, "gpt-5.4-xhigh")),
+            llm_files_config: AppConfig::default().llm.files,
+            sessions_dir: agent_trail_dir.join("sessions"),
             primitive,
             event_bus,
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
             read_file_state: Arc::new(ReadFileState::default()),
-            openai_files_runtime: None,
-            agent_workspace_dir: workspace.path().to_path_buf(),
+                        agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
             bash_config: AppConfig::default().tools.bash,
@@ -1451,6 +1490,81 @@ applied_changes: false
             .iter()
             .any(|line| line.contains("\"taskId\"") || line.contains("running_in_background")),
         "code reviewer transcript should capture tracked background bash ticket"
+    );
+
+    cleanup_home(&home);
+}
+
+/// 会话模型 ≠ default_model 且 catalog id 含 provider 前缀时，子 Agent transcript
+/// 必须记 catalog id，且 review 正常完成（不因 wire/catalog 错配 aborted）。
+#[tokio::test]
+async fn h13_plan_reviewer_follows_session_catalog_id_across_providers() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    let plan_id = "cross_provider_reviewer_plan";
+    write_test_plan(plan_id, "## Goal\ncross provider review\n");
+    rt.set_session_model("fcodex/gpt-5.6-sol");
+
+    let agent_trail_dir = home.join(".tomcat").join("agents").join("main");
+    std::fs::create_dir_all(&agent_trail_dir).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let gate = subagent_permission_gate(workspace.path());
+    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![scripted_text_stream(
+        r#"<review>
+summary: cross-provider review complete
+changes_summary: none
+applied_changes: false
+</review>"#,
+    )]));
+    let registry = AgentRegistry::new();
+    let _root_guard = registry.register_root("parent-cross-provider").unwrap();
+    let dispatcher = ProdPlanReviewerDispatcher::new(
+        "test_cross_provider_reviewer",
+        ProdReviewerDeps {
+            agent_registry: registry.clone(),
+            parent_session_id: "parent-cross-provider".into(),
+            llm_resolver: Arc::new(FixedResolver::new(llm, "deepseek-v4-flash")),
+            primitive: Arc::new(UnusedPrimitive),
+            event_bus: Arc::new(DefaultEventBus::new()),
+            agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+            checkpoint_store: Arc::new(NoopStore),
+            context_config: ContextConfig::default(),
+            read_file_state: Arc::new(ReadFileState::default()),
+            llm_files_config: AppConfig::default().llm.files,
+            sessions_dir: agent_trail_dir.join("sessions"),
+            agent_workspace_dir: workspace.path().to_path_buf(),
+            skill_set: Arc::new(RwLock::new(SkillSet::default())),
+            skills_config: AppConfig::default().skills,
+            bash_config: AppConfig::default().tools.bash,
+            gate,
+            confirmation: Arc::new(AllowAllConfirmation),
+            audit: Arc::new(TracingAuditRecorder),
+            bash_ast: BashAstChecker::default(),
+            plan_runtime: Arc::downgrade(&rt),
+            model_override: None,
+            fallback_model: "deepseek-v4-flash".into(),
+            max_turns: 8,
+        },
+    );
+
+    let summary = dispatcher
+        .dispatch(plan_id, "## Goal\ncross provider review\n", true)
+        .await;
+    assert!(!summary.aborted, "summary={}", summary.summary);
+    assert!(!summary.child_session_id.is_empty());
+
+    let transcript_path = subagent_transcript_path(&agent_trail_dir, &summary.child_session_id);
+    assert!(transcript_path.exists(), "missing {transcript_path:?}");
+    let lines = transcript_lines(&transcript_path);
+    assert!(
+        lines.len() >= 2,
+        "expected header + subagent.transcript.meta"
+    );
+    assert!(
+        lines[1].contains("\"model\":\"fcodex/gpt-5.6-sol\""),
+        "meta line should record catalog id, got {}",
+        lines[1]
     );
 
     cleanup_home(&home);

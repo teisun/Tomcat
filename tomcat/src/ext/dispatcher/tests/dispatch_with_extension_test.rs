@@ -18,10 +18,9 @@ use std::sync::{Arc, Mutex};
 use super::super::helpers::{normalize_tool_parameters, parse_chat_request};
 use super::super::HostApiDispatcher;
 use super::mocks::{MockLlm, MockPrimitive, MockToolRegistry};
-use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use crate::core::{
-    AllowAllConfirmation, BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse,
+    AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse,
     ChatResponseChoice, DefaultPrimitiveExecutor, DirEntry, EditFileResult, EditOperation,
     LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall,
     SessionManager, StreamEvent, WriteFileResult,
@@ -98,6 +97,7 @@ impl LlmProvider for RecordingLlm {
 struct StaticResolver {
     provider: Arc<dyn LlmProvider>,
     seen_models: Arc<Mutex<Vec<String>>>,
+    default_model: String,
 }
 
 impl LlmResolver for StaticResolver {
@@ -107,18 +107,16 @@ impl LlmResolver for StaticResolver {
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
         assert_eq!(scene, LlmScene::Main);
-        let model = session_override.unwrap_or_default().to_string();
-        self.seen_models.lock().unwrap().push(model.clone());
-        Ok(ResolvedCall {
-            provider_impl: Arc::clone(&self.provider),
+        self.seen_models
+            .lock()
+            .unwrap()
+            .push(session_override.unwrap_or_default().to_string());
+        let model = session_override.unwrap_or(&self.default_model).to_string();
+        Ok(ResolvedCall::from_parts_unchecked(
+            Arc::clone(&self.provider),
+            model.clone(),
             model,
-            api: "openai".to_string(),
-            provider: "mimo".to_string(),
-            base_url: None,
-            key_source: "TEST_KEY".to_string(),
-            thinking_format: ThinkingFormat::Openai,
-            capabilities: Capabilities::default(),
-        })
+        ))
     }
 }
 
@@ -621,7 +619,11 @@ fn parse_chat_request_forwards_tools() {
 #[tokio::test]
 async fn dispatch_chat_with_llm_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
-    let d = HostApiDispatcher::new(bus).with_llm(Arc::new(MockLlm));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(StaticResolver {
+        provider: Arc::new(MockLlm),
+        seen_models: Arc::new(Mutex::new(Vec::new())),
+        default_model: "default-model".to_string(),
+    }));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
@@ -635,16 +637,14 @@ async fn dispatch_chat_with_llm_returns_ok() {
 #[tokio::test]
 async fn dispatch_chat_routes_named_model_via_resolver() {
     let bus = Arc::new(DefaultEventBus::new());
-    let (global_llm, global_calls, _) = RecordingLlm::new("global");
     let (resolved_llm, resolved_calls, resolved_models) = RecordingLlm::new("resolved");
     let resolver_models = Arc::new(Mutex::new(Vec::new()));
     let resolver = StaticResolver {
         provider: Arc::new(resolved_llm),
         seen_models: Arc::clone(&resolver_models),
+        default_model: "default-model".to_string(),
     };
-    let d = HostApiDispatcher::new(bus)
-        .with_llm(Arc::new(global_llm))
-        .with_llm_resolver(Arc::new(resolver));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(resolver));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
@@ -654,7 +654,6 @@ async fn dispatch_chat_routes_named_model_via_resolver() {
 
     let res = d.dispatch_async("inst-1", req).await.unwrap();
     assert!(res.ok);
-    assert_eq!(global_calls.load(Ordering::SeqCst), 0);
     assert_eq!(resolved_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         resolver_models.lock().unwrap().clone(),
@@ -673,18 +672,16 @@ async fn dispatch_chat_routes_named_model_via_resolver() {
 }
 
 #[tokio::test]
-async fn dispatch_chat_default_model_falls_back_to_global_llm() {
+async fn dispatch_chat_default_model_routes_via_resolver_without_override() {
     let bus = Arc::new(DefaultEventBus::new());
-    let (global_llm, global_calls, global_models) = RecordingLlm::new("global");
-    let (resolved_llm, resolved_calls, _) = RecordingLlm::new("resolved");
+    let (resolved_llm, resolved_calls, resolved_models) = RecordingLlm::new("resolved");
     let resolver_models = Arc::new(Mutex::new(Vec::new()));
     let resolver = StaticResolver {
         provider: Arc::new(resolved_llm),
         seen_models: Arc::clone(&resolver_models),
+        default_model: "resolver-default".to_string(),
     };
-    let d = HostApiDispatcher::new(bus)
-        .with_llm(Arc::new(global_llm))
-        .with_llm_resolver(Arc::new(resolver));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(resolver));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
@@ -694,19 +691,22 @@ async fn dispatch_chat_default_model_falls_back_to_global_llm() {
 
     let res = d.dispatch_async("inst-1", req).await.unwrap();
     assert!(res.ok);
-    assert_eq!(global_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(resolved_calls.load(Ordering::SeqCst), 0);
-    assert!(resolver_models.lock().unwrap().is_empty());
+    assert_eq!(resolved_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver_models.lock().unwrap().clone(), vec![String::new()]);
     assert_eq!(
-        global_models.lock().unwrap().clone(),
-        vec!["default".to_string()]
+        resolved_models.lock().unwrap().clone(),
+        vec!["resolver-default".to_string()]
     );
 }
 
 #[tokio::test]
 async fn dispatch_chat_stream_with_llm_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
-    let d = HostApiDispatcher::new(bus).with_llm(Arc::new(MockLlm));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(StaticResolver {
+        provider: Arc::new(MockLlm),
+        seen_models: Arc::new(Mutex::new(Vec::new())),
+        default_model: "default-model".to_string(),
+    }));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletionStream".to_string(),
@@ -1068,7 +1068,11 @@ async fn dispatch_events_off_removes_listener() {
 async fn dispatch_chat_parses_max_tokens_and_temperature() {
     let bus = Arc::new(DefaultEventBus::new());
     let (llm, seen_max_tokens, seen_temperatures) = CapturingLlm::new();
-    let d = HostApiDispatcher::new(bus).with_llm(Arc::new(llm));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(StaticResolver {
+        provider: Arc::new(llm),
+        seen_models: Arc::new(Mutex::new(Vec::new())),
+        default_model: "capturing-default".to_string(),
+    }));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),

@@ -143,33 +143,6 @@ fn resolve_agent_workspace_dir(
     std::env::current_dir().unwrap_or_else(|_| agent_definition_dir.to_path_buf())
 }
 
-fn resolve_child_agent_compaction_runtime(
-    llm_resolver: &dyn crate::core::llm::LlmResolver,
-    base_context_config: &crate::infra::config::ContextConfig,
-    entry: Option<&SessionEntry>,
-) -> (
-    crate::infra::config::ContextConfig,
-    Option<Arc<dyn LlmProvider>>,
-) {
-    let mut context_config = base_context_config.clone();
-    let session_override = entry
-        .and_then(|e| e.model_override.as_deref())
-        .filter(|model| !model.trim().is_empty());
-    match llm_resolver.resolve(LlmScene::Compaction, session_override) {
-        Ok(call) => {
-            context_config.compaction_model = call.model;
-            (context_config, Some(call.provider_impl))
-        }
-        Err(err) => {
-            warn!(
-                error = %err,
-                "failed to resolve child-agent compaction runtime; falling back to main provider"
-            );
-            (context_config, None)
-        }
-    }
-}
-
 fn build_model_thinking_store(config: &AppConfig) -> Result<Arc<ModelThinkingStore>, AppError> {
     let default_level = ThinkingLevel::parse_or_medium(&config.llm.thinking.level).0;
     Ok(Arc::new(ModelThinkingStore::load(
@@ -234,7 +207,6 @@ fn scope_runtime_for(
     config: &AppConfig,
     agent_workspace_dir: std::path::PathBuf,
     audit: Arc<dyn AuditRecorder>,
-    llm: Arc<dyn LlmProvider>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
     bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
@@ -270,7 +242,6 @@ fn scope_runtime_for(
         audit,
         event_bus: event_bus.clone(),
         fetch_http_client: overrides.fetch_http_client.clone(),
-        llm,
         llm_resolver,
         primitive,
         bash_task_registry,
@@ -382,16 +353,7 @@ impl ChatContext {
         let llm_resolver: Arc<dyn crate::core::llm::LlmResolver> = Arc::new(
             crate::core::llm::DefaultLlmResolver::new(config.clone(), model_catalog.clone()),
         );
-        let llm: Arc<dyn LlmProvider> = llm_resolver
-            .resolve(crate::core::llm::LlmScene::Main, None)?
-            .provider_impl;
-        let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
-            llm.as_ref(),
-            &config.llm.files,
-            session.sessions_dir(),
-            &current_session_entry.session_id,
-        )
-        .map(Arc::new);
+        let _ = llm_resolver.resolve(crate::core::llm::LlmScene::Main, None)?;
 
         let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
             Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
@@ -482,7 +444,6 @@ impl ChatContext {
             &config,
             agent_workspace_dir.clone(),
             audit.clone(),
-            llm.clone(),
             llm_resolver.clone(),
             primitive.clone(),
             bash_task_registry.clone(),
@@ -624,12 +585,6 @@ impl ChatContext {
             .unwrap_or(config.reviewer.max_turns);
         // 只捕获 override；为空时由 dispatcher 在每次派发时取当前会话模型。
         let reviewer_model_override = config.reviewer.model_override.clone();
-        let (child_agent_context_config, child_agent_compaction_provider) =
-            resolve_child_agent_compaction_runtime(
-                llm_resolver.as_ref(),
-                &config.context,
-                Some(&current_session_entry),
-            );
         let read_file_state =
             Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default());
         let prod_plan_reviewer = plan_runtime::prod_reviewer::ProdPlanReviewerDispatcher::new(
@@ -637,15 +592,15 @@ impl ChatContext {
             plan_runtime::prod_reviewer::ProdReviewerDeps {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
-                llm: llm.clone(),
-                compaction_provider: child_agent_compaction_provider.clone(),
+                llm_resolver: llm_resolver.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: child_agent_context_config.clone(),
+                context_config: config.context.clone(),
                 read_file_state: read_file_state.clone(),
-                openai_files_runtime: openai_files_runtime.clone(),
+                llm_files_config: config.llm.files.clone(),
+                sessions_dir: session.sessions_dir().to_path_buf(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),
@@ -665,15 +620,15 @@ impl ChatContext {
             plan_runtime::prod_reviewer::ProdReviewerDeps {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
-                llm: llm.clone(),
-                compaction_provider: child_agent_compaction_provider.clone(),
+                llm_resolver: llm_resolver.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: child_agent_context_config.clone(),
+                context_config: config.context.clone(),
                 read_file_state: read_file_state.clone(),
-                openai_files_runtime: openai_files_runtime.clone(),
+                llm_files_config: config.llm.files.clone(),
+                sessions_dir: session.sessions_dir().to_path_buf(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),
@@ -693,15 +648,15 @@ impl ChatContext {
             plan_runtime::prod_reviewer::ProdReviewerDeps {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
-                llm: llm.clone(),
-                compaction_provider: child_agent_compaction_provider.clone(),
+                llm_resolver: llm_resolver.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: child_agent_context_config.clone(),
+                context_config: config.context.clone(),
                 read_file_state: read_file_state.clone(),
-                openai_files_runtime: openai_files_runtime.clone(),
+                llm_files_config: config.llm.files.clone(),
+                sessions_dir: session.sessions_dir().to_path_buf(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),
@@ -725,15 +680,15 @@ impl ChatContext {
             plan_runtime::verify::ProdVerifierDeps {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
-                llm: llm.clone(),
-                compaction_provider: child_agent_compaction_provider.clone(),
+                llm_resolver: llm_resolver.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: child_agent_context_config.clone(),
+                context_config: config.context.clone(),
                 read_file_state: read_file_state.clone(),
-                openai_files_runtime: openai_files_runtime.clone(),
+                llm_files_config: config.llm.files.clone(),
+                sessions_dir: session.sessions_dir().to_path_buf(),
                 web_fetch_runtime: web_fetch_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
@@ -803,7 +758,6 @@ impl ChatContext {
             initial_thinking_display.as_u8(),
         ));
         let global_services = GlobalServices {
-            llm: llm.clone(),
             model_catalog: model_catalog.clone(),
             llm_resolver: llm_resolver.clone(),
             model_thinking,
@@ -845,7 +799,6 @@ impl ChatContext {
             completion_subscriber_handle: completion_subscriber_handle.clone(),
             read_file_state: read_file_state.clone(),
             thinking_display: thinking_display.clone(),
-            openai_files_runtime: openai_files_runtime.clone(),
             todos_runtime: todos_runtime.clone(),
             plan_runtime: plan_runtime.clone(),
             suppress_cli_output: overrides.suppress_cli_output,
@@ -1187,7 +1140,6 @@ struct PluginRuntimeDeps {
     audit: Arc<dyn AuditRecorder>,
     event_bus: Arc<dyn EventBus>,
     fetch_http_client: Option<reqwest::Client>,
-    llm: Arc<dyn LlmProvider>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
     bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
@@ -1299,7 +1251,6 @@ fn build_plugin_runtime(
         audit,
         event_bus,
         fetch_http_client,
-        llm,
         llm_resolver,
         primitive,
         bash_task_registry,
@@ -1315,7 +1266,6 @@ fn build_plugin_runtime(
             HostApiDispatcher::new(event_bus.clone())
                 .with_tools(tool_registry.clone())
                 .with_session(session)
-                .with_llm(llm)
                 .with_llm_resolver(llm_resolver)
                 .with_primitive(primitive)
                 .with_bash_task_registry(bash_task_registry.clone())
@@ -1384,7 +1334,6 @@ fn build_plugin_runtime(
             )
             .with_tools(tool_registry.clone())
             .with_session(session.clone())
-            .with_llm(llm)
             .with_llm_resolver(llm_resolver)
             .with_primitive(primitive)
             .with_bash_task_registry(bash_task_registry)
@@ -1566,10 +1515,9 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::{
-        resolve_bash_production_policy, resolve_child_agent_compaction_runtime, ChatContext,
-    };
+    use super::{resolve_bash_production_policy, ChatContext};
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
+    use crate::core::plan_runtime::prod_reviewer::resolve_subagent_runtime;
     use crate::{AppConfig, ThinkingLevel};
 
     #[test]
@@ -1591,7 +1539,7 @@ mod tests {
     }
     #[test]
     #[serial(env_lock)]
-    fn child_agent_compaction_runtime_preserves_resolved_model_provider_pair() {
+    fn child_agent_dispatch_runtime_preserves_resolved_model_provider_pair() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("models.toml");
         let mut cfg = AppConfig::default();
@@ -1604,11 +1552,18 @@ mod tests {
             std::env::set_var("DEEPSEEK_API_KEY", "stub");
         }
 
-        let (context_config, provider) =
-            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
-        assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
+        let runtime = resolve_subagent_runtime(
+            resolver.as_ref(),
+            &cfg.context,
+            &cfg.llm.files,
+            dir.path(),
+            "parent-session",
+            "deepseek-v4-pro",
+        )
+        .expect("runtime should resolve");
+        assert_eq!(runtime.context_config.compaction_model, "deepseek-v4-pro");
         assert!(
-            provider.is_some(),
+            runtime.compaction_provider.is_some(),
             "应把解析成功的 compaction provider 注入给子 Agent"
         );
 
@@ -1619,7 +1574,7 @@ mod tests {
 
     #[test]
     #[serial(env_lock)]
-    fn child_agent_compaction_runtime_preserves_fallback_pair() {
+    fn child_agent_dispatch_runtime_preserves_fallback_pair() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("models.toml");
         let mut cfg = AppConfig::default();
@@ -1634,11 +1589,18 @@ mod tests {
             std::env::remove_var("OPENAI_API_KEY");
         }
 
-        let (context_config, provider) =
-            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
-        assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
+        let runtime = resolve_subagent_runtime(
+            resolver.as_ref(),
+            &cfg.context,
+            &cfg.llm.files,
+            dir.path(),
+            "parent-session",
+            "deepseek-v4-pro",
+        )
+        .expect("runtime should resolve");
+        assert_eq!(runtime.context_config.compaction_model, "deepseek-v4-pro");
         assert!(
-            provider.is_some(),
+            runtime.compaction_provider.is_some(),
             "fallback 成功时也应把 fallback 后的 provider 一起注入"
         );
 
@@ -1649,7 +1611,7 @@ mod tests {
 
     #[test]
     #[serial(env_lock)]
-    fn child_agent_compaction_runtime_keeps_compat_fallback_boundary_when_unresolved() {
+    fn child_agent_dispatch_runtime_keeps_compat_fallback_boundary_when_unresolved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("models.toml");
         let mut cfg = AppConfig::default();
@@ -1660,18 +1622,32 @@ mod tests {
             Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
 
         unsafe {
+            std::env::set_var("OPENAI_API_KEY", "stub");
             std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::remove_var("OPENAI_API_KEY");
         }
 
-        let (context_config, provider) =
-            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
+        let runtime = resolve_subagent_runtime(
+            resolver.as_ref(),
+            &cfg.context,
+            &cfg.llm.files,
+            dir.path(),
+            "parent-session",
+            "gpt-5.4",
+        )
+        .expect("main model should still resolve");
 
-        assert!(provider.is_none(), "无法解析 pair 时应保留兼容回退边界");
+        assert!(
+            runtime.compaction_provider.is_none(),
+            "无法解析 pair 时应保留兼容回退边界"
+        );
         assert_eq!(
-            context_config.compaction_model, "gpt-5.4",
+            runtime.context_config.compaction_model, "gpt-5.4",
             "未解析成功时不应偷偷改写 compaction_model"
         );
+
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
     }
 
     #[test]

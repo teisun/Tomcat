@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard;
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::MockPrimitiveExecutor;
+use super::mocks::{test_binding, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::compaction::TOOL_RESULT_PLACEHOLDER;
 use crate::core::llm::{
@@ -109,9 +109,12 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
         ..Default::default()
     };
     let mut agent = AgentLoop::new(
-        Arc::new(ChatOnlyMockLlm {
-            summary_text: "unused".to_string(),
-        }),
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "unused".to_string(),
+            }),
+            "gpt-4",
+        ),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
@@ -212,9 +215,12 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
     let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
 
     let mut agent = AgentLoop::new(
-        Arc::new(ChatOnlyMockLlm {
-            summary_text: "continue with execution".to_string(),
-        }),
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "continue with execution".to_string(),
+            }),
+            "gpt-4",
+        ),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
@@ -294,9 +300,12 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
     let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
 
     let mut agent = AgentLoop::new(
-        Arc::new(ChatOnlyMockLlm {
-            summary_text: "continue with pending work".to_string(),
-        }),
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "continue with pending work".to_string(),
+            }),
+            "gpt-4",
+        ),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {

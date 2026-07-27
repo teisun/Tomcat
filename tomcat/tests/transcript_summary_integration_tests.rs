@@ -271,7 +271,6 @@ impl PrimitiveExecutor for MockPrimitive {
 
 fn default_config(session_id: &str, title: Arc<dyn LlmProvider>) -> AgentLoopConfig {
     AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: session_id.to_string(),
         max_attempts: 3,
         retry_base_delay_ms: 0,
@@ -279,6 +278,10 @@ fn default_config(session_id: &str, title: Arc<dyn LlmProvider>) -> AgentLoopCon
         title_model: "utility-flash".to_string(),
         ..Default::default()
     }
+}
+
+fn loop_binding(provider: Arc<dyn LlmProvider>, model: &str) -> ResolvedCall {
+    ResolvedCall::from_parts_unchecked(provider, model, model)
 }
 
 struct SceneResolver {
@@ -324,16 +327,14 @@ impl LlmResolver for SceneResolver {
             }
             _ => (Arc::clone(&self.main), self.main_model.clone()),
         };
-        Ok(ResolvedCall {
-            provider_impl,
-            model,
-            api: "mock".to_string(),
-            provider: "mock".to_string(),
-            base_url: None,
-            key_source: "test".to_string(),
-            thinking_format: ThinkingFormat::Openai,
-            capabilities: Capabilities::default(),
-        })
+        let mut call = ResolvedCall::from_parts_unchecked(provider_impl, &model, &model);
+        call.api = "mock".to_string();
+        call.provider = "mock".to_string();
+        call.base_url = None;
+        call.key_source = "test".to_string();
+        call.thinking_format = ThinkingFormat::Openai;
+        call.capabilities = Capabilities::default();
+        Ok(call)
     }
 }
 
@@ -364,7 +365,6 @@ fn install_scene_resolver(
     default_model: &str,
     title_model: &str,
 ) {
-    ctx.global_services.llm = main.clone();
     ctx.global_services.llm_resolver = Arc::new(SceneResolver::new(
         main,
         title,
@@ -381,7 +381,6 @@ fn install_scene_resolver_without_title(
     default_model: &str,
     title_model: &str,
 ) {
-    ctx.global_services.llm = main.clone();
     ctx.global_services.llm_resolver = Arc::new(SceneResolver::new(
         main,
         title,
@@ -497,7 +496,13 @@ async fn run_and_collect_summaries(
     let event_bus: Arc<dyn EventBus> = Arc::new(tomcat::DefaultEventBus::new());
     let captured = capture_turn_summary_events(&*event_bus);
     let config = default_config(session_id, title);
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new());
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        CancellationToken::new(),
+    );
     let messages = vec![ChatMessage::user("please review the files")];
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await

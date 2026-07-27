@@ -568,7 +568,6 @@ pub async fn run_chat_turn_with_message(
         .as_ref()
         .map(|c| (c.provider_impl.clone(), c.model.clone()))
         .unwrap_or_else(|| (main_provider.clone(), main_call.model.clone()));
-    let model = main_call.model.clone();
     let title_model = title_call
         .as_ref()
         .map(|c| c.model.clone())
@@ -576,10 +575,12 @@ pub async fn run_chat_turn_with_message(
     let thinking_model_id = ctx.effective_model(entry.as_ref());
     // 让 reviewer / verifier 在下一次派发时跟上会话当前的模型。
     //
-    // 记的必须是 catalog id（`fcodex/claude-opus-4-8`），不是 `main_call.model` 那个
-    // 发给 provider 的线上模型名（`claude-opus-4-8`）。子 Agent 派发时会拿这个字符串
-    // 回 catalog 查 provider，线上名要么查不到、要么撞上同名的另一个 provider 条目 ——
-    // 实测就是后者：复审子 Agent 拿着 `claude-opus-4-8` 打到了别的账号组，404 起不来。
+    // 这里记的必须是 catalog id（`fcodex/claude-opus-4-8`），不是 `main_call.model`
+    // 那个发给 provider 的线上模型名（`claude-opus-4-8`）。真实解析点在
+    // `plan_runtime/prod_reviewer.rs::resolve_subagent_runtime()` 与
+    // `plan_runtime/verify.rs::dispatch()`：子 Agent 会拿这个 catalog id 回 catalog 重新
+    // resolve 出成对的 `{provider_impl, wire_model}`。上一轮 404 事故就是因为只带了线上名，
+    // 命中了另一个 provider 的同名条目；这条注释现在对应的是已落地的不变量，而不再只是意图。
     ctx.session_runtime
         .plan_runtime
         .set_session_model(&thinking_model_id);
@@ -665,7 +666,7 @@ pub async fn run_chat_turn_with_message(
         Some(
             ctx.session_runtime
                 .plan_runtime
-                .control_snapshot(Some(&model)),
+                .control_snapshot(Some(main_call.wire_model())),
         ),
     );
     check_before_request(context_state, &root_event_emitter).await;
@@ -690,7 +691,6 @@ pub async fn run_chat_turn_with_message(
         max_attempts: ctx.config.llm.agent_max_attempts,
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
-        model,
         thinking_level,
         session_id: session_id.clone(),
         tool_definitions: build_tool_definitions(ctx).await,
@@ -714,7 +714,7 @@ pub async fn run_chat_turn_with_message(
         skill_set: Some(ctx.scope_services.skill_set.clone()),
     };
     let mut agent_loop = AgentLoop::new(
-        main_provider,
+        main_call,
         ctx.global_services.primitive.clone(),
         ctx.global_services.event_bus.clone(),
         config,

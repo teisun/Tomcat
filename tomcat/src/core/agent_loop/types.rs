@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
-use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::llm::{ChatMessage, LlmProvider, ResolvedCall};
 use crate::core::session::manager::ContextState;
 use crate::core::session::manager::MessageAppendSink;
 use crate::core::tools::contract::registry::ToolRegistry;
@@ -103,7 +103,6 @@ pub struct AgentLoopConfig {
     /// 上下文预算自然约束轮次。TODO: 待 tool-loop-detection 方案替代。
     pub max_tool_rounds: usize,
     pub retry_base_delay_ms: u64,
-    pub model: String,
     pub thinking_level: Option<crate::core::llm::ThinkingLevel>,
     pub session_id: String,
     pub tool_definitions: Vec<serde_json::Value>,
@@ -159,7 +158,6 @@ impl Default for AgentLoopConfig {
             max_attempts: DEFAULT_AGENT_MAX_ATTEMPTS,
             max_tool_rounds: usize::MAX,
             retry_base_delay_ms: DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-            model: String::new(),
             thinking_level: None,
             session_id: String::new(),
             tool_definitions: Vec::new(),
@@ -280,6 +278,7 @@ pub type BackgroundCompletionRoutes = Arc<Mutex<HashMap<String, CompletionRoute>
 // ─── AgentLoop 结构体 ───────────────────────────────────────────────────────
 
 pub struct AgentLoop {
+    pub(super) binding: ResolvedCall,
     pub(super) llm: Arc<dyn LlmProvider>,
     pub(super) primitive: Arc<dyn PrimitiveExecutor>,
     pub(super) emitter: ScopedEventEmitter,

@@ -1649,10 +1649,17 @@ async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
     unsafe { std::env::set_var("TOMCAT_CHAT_CLEANUP_TEST_KEY", "stub") };
 
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    let runtime = ctx
+    let entry = ctx
         .session_runtime
-        .openai_files_runtime
-        .as_ref()
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())
+        .expect("session lookup should succeed")
+        .expect("current session should exist");
+    let resolved = ctx
+        .resolve_call(crate::core::llm::LlmScene::Main, Some(&entry))
+        .expect("main model should resolve");
+    let runtime = ctx
+        .openai_files_runtime_for(resolved.provider_impl.as_ref())
         .expect("openai-responses should expose files runtime");
     runtime.enqueue_delete("file-chat-cleanup".to_string(), Some(10), Some(1), "test");
     assert!(runtime.pending_cleanup_count() >= 1);

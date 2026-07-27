@@ -613,9 +613,20 @@ impl PlanRuntime {
 ### 8.3 abort 语义
 
 - 父 Agent 收到 abort → `CascadeAbort` cancel root token，reviewer 子 `CancellationToken` 立即跟着取消，并在 reasoning / tool await 间隙退出。
-- reviewer abort / 超时 / 解析失败 → `create_plan` **仍返回成功**（落盘已成功），但 `ToolResult.review` 标 `aborted: true` 且 `summary = "<aborted>"`，transcript 追加 `plan.review.warning` 摘要；**不**切 mode，**不**让 `/plan build` 失败。
+- reviewer abort / 超时 / 解析失败 / 模型解析失败 → `create_plan` **仍返回成功**（落盘已成功），但 `ToolResult.review` 标 `aborted: true`，摘要写入 `plan.review`（含错误原因与 debug transcript 提示）；**不**切 mode，**不**让 `/plan build` 失败。
+- `plan.review.warning` **仅**在同一 `plan_id` 累计派发轮次 `rounds > 1` 时写入（见 `PlanRuntime::dispatch_reviewer`）；首轮 aborted **不会**额外发 warning 事件。
 
-**说人话**：单次审稿：Pending→Running→Returned 或 Aborted；父停则子停；审稿挂了/超时也不挡用户后续 `/plan build`，摘要标个 aborted 就行。
+**说人话**：单次审稿：Pending→Running→Returned 或 Aborted；父停则子停；审稿挂了/超时也不挡用户后续 `/plan build`，摘要标个 aborted 就行。复审第二轮起才额外留 warning 审计。
+
+### 8.4 子 Agent 模型解析 = 派发时 resolver 配对
+
+子 Agent（plan / code reviewer、explorer、verifier）**不再**使用 ChatContext 启动时冻结的 LLM 客户端。派发路径：
+
+1. `resolve_dispatch_model(override → session_model → fallback)` 得到 **catalog id**；
+2. `resolve_subagent_runtime` 调用 `LlmResolver::resolve(Main, Some(catalog_id))` 与 `resolve(Compaction, None)`；
+3. 把完整 `ResolvedCall` 交给 `AgentLoop::new(binding, ...)`（wire 名走 `binding.model`，transcript header 记 `binding.catalog_id`）。
+
+解析失败 → `reviewer_stop_reason = "model_unresolved"`，plan 文件保留。详见 [`../llm/model-provider-binding.md`](../llm/model-provider-binding.md)。
 
 ---
 
@@ -635,7 +646,8 @@ impl PlanRuntime {
 
 | 触发 | 反馈 | 说人话 |
 |------|------|--------|
-| reviewer 子 Agent 异常退出 | `create_plan` 仍返回成功；`ToolResult.review = { aborted: true, summary: "<stderr 摘要>" }`；transcript `plan.review.warning` 追加 | 审稿员挂了也不挡进度。 |
+| reviewer 子 Agent 异常退出 | `create_plan` 仍返回成功；`ToolResult.review = { aborted: true, summary: "<stderr 摘要>" }`；摘要写入 `plan.review`。`plan.review.warning` 仅 `rounds > 1` 时追加 | 审稿员挂了也不挡进度。 |
+| 会话模型对应的 provider / key 解析失败 | `aborted: true`，`reviewer_stop_reason = model_unresolved`；plan 文件保留 | 配置坏了先 aborted，不假装用 default 模型审完。 |
 | reviewer 输出不符合 `<review>` 格式 | `ToolResult.review = { aborted: true, summary: "<格式错误，最后一条消息片段>" }`；不静默猜 `ReviewSummary` | 格式不对就 aborted，别瞎猜。 |
 | reviewer 超 `max_turns` 仍未给摘要 | warning + `ReviewSummary { applied_changes: false, summary: "<超时未给出摘要>", aborted: true }` | 超时只 warning。 |
 | reviewer 被父 abort | `ToolResult.review = { aborted: true, ... }`；`PlanFile` 保留 | 用户中断算 aborted。 |

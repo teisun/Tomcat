@@ -26,7 +26,7 @@ use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
 use crate::SessionManager;
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor, SteerableMockPrimitive};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor, SteerableMockPrimitive};
 
 struct RecordingMockLlmProvider {
     streams: StdMutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
@@ -108,13 +108,12 @@ async fn run_steering_skips_remaining_tools() {
     });
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new_with_steering_queue(
-        llm,
+        test_binding(llm, "gpt-4"),
         primitive,
         event_bus,
         config,
@@ -150,12 +149,11 @@ async fn run_follow_up_continues_in_same_context() {
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
     loop_.follow_up("next".to_string());
     let messages = vec![ChatMessage::user("first")];
     let result = loop_.run(messages).await.unwrap();
@@ -193,12 +191,11 @@ async fn run_follow_up_drains_at_tool_batch_boundary_before_next_llm_request() {
         "<background-task-finished task_id=\"t1\" exit_code=\"0\">done</background-task-finished>";
     let follow_up_queue = Arc::new(parking_lot::Mutex::new(vec![ChatMessage::user(synthetic)]));
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-followup-midturn".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm.clone(), primitive, event_bus, config, abort)
+    let mut loop_ = AgentLoop::new(test_binding(llm.clone(), "gpt-4"), primitive, event_bus, config, abort)
         .with_shared_follow_up_queue(follow_up_queue.clone());
 
     let result = loop_.run(vec![ChatMessage::user("start")]).await.unwrap();
@@ -254,13 +251,12 @@ async fn run_follow_up_does_not_bypass_max_tool_rounds() {
         "<background-task-finished task_id=\"t-budget\" exit_code=\"0\">done</background-task-finished>";
     let follow_up_queue = Arc::new(parking_lot::Mutex::new(vec![ChatMessage::user(synthetic)]));
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-followup-budget".to_string(),
         max_tool_rounds: 1,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm.clone(), primitive, event_bus, config, abort)
+    let mut loop_ = AgentLoop::new(test_binding(llm.clone(), "gpt-4"), primitive, event_bus, config, abort)
         .with_shared_follow_up_queue(follow_up_queue.clone());
 
     let result = loop_.run(vec![ChatMessage::user("start")]).await.unwrap();
@@ -295,11 +291,10 @@ async fn inject_steering_messages_records_context_and_persists_msg_id() {
         "stop now",
     )]));
     let mut loop_ = AgentLoop::new_with_steering_queue(
-        llm,
+        test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            model: "gpt-4".to_string(),
             session_id: "s-steering".to_string(),
             message_append_sink: Some(Arc::new(mgr.clone())),
             ..Default::default()
@@ -359,11 +354,10 @@ async fn inject_follow_up_messages_returns_false_for_empty_queue() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let follow_up_queue = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut loop_ = AgentLoop::new(
-        llm,
+        test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            model: "gpt-4".to_string(),
             session_id: "s-followup-empty".to_string(),
             ..Default::default()
         },
@@ -392,11 +386,10 @@ async fn inject_follow_up_messages_records_context_and_persists_msg_id() {
         follow_up_text,
     )]));
     let mut loop_ = AgentLoop::new(
-        llm,
+        test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            model: "gpt-4".to_string(),
             session_id: "s-followup-persist".to_string(),
             message_append_sink: Some(Arc::new(mgr.clone())),
             ..Default::default()

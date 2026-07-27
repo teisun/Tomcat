@@ -21,7 +21,7 @@ use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
 use crate::infra::{DefaultEventBus, EventContext};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
 /// 工具轮场景：metrics 必须在 turn_end 之前。
 #[tokio::test]
@@ -61,12 +61,11 @@ async fn context_metrics_update_emitted_before_turn_end() {
         );
     }
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-metrics-order".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: 100,
@@ -135,12 +134,11 @@ async fn context_metrics_update_payload_contains_valid_values() {
         }),
     );
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-metrics-payload".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: 2000,
@@ -231,12 +229,11 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         }),
     );
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-metrics-accum".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: 100,
@@ -304,12 +301,11 @@ async fn context_metrics_update_skipped_when_no_context_state() {
         }),
     );
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-no-ctx".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
     let captured = emitted.lock().unwrap();
@@ -347,12 +343,11 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         );
     }
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-text-metrics".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: 200,
@@ -406,11 +401,10 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
     let primitive_first = Arc::new(MockPrimitiveExecutor);
     let event_bus_first = Arc::new(DefaultEventBus::new());
     let mut first_loop = AgentLoop::new(
-        llm_first,
+        test_binding(llm_first, "gpt-5.4"),
         primitive_first,
         event_bus_first,
         AgentLoopConfig {
-            model: "gpt-5.4".to_string(),
             session_id: "s-model-a".to_string(),
             ..Default::default()
         },
@@ -469,11 +463,10 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
         }),
     );
     let mut second_loop = AgentLoop::new(
-        llm_second,
+        test_binding(llm_second, "gpt-5.2"),
         primitive_second,
         event_bus_second,
         AgentLoopConfig {
-            model: "gpt-5.2".to_string(),
             session_id: "s-model-b".to_string(),
             ..Default::default()
         },

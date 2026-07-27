@@ -62,7 +62,7 @@ pub(super) async fn run_reasoning_loop(
 
         let req = ChatRequest {
             messages: messages.clone(),
-            model: agent.config.model.clone(),
+            model: agent.wire_model().to_string(),
             temperature: None,
             max_tokens: None,
             stream: Some(true),

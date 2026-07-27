@@ -6,12 +6,13 @@
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use tracing::warn;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome, SubagentType};
 use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcomeLabel};
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::system_prompt::render_available_skills_prompt;
-use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::llm::{ChatMessage, LlmProvider, LlmResolver, LlmScene, ResolvedCall};
 use crate::core::plan_runtime::explorer::{
     build_explorer_prompt, explorer_system_prompt_text, ExplorerReport, ExplorerTask,
     EXPLORER_ALLOWED_TOOLS,
@@ -33,7 +34,7 @@ use crate::core::plan_runtime::{
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::CheckpointStore;
-use crate::infra::config::ContextConfig;
+use crate::infra::config::{ContextConfig, LlmFilesConfig};
 use crate::infra::event_bus::EventBus;
 
 /// 生产 plan reviewer dispatcher。装配点：`ChatContext::from_config`。
@@ -52,15 +53,15 @@ pub struct ProdCodeReviewerDispatcher {
 pub struct ProdReviewerDeps {
     pub agent_registry: Arc<AgentRegistry>,
     pub parent_session_id: String,
-    pub llm: Arc<dyn LlmProvider>,
-    pub compaction_provider: Option<Arc<dyn LlmProvider>>,
+    pub llm_resolver: Arc<dyn LlmResolver>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub event_bus: Arc<dyn EventBus>,
     pub agent_trail_dir: String,
     pub checkpoint_store: Arc<dyn CheckpointStore>,
     pub context_config: ContextConfig,
     pub read_file_state: Arc<ReadFileState>,
-    pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+    pub llm_files_config: LlmFilesConfig,
+    pub sessions_dir: std::path::PathBuf,
     pub agent_workspace_dir: std::path::PathBuf,
     pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
     pub skills_config: crate::infra::config::SkillsConfig,
@@ -89,6 +90,59 @@ impl ProdReviewerDeps {
             &self.fallback_model,
         )
     }
+}
+
+pub(crate) struct ResolvedSubagentRuntime {
+    pub main_call: ResolvedCall,
+    pub context_config: ContextConfig,
+    pub compaction_provider: Option<Arc<dyn LlmProvider>>,
+    pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+}
+
+fn resolve_subagent_compaction_runtime(
+    llm_resolver: &dyn LlmResolver,
+    base_context_config: &ContextConfig,
+) -> (ContextConfig, Option<Arc<dyn LlmProvider>>) {
+    let mut context_config = base_context_config.clone();
+    match llm_resolver.resolve(LlmScene::Compaction, None) {
+        Ok(call) => {
+            context_config.compaction_model = call.model;
+            (context_config, Some(call.provider_impl))
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to resolve child-agent compaction runtime; falling back to main provider"
+            );
+            (context_config, None)
+        }
+    }
+}
+
+pub(crate) fn resolve_subagent_runtime(
+    llm_resolver: &dyn LlmResolver,
+    base_context_config: &ContextConfig,
+    llm_files_config: &LlmFilesConfig,
+    sessions_dir: &std::path::Path,
+    session_id: &str,
+    model_id: &str,
+) -> Result<ResolvedSubagentRuntime, crate::infra::error::AppError> {
+    let main_call = llm_resolver.resolve(LlmScene::Main, Some(model_id))?;
+    let (context_config, compaction_provider) =
+        resolve_subagent_compaction_runtime(llm_resolver, base_context_config);
+    let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
+        main_call.provider_impl.as_ref(),
+        llm_files_config,
+        sessions_dir,
+        session_id,
+    )
+    .map(Arc::new);
+    Ok(ResolvedSubagentRuntime {
+        main_call,
+        context_config,
+        compaction_provider,
+        openai_files_runtime,
+    })
 }
 
 /// 子 Agent 派发模型的解析顺序：显式 override > 当前会话模型 > 启动兜底。
@@ -150,33 +204,53 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
             build_review_prompt(plan_id, plan_text, &plan_path, workspace_root);
         let turns_limit = deps.max_turns.max(1);
 
-        let llm = Arc::clone(&deps.llm);
-        let compaction_provider = deps.compaction_provider.clone();
         let primitive = Arc::clone(&deps.primitive);
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let context_config = deps.context_config.clone();
-        let context_budget_chars =
-            crate::infra::config::compute_context_budget_chars(&context_config);
         let read_file_state = Arc::clone(&deps.read_file_state);
-        let openai_files_runtime = deps.openai_files_runtime.clone();
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
         let expose_skills =
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs =
             resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(expose_skills));
+        let model_id = deps.resolve_model(&plan_runtime);
+        let parent_session_id = deps.parent_session_id.clone();
+        let parent_session_id_for_closure = parent_session_id.clone();
+        let origin = self.origin;
+        let runtime = match resolve_subagent_runtime(
+            deps.llm_resolver.as_ref(),
+            &deps.context_config,
+            &deps.llm_files_config,
+            &deps.sessions_dir,
+            &parent_session_id,
+            &model_id,
+        ) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let mut s = PlanReviewSummary::aborted_with(format!(
+                    "[{}] plan reviewer 模型 `{}` 解析失败：{}",
+                    self.origin, model_id, err
+                ));
+                s.reviewer_turns_limit = turns_limit;
+                s.reviewer_stop_reason = "model_unresolved".into();
+                return s;
+            }
+        };
+        let context_budget_chars =
+            crate::infra::config::compute_context_budget_chars(&runtime.context_config);
         let skill_prompt = if expose_skills {
             render_available_skills_prompt(&skill_set, context_budget_chars, &deps.skills_config)
         } else {
             None
         };
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let model = deps.resolve_model(&plan_runtime);
-        let parent_session_id = deps.parent_session_id.clone();
-        let parent_session_id_for_closure = parent_session_id.clone();
-        let origin = self.origin;
+        let compaction_provider = runtime.compaction_provider.clone();
+        let context_config = runtime.context_config.clone();
+        let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let binding = runtime.main_call;
+        let transcript_model = binding.catalog_id().to_string();
 
         let (tx, rx) = tokio::sync::oneshot::channel::<PlanReviewSummary>();
 
@@ -194,7 +268,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                             &transcript_root,
                             &child_session_id,
                             SubagentType::PlanReviewer,
-                            &model,
+                            &transcript_model,
                             &parent_session_id_for_closure,
                         );
 
@@ -212,7 +286,6 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        model,
                         thinking_level: None,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
@@ -236,7 +309,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         },
                     };
                     let mut agent_loop =
-                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone());
+                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone());
                     // PlanReviewer tool whitelist does not include `bash`, so it does not need
                     // a dedicated BashTaskRegistry.
                     let initial_messages = vec![
@@ -346,17 +419,11 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         );
         let turns_limit = deps.max_turns.max(1);
 
-        let llm = Arc::clone(&deps.llm);
-        let compaction_provider = deps.compaction_provider.clone();
         let primitive = Arc::clone(&deps.primitive);
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let context_config = deps.context_config.clone();
-        let context_budget_chars =
-            crate::infra::config::compute_context_budget_chars(&context_config);
         let read_file_state = Arc::clone(&deps.read_file_state);
-        let openai_files_runtime = deps.openai_files_runtime.clone();
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
         let bash_config = deps.bash_config.clone();
@@ -368,16 +435,42 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs =
             resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(expose_skills));
+        let model_id = deps.resolve_model(&plan_runtime);
+        let parent_session_id = deps.parent_session_id.clone();
+        let parent_session_id_for_closure = parent_session_id.clone();
+        let origin = self.origin;
+        let runtime = match resolve_subagent_runtime(
+            deps.llm_resolver.as_ref(),
+            &deps.context_config,
+            &deps.llm_files_config,
+            &deps.sessions_dir,
+            &parent_session_id,
+            &model_id,
+        ) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let mut s = CodeReviewSummary::aborted_with(format!(
+                    "[{}] code reviewer 模型 `{}` 解析失败：{}",
+                    self.origin, model_id, err
+                ));
+                s.reviewer_turns_limit = turns_limit;
+                s.reviewer_stop_reason = "model_unresolved".into();
+                return s;
+            }
+        };
+        let context_budget_chars =
+            crate::infra::config::compute_context_budget_chars(&runtime.context_config);
         let skill_prompt = if expose_skills {
             render_available_skills_prompt(&skill_set, context_budget_chars, &deps.skills_config)
         } else {
             None
         };
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let model = deps.resolve_model(&plan_runtime);
-        let parent_session_id = deps.parent_session_id.clone();
-        let parent_session_id_for_closure = parent_session_id.clone();
-        let origin = self.origin;
+        let compaction_provider = runtime.compaction_provider.clone();
+        let context_config = runtime.context_config.clone();
+        let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let binding = runtime.main_call;
+        let transcript_model = binding.catalog_id().to_string();
 
         let (tx, rx) = tokio::sync::oneshot::channel::<CodeReviewSummary>();
 
@@ -407,7 +500,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                             &transcript_root,
                             &child_session_id,
                             SubagentType::CodeReviewer,
-                            &model,
+                            &transcript_model,
                             &parent_session_id_for_closure,
                         );
 
@@ -425,7 +518,6 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        model,
                         thinking_level: None,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
@@ -449,7 +541,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         },
                     };
                     let mut agent_loop =
-                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
+                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
                             .with_bash_task_registry(bash_task_registry);
                     let initial_messages = vec![
                         ChatMessage::system(&system_text),
@@ -556,7 +648,7 @@ fn build_plan_summary_from_outcome(
             let mut s =
                 PlanReviewSummary::aborted_with(format!("[{origin}] reviewer 子 Agent 失败：{e}"));
             s.reviewer_turns_limit = turns_limit;
-            s.reviewer_stop_reason = "spawn_error".into();
+            s.reviewer_stop_reason = "llm_error".into();
             s.child_session_id = child_session_id.to_string();
             (s, SubagentOutcomeLabel::Failed)
         }
@@ -613,7 +705,7 @@ fn build_code_summary_from_outcome(
             let mut s =
                 CodeReviewSummary::aborted_with(format!("[{origin}] reviewer 子 Agent 失败：{e}"));
             s.reviewer_turns_limit = turns_limit;
-            s.reviewer_stop_reason = "spawn_error".into();
+            s.reviewer_stop_reason = "llm_error".into();
             s.child_session_id = child_session_id.to_string();
             (s, SubagentOutcomeLabel::Failed)
         }
@@ -659,28 +751,51 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
         let initial_user_message = build_explorer_prompt(task, workspace_root);
         let turns_limit = deps.max_turns.max(1);
 
-        let llm = Arc::clone(&deps.llm);
-        let compaction_provider = deps.compaction_provider.clone();
         let primitive = Arc::clone(&deps.primitive);
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let context_config = deps.context_config.clone();
         let read_file_state = Arc::clone(&deps.read_file_state);
-        let openai_files_runtime = deps.openai_files_runtime.clone();
         let bash_config = deps.bash_config.clone();
         let gate = Arc::clone(&deps.gate);
         let confirmation = Arc::clone(&deps.confirmation);
         let audit = Arc::clone(&deps.audit);
         let bash_ast = deps.bash_ast.clone();
         let tool_defs = resolve_internal_tools(EXPLORER_ALLOWED_TOOLS);
-        let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let model = deps.resolve_model(&plan_runtime);
+        let model_id = deps.resolve_model(&plan_runtime);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
         let task_id = task.id.clone();
         let task_id_for_closure = task_id.clone();
+        let runtime = match resolve_subagent_runtime(
+            deps.llm_resolver.as_ref(),
+            &deps.context_config,
+            &deps.llm_files_config,
+            &deps.sessions_dir,
+            &parent_session_id,
+            &model_id,
+        ) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let mut r = ExplorerReport::aborted_with(
+                    &task_id,
+                    format!(
+                        "[{}] explorer 模型 `{}` 解析失败：{}",
+                        self.origin, model_id, err
+                    ),
+                );
+                r.turns_limit = turns_limit;
+                r.stop_reason = "model_unresolved".into();
+                return r;
+            }
+        };
+        let plan_runtime_for_loop = Arc::clone(&plan_runtime);
+        let compaction_provider = runtime.compaction_provider.clone();
+        let context_config = runtime.context_config.clone();
+        let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let binding = runtime.main_call;
+        let transcript_model = binding.catalog_id().to_string();
 
         let (tx, rx) = tokio::sync::oneshot::channel::<ExplorerReport>();
 
@@ -710,7 +825,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                             &transcript_root,
                             &child_session_id,
                             SubagentType::Explorer,
-                            &model,
+                            &transcript_model,
                             &parent_session_id_for_closure,
                         );
 
@@ -724,7 +839,6 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        model,
                         thinking_level: None,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
@@ -744,7 +858,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         skill_set: None,
                     };
                     let mut agent_loop =
-                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
+                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
                             .with_bash_task_registry(bash_task_registry);
                     let initial_messages = vec![
                         ChatMessage::system(&system_text),
@@ -851,7 +965,7 @@ fn build_explorer_report_from_outcome(
                 format!("[{origin}] explorer 子 Agent 失败：{e}"),
             );
             r.turns_limit = turns_limit;
-            r.stop_reason = "spawn_error".into();
+            r.stop_reason = "llm_error".into();
             r.child_session_id = child_session_id.to_string();
             (r, SubagentOutcomeLabel::Failed)
         }

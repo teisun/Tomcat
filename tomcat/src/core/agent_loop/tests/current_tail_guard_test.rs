@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard;
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::MockPrimitiveExecutor;
+use super::mocks::{test_binding, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::compaction::TOOL_RESULT_PLACEHOLDER;
 use crate::core::llm::{
@@ -115,7 +115,7 @@ async fn mid_turn_guard_rewrites_tail_and_transcript() {
         summary_text: "unused".to_string(),
     });
     let mut agent = AgentLoop::new(
-        llm,
+        test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         config,
@@ -238,7 +238,7 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         summary_text: "continue with plan execution".to_string(),
     });
     let mut agent = AgentLoop::new(
-        llm,
+        test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         config,

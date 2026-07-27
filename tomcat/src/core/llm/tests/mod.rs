@@ -19,6 +19,7 @@
 // 不再隶属 `tests` 父模块的兄弟链），故提升到 `pub(crate)`。
 mod admin_test;
 mod auth_test;
+mod binding_invariant_test;
 mod catalog_test;
 pub(crate) mod mocks;
 mod multimodal_test;

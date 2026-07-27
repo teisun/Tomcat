@@ -48,11 +48,12 @@ pub(crate) fn subagent_transcript_path(
 }
 
 pub(crate) fn format_subagent_transcript_path(
-    _agent_trail_dir: &str,
+    agent_trail_dir: &str,
     child_session_id: &str,
 ) -> Option<String> {
+    let agent_trail_dir = agent_trail_dir.trim();
     let child_session_id = child_session_id.trim();
-    if child_session_id.is_empty() {
+    if agent_trail_dir.is_empty() || child_session_id.is_empty() {
         return None;
     }
     Some(format!("subagent-sessions/{child_session_id}.jsonl"))
@@ -69,7 +70,13 @@ pub(crate) fn append_subagent_transcript_hint(
     if summary.contains(&path) {
         return;
     }
-    let note = format!("[debug transcript] {path}");
+    let transcript_exists = subagent_transcript_path(agent_trail_dir, child_session_id)
+        .is_some_and(|absolute| absolute.is_file());
+    let note = if transcript_exists {
+        format!("[debug transcript] {path}")
+    } else {
+        "[no transcript] 子 Agent 未产生任何消息（首个 LLM 请求即失败）".to_string()
+    };
     if summary.is_empty() {
         *summary = note;
     } else {

@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard;
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::{MockPrimitiveExecutor, RecordedChatCall, RecordingChatLlmProvider};
+use super::mocks::{test_binding, MockPrimitiveExecutor, RecordedChatCall, RecordingChatLlmProvider};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessage, LlmProvider, MessageKind};
 use crate::core::session::manager::ContextState;
@@ -28,7 +28,7 @@ async fn collapse_summary_uses_compaction_provider_cross_provider() {
     ));
 
     let mut agent = AgentLoop::new(
-        Arc::clone(&main_provider),
+        test_binding(Arc::clone(&main_provider), "main-x"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {

@@ -1,5 +1,5 @@
 use crate::core::tools::primitive::BashTaskRegistry;
-use crate::core::{LlmProvider, LlmResolver, PrimitiveExecutor, SessionManager, ToolRegistry};
+use crate::core::{LlmResolver, PrimitiveExecutor, SessionManager, ToolRegistry};
 use crate::ext::host_binding::HostResponse;
 use crate::ext::vm_actor::EventEnvelope;
 use crate::ext::PluginManager;
@@ -34,7 +34,6 @@ pub struct HostApiDispatcher {
     pub(super) event_bus: Arc<dyn EventBus>,
     pub(super) primitive: Option<Arc<dyn PrimitiveExecutor>>,
     pub(super) tools: Option<Arc<dyn ToolRegistry>>,
-    pub(super) llm: Option<Arc<dyn LlmProvider>>,
     pub(super) llm_resolver: Option<Arc<dyn LlmResolver>>,
     pub(super) session: Option<Arc<SessionManager>>,
     pub(super) bash_task_registry: Option<Arc<BashTaskRegistry>>,
@@ -96,7 +95,6 @@ impl HostApiDispatcher {
             event_bus,
             primitive: None,
             tools: None,
-            llm: None,
             llm_resolver: None,
             session: None,
             bash_task_registry: None,
@@ -212,12 +210,6 @@ impl HostApiDispatcher {
     /// 注入工具注册中心。
     pub fn with_tools(mut self, t: Arc<dyn ToolRegistry>) -> Self {
         self.tools = Some(t);
-        self
-    }
-
-    /// 注入 LLM Provider。
-    pub fn with_llm(mut self, l: Arc<dyn LlmProvider>) -> Self {
-        self.llm = Some(l);
         self
     }
 

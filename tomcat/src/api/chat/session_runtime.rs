@@ -8,19 +8,17 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::BackgroundCompletionRoutes;
-use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::SharedModelCatalog;
 use crate::core::plan_runtime;
 use crate::core::tools::contract::registry::ToolRegistry;
 use crate::core::tools::primitive::{BashTaskId, BashTaskRegistry, PrimitiveExecutor};
 use crate::core::tools::web_fetch::WebFetchRuntime;
 use crate::core::tools::web_search::WebSearchRuntime;
-use crate::core::{CheckpointStore, LlmProvider, LlmResolver, ModelThinkingStore, SessionManager};
+use crate::core::{CheckpointStore, LlmResolver, ModelThinkingStore, SessionManager};
 use crate::ext::{FunctionRegistry, HostApiDispatcher, PluginFunctionInvoker, PluginManager};
 use crate::infra::{AuditRecorder, EventBus};
 
 pub struct GlobalServices {
-    pub llm: Arc<dyn LlmProvider>,
     pub model_catalog: SharedModelCatalog,
     pub llm_resolver: Arc<dyn LlmResolver>,
     pub model_thinking: Arc<ModelThinkingStore>,
@@ -77,7 +75,6 @@ pub struct SessionRuntime {
     pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
     pub thinking_display: Arc<std::sync::atomic::AtomicU8>,
-    pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
     pub todos_runtime: Arc<plan_runtime::todo_runtime::TodosRuntime>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
     pub suppress_cli_output: bool,

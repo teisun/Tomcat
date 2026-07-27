@@ -28,7 +28,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::llm::{ChatMessage, LlmProvider, ResolvedCall};
 use crate::core::session::manager::{generate_entry_id, ContextState};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::event_bus::{EventBus, ScopedEventEmitter};
@@ -38,7 +38,7 @@ use super::types::{AgentLoop, AgentLoopConfig, BackgroundCompletionRoutes, LoopE
 
 impl AgentLoop {
     pub fn new(
-        llm: Arc<dyn LlmProvider>,
+        binding: ResolvedCall,
         primitive: Arc<dyn PrimitiveExecutor>,
         event_bus: Arc<dyn EventBus>,
         config: AgentLoopConfig,
@@ -48,7 +48,9 @@ impl AgentLoop {
             Arc::clone(&event_bus),
             Some(config.session_id.clone()),
         );
+        let llm = binding.provider_impl.clone();
         Self {
+            binding,
             llm,
             primitive,
             emitter,
@@ -180,7 +182,7 @@ impl AgentLoop {
     /// 测试用：注入 steering_queue，便于 mock 在工具执行中推入 steering 消息。
     #[cfg(test)]
     pub fn new_with_steering_queue(
-        llm: Arc<dyn LlmProvider>,
+        binding: ResolvedCall,
         primitive: Arc<dyn PrimitiveExecutor>,
         event_bus: Arc<dyn EventBus>,
         config: AgentLoopConfig,
@@ -191,7 +193,9 @@ impl AgentLoop {
             Arc::clone(&event_bus),
             Some(config.session_id.clone()),
         );
+        let llm = binding.provider_impl.clone();
         Self {
+            binding,
             llm,
             primitive,
             emitter,
@@ -237,6 +241,14 @@ impl AgentLoop {
 
     pub fn set_context_state(&mut self, state: Option<ContextState>) {
         self.context_state = state;
+    }
+
+    pub fn wire_model(&self) -> &str {
+        self.binding.wire_model()
+    }
+
+    pub fn catalog_id(&self) -> &str {
+        self.binding.catalog_id()
     }
 
     pub fn take_context_state(&mut self) -> Option<ContextState> {

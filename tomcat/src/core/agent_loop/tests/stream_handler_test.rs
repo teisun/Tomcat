@@ -16,7 +16,7 @@ use crate::core::session::manager::ContextState;
 use crate::infra::error::AppError;
 use crate::infra::{wire, DefaultEventBus, EventBus};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
 fn make_agent(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> AgentLoop {
     make_agent_with_bus(streams).0
@@ -29,13 +29,12 @@ fn make_agent_with_bus(
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-stream-handler".to_string(),
         ..Default::default()
     };
     (
         AgentLoop::new(
-            llm,
+            test_binding(llm, "gpt-4"),
             primitive,
             event_bus.clone(),
             config,

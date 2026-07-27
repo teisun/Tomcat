@@ -417,12 +417,15 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
 
 fn default_config(session_id: &str) -> AgentLoopConfig {
     AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: session_id.to_string(),
         max_attempts: 3,
         retry_base_delay_ms: 0, // 集成测试中将延迟置零，避免等待
         ..Default::default()
     }
+}
+
+fn loop_binding(provider: Arc<dyn LlmProvider>, model: &str) -> ResolvedCall {
+    ResolvedCall::from_parts_unchecked(provider, model, model)
 }
 
 fn text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
@@ -472,16 +475,15 @@ impl FixedResolver {
             reasoning: lower.starts_with("gpt-5."),
             web_search: false,
         };
-        ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: model.to_string(),
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
-            base_url: Some("https://api.openai.com".to_string()),
-            key_source: "DEEPSEEK_API_KEY".to_string(),
-            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
-            capabilities,
-        }
+        let mut call =
+            ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.api = "openai-responses".to_string();
+        call.provider = "openai".to_string();
+        call.base_url = Some("https://api.openai.com".to_string());
+        call.key_source = "DEEPSEEK_API_KEY".to_string();
+        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.capabilities = capabilities;
+        call
     }
 }
 
@@ -507,7 +509,6 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.global_services.llm = provider.clone();
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 
@@ -607,7 +608,13 @@ async fn test_agent_loop_simple_text_response() -> Result<(), Box<dyn std::error
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-simple");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("say hello")];
 
     info!("Act: 调用 AgentLoop::run()");
@@ -675,7 +682,13 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
 
     let config = default_config("sess-abort");
     let abort_signal = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort_signal.clone());
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort_signal.clone(),
+    );
     let messages = vec![ChatMessage::user("read files")];
 
     info!("Act: 在后台线程 20ms 后触发 abort()，同时 run() 执行中");
@@ -720,7 +733,13 @@ async fn test_agent_loop_follow_up_continues_in_same_session(
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-followup");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     agent.follow_up("continue please".to_string());
     let messages = vec![ChatMessage::user("first message")];
@@ -894,7 +913,13 @@ async fn test_agent_loop_tool_error_does_not_terminate_loop(
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-tool-error");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("run bash")];
 
     info!("Act: 调用 run()，工具首次执行将 Err");
@@ -939,14 +964,19 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-retry".to_string(),
         max_attempts: 3,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()，期望自动重试后成功");
@@ -985,14 +1015,19 @@ async fn test_agent_loop_gateway_503_retries_and_succeeds() -> Result<(), Box<dy
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-503-retry".to_string(),
         max_attempts: 3,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         agent.run(vec![ChatMessage::user("hi")]),
@@ -1039,14 +1074,19 @@ async fn test_agent_loop_retryable_503_exhaustion_emits_auto_retry_end(
         }),
     );
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-503-fail".to_string(),
         max_attempts: 2,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         agent.run(vec![ChatMessage::user("hi")]),
@@ -1115,7 +1155,13 @@ async fn test_agent_loop_tool_pi_mono_event_subsequence() -> Result<(), Box<dyn 
 
     let config = default_config("sess-tool-pi-mono-order");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("run ls")];
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -1164,14 +1210,19 @@ async fn test_agent_loop_fatal_error_401_terminates_immediately(
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-fatal".to_string(),
         max_attempts: 3,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()，期望立即返回 Err（无重试）");
@@ -1230,7 +1281,13 @@ async fn test_agent_loop_events_published_in_correct_order(
 
     let config = default_config("sess-events");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()");
@@ -1286,7 +1343,13 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-steering");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     // 预注入 Steering 消息，工具批次第一个完成后将被检测并跳过剩余工具
     agent.steer("redirect me now".to_string());
@@ -1350,7 +1413,13 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
 
     let config = default_config("sess-ctx-metrics");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     use tomcat::ContextState;
     agent.set_context_state(Some(ContextState {
@@ -1446,7 +1515,13 @@ async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn s
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-empty");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     info!("Act: run([]) 调用");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(vec![]))

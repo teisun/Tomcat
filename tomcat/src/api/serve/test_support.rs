@@ -11,7 +11,6 @@ use parking_lot::Mutex;
 use tokio::io::AsyncWrite;
 
 use crate::api::chat::{ChatContext, ChatContextOverrides};
-use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene, ResolvedCall,
     StreamEvent,
@@ -288,16 +287,11 @@ impl LlmResolver for FixedResolver {
         let entry = self
             .catalog
             .lookup_explicit(session_override.unwrap_or(&self.default_model))?;
-        Ok(ResolvedCall {
-            provider_impl: Arc::clone(&self.provider),
-            model: entry.id,
-            api: entry.api,
-            provider: entry.provider,
-            base_url: entry.base_url,
-            key_source: "test".to_string(),
-            thinking_format: ThinkingFormat::Auto,
-            capabilities: entry.capabilities,
-        })
+        Ok(ResolvedCall::from_parts_unchecked(
+            Arc::clone(&self.provider),
+            entry.id.clone(),
+            entry.request_model_name().to_string(),
+        ))
     }
 }
 
@@ -373,7 +367,6 @@ pub async fn build_initialized_state_with_provider(
     ctx.session_runtime
         .plan_runtime
         .attach_ask_question_panel(ask_panel);
-    ctx.global_services.llm = Arc::clone(&provider);
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
         provider,
         "gpt-5.4",

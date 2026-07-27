@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::turn_finalize::finalize_turn_after_text;
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::{MockPrimitiveExecutor, RecordedChatCall, RecordingChatLlmProvider};
+use super::mocks::{
+    test_binding, MockPrimitiveExecutor, RecordedChatCall, RecordingChatLlmProvider,
+};
 use crate::core::compaction::preheat::{Preheat, PreheatOutcome};
 use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
 use crate::core::session::manager::ContextState;
@@ -86,7 +88,7 @@ fn build_agent(
     ];
     let messages = context_messages.clone();
     let mut agent = AgentLoop::new(
-        main_provider,
+        test_binding(main_provider, "main-x"),
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {

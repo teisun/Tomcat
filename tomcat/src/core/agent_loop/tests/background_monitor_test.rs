@@ -12,7 +12,7 @@ use crate::core::tools::primitive::BashTaskRegistry;
 use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
 
-use super::mocks::MockPrimitiveExecutor;
+use super::mocks::{test_binding, MockPrimitiveExecutor};
 
 struct HungTaskBoundedProvider {
     requests: StdMutex<Vec<ChatRequest>>,
@@ -168,11 +168,10 @@ async fn run_hung_background_task_wait_window_snapshot_keeps_turn_bounded() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(
-        llm.clone(),
+        test_binding(llm.clone(), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            model: "gpt-4".to_string(),
             session_id: "s-hung-timeout-bounded".to_string(),
             ..Default::default()
         },

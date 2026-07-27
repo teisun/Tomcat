@@ -24,21 +24,26 @@ pub enum LlmScene {
     Title,
 }
 
+#[derive(Clone)]
 pub struct ResolvedCall {
     pub provider_impl: Arc<dyn LlmProvider>,
     pub model: String,
+    pub catalog_id: String,
     pub api: String,
     pub provider: String,
     pub base_url: Option<String>,
     pub key_source: String,
     pub thinking_format: ThinkingFormat,
     pub capabilities: Capabilities,
+    #[allow(dead_code)]
+    sealed: Sealed,
 }
 
 impl std::fmt::Debug for ResolvedCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedCall")
             .field("model", &self.model)
+            .field("catalog_id", &self.catalog_id)
             .field("api", &self.api)
             .field("provider", &self.provider)
             .field("base_url", &self.base_url)
@@ -46,6 +51,42 @@ impl std::fmt::Debug for ResolvedCall {
             .field("thinking_format", &self.thinking_format)
             .field("capabilities", &self.capabilities)
             .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Sealed;
+
+impl ResolvedCall {
+    pub fn wire_model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn catalog_id(&self) -> &str {
+        &self.catalog_id
+    }
+
+    /// 仅测试与 provider 适配层可用；生产路径必须经 [`LlmResolver`]。
+    ///
+    /// 该工厂绕过密封构造，允许在单测里装配 `ResolvedCall`，**不得**在生产派发路径使用。
+    #[doc(hidden)]
+    pub fn from_parts_unchecked(
+        provider_impl: Arc<dyn LlmProvider>,
+        catalog_id: impl Into<String>,
+        wire_model: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider_impl,
+            model: wire_model.into(),
+            catalog_id: catalog_id.into(),
+            api: String::new(),
+            provider: String::new(),
+            base_url: None,
+            key_source: String::new(),
+            thinking_format: ThinkingFormat::default(),
+            capabilities: Capabilities::default(),
+            sealed: Sealed,
+        }
     }
 }
 
@@ -346,12 +387,14 @@ impl DefaultLlmResolver {
         Ok(ResolvedCall {
             provider_impl,
             model: entry.request_model_name().to_string(),
+            catalog_id: entry.id.clone(),
             api: entry.api.clone(),
             provider: entry.provider.clone(),
             base_url,
             key_source: credential.env_name,
             thinking_format: self.resolved_thinking_format(&entry),
             capabilities: entry.capabilities.clone(),
+            sealed: Sealed,
         })
     }
 

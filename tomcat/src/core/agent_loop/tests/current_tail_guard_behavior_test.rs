@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard::{self, GuardRoute, GuardRouteReason};
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::MockPrimitiveExecutor;
+use super::mocks::{test_binding, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::compaction::TOOL_RESULT_PLACEHOLDER;
 use crate::core::llm::{
@@ -724,7 +724,7 @@ fn make_agent_with_summary(context_config: ContextConfig, summary_text: String) 
         ..Default::default()
     };
     AgentLoop::new(
-        Arc::new(ChatOnlyMockLlm { summary_text }),
+        test_binding(Arc::new(ChatOnlyMockLlm { summary_text }), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         config,

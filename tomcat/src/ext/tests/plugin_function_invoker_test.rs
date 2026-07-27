@@ -1,4 +1,3 @@
-use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::tools::web_search::backend::BackendFailure;
 use crate::core::tools::web_search::plugin_backend::PluginSearchInvoker;
 use crate::ext::{
@@ -7,8 +6,8 @@ use crate::ext::{
 };
 use crate::infra::{DefaultEventBus, TracingAuditRecorder};
 use crate::{
-    AppError, Capabilities, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
-    LlmProvider, LlmResolver, LlmScene, ResolvedCall, StreamEvent,
+    AppError, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider,
+    LlmResolver, LlmScene, ResolvedCall, StreamEvent,
 };
 use async_trait::async_trait;
 use futures_util::stream;
@@ -393,16 +392,12 @@ impl LlmResolver for FixedResolver {
         _scene: LlmScene,
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
-        Ok(ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: session_override.unwrap_or("mimo-v2.5-pro").to_string(),
-            api: "openai".to_string(),
-            provider: "mimo".to_string(),
-            base_url: None,
-            key_source: "test".to_string(),
-            thinking_format: ThinkingFormat::Doubao,
-            capabilities: Capabilities::default(),
-        })
+        let model = session_override.unwrap_or("mimo-v2.5-pro").to_string();
+        Ok(ResolvedCall::from_parts_unchecked(
+            self.provider.clone(),
+            model.clone(),
+            model,
+        ))
     }
 }
 

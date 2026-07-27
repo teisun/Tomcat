@@ -9,7 +9,7 @@ use super::super::turn_finalize::{
     finalize_turn_after_text, TurnOutcome, MAX_COMPLETION_GUARD_INJECTIONS,
 };
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessage, MessageKind};
 use crate::core::plan_runtime::file_store::{
@@ -77,7 +77,7 @@ fn todo(id: &str, status: TodoStatus) -> TodoItem {
 
 fn build_agent(plan_runtime: Option<Arc<PlanRuntime>>) -> AgentLoop {
     let mut agent = AgentLoop::new(
-        Arc::new(MockLlmProvider::new(vec![])),
+        test_binding(Arc::new(MockLlmProvider::new(vec![])), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {

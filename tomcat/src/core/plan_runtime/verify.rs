@@ -16,15 +16,14 @@ use crate::core::agent_loop::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, SubagentType,
 };
 use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcomeLabel};
-use crate::core::llm::openai_files::OpenAiFilesRuntime;
-use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::llm::{ChatMessage, LlmResolver};
 use crate::core::plan_runtime::review::resolve_internal_tools;
 use crate::core::plan_runtime::{PlanRuntime, VerifierDispatcher};
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::CheckpointStore;
-use crate::infra::config::ContextConfig;
+use crate::infra::config::{ContextConfig, LlmFilesConfig};
 use crate::infra::event_bus::EventBus;
 
 pub const VERIFIER_MAX_TURNS: u32 = 64;
@@ -226,15 +225,15 @@ pub struct ProdVerifierDispatcher {
 pub struct ProdVerifierDeps {
     pub agent_registry: Arc<AgentRegistry>,
     pub parent_session_id: String,
-    pub llm: Arc<dyn LlmProvider>,
-    pub compaction_provider: Option<Arc<dyn LlmProvider>>,
+    pub llm_resolver: Arc<dyn LlmResolver>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub event_bus: Arc<dyn EventBus>,
     pub agent_trail_dir: String,
     pub checkpoint_store: Arc<dyn CheckpointStore>,
     pub context_config: ContextConfig,
     pub read_file_state: Arc<ReadFileState>,
-    pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+    pub llm_files_config: LlmFilesConfig,
+    pub sessions_dir: std::path::PathBuf,
     pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
     pub agent_workspace_dir: std::path::PathBuf,
     pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
@@ -298,17 +297,11 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             build_verify_prompt(plan_id, plan_text, &plan_path, workspace_root);
         let turns_limit = VERIFIER_MAX_TURNS;
 
-        let llm = Arc::clone(&deps.llm);
-        let compaction_provider = deps.compaction_provider.clone();
         let primitive = Arc::clone(&deps.primitive);
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let context_config = deps.context_config.clone();
-        let context_budget_chars =
-            crate::infra::config::compute_context_budget_chars(&context_config);
         let read_file_state = Arc::clone(&deps.read_file_state);
-        let openai_files_runtime = deps.openai_files_runtime.clone();
         let web_fetch_runtime = Arc::clone(&deps.web_fetch_runtime);
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
@@ -320,6 +313,31 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let expose_skills =
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs = resolve_internal_tools(&verifier_allowed_tools_with_policy(expose_skills));
+        let model_id = deps.resolve_model(&plan_runtime);
+        let parent_session_id = deps.parent_session_id.clone();
+        let parent_session_id_for_closure = parent_session_id.clone();
+        let origin = self.origin;
+        let runtime = match super::prod_reviewer::resolve_subagent_runtime(
+            deps.llm_resolver.as_ref(),
+            &deps.context_config,
+            &deps.llm_files_config,
+            &deps.sessions_dir,
+            &parent_session_id,
+            &model_id,
+        ) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let mut s = VerifySummary::aborted_with(format!(
+                    "[{}] verifier 模型 `{}` 解析失败：{}",
+                    self.origin, model_id, err
+                ));
+                s.verifier_turns_limit = turns_limit;
+                s.verifier_stop_reason = "model_unresolved".into();
+                return s;
+            }
+        };
+        let context_budget_chars =
+            crate::infra::config::compute_context_budget_chars(&runtime.context_config);
         let skill_prompt = if expose_skills {
             crate::core::llm::system_prompt::render_available_skills_prompt(
                 &skill_set,
@@ -330,10 +348,11 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             None
         };
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let model = deps.resolve_model(&plan_runtime);
-        let parent_session_id = deps.parent_session_id.clone();
-        let parent_session_id_for_closure = parent_session_id.clone();
-        let origin = self.origin;
+        let compaction_provider = runtime.compaction_provider.clone();
+        let context_config = runtime.context_config.clone();
+        let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let binding = runtime.main_call;
+        let transcript_model = binding.catalog_id().to_string();
         let mut system_text = format!(
             "{}\n(max_turns budget: {} reasoning turns)\n",
             verifier_system_prompt_text(),
@@ -372,7 +391,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                             &transcript_root,
                             &child_session_id,
                             SubagentType::Verifier,
-                            &model,
+                            &transcript_model,
                             &parent_session_id_for_closure,
                         );
 
@@ -381,7 +400,6 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        model,
                         thinking_level: None,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
@@ -405,7 +423,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         },
                     };
                     let mut agent_loop =
-                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
+                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
                             .with_web_fetch_runtime(web_fetch_runtime)
                             .with_bash_task_registry(bash_task_registry);
                     let initial_messages = vec![
@@ -527,7 +545,7 @@ pub(crate) fn build_summary_from_outcome(
             let mut s =
                 VerifySummary::aborted_with(format!("[{origin}] verifier 子 Agent 失败：{e}"));
             s.verifier_turns_limit = turns_limit;
-            s.verifier_stop_reason = "spawn_error".into();
+            s.verifier_stop_reason = "llm_error".into();
             s.child_session_id = child_session_id.to_string();
             (s, SubagentOutcomeLabel::Failed)
         }

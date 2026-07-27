@@ -16,18 +16,23 @@ use crate::ext::{
 use crate::infra::error::AppError;
 use crate::infra::{wire, DefaultEventBus, EventBus, EventContext, TracingAuditRecorder};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
 fn make_agent() -> AgentLoop {
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-tool-call-args".to_string(),
         ..Default::default()
     };
-    AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new())
+    AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        CancellationToken::new(),
+    )
 }
 
 struct MockPluginToolRegistry;
@@ -465,12 +470,11 @@ pi.registerTool({
     });
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-tool-call-args".to_string(),
         ..Default::default()
     };
     let mut agent = AgentLoop::new(
-        llm,
+        test_binding(llm, "gpt-4"),
         primitive,
         event_bus.clone(),
         config,
@@ -589,11 +593,16 @@ pi.registerTool({
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let cancel = CancellationToken::new();
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-tool-call-args".to_string(),
         ..Default::default()
     };
-    let mut agent = AgentLoop::new(llm, primitive, event_bus.clone(), config, cancel.clone())
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus.clone(),
+        config,
+        cancel.clone(),
+    )
         .with_tool_registry(harness.registry.clone());
 
     tokio::spawn(async move {

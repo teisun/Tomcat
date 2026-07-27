@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::core::llm::ChatMessage;
-use crate::core::llm::{ChatRequest, ChatResponse, LlmProvider, StreamEvent};
+use crate::core::llm::{ChatRequest, ChatResponse, LlmProvider, ResolvedCall, StreamEvent};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::error::AppError;
 
@@ -23,6 +23,14 @@ impl MockLlmProvider {
             streams: Mutex::new(streams),
         }
     }
+}
+
+pub(super) fn test_binding(
+    provider: Arc<dyn LlmProvider>,
+    model: impl Into<String>,
+) -> ResolvedCall {
+    let model = model.into();
+    ResolvedCall::from_parts_unchecked(provider, model.clone(), model)
 }
 
 #[async_trait::async_trait]

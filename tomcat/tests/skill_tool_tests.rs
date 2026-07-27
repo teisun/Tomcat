@@ -111,22 +111,21 @@ impl FixedResolver {
     }
 
     fn resolved_call(&self, model: &str) -> ResolvedCall {
-        ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: model.to_string(),
-            api: "openai".to_string(),
-            provider: "deepseek".to_string(),
-            base_url: Some(common::DEEPSEEK_TEST_API_BASE.to_string()),
-            key_source: common::DEEPSEEK_TEST_API_KEY_ENV.to_string(),
-            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
-            capabilities: Capabilities {
-                vision: false,
-                files: false,
-                tools: true,
-                reasoning: true,
-                web_search: false,
-            },
-        }
+        let mut call =
+            ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.api = "openai".to_string();
+        call.provider = "deepseek".to_string();
+        call.base_url = Some(common::DEEPSEEK_TEST_API_BASE.to_string());
+        call.key_source = common::DEEPSEEK_TEST_API_KEY_ENV.to_string();
+        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.capabilities = Capabilities {
+            vision: false,
+            files: false,
+            tools: true,
+            reasoning: true,
+            web_search: false,
+        };
+        call
     }
 }
 
@@ -149,7 +148,6 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.global_services.llm = provider.clone();
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 

@@ -9,13 +9,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tomcat::{
-    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
+    parse_manifest, BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse,
+    ChatResponseChoice,
     DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult, EditOperation,
-    FunctionRegistry, HostApiDispatcher, LlmProvider, PluginEngine, PluginEngineConfig,
-    PluginFunctionInvoker, PluginInstance, PluginManager, PluginRuntimeManager, PluginStatus,
-    PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager,
-    StreamEvent, Tool, ToolExecutor, ToolRegistry, TracingAuditRecorder, VmActorHandle,
-    VmActorState, WriteFileResult,
+    FunctionRegistry, HostApiDispatcher, LlmProvider, LlmResolver, LlmScene, PluginEngine,
+    PluginEngineConfig, PluginFunctionInvoker, PluginInstance, PluginManager, PluginRuntimeManager,
+    PluginStatus, PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation, ResolvedCall,
+    SharedPluginRuntimeManager, StreamEvent, Tool, ToolExecutor, ToolRegistry,
+    TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
 };
 
 type FunctionManagerHarness = (
@@ -370,6 +371,32 @@ impl LlmProvider for MockLlm {
     }
 }
 
+struct QuickJsFixedResolver {
+    provider: Arc<dyn LlmProvider>,
+}
+
+impl LlmResolver for QuickJsFixedResolver {
+    fn resolve(
+        &self,
+        _scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, tomcat::AppError> {
+        let model = session_override
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or("mock-model");
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.capabilities = Capabilities {
+            vision: false,
+            files: false,
+            tools: true,
+            reasoning: true,
+            web_search: false,
+        };
+        Ok(call)
+    }
+}
+
 async fn wait_for_state(handle: &VmActorHandle, expected: VmActorState) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -571,11 +598,12 @@ __pi_start_event_loop();
     );
 
     let bus = Arc::new(DefaultEventBus::new());
+    let llm: Arc<dyn LlmProvider> = Arc::new(MockLlm);
     let dispatcher = Arc::new(
         HostApiDispatcher::new(bus.clone())
             .with_tokio_handle(tokio::runtime::Handle::current())
             .with_primitive(Arc::new(MockPrimitive))
-            .with_llm(Arc::new(MockLlm)),
+            .with_llm_resolver(Arc::new(QuickJsFixedResolver { provider: llm })),
     );
     let (manager, rm) = make_manager_with_dispatcher(bus, dispatcher);
     register_plugin(&manager, plugin_dir.path(), "readfile-llm-plugin");
