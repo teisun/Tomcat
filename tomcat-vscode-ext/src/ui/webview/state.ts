@@ -366,12 +366,21 @@ function reviewAttemptId(
   return `${planId}:${typeof round === "number" ? round : 1}`;
 }
 
+function parseTimestampMs(value: unknown): number | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function upsertRunningCodeReviewRow(
   session: WebviewSessionSnapshot,
   input: {
     planId: string;
     reviewAttemptId?: unknown;
     round?: unknown;
+    startedAt?: unknown;
     toolCallId?: unknown;
   },
 ): void {
@@ -387,6 +396,8 @@ function upsertRunningCodeReviewRow(
   if (existing?.status === "done") {
     return;
   }
+  const startedAt =
+    asFiniteNumber(input.startedAt) ?? existing?.startedAt ?? Date.now();
   upsertTimelineItem(session, {
     anchorToolCallId:
       typeof input.toolCallId === "string" ? input.toolCallId : null,
@@ -394,6 +405,7 @@ function upsertRunningCodeReviewRow(
     planId: input.planId,
     reviewAttemptId: attemptId,
     round: typeof input.round === "number" ? input.round : null,
+    startedAt,
     status: "running",
     type: "review",
   } satisfies WebviewReviewRow);
@@ -418,6 +430,10 @@ function upsertDoneCodeReviewRow(
     (input.aborted === true ? "aborted" : undefined);
   const round = typeof input.round === "number" ? input.round : input.rounds;
   const attemptId = reviewAttemptId(input.planId, round, input.reviewAttemptId);
+  const existing = session.timeline.find(
+    (item): item is WebviewReviewRow =>
+      item.type === "review" && item.reviewAttemptId === attemptId,
+  );
   upsertTimelineItem(session, {
     anchorToolCallId:
       typeof input.toolCallId === "string" ? input.toolCallId : null,
@@ -427,6 +443,7 @@ function upsertDoneCodeReviewRow(
     reviewAttemptId: attemptId,
     round: typeof round === "number" ? round : null,
     rounds: typeof round === "number" ? round : null,
+    startedAt: existing?.startedAt,
     status: "done",
     summary: typeof input.summary === "string" ? input.summary : null,
     type: "review",
@@ -756,6 +773,35 @@ function extractToolCallId(
     : undefined;
 }
 
+function extractToolDisplay(
+  message: Record<string, unknown>,
+): WebviewToolCard["display"] | undefined {
+  const display = message.tool_display;
+  if (!isRecord(display) || typeof display.kind !== "string") {
+    return undefined;
+  }
+  switch (display.kind) {
+    case "file":
+      return typeof display.file === "string"
+        ? (display as unknown as WebviewToolCard["display"])
+        : undefined;
+    case "files":
+      return Array.isArray(display.files)
+        ? (display as unknown as WebviewToolCard["display"])
+        : undefined;
+    case "plan":
+      return typeof display.plan === "string"
+        ? (display as unknown as WebviewToolCard["display"])
+        : undefined;
+    case "text":
+      return typeof display.text === "string"
+        ? (display as unknown as WebviewToolCard["display"])
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
 function buildHistoryToolNameLookup(entries: unknown[]): Map<string, string> {
   const lookup = new Map<string, string>();
   for (const entry of entries) {
@@ -1012,6 +1058,30 @@ function applyLiveToolOutput(
     asNonEmptyString(partialResult.taskId) ?? tool.backgroundTaskId;
 }
 
+function applyToolDisplay(
+  tool: WebviewToolCard,
+  display: WebviewToolCard["display"] | null | undefined,
+): void {
+  tool.display = display ?? undefined;
+  if (
+    display?.kind === "file" &&
+    typeof display.added === "number" &&
+    typeof display.removed === "number"
+  ) {
+    tool.diffStat = {
+      added: display.added,
+      removed: display.removed,
+    };
+  } else {
+    delete tool.diffStat;
+  }
+  if (display?.kind === "file" && Array.isArray(display.diff)) {
+    tool.diff = display.diff;
+  } else {
+    delete tool.diff;
+  }
+}
+
 function applyBackgroundTaskFinished(
   session: WebviewSessionSnapshot,
   taskId: string,
@@ -1253,6 +1323,7 @@ function applyHistoryPlanCustomEntry(
           planId,
           reviewAttemptId: entry.review_attempt_id ?? entry.reviewAttemptId,
           round: entry.round,
+          startedAt: parseTimestampMs(entry.timestamp),
           toolCallId: entry.tool_call_id ?? entry.toolCallId,
         });
       }
@@ -1413,7 +1484,7 @@ function applyHistoryEntry(
       const toolName = historyToolNames.get(toolCallId) ?? "tool";
       const planReference = derivePlanReference(toolName, args, text);
       const planActivity = derivePlanActivity(toolName, text, args);
-      session.timeline.push({
+      const tool: WebviewToolCard = {
         args,
         assistantMessageId: toolCallToAssistant.get(toolCallId),
         id,
@@ -1426,7 +1497,9 @@ function applyHistoryEntry(
         toolCallId,
         toolName,
         type: "tool",
-      } satisfies WebviewToolCard);
+      };
+      applyToolDisplay(tool, extractToolDisplay(entry.message));
+      session.timeline.push(tool);
       return;
     }
   }
@@ -2635,27 +2708,7 @@ export class WebviewStateStore {
         clearThinkingStreaming(runtime);
         const activeAssistantId = runtime.activeAssistantId ?? undefined;
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
-        tool.display = frame.display ?? undefined;
-        if (
-          frame.display?.kind === "file" &&
-          typeof frame.display.added === "number" &&
-          typeof frame.display.removed === "number"
-        ) {
-          tool.diffStat = {
-            added: frame.display.added,
-            removed: frame.display.removed,
-          };
-        } else {
-          delete tool.diffStat;
-        }
-        if (
-          frame.display?.kind === "file" &&
-          Array.isArray(frame.display.diff)
-        ) {
-          tool.diff = frame.display.diff;
-        } else {
-          delete tool.diff;
-        }
+        applyToolDisplay(tool, frame.display);
         tool.isError = frame.isError;
         tool.status = toolResultWasInterrupted(frame.result)
           ? "interrupted"
@@ -2932,11 +2985,15 @@ export class WebviewStateStore {
     event: ServePlanEvent,
   ): void {
     const state = planEventState(event);
+    const planId =
+      "planId" in event && typeof event.planId === "string" && event.planId.length > 0
+        ? event.planId
+        : null;
     if (state) {
       session.planState = state;
     }
-    if (event.planId) {
-      session.planId = event.planId;
+    if (planId) {
+      session.planId = planId;
     }
     if (
       "path" in event &&
@@ -2948,17 +3005,17 @@ export class WebviewStateStore {
         session,
         event.path,
         nextState,
-        event.planId ?? session.planId ?? null,
+        planId ?? session.planId ?? null,
       );
       stampRunningCreatePlan(
         session,
         event.path,
-        event.planId ?? session.planId ?? null,
+        planId ?? session.planId ?? null,
       );
     } else if (session.planFile) {
       session.planFile = {
         ...session.planFile,
-        planId: event.planId ?? session.planFile.planId ?? null,
+        planId: planId ?? session.planFile.planId ?? null,
         state: state ?? session.planFile.state ?? null,
       };
     }
@@ -2980,6 +3037,7 @@ export class WebviewStateStore {
             planId: event.planId,
             reviewAttemptId: event.reviewAttemptId,
             round: event.round,
+            startedAt: Date.now(),
             toolCallId: event.toolCallId,
           });
         }

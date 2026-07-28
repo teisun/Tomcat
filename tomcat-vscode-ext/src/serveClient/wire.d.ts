@@ -145,7 +145,20 @@ export type ServePlanEvent = {
   round?: null | number;
   sessionId?: null | string;
   toolCallId?: null | string;
+  transcriptPath?: null | string;
   type: "plan.code_review.started";
+} | {
+  childSessionId?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  transcriptPath?: null | string;
+  type: "plan.review.started";
+} | {
+  childSessionId?: null | string;
+  sessionId?: null | string;
+  taskId?: null | string;
+  transcriptPath?: null | string;
+  type: "plan.explorer.started";
 } | {
   path?: null | string;
   planId?: null | string;

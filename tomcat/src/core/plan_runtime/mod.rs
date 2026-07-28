@@ -901,7 +901,11 @@ impl PlanRuntime {
     /// 1. 先判断 / 递增 `code_review_rounds`
     /// 2. 调用 `CodeReviewSummary::normalize_for_result()`
     /// 3. 再写 transcript，保证 transcript 与 `update_plan.code_review` 口径一致
-    pub async fn dispatch_code_reviewer(&self, plan_id: &str) -> code_reviewer::CodeReviewSummary {
+    pub async fn dispatch_code_reviewer(
+        &self,
+        plan_id: &str,
+        dispatch: &CodeReviewDispatchInfo,
+    ) -> code_reviewer::CodeReviewSummary {
         let Some(dispatcher) = self.code_reviewer.lock().clone() else {
             return code_reviewer::CodeReviewSummary::placeholder_pending();
         };
@@ -924,7 +928,7 @@ impl PlanRuntime {
         // 没修的沿用同一个 id 报回来——否则 8 轮预算会被同一个问题的不同措辞烧光。
         let open_findings = self.unresolved_findings(plan_id);
         dispatcher
-            .dispatch(plan_id, &plan_text, &open_findings)
+            .dispatch(plan_id, &plan_text, &open_findings, dispatch)
             .await
     }
 
@@ -989,6 +993,33 @@ impl PlanRuntime {
         self.write_transcript_custom(payload);
     }
 
+    pub(crate) fn write_plan_review_started_transcript(
+        &self,
+        plan_id: &str,
+        child_session_id: Option<&str>,
+        transcript_path: Option<&str>,
+    ) {
+        let mut payload = serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_REVIEW_STARTED,
+            "plan_id": plan_id,
+        });
+        if let Some(obj) = payload.as_object_mut() {
+            if let Some(child_session_id) = child_session_id {
+                obj.insert(
+                    "child_session_id".to_string(),
+                    serde_json::Value::String(child_session_id.to_string()),
+                );
+            }
+            if let Some(transcript_path) = transcript_path {
+                obj.insert(
+                    "transcript_path".to_string(),
+                    serde_json::Value::String(transcript_path.to_string()),
+                );
+            }
+        }
+        self.write_transcript_custom(payload);
+    }
+
     pub(crate) fn write_code_review_started_transcript(
         &self,
         plan_id: &str,
@@ -996,6 +1027,7 @@ impl PlanRuntime {
         review_attempt_id: &str,
         tool_call_id: &str,
         child_session_id: Option<&str>,
+        transcript_path: Option<&str>,
     ) {
         let mut payload = serde_json::json!({
             "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_STARTED,
@@ -1009,6 +1041,39 @@ impl PlanRuntime {
                 "child_session_id".to_string(),
                 serde_json::Value::String(child_session_id.to_string()),
             );
+        }
+        if let (Some(obj), Some(transcript_path)) = (payload.as_object_mut(), transcript_path) {
+            obj.insert(
+                "transcript_path".to_string(),
+                serde_json::Value::String(transcript_path.to_string()),
+            );
+        }
+        self.write_transcript_custom(payload);
+    }
+
+    pub(crate) fn write_explorer_started_transcript(
+        &self,
+        task_id: &str,
+        child_session_id: Option<&str>,
+        transcript_path: Option<&str>,
+    ) {
+        let mut payload = serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_EXPLORER_STARTED,
+            "task_id": task_id,
+        });
+        if let Some(obj) = payload.as_object_mut() {
+            if let Some(child_session_id) = child_session_id {
+                obj.insert(
+                    "child_session_id".to_string(),
+                    serde_json::Value::String(child_session_id.to_string()),
+                );
+            }
+            if let Some(transcript_path) = transcript_path {
+                obj.insert(
+                    "transcript_path".to_string(),
+                    serde_json::Value::String(transcript_path.to_string()),
+                );
+            }
         }
         self.write_transcript_custom(payload);
     }
@@ -1532,6 +1597,13 @@ pub trait ExplorerDispatcher: Send + Sync {
     async fn dispatch(&self, task: &explorer::ExplorerTask) -> explorer::ExplorerReport;
 }
 
+#[derive(Debug, Clone)]
+pub struct CodeReviewDispatchInfo {
+    pub round: u32,
+    pub review_attempt_id: String,
+    pub tool_call_id: String,
+}
+
 #[async_trait::async_trait]
 pub trait CodeReviewerDispatcher: Send + Sync {
     /// `open_findings` 是上一轮未清的 finding；实现应把它们渲染进 prompt，
@@ -1541,6 +1613,7 @@ pub trait CodeReviewerDispatcher: Send + Sync {
         plan_id: &str,
         plan_text: &str,
         open_findings: &[review::Finding],
+        dispatch: &CodeReviewDispatchInfo,
     ) -> code_reviewer::CodeReviewSummary;
 }
 

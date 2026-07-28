@@ -229,17 +229,21 @@ impl CodeReviewSummary {
     }
 }
 
-pub fn collect_git_diff_context(workspace_root: &std::path::Path) -> (String, Vec<String>) {
+pub async fn collect_git_diff_context(workspace_root: &std::path::Path) -> (String, Vec<String>) {
     use std::collections::BTreeSet;
 
-    let diff_stat = run_git_capture(workspace_root, &["diff", "--stat", "--no-ext-diff", "HEAD"])
-        .unwrap_or_default();
+    let diff_stat =
+        run_git_capture(workspace_root, &["diff", "--stat", "--no-ext-diff", "HEAD"])
+            .await
+            .unwrap_or_default();
 
     let mut changed_files = BTreeSet::new();
     for line in run_git_lines(
         workspace_root,
         &["diff", "--name-only", "--no-ext-diff", "HEAD"],
-    ) {
+    )
+    .await
+    {
         if !line.is_empty() {
             changed_files.insert(line);
         }
@@ -247,7 +251,9 @@ pub fn collect_git_diff_context(workspace_root: &std::path::Path) -> (String, Ve
     for line in run_git_lines(
         workspace_root,
         &["ls-files", "--others", "--exclude-standard"],
-    ) {
+    )
+    .await
+    {
         if !line.is_empty() {
             changed_files.insert(line);
         }
@@ -256,12 +262,13 @@ pub fn collect_git_diff_context(workspace_root: &std::path::Path) -> (String, Ve
     (diff_stat, changed_files.into_iter().collect())
 }
 
-fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
+async fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = tokio::process::Command::new("git")
         .arg("-C")
         .arg(workspace_root)
         .args(args)
         .output()
+        .await
         .ok()?;
     if !output.status.success() {
         return None;
@@ -269,8 +276,9 @@ fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Option<St
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String> {
+async fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String> {
     run_git_capture(workspace_root, args)
+        .await
         .map(|text| {
             text.lines()
                 .map(str::trim)

@@ -164,14 +164,14 @@ pub async fn execute_for_tool(
     let plan_state_after = if tx.derived_completed {
         if let Some(round) = runtime.try_begin_code_review_round(&target_plan_id) {
             let review_attempt_id = format!("{target_plan_id}:{round}");
-            runtime.write_code_review_started_transcript(
-                &target_plan_id,
+            let dispatch = crate::core::plan_runtime::CodeReviewDispatchInfo {
                 round,
-                &review_attempt_id,
-                tool_call_id,
-                None,
-            );
-            let mut code_review_summary = runtime.dispatch_code_reviewer(&target_plan_id).await;
+                review_attempt_id: review_attempt_id.clone(),
+                tool_call_id: tool_call_id.to_string(),
+            };
+            let mut code_review_summary = runtime
+                .dispatch_code_reviewer(&target_plan_id, &dispatch)
+                .await;
             warnings.extend(code_review_summary.normalize_for_result());
             runtime.write_code_review_transcript(
                 &target_plan_id,

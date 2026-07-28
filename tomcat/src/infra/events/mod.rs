@@ -146,11 +146,15 @@ pub mod wire {
     pub const WIRE_PLAN_UPDATE: &str = "plan.update";
     /// 已完成 / 中断后的 plan 被 reopen 到 `pending`。
     pub const WIRE_PLAN_PENDING: &str = "plan.pending";
+    /// plan reviewer 子 Agent 派发成功，父侧记住 child 指针。
+    pub const WIRE_PLAN_REVIEW_STARTED: &str = "plan.review.started";
     /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
     pub const WIRE_PLAN_REVIEW: &str = "plan.review";
-    /// verifier 前 code reviewer 子 Agent 返回。
+    /// verifier 前 code reviewer 子 Agent 派发成功，父侧记住 child 指针。
     pub const WIRE_PLAN_CODE_REVIEW_STARTED: &str = "plan.code_review.started";
     pub const WIRE_PLAN_CODE_REVIEW: &str = "plan.code_review";
+    /// `dispatch_agent` 派发 explorer 子 Agent 成功，父侧记住 child 指针。
+    pub const WIRE_PLAN_EXPLORER_STARTED: &str = "plan.explorer.started";
     /// verifier 子 Agent 返回（含 `verdict=aborted` / `partial` / `fail` 分支）。
     pub const WIRE_PLAN_VERIFY: &str = "plan.verify";
     /// reviewer parse 失败 / 超 `max_review_rounds` 软上限时的告警。

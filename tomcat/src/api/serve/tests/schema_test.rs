@@ -81,9 +81,13 @@ fn serve_dts_includes_context_reference_types() {
 fn serve_dts_includes_plan_code_review_findings() {
     let dts = serve_dts();
     assert!(dts.contains("export interface ServeFinding {"));
+    assert!(dts.contains("type: \"plan.review.started\";"));
     assert!(dts.contains("type: \"plan.code_review.started\";"));
+    assert!(dts.contains("transcriptPath?: null | string;"));
     assert!(dts.contains("reviewAttemptId?: null | string;"));
     assert!(dts.contains("toolCallId?: null | string;"));
+    assert!(dts.contains("type: \"plan.explorer.started\";"));
+    assert!(dts.contains("taskId?: null | string;"));
     assert!(dts.contains("type: \"plan.code_review\";"));
     assert!(dts.contains("changesSummary?: null | string;"));
     assert!(dts.contains("findings?: ServeFinding[] | null;"));
@@ -214,6 +218,23 @@ fn serve_emitted_event_validates_against_generated_schema() {
         .expect("out_frame schema should exist");
     let out_frame_validator =
         jsonschema::validator_for(&out_frame_schema).expect("compile out_frame schema");
+    let started_frame_sample = serde_json::to_value(OutFrame::Event(
+        serde_json::to_value(ServeEvent::Plan(ServePlanEvent::PlanCodeReviewStarted {
+            session_id: Some("s1".to_string()),
+            plan_id: Some("plan-1".to_string()),
+            round: Some(1),
+            review_attempt_id: Some("plan-1:1".to_string()),
+            tool_call_id: Some("tc-update".to_string()),
+            child_session_id: Some("code-reviewer-child".to_string()),
+            transcript_path: Some("subagent-sessions/code-reviewer-child.jsonl".to_string()),
+        }))
+        .expect("serialize plan.code_review.started event"),
+    ))
+    .expect("out_frame plan.code_review.started sample");
+    assert!(
+        out_frame_validator.is_valid(&started_frame_sample),
+        "plan.code_review.started out_frame should validate: {started_frame_sample}"
+    );
     let out_frame_sample = serde_json::to_value(OutFrame::Event(
         serde_json::to_value(ServeEvent::Plan(ServePlanEvent::PlanCodeReview {
             session_id: Some("s1".to_string()),

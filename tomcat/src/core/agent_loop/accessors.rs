@@ -326,6 +326,16 @@ impl AgentLoop {
         Ok(row_id)
     }
 
+    pub(super) fn persist_custom_entry_if_needed(
+        &self,
+        extra: serde_json::Value,
+    ) -> Result<(), crate::infra::error::AppError> {
+        let Some(ref sink) = self.config.message_append_sink else {
+            return Ok(());
+        };
+        sink.append_custom_entry(extra)
+    }
+
     pub(super) fn push_message(
         &self,
         messages: &mut Vec<ChatMessage>,

@@ -13,6 +13,7 @@ mod types;
 pub use bash_task::{
     BackgroundTaskLifecycleEvent, BashOutputStream, BashRuntimePreview, BashTaskId, BashTaskInfo,
     BashTaskOutputChunk, BashTaskOutputEvent, BashTaskRegistry, BashTaskStatus, BashTaskTicket,
+    ResolvedCwd,
 };
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;

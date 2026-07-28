@@ -248,6 +248,7 @@ export interface WebviewReviewRow {
   reviewAttemptId: string;
   round?: number | null;
   rounds?: number | null;
+  startedAt?: number | null;
   status: "done" | "running";
   summary?: string | null;
   type: "review";

@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, StreamEvent};
 use crate::core::llm::multimodal::UNSUPPORTED_FILE_INPUT_PLACEHOLDER;
+use crate::core::session::manager::MessageAppendSink;
 use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::event_bus::EventBus;
 use crate::infra::{wire, DefaultEventBus, EventContext};
@@ -57,6 +58,33 @@ fn pdf_user_message() -> ChatMessage {
         ChatMessageContentPart::file_base64_data("notes.pdf", "application/pdf", pdf_b64)
             .expect("pdf part"),
     ])
+}
+
+#[derive(Default)]
+struct RecordingAppendSink {
+    next_id: Mutex<u32>,
+    custom_entries: Mutex<Vec<serde_json::Value>>,
+}
+
+impl MessageAppendSink for RecordingAppendSink {
+    fn append_message(&self, _value: serde_json::Value) -> Result<String, AppError> {
+        let mut next = self.next_id.lock().unwrap();
+        *next += 1;
+        Ok(format!("msg-{}", *next))
+    }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.custom_entries.lock().unwrap().push(extra);
+        Ok(())
+    }
+
+    fn append_message_with_id(
+        &self,
+        _value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        Ok(forced_id.to_string())
+    }
 }
 
 #[tokio::test]
@@ -382,6 +410,40 @@ async fn run_retry_sleep_is_interruptible() {
         matches!(outcome, AgentRunOutcome::Interrupted(_)),
         "退避 sleep 期间 cancel 应立即打断"
     );
+}
+
+#[tokio::test]
+async fn run_persists_auto_retry_events_to_transcript_sink() {
+    let llm = Arc::new(MockLlmProvider::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "service unavailable",
+        ))],
+        ok_text_stream("RECOVERED"),
+    ]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let sink = Arc::new(RecordingAppendSink::default());
+    let config = AgentLoopConfig {
+        max_attempts: 2,
+        retry_base_delay_ms: 0,
+        session_id: "s-retry-transcript".to_string(),
+        message_append_sink: Some(sink.clone()),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+    assert!(matches!(outcome, AgentRunOutcome::Completed(_)));
+
+    let entries = sink.custom_entries.lock().unwrap().clone();
+    assert_eq!(entries.len(), 2, "expected retry start + end entries");
+    assert_eq!(entries[0]["event"].as_str(), Some(wire::WIRE_AUTO_RETRY_START));
+    assert_eq!(entries[0]["attempt"].as_u64(), Some(2));
+    assert_eq!(entries[1]["event"].as_str(), Some(wire::WIRE_AUTO_RETRY_END));
+    assert_eq!(entries[1]["success"].as_bool(), Some(true));
 }
 
 /// 工具循环：第 1 次 LLM 返回 read tool call，第 2 次返回纯文本；断言 final_text 含第 2 次文本。

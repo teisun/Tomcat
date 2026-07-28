@@ -22,13 +22,22 @@ pub(crate) fn open_subagent_transcript(
     parent_session_id: &str,
 ) -> Option<Arc<dyn MessageAppendSink>> {
     let path = subagent_transcript_path(agent_trail_dir, child_session_id)?;
-    Some(Arc::new(JsonlFileAppendSink::new(
+    let sink = Arc::new(JsonlFileAppendSink::new(
         path,
         child_session_id,
         subagent_type,
         model,
         parent_session_id,
-    )))
+    ));
+    if let Err(error) = sink.ensure_initialized() {
+        warn!(
+            path = %sink.path.display(),
+            error = %error,
+            child_session_id = %sink.child_session_id,
+            "subagent transcript eager init failed; continuing without persistence"
+        );
+    }
+    Some(sink)
 }
 
 pub(crate) fn subagent_transcript_path(
@@ -149,6 +158,20 @@ impl JsonlFileAppendSink {
         Ok(row_id)
     }
 
+    fn append_custom_entry_internal(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        let _guard = self.write_lock.lock();
+
+        self.ensure_initialized()?;
+
+        let entry = TranscriptEntry::Custom(CustomEntry {
+            id: Some(generate_entry_id()),
+            parent_id: None,
+            timestamp: iso_ts_now(),
+            extra,
+        });
+        append_entry_with_sync(&self.path, &entry, SyncLevel::Flush)
+    }
+
     fn ensure_initialized(&self) -> Result<(), AppError> {
         let needs_init = match std::fs::metadata(&self.path) {
             Ok(meta) => meta.len() == 0,
@@ -178,6 +201,7 @@ impl JsonlFileAppendSink {
                 "parent_session_id": self.parent_session_id.clone(),
                 "subagent_type": self.subagent_type.as_str(),
                 "model": self.model.clone(),
+                "dispatched_at": iso_ts_now(),
             }),
         });
         append_entry_with_sync(&self.path, &meta, SyncLevel::Flush)
@@ -187,6 +211,10 @@ impl JsonlFileAppendSink {
 impl MessageAppendSink for JsonlFileAppendSink {
     fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
         self.append_message_internal(value, None)
+    }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.append_custom_entry_internal(extra)
     }
 
     fn append_message_with_id(

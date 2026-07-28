@@ -170,9 +170,6 @@ pub(super) async fn run_reasoning_loop(
             }
         }
 
-        // 模型重新动手了，连续注入计数归零。
-        agent.completion_guard_injections = 0;
-
         // tool_calls 调度（block / steering / cancel / 事件配对 / 计费 / push）
         // 整块委托给 tool_dispatcher::run_tool_calls；函数内部严格保持原事件顺序：
         // ToolExecutionStart → ExtensionEvent::ToolCall → execute_tool →

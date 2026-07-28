@@ -21,6 +21,7 @@ use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
 use crate::core::llm::{
+    retry_delay::{is_provider_retry_cancelled, with_provider_retry_cancel},
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
     StreamEvent,
 };
@@ -168,7 +169,7 @@ pub(super) async fn run_chat_stream(
 
     // ── LLM connect：chat_stream 建连 await 可被取消 ──
     let mut stream = {
-        let connect = llm.chat_stream(req);
+        let connect = with_provider_retry_cancel(cancel.clone(), llm.chat_stream(req));
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -187,6 +188,19 @@ pub(super) async fn run_chat_stream(
             }
             conn = connect => match conn {
                 Ok(s) => s,
+                Err(e) if cancel.is_cancelled() && is_provider_retry_cancelled(&e) => {
+                    return Ok(StreamOutcome {
+                        content_buf: String::new(),
+                        tool_calls_buf: Vec::new(),
+                        finish_reason: None,
+                        error_message: None,
+                        error_code: None,
+                        thinking_text: None,
+                        reasoning_continuation: None,
+                        continuity: None,
+                        aborted: true,
+                    });
+                }
                 Err(e) => {
                     let snippet: String = e.to_string().chars().take(200).collect();
                     let summary = llm_summary(&e).unwrap_or_else(|| snippet.clone());

@@ -64,8 +64,9 @@ use crate::core::session::{
 use crate::infra::error::{
     is_unsupported_multimodal_text, llm_http_status, llm_stage, llm_summary, AppError,
 };
-use crate::infra::events::AgentEvent;
+use crate::infra::events::{wire, AgentEvent};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 use super::error_classifier::{handle_overflow_retry, handle_unsupported_multimodal_retry};
 use super::reasoning_loop::run_reasoning_loop;
@@ -119,6 +120,7 @@ impl AgentLoop {
     /// `Interrupted` 与 `Completed` 共用 `AgentRunResult` 载荷，调用方走同一
     /// 持久化路径即可（T-004 / T-017）。
     pub async fn run(&mut self, initial_messages: Vec<ChatMessage>) -> AgentRunOutcome {
+        self.completion_guard_injections = 0;
         if self.cancel_token.is_cancelled() {
             // 入口兜底：token 已经被上一轮 cancel 但未重建，立即以空 partial 返回 Interrupted
             // 避免 chat_loop 误把"取消信号"传染给下一回合的正常输入。
@@ -261,6 +263,15 @@ impl AgentLoop {
                     delay_ms,
                     error_message: err_msg,
                 });
+                if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+                    "event": wire::WIRE_AUTO_RETRY_START,
+                    "attempt": attempt,
+                    "max_attempts": self.config.max_attempts,
+                    "delay_ms": delay_ms,
+                    "error_message": last_err.as_ref().map(ToString::to_string),
+                })) {
+                    warn!(error = %error, "auto retry start transcript write failed");
+                }
                 // Sleep 期间也要响应取消，不然 Ctrl+C 会被"3 秒退避"吃掉
                 let cancel = self.cancel_token.clone();
                 tokio::select! {
@@ -283,6 +294,14 @@ impl AgentLoop {
                             attempt,
                             final_error: None,
                         });
+                        if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+                            "event": wire::WIRE_AUTO_RETRY_END,
+                            "success": true,
+                            "attempt": attempt,
+                            "final_error": serde_json::Value::Null,
+                        })) {
+                            warn!(error = %error, "auto retry end transcript write failed");
+                        }
                     }
                     return Ok(text);
                 }
@@ -295,6 +314,14 @@ impl AgentLoop {
                             attempt,
                             final_error: Some(err_text),
                         });
+                        if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+                            "event": wire::WIRE_AUTO_RETRY_END,
+                            "success": false,
+                            "attempt": attempt,
+                            "final_error": e.to_string(),
+                        })) {
+                            warn!(error = %error, "auto retry end transcript write failed");
+                        }
                     }
                     return Err(LoopError::Fatal(e));
                 }
@@ -330,8 +357,16 @@ impl AgentLoop {
                         self.emit_event(AgentEvent::AutoRetryEnd {
                             success: false,
                             attempt,
-                            final_error: Some(final_error),
+                            final_error: Some(final_error.clone()),
                         });
+                        if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+                            "event": wire::WIRE_AUTO_RETRY_END,
+                            "success": false,
+                            "attempt": attempt,
+                            "final_error": final_error,
+                        })) {
+                            warn!(error = %error, "auto retry end transcript write failed");
+                        }
                         return Err(LoopError::Fatal(fatal));
                     }
                 }

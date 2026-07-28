@@ -686,29 +686,36 @@ async fn idle_timeout_errors_when_no_bytes_arrive() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn keepalive_bytes_do_not_trigger_idle_timeout() {
+async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
     use tokio_stream::wrappers::IntervalStream;
     use tokio_stream::StreamExt;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
     let source = IntervalStream::new(interval)
-        .take(3)
         .map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
-    let mut stream = apply_stream_idle_timeout(source, 1);
-    let collect_task = tokio::spawn(async move {
-        let mut out = Vec::new();
-        while let Some(item) = stream.next().await {
-            out.push(item);
-        }
-        out
-    });
+    let event_stream = SseEventStream::new(
+        source,
+        ProviderCompatProfile::chat_completions("gpt-5"),
+        true,
+    );
+    let mut stream = apply_stream_idle_timeout(event_stream, 1);
+    let next_task = tokio::spawn(async move { stream.next().await });
 
     tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
 
-    let out = collect_task.await.expect("join ok");
-    assert_eq!(out.len(), 3);
-    assert!(out.into_iter().all(|item| item.is_ok()));
+    let item = next_task
+        .await
+        .expect("join ok")
+        .expect("should produce timeout error");
+    match item {
+        Err(err) => {
+            let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
+            assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
+            assert!(msg.contains("stream_timeout_sec=1s"), "unexpected msg: {}", msg);
+        }
+        other => panic!("expected timeout AppError, got {:?}", other),
+    }
 }
 
 fn stream_test_provider(

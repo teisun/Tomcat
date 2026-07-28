@@ -648,6 +648,17 @@ pub enum ServePlanEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         state: Option<String>,
     },
+    #[serde(rename = "plan.review.started")]
+    PlanReviewStarted {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
+        #[serde(rename = "transcriptPath", skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+    },
     #[serde(rename = "plan.review")]
     PlanReview {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -673,6 +684,8 @@ pub enum ServePlanEvent {
         tool_call_id: Option<String>,
         #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
         child_session_id: Option<String>,
+        #[serde(rename = "transcriptPath", skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
     },
     #[serde(rename = "plan.code_review")]
     PlanCodeReview {
@@ -700,6 +713,17 @@ pub enum ServePlanEvent {
         tool_call_id: Option<String>,
         #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
         child_session_id: Option<String>,
+    },
+    #[serde(rename = "plan.explorer.started")]
+    PlanExplorerStarted {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
+        #[serde(rename = "transcriptPath", skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
     },
     #[serde(rename = "plan.verify")]
     PlanVerify {

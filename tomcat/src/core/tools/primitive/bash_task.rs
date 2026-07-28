@@ -130,7 +130,7 @@ fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
         );
         if raw_cwd.contains('$') {
             msg.push_str(
-                "; environment variables are not expanded here; pass an absolute path or ~/...",
+                "; environment variables are not expanded here; use ~/... or an absolute path instead",
             );
         }
         return Err(AppError::Primitive(msg));
@@ -143,6 +143,61 @@ fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCwd {
+    path: PathBuf,
+    raw_input: Option<String>,
+}
+
+impl ResolvedCwd {
+    pub fn inherited() -> Self {
+        Self {
+            path: PathBuf::from("."),
+            raw_input: None,
+        }
+    }
+
+    pub fn from_raw(cwd: Option<&str>) -> Result<Self, AppError> {
+        Self::from_owned(cwd.map(str::to_string))
+    }
+
+    pub fn from_path_buf(cwd: Option<PathBuf>) -> Result<Self, AppError> {
+        Self::from_owned(cwd.map(|path| path.to_string_lossy().into_owned()))
+    }
+
+    fn from_owned(cwd: Option<String>) -> Result<Self, AppError> {
+        let raw_input = cwd.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        let Some(raw_input) = raw_input else {
+            return Ok(Self::inherited());
+        };
+        let path = normalize_path(&raw_input)?;
+        validate_bash_cwd(&path, &raw_input)?;
+        Ok(Self {
+            path,
+            raw_input: Some(raw_input),
+        })
+    }
+
+    pub fn resolved_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn raw_input(&self) -> Option<&str> {
+        self.raw_input.as_deref()
+    }
+
+    pub fn display_input(&self) -> &str {
+        self.raw_input.as_deref().unwrap_or("<inherited>")
+    }
+
+    fn command_cwd(&self) -> Option<&Path> {
+        self.raw_input.as_ref().map(|_| self.path.as_path())
+    }
 }
 
 fn resolve_preflight_path(raw: &str, cwd_path: &Path) -> PathBuf {
@@ -321,16 +376,13 @@ impl BackgroundBashGuard {
     async fn bash_preflight_and_gate(
         &self,
         audit_cmd: &str,
-        cwd: Option<&Path>,
+        cwd: &ResolvedCwd,
     ) -> Result<(PermissionScope, GrantTrace), AppError> {
-        let cwd_path = if let Some(cwd) = cwd {
-            let raw_cwd = cwd.to_string_lossy();
-            let path = self
-                .gate_check_path(PrimitiveOperation::Read, raw_cwd.as_ref())
-                .await?
-                .0;
-            validate_bash_cwd(&path, raw_cwd.as_ref())?;
-            path
+        let cwd_path = if let Some(raw_cwd) = cwd.raw_input() {
+            let _ = self
+                .gate_check_path(PrimitiveOperation::Read, raw_cwd)
+                .await?;
+            cwd.resolved_path().to_path_buf()
         } else {
             PathBuf::from(".")
         };
@@ -599,7 +651,7 @@ impl BashTaskRegistry {
         &self,
         command: String,
         argv: Option<Vec<String>>,
-        cwd: Option<PathBuf>,
+        cwd: ResolvedCwd,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
         self.spawn_tracked_inner(
@@ -622,6 +674,7 @@ impl BashTaskRegistry {
         cwd: Option<PathBuf>,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
+        let cwd = ResolvedCwd::from_path_buf(cwd)?;
         self.spawn_tracked_inner(
             command,
             argv,
@@ -642,6 +695,7 @@ impl BashTaskRegistry {
         cwd: Option<PathBuf>,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
+        let cwd = ResolvedCwd::from_path_buf(cwd)?;
         self.spawn_tracked_inner(command, argv, cwd, deliver_completion_on_finish, true, true)
             .await
     }
@@ -650,7 +704,7 @@ impl BashTaskRegistry {
         &self,
         command: String,
         argv: Option<Vec<String>>,
-        cwd: Option<PathBuf>,
+        cwd: ResolvedCwd,
         deliver_completion_on_finish: bool,
         apply_guard: bool,
         preview_flush_required: bool,
@@ -680,7 +734,7 @@ impl BashTaskRegistry {
         let bash_scope_grant = if apply_guard {
             if let Some(guard) = self.background_guard.as_ref() {
                 match guard
-                    .bash_preflight_and_gate(&audit_cmd, cwd.as_deref())
+                    .bash_preflight_and_gate(&audit_cmd, &cwd)
                     .await
                 {
                     Ok(scope_grant) => Some(scope_grant),
@@ -720,7 +774,7 @@ impl BashTaskRegistry {
                 c
             }
         };
-        if let Some(c) = cwd.as_ref() {
+        if let Some(c) = cwd.command_cwd() {
             cmd.current_dir(c);
         }
         cmd.env("TOMCAT_AGENT_ACTIVE", "1")
@@ -733,7 +787,12 @@ impl BashTaskRegistry {
         cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(|e| {
-            let err = AppError::Primitive(e.to_string());
+            let err = AppError::Primitive(format!(
+                "bash spawn failed (cwd={}, input={:?}): {}",
+                cwd.resolved_path().display(),
+                cwd.display_input(),
+                e
+            ));
             if let (Some(guard), Some((scope, grant))) =
                 (self.background_guard.as_ref(), bash_scope_grant)
             {

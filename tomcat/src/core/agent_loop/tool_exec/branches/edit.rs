@@ -218,11 +218,24 @@ async fn edit_batch(
         }
     }
 
-    *display_out = Some(ToolDisplay::Files {
+    *display_out = Some(display_for_entries(summary, entries));
+    Ok(text)
+}
+
+fn display_for_entries(summary: String, mut entries: Vec<ToolDisplayFileEntry>) -> ToolDisplay {
+    if entries.len() == 1 {
+        let entry = entries.pop().expect("len checked");
+        return ToolDisplay::File {
+            file: entry.file,
+            added: entry.added,
+            removed: entry.removed,
+            diff: entry.diff,
+        };
+    }
+    ToolDisplay::Files {
         summary,
         files: entries,
-    });
-    Ok(text)
+    }
 }
 
 fn failed_entry(file: String, error: String) -> ToolDisplayFileEntry {

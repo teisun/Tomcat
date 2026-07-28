@@ -144,8 +144,10 @@ pub struct AgentLoopConfig {
     /// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 工具
     /// - 读取当前 `PlanState` 做写路径策略 (`safety::enforce_write_path_policy`) 守卫
     ///
-    /// 顶层 chat_loop 必填；reviewer 子 Agent 与脱离 PlanRuntime 的单测/独立 AgentLoop 可为 `None`，
-    /// 此时 tool_exec 收到这四个工具的调用会返回 `ToolError::PlanRuntimeUnavailable` 文案。
+    /// 顶层 chat_loop 必填；只有会真正写 plan 的 PlanReviewer 应保留 `Some`。
+    /// CodeReviewer / Verifier / Explorer 与脱离 PlanRuntime 的单测/独立 AgentLoop
+    /// 应为 `None`，此时 tool_exec 收到这四个工具的调用会返回
+    /// `ToolError::PlanRuntimeUnavailable` 文案。
     pub plan_runtime: Option<Arc<crate::core::plan_runtime::PlanRuntime>>,
     /// Skill 目录账本：root chat 透传共享 `SkillSet`，`load_skill` 按名解析用；
     /// reviewer/verifier 或无 Skill 上下文的独立 loop 可为 `None`。

@@ -251,15 +251,11 @@ pub(super) async fn run_tool_calls(
                     }
                 }
                 Err(AppError::Tool(_)) => {
-                    let expose_skills_to_reviewer =
-                        agent
-                            .config
-                            .plan_runtime
-                            .as_ref()
-                            .is_some_and(|rt| rt.expose_skills_to_reviewer())
-                            && agent.config.skill_set.as_ref().is_some_and(|skill_set| {
-                                !skill_set.read().visible_skills().is_empty()
-                            });
+                    let expose_skills_to_reviewer = agent
+                        .config
+                        .skill_set
+                        .as_ref()
+                        .is_some_and(|skill_set| !skill_set.read().visible_skills().is_empty());
                     let exec = tool_exec::execute_tool_full_with_policy(
                         &agent.primitive,
                         agent.config.session_id.as_str(),
@@ -292,11 +288,6 @@ pub(super) async fn run_tool_calls(
             }
         } else {
             let expose_skills_to_reviewer = agent
-                .config
-                .plan_runtime
-                .as_ref()
-                .is_some_and(|rt| rt.expose_skills_to_reviewer())
-                && agent
                     .config
                     .skill_set
                     .as_ref()
@@ -368,7 +359,10 @@ pub(super) async fn run_tool_calls(
         }
 
         agent
-            .push_message(messages, ChatMessage::tool(&tc.id, &model_text))
+            .push_message(
+                messages,
+                ChatMessage::tool(&tc.id, &model_text).with_tool_display(display.clone()),
+            )
             .map_err(LoopError::Fatal)?;
         tool_results.push(Message(
             serde_json::json!({ "content": model_text.clone() }),

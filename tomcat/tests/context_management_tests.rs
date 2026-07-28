@@ -392,6 +392,10 @@ impl MessageAppendSink for InjectAppendInvariantSink {
         }
         self.inner.append_message_with_id(value, forced_id)
     }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.inner.append_custom_entry(extra)
+    }
 }
 
 fn chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {

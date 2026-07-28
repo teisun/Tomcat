@@ -1,10 +1,11 @@
 use std::borrow::Cow;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
 use crate::core::llm::endpoint::build_path_aware_endpoint;
@@ -12,7 +13,7 @@ use crate::core::llm::files_api::FilesApiAdapter;
 use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::replay_policy::ProviderCompatProfile;
-use crate::core::llm::retry_delay::provider_retry_delay;
+use crate::core::llm::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ChatResponse, FileSource,
     ImageSource, StreamEvent,
@@ -40,6 +41,7 @@ pub(super) struct AnthropicProvider {
     default_model: String,
     catalog_model_id: String,
     retry_count: u32,
+    stream_timeout_sec: u64,
     non_stream_stale_timeout_sec: u64,
     files_adapter: std::sync::OnceLock<Arc<dyn FilesApiAdapter>>,
     files_expires_after_seconds: u64,
@@ -74,6 +76,7 @@ impl AnthropicProvider {
             default_model: entry.request_model_name().to_string(),
             catalog_model_id: entry.id.clone(),
             retry_count: runtime.retry_count,
+            stream_timeout_sec: runtime.stream_timeout_sec,
             non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
             files_adapter: std::sync::OnceLock::new(),
             files_expires_after_seconds: runtime.files.expires_after_seconds,
@@ -272,7 +275,7 @@ impl AnthropicProvider {
                         self.retry_count,
                         error
                     );
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_error = Some(error);
                 }
                 Err(error) => return Err(error),
@@ -280,6 +283,36 @@ impl AnthropicProvider {
         }
         Err(last_error.unwrap_or_else(|| AppError::Llm("Anthropic 请求重试耗尽".to_string())))
     }
+}
+
+fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
+    llm_error(
+        PROVIDER_NAME,
+        LlmErrorStage::IdleTimeout,
+        format!("流式空闲超时: stream_timeout_sec={}s", stream_timeout_sec),
+    )
+}
+
+fn apply_stream_idle_timeout<S, T>(
+    stream: S,
+    stream_timeout_sec: u64,
+) -> Pin<Box<dyn Stream<Item = Result<T, AppError>> + Send>>
+where
+    S: Stream<Item = Result<T, AppError>> + Send + 'static,
+    T: Send + 'static,
+{
+    if stream_timeout_sec == 0 {
+        return Box::pin(stream);
+    }
+
+    Box::pin(
+        stream
+            .timeout(Duration::from_secs(stream_timeout_sec))
+            .map(move |item| match item {
+                Ok(event) => event,
+                Err(_) => Err(idle_timeout_error(stream_timeout_sec)),
+            }),
+    )
 }
 
 #[async_trait]
@@ -326,10 +359,14 @@ impl LlmProvider for AnthropicProvider {
         let model = self.effective_model(&request);
         let response = self.chat_with_retry(&request, true).await?;
         let source_profile = self.source_profile(&model);
-        Ok(Box::new(stream::AnthropicStream::new(
+        let event_stream = stream::AnthropicStream::new(
             response.bytes_stream(),
             source_profile,
             self.continuity_enabled,
+        );
+        Ok(Box::new(apply_stream_idle_timeout(
+            event_stream,
+            self.stream_timeout_sec,
         )))
     }
 
@@ -350,5 +387,43 @@ impl LlmProvider for AnthropicProvider {
 
     fn files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
         self.cached_files_adapter(files_cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use tokio_stream::StreamExt;
+    use tokio_stream::wrappers::IntervalStream;
+
+    #[tokio::test(start_paused = true)]
+    async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
+        let interval = tokio::time::interval(Duration::from_millis(200));
+        let source = IntervalStream::new(interval)
+            .map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
+        let event_stream = stream::AnthropicStream::new(
+            source,
+            ProviderCompatProfile::anthropic_messages("claude-opus-4-8"),
+            true,
+        );
+        let mut stream = apply_stream_idle_timeout(event_stream, 1);
+        let next_task = tokio::spawn(async move { stream.next().await });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let item = next_task
+            .await
+            .expect("join ok")
+            .expect("should produce timeout error");
+        match item {
+            Err(err) => {
+                assert_eq!(crate::infra::error::llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
+                let msg = crate::infra::error::llm_summary(&err).unwrap_or_else(|| err.to_string());
+                assert!(msg.contains("stream_timeout_sec=1s"), "unexpected msg: {}", msg);
+            }
+            other => panic!("expected timeout AppError, got {:?}", other),
+        }
     }
 }

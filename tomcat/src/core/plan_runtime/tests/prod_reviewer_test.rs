@@ -5,7 +5,7 @@ use super::super::file_store::{
 use super::super::plan_reviewer::{build_review_prompt, plan_reviewer_allowed_tools_with_policy};
 use super::super::prod_reviewer::{ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher};
 use super::super::review::resolve_internal_tools;
-use super::super::{CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime};
+use super::super::{CodeReviewDispatchInfo, CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime};
 use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
 
 #[tokio::test]
@@ -20,7 +20,18 @@ async fn prod_plan_reviewer_stub_returns_aborted_with_origin() {
 #[tokio::test]
 async fn prod_code_reviewer_stub_returns_aborted_with_origin() {
     let d = ProdCodeReviewerDispatcher::stub("test_origin");
-    let r = d.dispatch("demo", "noop", &[]).await;
+    let r = d
+        .dispatch(
+            "demo",
+            "noop",
+            &[],
+            &CodeReviewDispatchInfo {
+                round: 1,
+                review_attempt_id: "demo:1".into(),
+                tool_call_id: "tc-demo".into(),
+            },
+        )
+        .await;
     assert!(r.aborted);
     assert_eq!(r.verdict.as_deref(), Some("aborted"));
     assert!(r.summary.contains("test_origin"));

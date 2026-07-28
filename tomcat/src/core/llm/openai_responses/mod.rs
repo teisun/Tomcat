@@ -25,7 +25,6 @@
 //!   `impl LlmProvider`，每个 wire 翻译入口做一行委托。
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -53,7 +52,7 @@ use crate::infra::error::{
     llm_http_status_error, llm_http_status_error_with_stage, AppError, LlmErrorStage,
 };
 
-use super::super::retry_delay::provider_retry_delay;
+use super::super::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse, StreamEvent,
@@ -214,12 +213,13 @@ pub struct OpenAiResponsesProvider {
     capabilities: Capabilities,
 }
 
-fn apply_stream_idle_timeout<S>(
+fn apply_stream_idle_timeout<S, T>(
     stream: S,
     stream_timeout_sec: u64,
-) -> Pin<Box<dyn Stream<Item = Result<Bytes, AppError>> + Send>>
+) -> Pin<Box<dyn Stream<Item = Result<T, AppError>> + Send>>
 where
-    S: Stream<Item = Result<Bytes, AppError>> + Send + 'static,
+    S: Stream<Item = Result<T, AppError>> + Send + 'static,
+    T: Send + 'static,
 {
     if stream_timeout_sec == 0 {
         return Box::pin(stream);
@@ -541,7 +541,7 @@ impl OpenAiResponsesProvider {
                             self.retry_count,
                             e
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -621,7 +621,7 @@ impl OpenAiResponsesProvider {
                         self.retry_count,
                         err
                     );
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
@@ -736,14 +736,16 @@ impl LlmProvider for OpenAiResponsesProvider {
         let bytes_stream = resp
             .bytes_stream()
             .map_err(move |e| map_body_read_error("流读取", e, http_read_timeout_sec));
-        let bytes_stream = apply_stream_idle_timeout(bytes_stream, stream_timeout_sec);
         let event_stream = stream::ResponsesStream::new(
             bytes_stream,
             prefer_ndjson,
             source_profile,
             self.continuity_enabled,
         );
-        Ok(Box::new(event_stream))
+        Ok(Box::new(apply_stream_idle_timeout(
+            event_stream,
+            stream_timeout_sec,
+        )))
     }
 
     /// Trait 启发式 token 估算：`chars / 3`（与 Completions 同口径，便于上层统一近似预算）。

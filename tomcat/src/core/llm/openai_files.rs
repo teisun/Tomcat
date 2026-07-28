@@ -19,7 +19,7 @@ use tracing::warn;
 
 use super::files_api::{FilesApiAdapter, OpenAiFilesAdapter};
 use crate::core::llm::provider::LlmProvider;
-use crate::core::llm::retry_delay::provider_retry_delay;
+use crate::core::llm::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::infra::config::LlmFilesConfig;
 use crate::infra::error::{
     is_retryable_llm_error, llm_error_with_source, llm_http_status_error_with_summary, AppError,
@@ -343,7 +343,7 @@ impl OpenAiFilesClient {
                             self.retry_count,
                             e
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -389,7 +389,7 @@ impl OpenAiFilesClient {
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
                         let delay = provider_retry_delay(attempt);
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -438,7 +438,7 @@ impl OpenAiFilesClient {
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
                         let delay = provider_retry_delay(attempt);
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -497,7 +497,7 @@ impl OpenAiFilesClient {
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
                         let delay = provider_retry_delay(attempt);
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);

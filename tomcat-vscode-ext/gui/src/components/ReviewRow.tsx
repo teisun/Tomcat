@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useEffect, useState } from "react";
 
 import { DisclosureCard, type DisclosureStatusVariant } from "./DisclosureCard";
 
@@ -16,13 +16,49 @@ function disclosureVariant(item: WebviewReviewRow): DisclosureStatusVariant {
   return "neutral";
 }
 
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(totalMinutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function runningMeta(item: WebviewReviewRow, nowTick: number): string | null {
+  const parts: string[] = [];
+  const round = item.round ?? item.rounds;
+  if (typeof round === "number") {
+    parts.push(`Round ${round}`);
+  }
+  if (typeof item.startedAt === "number") {
+    parts.push(`${formatElapsed(nowTick - item.startedAt)} elapsed`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
   const shellClassName = "tc-tool-row-shell tc-tool-row-shell--standalone";
   const leadingIcon = (
     <span aria-hidden="true" className="tc-tool-row__leading-icon codicon codicon-shield" />
   );
+  const [nowTick, setNowTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (item.status !== "running" || typeof item.startedAt !== "number") {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setNowTick(Date.now());
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [item.startedAt, item.status]);
 
   if (item.status === "running") {
+    const meta = runningMeta(item, nowTick);
     return (
       <div className={shellClassName} data-testid="review-row-wrapper">
         {leadingIcon}
@@ -35,6 +71,11 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
               >
                 Reviewing code...
               </span>
+              {meta ? (
+                <span className="tc-review-row__count" data-testid="review-row-running-meta">
+                  {meta}
+                </span>
+              ) : null}
             </span>
           </div>
         </div>

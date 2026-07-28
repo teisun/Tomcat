@@ -8,7 +8,7 @@ use tracing::warn;
 use super::openai_files::{
     FilePurpose, FilesApiProviderContext, OpenAiFileMeta, OpenAiFilesClient,
 };
-use super::retry_delay::provider_retry_delay;
+use super::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::infra::config::LlmFilesConfig;
 use crate::infra::error::{
     is_retryable_llm_error, llm_error_with_source, llm_http_status_error_with_summary, AppError,
@@ -248,7 +248,7 @@ impl FilesApiAdapter for MoonshotFilesAdapter {
                         self.retry_count,
                         err
                     );
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
@@ -264,7 +264,7 @@ impl FilesApiAdapter for MoonshotFilesAdapter {
                 Ok(()) => return Ok(()),
                 Err(err) if is_retryable_llm_error(&err) && attempt < self.retry_count => {
                     let delay = provider_retry_delay(attempt);
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
@@ -412,7 +412,7 @@ impl FilesApiAdapter for AnthropicFilesAdapter {
                         self.retry_count,
                         err
                     );
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
@@ -429,7 +429,7 @@ impl FilesApiAdapter for AnthropicFilesAdapter {
                 Ok(()) => return Ok(()),
                 Err(err) if is_retryable_llm_error(&err) && attempt < self.retry_count => {
                     let delay = provider_retry_delay(attempt);
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),

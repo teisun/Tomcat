@@ -369,7 +369,7 @@ fn fallback_deadline_hit(started: Instant, deadline: Duration) -> bool {
 
 fn fallback_timeout_warning(warnings: &mut Vec<String>, deadline: Duration) {
     warnings.push(format!(
-        "tier2 wall-clock budget {}ms exhausted; result truncated. Override with {}=<ms> or narrow path/glob.",
+        "tier2 wall-clock budget {}ms exhausted; result truncated. Override with {}=<ms>, or narrow path/glob/file_type before retrying.",
         deadline.as_millis(),
         SEARCH_FALLBACK_DEADLINE_ENV
     ));

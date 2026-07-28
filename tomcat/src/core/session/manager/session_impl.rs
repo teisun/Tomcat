@@ -1170,6 +1170,10 @@ impl MessageAppendSink for SessionManager {
         SessionManager::append_message(self, value)
     }
 
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        SessionManager::append_custom_entry(self, extra)
+    }
+
     fn append_message_with_id(
         &self,
         value: serde_json::Value,

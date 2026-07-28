@@ -91,6 +91,16 @@ fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
          Fix them and re-run the review. Do not hand back with findings outstanding."
     ))
 }
+
+fn should_apply_completion_guard(agent: &AgentLoop) -> Option<String> {
+    if !agent.config.subagent_type.is_root() {
+        return None;
+    }
+    agent.config
+        .plan_runtime
+        .as_ref()
+        .and_then(|rt| completion_guard_instruction(rt))
+}
 /// 处理 text-only 回合的全部副作用：消息落盘、timing ⑤、收束事件发射。
 ///
 /// **必须在 `tool_calls.is_empty()` 分支调用，且仅调用一次**——重复调用会重复
@@ -125,12 +135,7 @@ pub(super) async fn finalize_turn_after_text(
     // Completion guard：计划还没收口就想用一段文字收工时，注入继续指令并把回合续上。
     // 放在 timing ⑤ 之前 —— 这个回合根本没结束，不该走收束流程。
     if agent.completion_guard_injections < MAX_COMPLETION_GUARD_INJECTIONS {
-        if let Some(instruction) = agent
-            .config
-            .plan_runtime
-            .as_ref()
-            .and_then(|rt| completion_guard_instruction(rt))
-        {
+        if let Some(instruction) = should_apply_completion_guard(agent) {
             agent.completion_guard_injections += 1;
             let mut nudge = ChatMessage::user(&instruction);
             nudge.kind = MessageKind::Steering;
@@ -141,7 +146,6 @@ pub(super) async fn finalize_turn_after_text(
             return Ok(TurnOutcome::Continue);
         }
     }
-    agent.completion_guard_injections = 0;
 
     // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
     let compaction_provider = agent.compaction_provider();

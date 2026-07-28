@@ -8,6 +8,29 @@ use crate::core::agent_loop::ConfigBackend;
 
 struct DisplayPrimitive;
 
+fn sample_diff() -> Vec<crate::core::tools::primitive::FileDiffLine> {
+    vec![
+        crate::core::tools::primitive::FileDiffLine {
+            tag: crate::core::tools::primitive::DiffTag::Add,
+            old_line: None,
+            new_line: Some(1),
+            text: "hello".to_string(),
+        },
+        crate::core::tools::primitive::FileDiffLine {
+            tag: crate::core::tools::primitive::DiffTag::Add,
+            old_line: None,
+            new_line: Some(2),
+            text: "world".to_string(),
+        },
+        crate::core::tools::primitive::FileDiffLine {
+            tag: crate::core::tools::primitive::DiffTag::Add,
+            old_line: None,
+            new_line: Some(3),
+            text: "!".to_string(),
+        },
+    ]
+}
+
 #[async_trait::async_trait]
 impl PrimitiveExecutor for DisplayPrimitive {
     async fn read(
@@ -48,36 +71,23 @@ impl PrimitiveExecutor for DisplayPrimitive {
             diff_hint: None,
             added: Some(3),
             removed: Some(0),
-            diff: Some(vec![
-                crate::core::tools::primitive::FileDiffLine {
-                    tag: crate::core::tools::primitive::DiffTag::Add,
-                    old_line: None,
-                    new_line: Some(1),
-                    text: "hello".to_string(),
-                },
-                crate::core::tools::primitive::FileDiffLine {
-                    tag: crate::core::tools::primitive::DiffTag::Add,
-                    old_line: None,
-                    new_line: Some(2),
-                    text: "world".to_string(),
-                },
-                crate::core::tools::primitive::FileDiffLine {
-                    tag: crate::core::tools::primitive::DiffTag::Add,
-                    old_line: None,
-                    new_line: Some(3),
-                    text: "!".to_string(),
-                },
-            ]),
+            diff: Some(sample_diff()),
         })
     }
 
     async fn edit_file(
         &self,
-        _path: &str,
+        path: &str,
         _edits: Vec<crate::core::tools::primitive::EditOperation>,
         _plugin_id: &str,
     ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
-        unreachable!()
+        Ok(crate::core::tools::primitive::EditFileResult {
+            path: path.to_string(),
+            applied: true,
+            added: Some(3),
+            removed: Some(0),
+            diff: Some(sample_diff()),
+        })
     }
 
     async fn execute_bash(
@@ -93,11 +103,17 @@ impl PrimitiveExecutor for DisplayPrimitive {
 
     async fn hashline_edit(
         &self,
-        _path: &str,
+        path: &str,
         _segments: Vec<crate::core::tools::primitive::HashlineSegment>,
         _plugin_id: &str,
     ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
-        unreachable!()
+        Ok(crate::core::tools::primitive::EditFileResult {
+            path: path.to_string(),
+            applied: true,
+            added: Some(3),
+            removed: Some(0),
+            diff: Some(sample_diff()),
+        })
     }
 
     async fn search_files(
@@ -171,28 +187,191 @@ async fn write_success_populates_file_display() {
             file: "~/workspace/demo.txt".to_string(),
             added: Some(3),
             removed: Some(0),
-            diff: Some(vec![
-                crate::core::tools::primitive::FileDiffLine {
-                    tag: crate::core::tools::primitive::DiffTag::Add,
-                    old_line: None,
-                    new_line: Some(1),
-                    text: "hello".to_string(),
-                },
-                crate::core::tools::primitive::FileDiffLine {
-                    tag: crate::core::tools::primitive::DiffTag::Add,
-                    old_line: None,
-                    new_line: Some(2),
-                    text: "world".to_string(),
-                },
-                crate::core::tools::primitive::FileDiffLine {
-                    tag: crate::core::tools::primitive::DiffTag::Add,
-                    old_line: None,
-                    new_line: Some(3),
-                    text: "!".to_string(),
-                },
-            ]),
+            diff: Some(sample_diff()),
         })
     );
+}
+
+#[tokio::test]
+async fn edit_success_populates_file_display() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DisplayPrimitive);
+    let tc = ToolCallInfo {
+        id: "edit1".into(),
+        name: "edit".into(),
+        arguments: json!({
+            "path": "~/workspace/demo.txt",
+            "old_content": "before",
+            "new_content": "after"
+        })
+        .to_string(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(!outcome.is_error);
+    assert_eq!(
+        outcome.display,
+        Some(ToolDisplay::File {
+            file: "~/workspace/demo.txt".to_string(),
+            added: Some(3),
+            removed: Some(0),
+            diff: Some(sample_diff()),
+        })
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_success_populates_file_display() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DisplayPrimitive);
+    let tc = ToolCallInfo {
+        id: "hedit1".into(),
+        name: "hashline_edit".into(),
+        arguments: json!({
+            "path": "~/workspace/demo.txt",
+            "edits": [{
+                "op": "replace",
+                "pos": "1#ab",
+                "end": "1#ab",
+                "lines": "after"
+            }]
+        })
+        .to_string(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(!outcome.is_error);
+    assert_eq!(
+        outcome.display,
+        Some(ToolDisplay::File {
+            file: "~/workspace/demo.txt".to_string(),
+            added: Some(3),
+            removed: Some(0),
+            diff: Some(sample_diff()),
+        })
+    );
+}
+
+#[tokio::test]
+async fn batch_edit_with_one_file_still_populates_file_display() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DisplayPrimitive);
+    let tc = ToolCallInfo {
+        id: "edit-batch-1".into(),
+        name: "edit".into(),
+        arguments: json!({
+            "files": [{
+                "path": "~/workspace/demo.txt",
+                "old_content": "before",
+                "new_content": "after"
+            }]
+        })
+        .to_string(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(!outcome.is_error);
+    assert_eq!(
+        outcome.display,
+        Some(ToolDisplay::File {
+            file: "~/workspace/demo.txt".to_string(),
+            added: Some(3),
+            removed: Some(0),
+            diff: Some(sample_diff()),
+        })
+    );
+}
+
+#[tokio::test]
+async fn batch_edit_with_multiple_files_uses_files_display() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DisplayPrimitive);
+    let tc = ToolCallInfo {
+        id: "edit-batch-2".into(),
+        name: "edit".into(),
+        arguments: json!({
+            "files": [
+                {
+                    "path": "~/workspace/demo-a.txt",
+                    "old_content": "before",
+                    "new_content": "after"
+                },
+                {
+                    "path": "~/workspace/demo-b.txt",
+                    "old_content": "before",
+                    "new_content": "after"
+                }
+            ]
+        })
+        .to_string(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(!outcome.is_error);
+    match outcome.display {
+        Some(ToolDisplay::Files { files, .. }) => {
+            assert_eq!(files.len(), 2);
+            assert_eq!(files[0].file, "~/workspace/demo-a.txt");
+            assert_eq!(files[1].file, "~/workspace/demo-b.txt");
+        }
+        other => panic!("expected Files display, got {other:?}"),
+    }
 }
 
 #[tokio::test]

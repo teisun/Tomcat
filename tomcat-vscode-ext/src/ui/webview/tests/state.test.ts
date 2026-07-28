@@ -274,6 +274,8 @@ describe("WebviewStateStore wire routing", () => {
   });
 
   it("shows a running code review row and settles the same attempt with the structured verdict", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T03:01:05Z"));
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
@@ -319,6 +321,7 @@ describe("WebviewStateStore wire routing", () => {
       planId: "plan-1",
       reviewAttemptId: "plan-1:1",
       round: 1,
+      startedAt: Date.parse("2026-07-28T03:01:05Z"),
       status: "running",
       type: "review",
     });
@@ -362,6 +365,42 @@ describe("WebviewStateStore wire routing", () => {
       findings: [
         { area: "logic", note: "Missing null guard", severity: "concern" },
       ],
+      startedAt: Date.parse("2026-07-28T03:01:05Z"),
+    });
+    vi.useRealTimers();
+  });
+
+  it("hydrates a running code review row with its original start time", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          event: "plan.code_review.started",
+          id: "custom-review-started-1",
+          plan_id: "plan-1",
+          review_attempt_id: "plan-1:2",
+          round: 2,
+          timestamp: "2026-07-28T03:00:00.000Z",
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const review = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item) => item.type === "review",
+      );
+    expect(review).toMatchObject({
+      id: "review:plan-1:2",
+      planId: "plan-1",
+      reviewAttemptId: "plan-1:2",
+      round: 2,
+      startedAt: Date.parse("2026-07-28T03:00:00.000Z"),
+      status: "running",
+      type: "review",
     });
   });
 
@@ -851,6 +890,161 @@ describe("WebviewStateStore wire routing", () => {
       tool && "diffStat" in tool ? tool.diffStat : undefined,
     ).toBeUndefined();
     expect(tool && "diff" in tool ? tool.diff : undefined).toBeUndefined();
+  });
+
+  it("hydrates persisted file display into the same diff metadata as live events", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-1",
+          message: {
+            role: "assistant",
+            tool_calls: [
+              {
+                function: {
+                  arguments: '{"path":"src/app.ts"}',
+                  name: "edit",
+                },
+                id: "tc-edit-1",
+              },
+            ],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-result-1",
+          message: {
+            content: "updated file",
+            role: "tool",
+            tool_call_id: "tc-edit-1",
+            tool_display: {
+              added: 3,
+              diff: [
+                { newLine: 1, oldLine: 1, tag: "ctx", text: "const a = 1;" },
+                { newLine: null, oldLine: 2, tag: "del", text: "const b = 2;" },
+                { newLine: 2, oldLine: null, tag: "add", text: "const b = 3;" },
+              ],
+              file: "src/app.ts",
+              kind: "file",
+              removed: 1,
+            },
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item): item is WebviewToolCard => item.type === "tool",
+      );
+    expect(tool).toMatchObject({
+      diff: [
+        { newLine: 1, oldLine: 1, tag: "ctx", text: "const a = 1;" },
+        { newLine: null, oldLine: 2, tag: "del", text: "const b = 2;" },
+        { newLine: 2, oldLine: null, tag: "add", text: "const b = 3;" },
+      ],
+      diffStat: {
+        added: 3,
+        removed: 1,
+      },
+      display: {
+        added: 3,
+        file: "src/app.ts",
+        kind: "file",
+        removed: 1,
+      },
+      toolCallId: "tc-edit-1",
+      toolName: "edit",
+      type: "tool",
+    });
+  });
+
+  it("hydrates persisted files display without inventing single-file diff metadata", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-1",
+          message: {
+            role: "assistant",
+            tool_calls: [
+              {
+                function: {
+                  arguments:
+                    '{"files":[{"path":"src/a.ts"},{"path":"src/b.ts"}]}',
+                  name: "edit",
+                },
+                id: "tc-edit-batch",
+              },
+            ],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-result-1",
+          message: {
+            content: "1 个文件已落盘，1 个失败且未写入",
+            role: "tool",
+            tool_call_id: "tc-edit-batch",
+            tool_display: {
+              files: [
+                {
+                  added: 2,
+                  file: "src/a.ts",
+                  removed: 1,
+                  status: "applied",
+                },
+                {
+                  file: "src/b.ts",
+                  note: "第 2 段匹配到 3 处",
+                  status: "failed",
+                },
+              ],
+              kind: "files",
+              summary: "1 个文件已落盘，1 个失败且未写入",
+            },
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item): item is WebviewToolCard => item.type === "tool",
+      );
+    expect(tool).toMatchObject({
+      display: {
+        files: [
+          {
+            added: 2,
+            file: "src/a.ts",
+            removed: 1,
+            status: "applied",
+          },
+          {
+            file: "src/b.ts",
+            note: "第 2 段匹配到 3 处",
+            status: "failed",
+          },
+        ],
+        kind: "files",
+        summary: "1 个文件已落盘，1 个失败且未写入",
+      },
+      toolCallId: "tc-edit-batch",
+      toolName: "edit",
+      type: "tool",
+    });
+    expect(tool?.diffStat).toBeUndefined();
+    expect(tool?.diff).toBeUndefined();
   });
 });
 

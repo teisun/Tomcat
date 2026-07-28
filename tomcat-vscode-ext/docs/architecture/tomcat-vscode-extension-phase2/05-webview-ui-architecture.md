@@ -167,6 +167,8 @@ React render timeline / composer / plan strip
 > 专业：本轮没有把 diff 计算留在 VSCode 扩展侧“事后读盘猜”，而是让 Rust 核心在 `write/edit/hashline_edit` 当下直接产出 `ToolDisplay::File { added, removed, diff? }`。这样 transcript 内联彩色 diff 和原生 `vscode.diff` 都共享同一份权威事实源。
 >
 > 说人话：谁真正同时知道“改前”和“改后”？只有核心。所以 diff 真相从核心来，前端只负责画和打开。
+>
+> 这轮又往前收了一步：`tool_display` 现在会跟着 transcript 一起持久化，reload / 切会话回来时，`state.ts` 不再靠“重新读盘猜有没有 diff 卡片”，而是直接复用 live 阶段同一套 `ToolDisplay` 归并逻辑。单文件与“批量但只改 1 个文件”都收敛成 `File` rich card；真多文件才走 `Files` 列表卡。
 
 ```text
 Rust core write/edit/hashline
@@ -397,6 +399,7 @@ ToolRow
 1. **edit**
    - 只认 `edit / write / hashline_edit`，与 transcript 内部的 mutation 语义对齐。
    - diff 徽章与逐行 diff 都来自核心 `ToolDisplay::File.added/removed/diff`，经 [`src/serveClient/wire.d.ts`](../../../src/serveClient/wire.d.ts) → [`src/ui/webview/state.ts`](../../../src/ui/webview/state.ts) 直达 GUI。
+   - `display` 不再是 live-only 临时态：history hydration 也读同一份 `tool_display`。因此“纯单文件”和“批量单文件”reload 后仍是可点 diff 的单卡；只有真多文件 batch 才退成列表卡。
    - 有 `diff` 时，`ToolRow` 会装配 `DisclosureCard(body=DiffView)`：折叠态不是看“文件尾部 5 行”，而是围绕**第一处真实改动**取迷你预览；展开态看完整结构化 diff（最大半屏、高度内滚动）。
    - `toolCallId + diff` 同时存在时，卡片右上角显示 `View diff` 图标按钮；点击发 `openDiff` intent。
    - 宿主 [`src/ui/webview/provider.ts`](../../../src/ui/webview/provider.ts) 会按 `ctx+del` 重建 before、按 `ctx+add` 重建 after，再通过 [`src/ide/VsCodeIde.ts`](../../../src/ide/VsCodeIde.ts) 复用既有 `tomcat-diff://` + `vscode.diff` 原生链路打开 diff 编辑器；虚拟文档键现编码进 URI path，规避 authority 被小写化后的空白 diff。
@@ -574,6 +577,8 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 
 1. 让滚动语义从“只会盲目追底”升级成“理解用户是否在看历史”；
 2. 让 thinking 与 tool 在历史回放时和实时阶段保持同一语义；
+3. 让 `ToolDisplay` 真正变成 transcript 事实，而不是 reload 后就会蒸发的 UI 临时态；
+4. 让 code review running 行直接消费 `plan.code_review.started` 的轮次与起始时间，实时显示 `round + elapsed`，完成后原地翻成 PASS / FAIL；
 3. 让 transcript 内部从“所有工具一把梭折叠”升级成“action 恒显、context 收纳、样式类型化、command/edit 统一 DisclosureCard 外壳”；
 4. 让 edit diff 真相回到核心：同一份结构化 diff 同时喂给 transcript 内联彩色 diff 与原生 `View diff`，不再依赖扩展读盘时序或 git 工作区状态；
 5. 把“协议改了但前端/fixture/安装包没追上”的工程风险显式制度化：`gen:wire`、serve fixture、版本 bump 必须一起做。

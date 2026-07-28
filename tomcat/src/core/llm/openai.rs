@@ -31,7 +31,7 @@ use crate::infra::error::{
 use super::super::auth::Credential;
 use super::super::catalog::{infer_default_base_url, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
-use super::super::retry_delay::provider_retry_delay;
+use super::super::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::core::llm::files_api::{FilesApiAdapter, ImageRefSlot};
 use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::provider::LlmProvider;
@@ -594,12 +594,13 @@ pub struct OpenAiProvider {
     capabilities: Capabilities,
 }
 
-fn apply_stream_idle_timeout<S>(
+fn apply_stream_idle_timeout<S, T>(
     stream: S,
     stream_timeout_sec: u64,
-) -> Pin<Box<dyn Stream<Item = Result<Bytes, AppError>> + Send>>
+) -> Pin<Box<dyn Stream<Item = Result<T, AppError>> + Send>>
 where
-    S: Stream<Item = Result<Bytes, AppError>> + Send + 'static,
+    S: Stream<Item = Result<T, AppError>> + Send + 'static,
+    T: Send + 'static,
 {
     if stream_timeout_sec == 0 {
         return Box::pin(stream);
@@ -873,7 +874,7 @@ impl OpenAiProvider {
                         self.retry_count,
                         err
                     );
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
@@ -944,7 +945,7 @@ impl LlmProvider for OpenAiProvider {
                             self.retry_count,
                             e
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -1027,13 +1028,15 @@ impl LlmProvider for OpenAiProvider {
         let bytes_stream = resp
             .bytes_stream()
             .map_err(move |e| map_body_read_error("流读取", e, http_read_timeout_sec));
-        let bytes_stream = apply_stream_idle_timeout(bytes_stream, stream_timeout_sec);
         let event_stream = SseEventStream::new(
             bytes_stream,
             ProviderCompatProfile::chat_completions(&model),
             self.continuity_enabled,
         );
-        Ok(Box::new(event_stream))
+        Ok(Box::new(apply_stream_idle_timeout(
+            event_stream,
+            stream_timeout_sec,
+        )))
     }
 
     /// Trait 启发式 token 估算：`chars / 3`（保守上估，留出英文场景余量）。

@@ -6,6 +6,7 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard;
+use super::super::types::SubagentType;
 use super::super::{AgentLoop, AgentLoopConfig};
 use super::mocks::{test_binding, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
@@ -342,6 +343,61 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
     assert!(text.contains("first pending"));
 
     cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn collapse_to_branch_summary_omits_control_snapshot_for_child_agents_without_plan_runtime() {
+    let system = ChatMessage::system("sys");
+    let user = ChatMessage::user("u".repeat(4_000));
+    let assistant = ChatMessage::assistant("a".repeat(4_000));
+    let mut messages = vec![system, user, assistant];
+    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "child summary".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "sess-collapse-child".to_string(),
+            subagent_type: SubagentType::CodeReviewer,
+            plan_runtime: None,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: tail_chars,
+        context_budget_chars: 200,
+        context_budget_tokens: 50,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    let text = messages[1].text_content().unwrap_or("");
+    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert!(
+        !text.starts_with("<control_state>"),
+        "child agent should not inherit parent plan snapshot: {text}"
+    );
+    assert!(!text.contains("plan_file_state:"));
 }
 
 fn assistant_with_tool_calls(calls: &[(&str, &str)]) -> ChatMessage {

@@ -347,7 +347,6 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         } else {
             None
         };
-        let plan_runtime_for_loop = Arc::clone(&plan_runtime);
         let compaction_provider = runtime.compaction_provider.clone();
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
@@ -415,7 +414,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Verifier,
-                        plan_runtime: Some(plan_runtime_for_loop),
+                        plan_runtime: None,
                         skill_set: if expose_skills {
                             Some(Arc::clone(&shared_skill_set))
                         } else {

@@ -4,6 +4,8 @@ import {
   assertWebviewAnswerCardFlow,
   assertWebviewAddModelsFlow,
   assertWebviewDiffFlow,
+  assertWebviewEditDisplayReplayFlow,
+  assertWebviewReviewProgressFlow,
   assertWebviewAtMentionDirectoryAndWarningFlow,
   assertWebviewAtMentionReferenceFlow,
   assertWebviewFileDropReferenceFlow,
@@ -55,6 +57,16 @@ suite("Tomcat host E2E", () => {
   test("applies edits from the Tomcat webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewDiffFlow(api);
+  });
+
+  test("replays single-file and multi-file edit cards after a webview reload", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewEditDisplayReplayFlow(api);
+  });
+
+  test("shows running review progress and settles into pass/fail rows", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewReviewProgressFlow(api);
   });
 
   test("recovers from a failed same-session retry and keeps the error in transcript history", async () => {

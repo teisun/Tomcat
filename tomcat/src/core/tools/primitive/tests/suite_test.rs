@@ -67,6 +67,34 @@ impl Drop for CurrentDirGuard {
     }
 }
 
+struct HomeEnvGuard {
+    previous: Option<String>,
+}
+
+impl HomeEnvGuard {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var("HOME").ok();
+        // SAFETY: env_lock 串行化了环境变量修改，测试结束后会恢复原值。
+        unsafe { std::env::set_var("HOME", path) };
+        Self { previous }
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.as_deref() {
+            Some(previous) => {
+                // SAFETY: 与 set() 成对恢复；仍处于 env_lock 保护下。
+                unsafe { std::env::set_var("HOME", previous) };
+            }
+            None => {
+                // SAFETY: 与 set() 成对恢复；仍处于 env_lock 保护下。
+                unsafe { std::env::remove_var("HOME") };
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn read_file_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_read");
@@ -477,6 +505,89 @@ async fn execute_bash_empty_string_cwd_treated_as_none() {
 }
 
 #[tokio::test]
+#[serial(env_lock)]
+async fn bash_registry_empty_string_cwd_treated_as_none() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let _cwd = CurrentDirGuard::set(&dir);
+    let registry = BashTaskRegistry::new(dir.join("tool-results"));
+
+    let ticket = registry
+        .spawn_tracked("pwd".to_string(), None::<Vec<String>>, Some(PathBuf::from("")), false)
+        .await
+        .expect("空 cwd 应视同未传");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("task finish");
+    let output = registry
+        .tail_output_chunk(&ticket.task_id, 1024)
+        .await
+        .expect("tail output");
+    assert_eq!(output.content.trim(), dir.display().to_string());
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn bash_registry_tilde_cwd_executes_without_guard() {
+    let home = tempfile::tempdir().expect("home");
+    let _home = HomeEnvGuard::set(home.path());
+    let target = home.path().join("tilde-registry");
+    std::fs::create_dir_all(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let registry = BashTaskRegistry::new(home.path().join("tool-results"));
+
+    let ticket = registry
+        .spawn_tracked(
+            "pwd".to_string(),
+            None::<Vec<String>>,
+            Some(PathBuf::from("~/tilde-registry")),
+            false,
+        )
+        .await
+        .expect("注册表入口应展开 ~/...");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("task finish");
+    let output = registry
+        .tail_output_chunk(&ticket.task_id, 1024)
+        .await
+        .expect("tail output");
+    assert_eq!(output.content.trim(), target.display().to_string());
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn bash_registry_unchecked_still_normalizes_tilde_cwd() {
+    let home = tempfile::tempdir().expect("home");
+    let _home = HomeEnvGuard::set(home.path());
+    let target = home.path().join("tilde-unchecked");
+    std::fs::create_dir_all(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let registry = BashTaskRegistry::new(home.path().join("tool-results"));
+
+    let ticket = registry
+        .spawn_tracked_unchecked(
+            "pwd".to_string(),
+            None::<Vec<String>>,
+            ResolvedCwd::from_raw(Some("~/tilde-unchecked")).expect("resolved cwd"),
+            false,
+        )
+        .await
+        .expect("unchecked 入口也应展开 ~/...");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("task finish");
+    let output = registry
+        .tail_output_chunk(&ticket.task_id, 1024)
+        .await
+        .expect("tail output");
+    assert_eq!(output.content.trim(), target.display().to_string());
+}
+
+#[tokio::test]
 async fn execute_bash_nonexistent_absolute_cwd_returns_clear_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dir = dir.path().canonicalize().unwrap();
@@ -634,6 +745,32 @@ async fn execute_bash_spawn_error_includes_cwd_and_input() {
     assert!(msg.contains("bash spawn failed"));
     assert!(msg.contains(&format!("cwd={}", path_str)));
     assert!(msg.contains(&format!("input={:?}", path_str)));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn bash_registry_spawn_error_includes_cwd_and_raw_input() {
+    let home = tempfile::tempdir().expect("home");
+    let _home = HomeEnvGuard::set(home.path());
+    let target = home.path().join("spawn-error-target");
+    std::fs::create_dir_all(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let registry = BashTaskRegistry::new(home.path().join("tool-results"));
+    let argv = vec!["--version".to_string()];
+
+    let err = registry
+        .spawn_tracked(
+            "definitely_missing_binary_for_registry_bash_test".to_string(),
+            Some(argv),
+            Some(PathBuf::from("~/spawn-error-target")),
+            false,
+        )
+        .await
+        .expect_err("缺失 binary 应走注册表 spawn 失败路径");
+    let msg = err.to_string();
+    assert!(msg.contains("bash spawn failed"));
+    assert!(msg.contains(&format!("cwd={}", target.display())));
+    assert!(msg.contains(r#"input="~/spawn-error-target""#));
 }
 
 #[test]

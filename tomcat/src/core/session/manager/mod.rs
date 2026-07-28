@@ -27,6 +27,11 @@ pub trait MessageAppendSink: Send + Sync {
         value: serde_json::Value,
     ) -> Result<String, crate::infra::error::AppError>;
 
+    fn append_custom_entry(
+        &self,
+        extra: serde_json::Value,
+    ) -> Result<(), crate::infra::error::AppError>;
+
     fn append_message_with_id(
         &self,
         value: serde_json::Value,

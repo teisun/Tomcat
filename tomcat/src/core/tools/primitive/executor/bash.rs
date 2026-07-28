@@ -8,6 +8,7 @@ use super::DefaultPrimitiveExecutor;
 use crate::core::permission::{GrantTrace, PermissionScope};
 use crate::core::tools::primitive::{
     BashExecutionState, BashNextAction, BashResult, BashTaskRegistry, PrimitiveOperation,
+    ResolvedCwd,
 };
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
@@ -20,30 +21,6 @@ fn resolve_foreground_wait_ms(executor: &DefaultPrimitiveExecutor, value: Option
         crate::infra::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS,
         crate::infra::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS,
     )
-}
-
-fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
-    if !path.try_exists().map_err(AppError::Io)? {
-        let mut msg = format!(
-            "bash.cwd does not exist: {} (input: {:?})",
-            path.display(),
-            raw_cwd
-        );
-        if raw_cwd.contains('$') {
-            msg.push_str(
-                "; environment variables are not expanded here; pass an absolute path or ~/...",
-            );
-        }
-        return Err(AppError::Primitive(msg));
-    }
-    if !path.is_dir() {
-        return Err(AppError::Primitive(format!(
-            "bash.cwd is not a directory: {} (input: {:?})",
-            path.display(),
-            raw_cwd
-        )));
-    }
-    Ok(())
 }
 
 fn record_bash_failure(
@@ -72,26 +49,26 @@ async fn resolve_cwd(
     cwd: Option<&str>,
     audit_cmd: &str,
     plugin_id: &str,
-) -> Result<(PathBuf, Option<String>), AppError> {
-    let raw_cwd = cwd.filter(|v| !v.trim().is_empty()).map(str::to_string);
-    let Some(raw) = raw_cwd.as_deref() else {
-        return Ok((PathBuf::from("."), None));
-    };
-    let path = match executor
-        .gate_check_path(PrimitiveOperation::Read, raw, plugin_id)
-        .await
-    {
-        Ok((path, _, _)) => path,
+) -> Result<ResolvedCwd, AppError> {
+    let cwd = match ResolvedCwd::from_raw(cwd) {
+        Ok(cwd) => cwd,
         Err(err) => {
             record_bash_failure(executor, audit_cmd, plugin_id, &err);
             return Err(err);
         }
     };
-    if let Err(err) = validate_bash_cwd(&path, raw) {
+    let Some(raw) = cwd.raw_input() else {
+        return Ok(cwd);
+    };
+    if let Err(err) = executor
+        .gate_check_path(PrimitiveOperation::Read, raw, plugin_id)
+        .await
+        .map(|_| ())
+    {
         record_bash_failure(executor, audit_cmd, plugin_id, &err);
         return Err(err);
-    }
-    Ok((path, raw_cwd))
+    };
+    Ok(cwd)
 }
 
 /// AST guard + explicit-path preflight + bash policy gate. Returns the resolved `(scope, grant)`
@@ -138,8 +115,15 @@ pub(super) async fn execute_bash_impl(
         None => command.to_string(),
         Some(args) => format!("{} {}", command, args.join(" ")),
     };
-    let (cwd, raw_cwd) = resolve_cwd(executor, cwd, &audit_cmd, plugin_id).await?;
-    let (bash_scope, bash_grant) = match preflight(executor, &audit_cmd, &cwd, plugin_id).await {
+    let cwd = resolve_cwd(executor, cwd, &audit_cmd, plugin_id).await?;
+    let (bash_scope, bash_grant) = match preflight(
+        executor,
+        &audit_cmd,
+        cwd.resolved_path(),
+        plugin_id,
+    )
+    .await
+    {
         Ok(scope_grant) => scope_grant,
         Err(error) => {
             record_bash_failure(executor, &audit_cmd, plugin_id, &error);
@@ -159,16 +143,8 @@ pub(super) async fn execute_bash_impl(
         )
     });
     let ticket = registry
-        .spawn_tracked_unchecked(command.to_string(), argv, Some(cwd.clone()), false)
-        .await
-        .map_err(|e| {
-            AppError::Primitive(format!(
-                "bash spawn failed (cwd={}, input={:?}): {}",
-                cwd.display(),
-                raw_cwd.as_deref().unwrap_or("<inherited>"),
-                e
-            ))
-        })?;
+        .spawn_tracked_unchecked(command.to_string(), argv, cwd.clone(), false)
+        .await?;
     let wait_ms = resolve_foreground_wait_ms(executor, foreground_wait_ms);
     let finished = tokio::select! {
         result = registry.wait_for_finish(&ticket.task_id) => { result?; true }

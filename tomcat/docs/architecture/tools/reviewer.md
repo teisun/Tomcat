@@ -628,6 +628,39 @@ impl PlanRuntime {
 
 解析失败 → `reviewer_stop_reason = "model_unresolved"`，plan 文件保留。详见 [`../llm/model-provider-binding.md`](../llm/model-provider-binding.md)。
 
+### 8.5 completion guard 只属于 root Agent
+
+```text
+root agent（主会话）
+  ├─ 可持有 active plan 执行态
+  ├─ 负责 decide：现在能不能真正收工
+  └─ 因此只有它会跑 completion guard
+
+read-only child（code reviewer / verifier / explorer）
+  ├─ 只回答“我这次审/验/查到了什么”
+  ├─ 不负责推进父计划
+  └─ 因此 guard 判据直接用 subagent_type.is_root() 把它们排除
+```
+
+**说人话**：`<review>`、`<verify>`、explorer 文本本来就是子 Agent 的终局产物，不该被父计划的“继续做下去”守卫再顶回去重答一轮。现在守卫只看 root，子 Agent 不会再因为父计划还在 executing/planning 就被强行续命。
+
+### 8.6 只读子 Agent 不持有 `plan_runtime`
+
+- `CodeReviewer` / `Verifier` / `Explorer` 的 `AgentLoopConfig.plan_runtime = None`。
+- `PlanReviewer` 保留 `Some(...)`，因为它确实允许改 plan 正文、需要看 planning 态并留下审稿事件。
+- started 指针（`plan.review.started` / `plan.code_review.started` / `plan.explorer.started`）通过派发侧写回父 transcript，**不要求**把整份父计划执行句柄塞进子 loop。
+
+**说人话**：只读子 Agent 只该拿“这次任务要看的材料”，不该顺手把父会话的执行控制台一起抱走。这样它在压缩上下文、判断收尾、写 transcript 时都不会再误读父计划的 live 状态。
+
+### 8.7 空闲超时测“有没有产出”，不是“有没有字节”
+
+- 流式空闲阈值仍用 `llm.stream_timeout_sec`，默认 `180s`。
+- 计时器现在挂在 **SSE 解析后的事件流** 上：只有真正的 `StreamEvent` 产出会续命。
+- 中转站 keepalive / ping / SSE comment 这类“只有字节、没有业务事件”的噪音不会再把 code review 无限续下去。
+- provider 自动重试仍保留；差别只是单次尝试会在 `180s` 无产出时明确失败，而不是继续静默等。
+
+**说人话**：以前是“网线上还有心跳包，所以系统以为模型还活着”；现在改成“只有模型真的继续吐内容，才算活着”。这就是为什么 60 分钟静默会回落成可解释的 `180s * attempts` 量级。
+
 ---
 
 ## 9. 配置与环境变量
@@ -637,6 +670,7 @@ impl PlanRuntime {
 | `TOMCAT_REVIEWER_MAX_TURNS` | `64` | reviewer subagent 最大 reasoning 轮次（映射 `AgentLoopConfig.max_tool_rounds`） | 审稿最多 64 轮推理；transcript 落实际 `reviewer_turns_used`。 |
 | `TOMCAT_REVIEWER_MODEL` | 继承父 Agent | 显式覆写 reviewer 使用的模型 | 可单独指定审稿模型。 |
 | `TOMCAT_PLAN_MAX_REVIEW_ROUNDS` | `1` | 单个 `PlanFile` 累计 reviewer 派发轮次软上限；超限只 warning，不阻塞 | 软上限，超了只提醒。 |
+| `llm.stream_timeout_sec` | `180` | 流式空闲超时；**测的是解析后事件流是否继续产出**，不是 socket 上是否还有 keepalive 字节 | 3 分钟没真内容就判这次尝试卡住。 |
 | ~~`TOMCAT_REVIEWER_DEFAULT_ALLOW_EDIT`~~ | ~~`false`~~ | **已删除**：`allow_review_edit` 在实现层固定为 `true`，不再接受环境变量/配置项 | 改稿权写死，不可配。 |
 | `TOMCAT_REVIEWER_SYSTEM_PROMPT_OVERRIDE_PATH` | 未设 | 测试用：从指定文件读取 system prompt 覆写默认常量 | 单测可换审稿提示词。 |
 

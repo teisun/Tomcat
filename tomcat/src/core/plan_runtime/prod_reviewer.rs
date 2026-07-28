@@ -29,7 +29,8 @@ use crate::core::plan_runtime::review::{
     count_assistant_turns, extract_review_text, parse_review_block, resolve_internal_tools,
 };
 use crate::core::plan_runtime::{
-    CodeReviewerDispatcher, ExplorerDispatcher, PlanReviewerDispatcher, PlanRuntime,
+    CodeReviewDispatchInfo, CodeReviewerDispatcher, ExplorerDispatcher, PlanReviewerDispatcher,
+    PlanRuntime,
 };
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
@@ -245,6 +246,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
         } else {
             None
         };
+        let plan_id_for_closure = plan_id.to_string();
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
         let compaction_provider = runtime.compaction_provider.clone();
         let context_config = runtime.context_config.clone();
@@ -271,6 +273,16 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                             &transcript_model,
                             &parent_session_id_for_closure,
                         );
+                    let transcript_path =
+                        crate::core::session::subagent_transcript::format_subagent_transcript_path(
+                            &transcript_root,
+                            &child_session_id,
+                        );
+                    plan_runtime.write_plan_review_started_transcript(
+                        &plan_id_for_closure,
+                        Some(&child_session_id),
+                        transcript_path.as_deref(),
+                    );
 
                     let mut system_text = format!(
                         "{}\n(max_turns budget: {} reasoning turns)\n",
@@ -387,6 +399,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         plan_id: &str,
         plan_text: &str,
         open_findings: &[crate::core::plan_runtime::review::Finding],
+        dispatch: &CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         let Some(deps) = self.deps.as_ref() else {
             return CodeReviewSummary::aborted_with(format!(
@@ -407,7 +420,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         };
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let (diff_stat, changed_files) =
-            collect_git_diff_context(deps.agent_workspace_dir.as_path());
+            collect_git_diff_context(deps.agent_workspace_dir.as_path()).await;
         let initial_user_message = build_code_review_prompt(
             plan_id,
             plan_text,
@@ -465,7 +478,8 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         } else {
             None
         };
-        let plan_runtime_for_loop = Arc::clone(&plan_runtime);
+        let plan_id_for_closure = plan_id.to_string();
+        let dispatch = dispatch.clone();
         let compaction_provider = runtime.compaction_provider.clone();
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
@@ -503,6 +517,19 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                             &transcript_model,
                             &parent_session_id_for_closure,
                         );
+                    let transcript_path =
+                        crate::core::session::subagent_transcript::format_subagent_transcript_path(
+                            &transcript_root,
+                            &child_session_id,
+                        );
+                    plan_runtime.write_code_review_started_transcript(
+                        &plan_id_for_closure,
+                        dispatch.round,
+                        &dispatch.review_attempt_id,
+                        &dispatch.tool_call_id,
+                        Some(&child_session_id),
+                        transcript_path.as_deref(),
+                    );
 
                     let mut system_text = format!(
                         "{}\n(max_turns budget: {} reasoning turns)\n",
@@ -533,7 +560,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::CodeReviewer,
-                        plan_runtime: Some(plan_runtime_for_loop),
+                        plan_runtime: None,
                         skill_set: if expose_skills {
                             Some(Arc::clone(&shared_skill_set))
                         } else {
@@ -790,7 +817,6 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                 return r;
             }
         };
-        let plan_runtime_for_loop = Arc::clone(&plan_runtime);
         let compaction_provider = runtime.compaction_provider.clone();
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
@@ -828,6 +854,16 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                             &transcript_model,
                             &parent_session_id_for_closure,
                         );
+                    let transcript_path =
+                        crate::core::session::subagent_transcript::format_subagent_transcript_path(
+                            &transcript_root,
+                            &child_session_id,
+                        );
+                    plan_runtime.write_explorer_started_transcript(
+                        &task_id_for_closure,
+                        Some(&child_session_id),
+                        transcript_path.as_deref(),
+                    );
 
                     let system_text = format!(
                         "{}\n(max_turns budget: {} reasoning turns)\n",
@@ -854,7 +890,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Explorer,
-                        plan_runtime: Some(plan_runtime_for_loop),
+                        plan_runtime: None,
                         skill_set: None,
                     };
                     let mut agent_loop =

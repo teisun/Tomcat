@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WebviewReviewRow } from "../types";
 import { ReviewRow } from "./ReviewRow";
@@ -21,12 +21,38 @@ function buildReview(overrides: Partial<WebviewReviewRow> = {}): WebviewReviewRo
 }
 
 describe("ReviewRow", () => {
-  it("renders a shimmering running row while code review is in progress", () => {
-    render(<ReviewRow item={buildReview({ findings: undefined, status: "running", summary: null })} />);
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders running round + elapsed metadata while code review is in progress", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T03:01:05Z"));
+    render(
+      <ReviewRow
+        item={buildReview({
+          findings: undefined,
+          round: 2,
+          startedAt: Date.parse("2026-07-28T03:00:00Z"),
+          status: "running",
+          summary: null,
+        })}
+      />,
+    );
 
     expect(screen.getByTestId("review-row-running-text").textContent).toBe("Reviewing code...");
     expect(screen.getByTestId("review-row-running-text").className).toContain("tc-loading-shimmer");
+    expect(screen.getByTestId("review-row-running-meta").textContent).toBe(
+      "Round 2 · 01:05 elapsed",
+    );
     expect(screen.queryByTestId("review-row-toggle")).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByTestId("review-row-running-meta").textContent).toBe(
+      "Round 2 · 01:06 elapsed",
+    );
   });
 
   it("renders verdict badge, rounds and findings for completed reviews", () => {

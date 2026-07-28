@@ -155,6 +155,7 @@ impl CodeReviewerDispatcher for MockCodeReviewerDispatcher {
         _plan_id: &str,
         _plan_text: &str,
         open_findings: &[Finding],
+        _dispatch: &crate::core::plan_runtime::CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         self.open_findings_per_round

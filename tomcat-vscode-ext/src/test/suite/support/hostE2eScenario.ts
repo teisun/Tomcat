@@ -1870,6 +1870,261 @@ export async function assertWebviewDiffFlow(
   assert.ok(readSnapshot.fileChipVisible, "expected a standalone read row to render a file chip");
 }
 
+export async function assertWebviewEditDisplayReplayFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-edit-display-replay-session",
+  );
+  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
+  const fixtureDir = path.join(workspaceDir, "test-stuff", "edit-display-replay");
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "edit display replay",
+      },
+      messageId: "webview-edit-display-replay-prompt",
+      type: "prompt",
+    }),
+  );
+  await waitForEvent(api, { sessionId, timeoutMs: 20_000, type: "agent_end" });
+  const fixtureRealDir = await fs.realpath(fixtureDir);
+  const singlePath = path.join(fixtureRealDir, "single.ts");
+  const batchSinglePath = path.join(fixtureRealDir, "batch-single.ts");
+
+  const initial = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) => {
+      const diffButtons = snapshot.html.match(/View diff/gu) ?? [];
+      return snapshot.activeSessionId === sessionId
+        && snapshot.actionToolRowCount >= 3
+        && snapshot.html.includes("single.ts")
+        && snapshot.html.includes("batch-single.ts")
+        && snapshot.html.includes("Edited 2 files")
+        && snapshot.html.includes("1 applied · 1 failed")
+        && diffButtons.length >= 2
+        ? snapshot
+        : undefined;
+    },
+    20_000,
+  );
+  assert.ok(initial.html.includes("multi-failed.ts"));
+  assert.ok(
+    (initial.html.match(/View diff/gu) ?? []).length >= 2,
+    `expected two single-file diff buttons, got html=${initial.html}`,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { toolCallId: "tc-edit-display-single" },
+      messageId: "webview-edit-display-single-open-diff",
+      type: "openDiff",
+    }),
+  );
+  const singlePreparedChange = await waitForPreparedChange(
+    api,
+    "tc-edit-display-single",
+    (change) =>
+      stripTerminalNewline(change.originalContent) === "export const mode = 'before';"
+      && stripTerminalNewline(change.proposedContent) === "export const mode = 'after';",
+  );
+  assertPreparedChangeMatches(
+    singlePreparedChange,
+    singlePath,
+    "export const mode = 'before';",
+    "export const mode = 'after';",
+  );
+  await waitForVisiblePreparedDiffEditors("tc-edit-display-single", 20_000);
+
+  await api.__testing.reloadWebview();
+  const reloaded = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) => {
+      const diffButtons = snapshot.html.match(/View diff/gu) ?? [];
+      return snapshot.activeSessionId === sessionId
+        && snapshot.actionToolRowCount >= 3
+        && snapshot.html.includes("single.ts")
+        && snapshot.html.includes("batch-single.ts")
+        && snapshot.html.includes("Edited 2 files")
+        && snapshot.html.includes("1 applied · 1 failed")
+        && diffButtons.length >= 2
+        ? snapshot
+        : undefined;
+    },
+    20_000,
+  );
+  assert.ok(reloaded.html.includes("multi-failed.ts"));
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { toolCallId: "tc-edit-display-batch-single" },
+      messageId: "webview-edit-display-batch-single-open-diff",
+      type: "openDiff",
+    }),
+  );
+  const batchSinglePreparedChange = await waitForPreparedChange(
+    api,
+    "tc-edit-display-batch-single",
+    (change) =>
+      stripTerminalNewline(change.originalContent) === "export const batch = 'before';"
+      && stripTerminalNewline(change.proposedContent) === "export const batch = 'after';",
+  );
+  assertPreparedChangeMatches(
+    batchSinglePreparedChange,
+    batchSinglePath,
+    "export const batch = 'before';",
+    "export const batch = 'after';",
+  );
+  await waitForVisiblePreparedDiffEditors("tc-edit-display-batch-single", 20_000);
+
+  await api.__testing.sendWebviewDomAction({
+    index: 0,
+    kind: "clickTestId",
+    testId: "tool-row-file-toggle",
+  });
+  const expanded = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId
+      && snapshot.html.includes("export const multi = 'after';")
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.match(expanded.html, /export const multi = 'after';/u);
+}
+
+export async function assertWebviewReviewProgressFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-review-progress-session",
+  );
+  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
+  await api.__testing.applyWebviewSessionState({
+    busy: true,
+    model: "gpt-5.4",
+    planId: "plan-review-progress",
+    planPath: path.join(workspaceDir, "plans", "review-progress.plan.md"),
+    planState: "executing",
+    sessionId,
+  });
+
+  await api.__testing.injectServeEvent({
+    args: { ops: [{ id: "todo-1", kind: "set_status", status: "completed" }] },
+    sessionId,
+    toolCallId: "tc-update-pass",
+    toolName: "update_plan",
+    type: "tool_execution_start",
+  });
+  await api.__testing.injectServeEvent({
+    planId: "plan-review-progress",
+    reviewAttemptId: "plan-review-progress:2",
+    round: 2,
+    sessionId,
+    toolCallId: "tc-update-pass",
+    type: "plan.code_review.started",
+  } as never);
+  const runningPass = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId
+      && snapshot.html.includes("Reviewing code...")
+      && /Round 2 · 00:0\d elapsed/u.test(snapshot.html)
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.match(runningPass.html, /Round 2 · 00:0\d elapsed/u);
+
+  await api.__testing.injectServeEvent({
+    findings: [],
+    planId: "plan-review-progress",
+    reviewAttemptId: "plan-review-progress:2",
+    round: 2,
+    rounds: 2,
+    sessionId,
+    summary: "Review verified.",
+    toolCallId: "tc-update-pass",
+    type: "plan.code_review",
+    verdict: "pass",
+  } as never);
+  const passed = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId
+      && snapshot.html.includes("PASS")
+      && snapshot.html.includes("Review verified.")
+      && !snapshot.html.includes("Reviewing code...")
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(passed.html.includes("PASS"));
+
+  await api.__testing.injectServeEvent({
+    args: { ops: [{ id: "todo-2", kind: "set_status", status: "completed" }] },
+    sessionId,
+    toolCallId: "tc-update-fail",
+    toolName: "update_plan",
+    type: "tool_execution_start",
+  });
+  await api.__testing.injectServeEvent({
+    planId: "plan-review-progress",
+    reviewAttemptId: "plan-review-progress:3",
+    round: 3,
+    sessionId,
+    toolCallId: "tc-update-fail",
+    type: "plan.code_review.started",
+  } as never);
+  const runningFail = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId
+      && snapshot.html.includes("Reviewing code...")
+      && /Round 3 · 00:0\d elapsed/u.test(snapshot.html)
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.match(runningFail.html, /Round 3 · 00:0\d elapsed/u);
+
+  await api.__testing.injectServeEvent({
+    findings: [{ area: "logic", note: "Guard missing", severity: "concern" }],
+    planId: "plan-review-progress",
+    reviewAttemptId: "plan-review-progress:3",
+    round: 3,
+    rounds: 3,
+    sessionId,
+    summary: "Add the missing guard before proceeding.",
+    toolCallId: "tc-update-fail",
+    type: "plan.code_review",
+    verdict: "fail",
+  } as never);
+  const failed = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId
+      && snapshot.html.includes("FAIL")
+      && snapshot.html.includes("Add the missing guard before proceeding.")
+      && !snapshot.html.includes("Reviewing code...")
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(failed.html.includes("FAIL"));
+}
+
 export async function assertWebviewRetryRecoveryFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {

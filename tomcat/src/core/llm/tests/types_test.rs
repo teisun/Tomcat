@@ -14,6 +14,7 @@ use super::super::types::{
     TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 use crate::core::llm::openai_files::OpenAiFilesClient;
+use crate::infra::events::ToolDisplay;
 
 #[test]
 fn chat_message_constructors() {
@@ -101,7 +102,10 @@ fn chat_message_completion_metadata_roundtrip() {
                 had_tool_call: false,
                 replay_requirement: ReplayRequirement::SameProfileOptional,
             }),
-        );
+        )
+        .with_tool_display(Some(ToolDisplay::Text {
+            text: "edited src/app.ts".to_string(),
+        }));
     let json = serde_json::to_value(&msg).unwrap();
     assert_eq!(json["finish_reason"], "error:boom");
     assert_eq!(json["error_message"], "boom");
@@ -120,6 +124,7 @@ fn chat_message_completion_metadata_roundtrip() {
     assert!(stripped_json.get("thinking_text").is_none());
     assert!(stripped_json.get("reasoning_continuation").is_none());
     assert!(stripped_json.get("continuity").is_none());
+    assert!(stripped_json.get("tool_display").is_none());
 }
 
 #[test]

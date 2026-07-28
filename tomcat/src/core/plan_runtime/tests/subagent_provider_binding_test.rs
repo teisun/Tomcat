@@ -6,9 +6,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::{StreamExt, future};
 use parking_lot::{Mutex, RwLock};
+use tokio_stream::wrappers::IntervalStream;
 use super::super::explorer::ExplorerTask;
 use super::super::file_store::{
     plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
@@ -35,7 +38,7 @@ use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::tools::web_fetch::WebFetchRuntime;
 use crate::core::NoopStore;
 use crate::infra::config::{AppConfig, ContextConfig, LlmFilesConfig};
-use crate::infra::error::{llm_http_status_error, AppError};
+use crate::infra::error::{LlmErrorStage, llm_error, llm_http_status_error, AppError};
 use crate::infra::event_bus::DefaultEventBus;
 use crate::infra::TracingAuditRecorder;
 use crate::AllowAllConfirmation;
@@ -116,10 +119,15 @@ type ResolveCallLog = Vec<(LlmScene, Option<String>)>;
 #[derive(Clone, Default)]
 struct ResolveLog(Arc<Mutex<ResolveCallLog>>);
 
+enum RecordingStreamPlan {
+    Immediate(Vec<Result<StreamEvent, AppError>>),
+    KeepaliveOnlyIdle { interval_ms: u64, timeout_sec: u64 },
+}
+
 struct RecordingProvider {
     name: String,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
-    streams: Mutex<Vec<Vec<Result<StreamEvent, AppError>>>>,
+    streams: Mutex<Vec<RecordingStreamPlan>>,
 }
 
 impl RecordingProvider {
@@ -128,14 +136,14 @@ impl RecordingProvider {
         let provider = Arc::new(Self {
             name: name.to_string(),
             requests: requests.clone(),
-            streams: Mutex::new(vec![vec![
+            streams: Mutex::new(vec![RecordingStreamPlan::Immediate(vec![
                 Ok(StreamEvent::ContentDelta {
                     delta: text.to_string(),
                 }),
                 Ok(StreamEvent::FinishReason {
                     reason: "stop".to_string(),
                 }),
-            ]]),
+            ])]),
         });
         (provider, requests)
     }
@@ -145,11 +153,29 @@ impl RecordingProvider {
         let provider = Arc::new(Self {
             name: name.to_string(),
             requests: requests.clone(),
-            streams: Mutex::new(vec![vec![Err(llm_http_status_error(
-                name,
-                400,
-                "unsupported model",
-            ))]]),
+            streams: Mutex::new(vec![RecordingStreamPlan::Immediate(vec![Err(
+                llm_http_status_error(name, 400, "unsupported model"),
+            )])]),
+        });
+        (provider, requests)
+    }
+
+    fn keepalive_only_idle(
+        name: &str,
+        timeout_sec: u64,
+    ) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut streams = Vec::new();
+        for _ in 0..8 {
+            streams.push(RecordingStreamPlan::KeepaliveOnlyIdle {
+                interval_ms: 200,
+                timeout_sec,
+            });
+        }
+        let provider = Arc::new(Self {
+            name: name.to_string(),
+            requests: requests.clone(),
+            streams: Mutex::new(streams),
         });
         (provider, requests)
     }
@@ -177,8 +203,41 @@ impl LlmProvider for RecordingProvider {
         if guard.is_empty() {
             return Err(AppError::Llm("no streams left".into()));
         }
-        let events = guard.remove(0);
-        Ok(Box::new(tokio_stream::iter(events)))
+        let stream = match guard.remove(0) {
+            RecordingStreamPlan::Immediate(events) => {
+                Box::new(tokio_stream::iter(events))
+                    as Box<
+                        dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>>
+                            + Send
+                            + Unpin,
+                    >
+            }
+            RecordingStreamPlan::KeepaliveOnlyIdle {
+                interval_ms,
+                timeout_sec,
+            } => {
+                let provider_name = self.name.clone();
+                let timeout_ticks =
+                    ((timeout_sec * 1000) + interval_ms.saturating_sub(1)) / interval_ms;
+                let interval =
+                    IntervalStream::new(tokio::time::interval(Duration::from_millis(interval_ms)))
+                        .enumerate()
+                        .map(move |(idx, _)| {
+                            if (idx as u64) + 1 >= timeout_ticks {
+                                Some(Err(llm_error(
+                                    &provider_name,
+                                    LlmErrorStage::IdleTimeout,
+                                    format!("流式空闲超时: stream_timeout_sec={}s", timeout_sec),
+                                )))
+                            } else {
+                                None
+                            }
+                        })
+                        .filter_map(future::ready);
+                Box::new(interval)
+            }
+        };
+        Ok(stream)
     }
 
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
@@ -565,7 +624,7 @@ summary: verify ok
         name: "fcodex".into(),
         requests: fcodex_requests.clone(),
         streams: Mutex::new(vec![
-            vec![
+            RecordingStreamPlan::Immediate(vec![
                 Ok(StreamEvent::ContentDelta {
                     delta: r#"<review>
 summary: plan ok
@@ -577,8 +636,8 @@ applied_changes: false
                 Ok(StreamEvent::FinishReason {
                     reason: "stop".into(),
                 }),
-            ],
-            vec![
+            ]),
+            RecordingStreamPlan::Immediate(vec![
                 Ok(StreamEvent::ContentDelta {
                     delta: r#"<review>
 verdict: pass
@@ -591,16 +650,16 @@ applied_changes: false
                 Ok(StreamEvent::FinishReason {
                     reason: "stop".into(),
                 }),
-            ],
-            vec![
+            ]),
+            RecordingStreamPlan::Immediate(vec![
                 Ok(StreamEvent::ContentDelta {
                     delta: "explorer found nothing critical".into(),
                 }),
                 Ok(StreamEvent::FinishReason {
                     reason: "stop".into(),
                 }),
-            ],
-            vec![
+            ]),
+            RecordingStreamPlan::Immediate(vec![
                 Ok(StreamEvent::ContentDelta {
                     delta: r#"<verify>
 checks:
@@ -616,7 +675,7 @@ summary: verify ok
                 Ok(StreamEvent::FinishReason {
                     reason: "stop".into(),
                 }),
-            ],
+            ]),
         ]),
     });
     let deepseek = Arc::new(RecordingProvider {
@@ -632,6 +691,24 @@ summary: verify ok
         deepseek_requests,
         false,
     );
+    let parent_session = crate::core::session::SessionManager::new(fx.agent_trail_dir.join("sessions"));
+    parent_session
+        .create_session("agent:main:main", None)
+        .expect("create parent session");
+    let parent_transcript = parent_session
+        .current_transcript_path()
+        .expect("current transcript path")
+        .expect("parent transcript");
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let captured = Arc::clone(&captured);
+        let parent_session = parent_session.clone();
+        fx.plan_runtime
+            .attach_transcript_appender(Arc::new(move |extra| {
+                captured.lock().push(extra.clone());
+                parent_session.append_custom_entry(extra)
+            }));
+    }
 
     let plan = ProdPlanReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
     let code = ProdCodeReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
@@ -642,7 +719,16 @@ summary: verify ok
         .dispatch("binding_plan", "## Goal\nbinding\n", true)
         .await;
     let code_summary = code
-        .dispatch("binding_plan", "## Goal\nbinding\n", &[])
+        .dispatch(
+            "binding_plan",
+            "## Goal\nbinding\n",
+            &[],
+            &crate::core::plan_runtime::CodeReviewDispatchInfo {
+                round: 1,
+                review_attempt_id: "binding_plan:1".into(),
+                tool_call_id: "tc-binding".into(),
+            },
+        )
         .await;
     let explorer_report = explorer
         .dispatch(&ExplorerTask {
@@ -671,6 +757,43 @@ summary: verify ok
     for (_scene, override_) in &main_calls {
         assert_eq!(override_.as_deref(), Some("fcodex/gpt-5.6-sol"));
     }
+    let events = captured.lock();
+    let plan_started = events
+        .iter()
+        .find(|v| v["event"] == "plan.review.started")
+        .expect("missing plan.review.started");
+    assert_eq!(plan_started["child_session_id"], plan_summary.child_session_id);
+    assert!(
+        plan_started["transcript_path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(".jsonl")
+    );
+    let code_started = events
+        .iter()
+        .find(|v| v["event"] == "plan.code_review.started")
+        .expect("missing plan.code_review.started");
+    assert_eq!(code_started["child_session_id"], code_summary.child_session_id);
+    assert_eq!(code_started["review_attempt_id"], "binding_plan:1");
+    let explorer_started = events
+        .iter()
+        .find(|v| v["event"] == "plan.explorer.started")
+        .expect("missing plan.explorer.started");
+    assert_eq!(explorer_started["child_session_id"], explorer_report.child_session_id);
+    assert_eq!(explorer_started["task_id"], "e1");
+    let transcript = std::fs::read_to_string(&parent_transcript).expect("read parent transcript");
+    assert!(
+        transcript.contains("\"event\":\"plan.review.started\""),
+        "transcript={transcript}"
+    );
+    assert!(
+        transcript.contains("\"event\":\"plan.code_review.started\""),
+        "transcript={transcript}"
+    );
+    assert!(
+        transcript.contains("\"event\":\"plan.explorer.started\""),
+        "transcript={transcript}"
+    );
     let _ = fx.home;
 }
 
@@ -716,21 +839,58 @@ async fn first_llm_fatal_uses_no_transcript_hint_and_llm_error_stop_reason() {
     assert!(summary.aborted);
     assert_eq!(summary.reviewer_stop_reason, "llm_error");
     assert!(
-        summary.summary.contains("[no transcript]"),
+        summary.summary.contains("[debug transcript]"),
+        "summary={}",
+        summary.summary
+    );
+    let path = fx
+        .agent_trail_dir
+        .join("subagent-sessions")
+        .join(format!("{}.jsonl", summary.child_session_id));
+    assert!(path.exists(), "eager transcript should exist even with zero messages");
+    let raw = std::fs::read_to_string(&path).expect("read eager transcript");
+    let lines: Vec<_> = raw.lines().collect();
+    assert_eq!(lines.len(), 2, "zero-message transcript should contain header + meta");
+    assert!(
+        raw.contains("\"event\":\"subagent.transcript.meta\""),
+        "raw={raw}"
+    );
+    let _ = fx.home;
+}
+
+#[tokio::test]
+async fn prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout() {
+    let _g = home_lock().lock().unwrap();
+    let (fcodex, fcodex_requests) = RecordingProvider::keepalive_only_idle("fcodex", 1);
+    let (deepseek, deepseek_requests) = RecordingProvider::success("deepseek", "unused");
+    let fx = build_fixture(fcodex, deepseek, fcodex_requests, deepseek_requests, false);
+
+    let dispatcher =
+        ProdCodeReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
+    let summary = dispatcher
+        .dispatch(
+            "binding_plan",
+            "## Goal\nbinding\n",
+            &[],
+            &crate::core::plan_runtime::CodeReviewDispatchInfo {
+                round: 1,
+                review_attempt_id: "binding_plan:1".into(),
+                tool_call_id: "tc-binding".into(),
+            },
+        )
+        .await;
+
+    assert!(summary.aborted, "summary={}", summary.summary);
+    assert_eq!(summary.reviewer_stop_reason, "llm_error");
+    assert!(
+        summary.summary.contains("流式空闲超时"),
         "summary={}",
         summary.summary
     );
     assert!(
-        !summary.summary.contains("[debug transcript]"),
+        summary.summary.contains("stream_timeout_sec=1s"),
         "summary={}",
         summary.summary
     );
-    if !summary.child_session_id.is_empty() {
-        let path = fx
-            .agent_trail_dir
-            .join("subagent-sessions")
-            .join(format!("{}.jsonl", summary.child_session_id));
-        assert!(!path.exists(), "fatal before first append must not create jsonl");
-    }
     let _ = fx.home;
 }

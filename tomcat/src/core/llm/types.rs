@@ -31,6 +31,7 @@ use super::thinking_policy::ThinkingLevel;
 use crate::core::llm::files_api::FilesApiAdapter;
 use crate::core::llm::openai_files::FilePurpose;
 use crate::infra::error::AppError;
+use crate::infra::events::ToolDisplay;
 
 /// inline 图片字节上限（解码后），与 [`pi_agent_rust/src/tools.rs`] 对齐。
 pub const IMAGE_MAX_BYTES: usize = 4_718_592;
@@ -647,6 +648,9 @@ pub struct ChatMessage {
     /// turn/tool 折叠标题；仅本地持久化与 transcript/webview 恢复使用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_title: Option<String>,
+    /// 工具结构化展示元数据；仅本地持久化与 transcript/webview 恢复使用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_display: Option<ToolDisplay>,
 
     /// Transcript `MessageEntry.id` — set during hydration or after `append_message`.
     #[serde(skip)]
@@ -675,6 +679,7 @@ impl ChatMessage {
             reasoning_continuation: None,
             continuity: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -698,6 +703,7 @@ impl ChatMessage {
             reasoning_continuation: None,
             continuity: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -719,6 +725,7 @@ impl ChatMessage {
             reasoning_continuation: None,
             continuity: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -743,6 +750,7 @@ impl ChatMessage {
             reasoning_continuation: None,
             continuity: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -764,6 +772,7 @@ impl ChatMessage {
             reasoning_continuation: None,
             continuity: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -785,6 +794,7 @@ impl ChatMessage {
             reasoning_continuation: None,
             continuity: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -806,6 +816,7 @@ impl ChatMessage {
             reasoning_continuation: None,
             continuity: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Steering,
             timestamp: None,
@@ -827,6 +838,7 @@ impl ChatMessage {
             reasoning_continuation: None,
             continuity: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::CompactionSummary,
             timestamp: None,
@@ -865,6 +877,12 @@ impl ChatMessage {
         self
     }
 
+    /// 为 tool 回合附加 transcript/webview 使用的结构化展示数据。
+    pub fn with_tool_display(mut self, tool_display: Option<ToolDisplay>) -> Self {
+        self.tool_display = tool_display;
+        self
+    }
+
     /// 请求发往上游前剥离本地 transcript 元数据，避免污染 API wire payload。
     pub fn without_completion_metadata(&self) -> Self {
         let mut cloned = self.clone();
@@ -876,6 +894,7 @@ impl ChatMessage {
         cloned.reasoning_continuation = None;
         cloned.continuity = None;
         cloned.summary_title = None;
+        cloned.tool_display = None;
         cloned
     }
 

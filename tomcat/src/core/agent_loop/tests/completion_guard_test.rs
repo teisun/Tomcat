@@ -8,10 +8,11 @@ use tokio_util::sync::CancellationToken;
 use super::super::turn_finalize::{
     finalize_turn_after_text, TurnOutcome, MAX_COMPLETION_GUARD_INJECTIONS,
 };
-use super::super::{AgentLoop, AgentLoopConfig};
+use super::super::types::SubagentType;
+use super::super::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
-use crate::core::llm::{ChatMessage, MessageKind};
+use crate::core::llm::{ChatMessage, MessageKind, StreamEvent};
 use crate::core::plan_runtime::file_store::{
     plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
     TodoStatus,
@@ -19,6 +20,7 @@ use crate::core::plan_runtime::file_store::{
 use crate::core::plan_runtime::review::Finding;
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::ContextState;
+use crate::infra::error::AppError;
 use crate::infra::event_bus::DefaultEventBus;
 
 /// 计划文件写在 `$HOME/.tomcat/plans` 下，和 plan_tool 那批测试共享同一个进程环境变量，
@@ -75,19 +77,8 @@ fn todo(id: &str, status: TodoStatus) -> TodoItem {
     }
 }
 
-fn build_agent(plan_runtime: Option<Arc<PlanRuntime>>) -> AgentLoop {
-    let mut agent = AgentLoop::new(
-        test_binding(Arc::new(MockLlmProvider::new(vec![])), "gpt-4"),
-        Arc::new(MockPrimitiveExecutor),
-        Arc::new(DefaultEventBus::new()),
-        AgentLoopConfig {
-            session_id: "sess-guard".to_string(),
-            plan_runtime,
-            ..Default::default()
-        },
-        CancellationToken::new(),
-    );
-    agent.set_context_state(Some(ContextState {
+fn empty_context_state() -> ContextState {
+    ContextState {
         messages: vec![],
         estimate_context_chars: 0,
         context_budget_chars: 100_000,
@@ -100,7 +91,23 @@ fn build_agent(plan_runtime: Option<Arc<PlanRuntime>>) -> AgentLoop {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
-    }));
+    }
+}
+
+fn build_agent(plan_runtime: Option<Arc<PlanRuntime>>, subagent_type: SubagentType) -> AgentLoop {
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![])), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "sess-guard".to_string(),
+            plan_runtime,
+            subagent_type,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.set_context_state(Some(empty_context_state()));
     agent
 }
 
@@ -137,7 +144,7 @@ async fn guard_blocks_handback_while_todos_remain() {
     let plan_runtime = PlanRuntime::new("sess-guard");
     plan_runtime.set_executing_for_test(plan_id.clone());
 
-    let mut agent = build_agent(Some(plan_runtime));
+    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
     let outcome = finalize(&mut agent, &mut messages).await;
 
@@ -172,7 +179,7 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
     ];
     plan_runtime.set_unresolved_findings(&plan_id, findings.clone());
 
-    let mut agent = build_agent(Some(plan_runtime));
+    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
     let outcome = finalize(&mut agent, &mut messages).await;
 
@@ -197,7 +204,7 @@ async fn guard_stops_after_the_injection_cap_and_hands_back() {
     let plan_runtime = PlanRuntime::new("sess-guard");
     plan_runtime.set_executing_for_test(plan_id.clone());
 
-    let mut agent = build_agent(Some(plan_runtime));
+    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
     for round in 0..MAX_COMPLETION_GUARD_INJECTIONS {
         assert_eq!(
@@ -227,7 +234,7 @@ async fn guard_does_not_fire_once_the_plan_file_leaves_executing() {
     let plan_runtime = PlanRuntime::new("sess-guard");
     plan_runtime.set_executing_for_test(plan_id.clone());
 
-    let mut agent = build_agent(Some(plan_runtime));
+    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
     assert_eq!(
         finalize(&mut agent, &mut messages).await,
@@ -239,7 +246,7 @@ async fn guard_does_not_fire_once_the_plan_file_leaves_executing() {
 
 #[tokio::test]
 async fn guard_never_fires_outside_exec() {
-    let mut agent = build_agent(Some(PlanRuntime::new("sess-guard")));
+    let mut agent = build_agent(Some(PlanRuntime::new("sess-guard")), SubagentType::User);
     let mut messages = vec![ChatMessage::user("just chatting")];
     assert_eq!(
         finalize(&mut agent, &mut messages).await,
@@ -249,11 +256,111 @@ async fn guard_never_fires_outside_exec() {
 
     let planning = PlanRuntime::new("sess-guard");
     planning.enter_planning().unwrap();
-    let mut agent = build_agent(Some(planning));
+    let mut agent = build_agent(Some(planning), SubagentType::User);
     let mut messages = vec![ChatMessage::user("write me a plan")];
     assert_eq!(
         finalize(&mut agent, &mut messages).await,
         TurnOutcome::Finished,
         "PLAN 模式不注入"
     );
+}
+
+#[tokio::test]
+async fn guard_never_fires_for_non_root_subagents() {
+    let _home = home_guard();
+    let plan_id = unique_plan_id("guard_non_root");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Pending)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.set_executing_for_test(plan_id.clone());
+
+    for subagent_type in [
+        SubagentType::PlanReviewer,
+        SubagentType::CodeReviewer,
+        SubagentType::Verifier,
+        SubagentType::Explorer,
+    ] {
+            let mut agent = build_agent(Some(Arc::clone(&plan_runtime)), subagent_type);
+        let mut messages = vec![ChatMessage::user("start building")];
+        assert_eq!(
+            finalize(&mut agent, &mut messages).await,
+            TurnOutcome::Finished,
+            "{:?} 不应触发 completion guard",
+            subagent_type
+        );
+    }
+
+    cleanup_plan_file(&plan_path);
+}
+
+fn text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: text.to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+fn tool_stream(id: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/tmp/x"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ]
+}
+
+#[tokio::test]
+async fn guard_cap_survives_tool_rounds_between_text_turns() {
+    let _home = home_guard();
+    let plan_id = unique_plan_id("guard_cap_tool_rounds");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Pending)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.set_executing_for_test(plan_id.clone());
+
+    let mut streams = Vec::new();
+    for idx in 0..MAX_COMPLETION_GUARD_INJECTIONS {
+        streams.push(text_stream(&format!("guarded text {idx}")));
+        streams.push(tool_stream(&format!("call_{idx}")));
+    }
+    streams.push(text_stream("final handback"));
+
+    let llm = Arc::new(MockLlmProvider::new(streams));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let config = AgentLoopConfig {
+        session_id: "sess-guard".to_string(),
+        plan_runtime: Some(plan_runtime),
+        subagent_type: SubagentType::User,
+        ..Default::default()
+    };
+    let mut agent = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, CancellationToken::new());
+    agent.set_context_state(Some(empty_context_state()));
+
+    let outcome = agent.run(vec![ChatMessage::user("do work")]).await;
+    let AgentRunOutcome::Completed(result) = outcome else {
+        panic!("guard should hand back after hitting cap");
+    };
+    assert!(
+        result.final_text.ends_with("final handback"),
+        "unexpected final_text: {}",
+        result.final_text
+    );
+
+    cleanup_plan_file(&plan_path);
 }

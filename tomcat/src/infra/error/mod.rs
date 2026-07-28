@@ -9,9 +9,11 @@ mod llm;
 
 #[cfg(test)]
 pub use llm::is_context_overflow_text;
+#[cfg(test)]
+pub use llm::llm_code;
 pub use llm::{
     is_context_overflow, is_deterministic_stream_refusal_text, is_retryable_llm_error,
-    is_unsupported_multimodal_text, llm_code, llm_connect_or_network, llm_error,
+    is_unsupported_multimodal_text, llm_connect_or_network, llm_error,
     llm_error_with_source, llm_http_status, llm_http_status_error, llm_http_status_error_with_stage,
     llm_http_status_error_with_summary, llm_source_chain, llm_stage, llm_stream_terminal_error,
     llm_summary, LlmError, LlmErrorStage,
@@ -32,8 +34,8 @@ pub enum AppError {
     /// 插件运行时错误，如 WASM 加载失败或插件逻辑异常。
     #[error("插件错误: {0}")]
     Plugin(String),
-    /// 4 原语（read/write/edit/bash）执行异常。
-    #[error("4原语执行错误: {0}")]
+    /// 工具底层执行异常（read/write/edit/bash 等）。
+    #[error("工具执行错误: {0}")]
     Primitive(String),
     /// 事件总线回调返回错误；单 listener 错误会被捕获并记录，不中断其他 listener。
     #[error("事件执行错误: {0}")]

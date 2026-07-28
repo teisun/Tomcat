@@ -13,11 +13,13 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
+use crate::core::llm::retry_delay::sleep_provider_retry_delay;
 use crate::core::session::find_dangling_tail_tool_call_ids;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
@@ -498,4 +500,68 @@ async fn token_rebuild_per_turn_allows_next_run() {
     assert!(out_b.is_ok(), "新回合应正常 Completed");
     let r = out_b.unwrap();
     assert_eq!(r.final_text, "second-ok");
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_interrupt_during_provider_retry_backoff_returns_interrupted() {
+    struct BackoffProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for BackoffProvider {
+        fn provider_name(&self) -> &str {
+            "backoff-provider"
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+            Err(AppError::Llm("unused".into()))
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<
+            Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+            AppError,
+        > {
+            sleep_provider_retry_delay(Duration::from_secs(30)).await?;
+            Err(AppError::Llm(
+                "should have been cancelled during retry backoff".into(),
+            ))
+        }
+
+        fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+            Ok(0)
+        }
+    }
+
+    let llm: Arc<dyn LlmProvider> = Arc::new(BackoffProvider);
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let cancel = CancellationToken::new();
+    let config = AgentLoopConfig {
+        session_id: "provider-backoff-cancel".to_string(),
+        ..Default::default()
+    };
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
+
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        cancel_bg.cancel();
+    });
+
+    let outcome = loop_
+        .run(vec![ChatMessage::user("interrupt provider retry backoff")])
+        .await;
+    assert!(
+        outcome.is_interrupted(),
+        "expected Interrupted outcome, got {:?}",
+        outcome
+    );
 }

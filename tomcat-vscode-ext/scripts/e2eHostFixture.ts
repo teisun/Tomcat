@@ -726,6 +726,104 @@ function buildGiantHistoryTools() {
   });
 }
 
+function buildEditDisplayReplayTools() {
+  const fixtureDir = path.join(process.cwd(), "test-stuff", "edit-display-replay");
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  const singlePath = path.join(fixtureDir, "single.ts");
+  const batchSinglePath = path.join(fixtureDir, "batch-single.ts");
+  const multiAppliedPath = path.join(fixtureDir, "multi-applied.ts");
+  const multiFailedPath = path.join(fixtureDir, "multi-failed.ts");
+  fs.writeFileSync(singlePath, "export const mode = 'before';\\n", "utf8");
+  fs.writeFileSync(batchSinglePath, "export const batch = 'before';\\n", "utf8");
+  fs.writeFileSync(multiAppliedPath, "export const multi = 'before';\\n", "utf8");
+  fs.writeFileSync(multiFailedPath, "export const untouched = true;\\n", "utf8");
+  return [
+    {
+      toolCallId: "tc-edit-display-single",
+      toolName: "edit",
+      args: { path: singlePath },
+      display: {
+        added: 1,
+        diff: createReplacementDiff(
+          ["export const mode = 'before';"],
+          ["export const mode = 'after';"],
+        ),
+        file: singlePath,
+        kind: "file",
+        removed: 1,
+      },
+      result: "已编辑: " + singlePath,
+    },
+    {
+      toolCallId: "tc-edit-display-batch-single",
+      toolName: "edit",
+      args: {
+        files: [
+          {
+            new_content: "export const batch = 'after';",
+            old_content: "export const batch = 'before';",
+            path: batchSinglePath,
+          },
+        ],
+      },
+      display: {
+        added: 1,
+        diff: createReplacementDiff(
+          ["export const batch = 'before';"],
+          ["export const batch = 'after';"],
+        ),
+        file: batchSinglePath,
+        kind: "file",
+        removed: 1,
+      },
+      result: "已编辑 1 个文件，全部落盘\\n- APPLIED " + batchSinglePath + " (+1 -1)",
+    },
+    {
+      toolCallId: "tc-edit-display-batch-multi",
+      toolName: "edit",
+      args: {
+        files: [
+          {
+            new_content: "export const multi = 'after';",
+            old_content: "export const multi = 'before';",
+            path: multiAppliedPath,
+          },
+          {
+            new_content: "export const untouched = false;",
+            old_content: "export const untouched = true;",
+            path: multiFailedPath,
+          },
+        ],
+      },
+      display: {
+        files: [
+          {
+            added: 1,
+            diff: createReplacementDiff(
+              ["export const multi = 'before';"],
+              ["export const multi = 'after';"],
+            ),
+            file: multiAppliedPath,
+            removed: 1,
+            status: "applied",
+          },
+          {
+            file: multiFailedPath,
+            note: "第 2 段匹配到 3 处",
+            status: "failed",
+          },
+        ],
+        kind: "files",
+        summary: "1 个文件已落盘，1 个失败且未写入；失败的文件磁盘内容保持原样",
+      },
+      result:
+        "1 个文件已落盘，1 个失败且未写入；失败的文件磁盘内容保持原样\\n" +
+        "- APPLIED " + multiAppliedPath + " (+1 -1)\\n" +
+        "- FAILED  " + multiFailedPath + ": 第 2 段匹配到 3 处",
+    },
+  ];
+}
+
 function emitMessageDelta(sessionId, delta) {
   const session = touchSession(ensureSession(sessionId));
   const assistantMessageId = ensurePendingAssistantMessageId(session);
@@ -924,6 +1022,7 @@ function recordHistoryToolResult(sessionId, tool) {
     message: {
       content: tool.result,
       role: "tool",
+      tool_display: tool.display,
       tool_call_id: tool.toolCallId,
     },
     type: "message",
@@ -1282,6 +1381,42 @@ function handlePrompt(frame) {
       "Giant history tool group",
     );
     for (const tool of giantTools) {
+      recordHistoryToolResult(sessionId, tool);
+    }
+    finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("edit display replay")) {
+    emitMessageDelta(sessionId, "I prepared single-file and batch edit cards.");
+    send({
+      assistantMessageEvent: {
+        delta: "Keep the single-file rich card for one file and the list card for many files.",
+        kind: "thinking_delta",
+      },
+      assistantMessageId: ensurePendingAssistantMessageId(session),
+      message: {},
+      sessionId,
+      type: "message_update",
+    });
+    const displayTools = buildEditDisplayReplayTools();
+    for (const tool of displayTools) {
+      emitCompletedTool(sessionId, tool);
+    }
+    emitTurnEnd(sessionId, {
+      message: {},
+      summaryTitle: "Edit display replay",
+      toolResults: [],
+      turnIndex: 1,
+    });
+    emitContextMetrics(sessionId, 0.35);
+    recordHistoryAssistantWithTools(
+      sessionId,
+      "I prepared single-file and batch edit cards.",
+      displayTools,
+      "Edit display replay",
+    );
+    for (const tool of displayTools) {
       recordHistoryToolResult(sessionId, tool);
     }
     finishTurn(sessionId, null);

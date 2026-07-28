@@ -464,6 +464,10 @@ impl tomcat::core::session::MessageAppendSink for CliInjectAppendInvariantSink {
         }
         self.inner.append_message_with_id(value, forced_id)
     }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.inner.append_custom_entry(extra)
+    }
 }
 
 fn cli_text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
