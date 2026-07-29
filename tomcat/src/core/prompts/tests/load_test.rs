@@ -51,13 +51,48 @@ fn executor_prompt_requires_separating_regressions_from_pre_existing_failures() 
 #[test]
 fn planner_prompt_carries_a_generic_plan_structure_section() {
     let s = load(PromptKey::PlannerReminder);
+    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let section = s
+        .split_once("## Plan structure\n\n")
+        .expect("planner should have a Plan structure section")
+        .1
+        .split_once("\n\n## Design and explanation standards")
+        .expect("Plan structure should end before Design standards")
+        .0;
+
     assert!(s.contains("## Plan structure"));
-    // 骨架约束的是「怎么论证」，对任何任务类型都成立，不绑定某一类场景。
-    assert!(s.contains("one self-contained section per substantive problem"));
-    assert!(s.contains("concrete evidence (file:line, command output, log excerpt)"));
-    assert!(s.contains("root cause -> the solution -> how it will be verified"));
-    assert!(s.contains("do not list every problem first and every solution afterwards"));
-    assert!(s.contains("as simple and elegant as the"));
+    assert!(normalized.contains("one self-contained section per substantive problem"));
+    assert!(normalized.contains("separate subheadings in this order"));
+    assert!(normalized.contains(
+        "problem or requirement background with concrete evidence -> root cause (or governing constraint for new work) -> solution -> verification"
+    ));
+    assert!(normalized.contains("Never merge root cause and solution into the same subsection"));
+    assert!(
+        normalized.contains("plain language that a reader without the code context can understand")
+    );
+    assert!(normalized.contains("Do not use jargon, terminology dumps, or abstract slogans"));
+    assert!(normalized
+        .contains("when a technical term is necessary, explain it immediately in everyday words"));
+    assert!(normalized.contains("Under solution, include a Key decisions checklist"));
+    assert!(normalized.contains("exact files, symbols, or contracts to change"));
+    assert!(normalized.contains("behavior before and after; boundaries; and explicit non-goals"));
+    assert!(
+        normalized.contains("Restating the goal or assigning responsibilities is not a solution")
+    );
+    assert!(normalized.contains("do not list every problem first and every solution afterwards"));
+
+    assert!(section.contains("same subsection.\n\nExplain the background"));
+    assert!(section.contains("everyday words.\n\nUnder solution"));
+    assert!(section.contains("not a solution.\n\nKeep each problem"));
+    assert!(
+        section.lines().all(|line| line.len() <= 100),
+        "Plan structure prose should stay reviewable instead of collapsing into long lines"
+    );
+
+    assert!(!s.contains(
+        "Reason from first principles: an existing design may be overturned when it does not"
+    ));
+    assert!(s.contains("Reason from first principles: when planning or coding"));
 }
 
 #[test]
@@ -87,7 +122,31 @@ fn paged_reading_separates_persisted_results_from_fresh_files() {
 fn parallel_tools_gives_a_number_and_a_counter_example() {
     let s = load(PromptKey::SystemParallelTools);
     assert!(s.contains("4-8 independent read-only calls in one response"));
-    assert!(s.contains("Five consecutive turns that each contain a single `read` is a failure mode"));
+    assert!(
+        s.contains("Five consecutive turns that each contain a single `read` is a failure mode")
+    );
+}
+
+#[test]
+fn planner_and_executor_gate_dispatch_agent_on_its_catalog_criteria() {
+    let planner = load(PromptKey::PlannerReminder);
+    let executor = load(PromptKey::ExecutorReminderFmt);
+
+    assert!(planner
+        .contains("use it to survey several modules in parallel without filling your own context"));
+    assert!(
+        planner.contains("but use it only when the criteria in its tool description are satisfied")
+    );
+    assert!(planner.contains("NEVER mutate the codebase in PLAN"));
+    assert!(planner.contains("File editing tools are restricted to"));
+
+    assert!(executor.contains(
+        "survey several modules in parallel and return findings instead of raw file contents"
+    ));
+    assert!(executor.contains(
+        "but use `dispatch_agent` only when the criteria in its tool description are satisfied"
+    ));
+    assert!(!executor.contains(". but Use `dispatch_agent`"));
 }
 
 #[test]
@@ -155,8 +214,7 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
         }
     }
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/core/prompts/templates");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core/prompts/templates");
     let mut files = Vec::new();
     collect_txt(&root, &mut files);
     assert!(!files.is_empty(), "should have found template files");
@@ -291,12 +349,19 @@ fn verification_template_is_language_neutral_and_delegates_mode_scope() {
 }
 
 #[test]
-fn planner_prompt_prefers_thorough_decomposition_and_multi_perspective_tests() {
+fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
     let s = load(PromptKey::PlannerReminder);
-    // engineering-standards #10：宁多勿少，取代原"避免过度拆解"。
+    const TODO_POLICY: &str = concat!(
+        "10. Decompose thoroughly. For non-trivial work, break the work into one or more\n",
+        "milestones, then precisely break each milestone down into detailed todos so\n",
+        "nothing is missed. However, for a simple, single-surface change, a flat linear\n",
+        "todo list is sufficient."
+    );
+
+    assert!(s.contains(TODO_POLICY));
     assert!(!s.contains("Avoid over-decomposition"));
-    assert!(s.contains("Err on the side"));
-    assert!(s.contains("of more, smaller items"));
+    assert!(!s.contains("Err on the side"));
+    assert!(!s.contains("of more, smaller items"));
     // engineering-standards #9：按独特风险分层的多视角测试。
     assert!(s.contains("unit, integration, and\n  E2E"));
     assert!(s.contains("only where it catches a distinct failure type"));

@@ -1,8 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-07-28 18:50 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-07-29 08:36 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Planner/Executor 仅在 `dispatch_agent` description 条件满足时派发 Explorer；catalog 明确简单任务、已知位置、一两批直接工具、自审及 Reviewer 已覆盖时禁用，并锁定首次合并问题、仅新阻塞点可二次派发；同步 prompt/catalog 回归和生成文档。@2026-07-29
+- [✓] **[P0]** Planner todo 改为“非简单任务按 milestone 精确拆解、简单单面修改使用 flat linear todo”；每个问题固定为“背景与证据 → 根因 → 解决方案（Key decisions）→ 验证”，要求不了解代码上下文的读者也能看懂，并删除一处重复第一性原理文案。@2026-07-29
+- [✓] **[P0]** Plan Preview selection 去重修复：列表项获得精确源行，selection identity 始终纳入文本快照 hash；不同条目可连续加入、完全相同引用仍去重，wire 协议不变；补齐 blockquote 内列表项递归行号映射与 2s 连续稳定性 host E2E 断言。@2026-07-29
+- [✓] **[P1]** 真实 PLAN 行为冒烟覆盖简单单面任务与双问题非简单任务：两类场景都只用直接读工具、`dispatch_agent=0`，分别生成 flat linear todos 与 milestone todos；结构和通俗解释要求通过，同时保留 renderer 样例预期与 todo/正文矛盾的生成质量风险。@2026-07-29
 - [✓] **(版本发布)** CLI `0.1.21` + Extension `0.1.31` + bundled CLI `0.1.21`：统一执行 `node scripts/release-version.mjs bump --all patch`，已验证 `check` 通过且 Cargo/npm 镜像一致。@2026-07-28
 - [✓] **[P0]** code review 耗时失控与子 Agent 可观测性根治已在本地源码二进制上完成实测闭环：completion guard 现在只看 `subagent_type.is_root()`，只读子 Agent（`CodeReviewer` / `Verifier` / `Explorer`）不再持有 `plan_runtime`，避免把父计划执行态误带进子 loop；`tool_display` 改为随 transcript 持久化，reload 后单文件 / 批量单文件仍保持可点 diff 卡，多文件保持列表卡；`ReviewRow` running 态新增 `round + elapsed`；`plan.review.started` / `plan.code_review.started` / `plan.explorer.started` 会在主 transcript 写入 `child_session_id + transcript_path`，子 transcript 派发即创建并先写 `subagent.transcript.meta`；provider 重试等待可被 cancel 打断；`search_files` Tier2 超时 warning 改成先收窄 `path/glob/file_type`。最关键的真实回归数据来自**工作区本地编译的** `target/debug/tomcat`（不是系统已安装旧版）：`fcodex/gpt-5.6-sol + xhigh` 的最小真实 build 链路中，planning `119.896s`，exec 总墙钟 `381.499s`，`plan.code_review.started -> plan.code_review(pass)` `318.363s`；reviewer 第 1 次尝试在 `180s` 触发 `auto_retry_start`（`LLM调用错误: 流式空闲超时: stream_timeout_sec=180s`），第 2 次尝试约 62s 后成功返回 `pass`；主 transcript 已实测含 `child_session_id` 与 `transcript_path`，子 transcript 含 `auto_retry_start/auto_retry_end` 与最终 `<review>`，重复 review 块回落为 1 次真实 started + 1 次 pass 收口，不再出现 60 分钟无返回黑洞。@2026-07-28
 - [✓] **[P0]** CLI / VS Code 扩展版本管理已收敛：新增根权威清单 `release-versions.json`，将 CLI、扩展和 bundled CLI pin 作为三个独立发布事实；零依赖 Node 工具提供 `bump` / `set` / `sync` / `check`，定点同步 Cargo/npm manifest 与 lockfile，并以验证优先、单快照和 rename 防止漂移、坏输入写入及并发覆盖；release guards、CLI/EXT workflows 与独立 version-sync CI 全部接入同一检查；私有 GUI 不再携带无意义版本。验证：版本 unit/fixture `19/19`、guard `10/10`、扩展 integration `342 passed`、GUI `438/438`、`cargo build --locked --release`、`tomcat --version=0.1.20`、npm CI/compile/GUI build/VSIX 打包与包内 `0.1.30 + bundled 0.1.20` 检查均通过。@2026-07-28
@@ -42,6 +46,8 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- `dispatch_agent` catalog description 与 Planner/Executor 行为合同收紧为条件式 Explorer 派发；工具 schema 与 wire 协议不变。
+- Plan Preview Markdown 列表项新增内部 `_sourceLine` 递归标记；`WebviewReference` wire 类型不变，selection 去重身份改为 `path + range + text hash`。
 - 发布版本接口：根 `release-versions.json` 新增 `cli`、`extension.version`、`extension.bundledCli` 三个权威字段；`scripts/release-version.mjs` 提供 `bump` / `set` / `sync` / `check`；Cargo.toml/Cargo.lock 与扩展 package/package-lock 降为生成镜像；私有 GUI manifest/lock 根包不再含 `version`；CLI/EXT tag guard 在检查 tag 前先验证全仓镜像，EXT guard 的 `bundled_cli_version` / `extension_version` GitHub outputs 保持兼容。
 - 子 Agent LLM 绑定：`AgentLoop::new(binding: ResolvedCall, ...)`；`AgentLoopConfig.model` 删除；`ProdReviewerDeps` / `ProdVerifierDeps` 持 `llm_resolver` + `llm_files_config` + `sessions_dir`（不再持冻结 `llm` / `compaction_provider` / `openai_files_runtime`）；`GlobalServices.llm` 与 `HostApiDispatcher.llm` / `with_llm` 删除；`ResolvedCall` 增 `catalog_id` 并密封构造。
 - Agent 交付控制：`ResumeIndex` schema `1 → 2`，新增 `agent_mode` / `active_plan_path`；`PlanRuntime::control_snapshot` / `set_session_model`（catalog id）；`ToolDisplay::Files` + webview `kind:"files"`；工具目录新增 `dispatch_agent`；`read.paths` / `edit.files` 批量入参；`search_files` 默认 content 上下文 ±3；`max_code_review_rounds` 默认 `8`；CLI `0.1.20` / 扩展 `0.1.30`（`bundledCliVersion=0.1.20`）。
@@ -72,10 +78,16 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
+| 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但真实 `dispatch_agent > 0` 路径仍待授权验证 | 获得明确授权后，在隔离夹具中补跑一次并检查首次是否合并全部独立问题 |
+| Rust 全量 `gate-fast` 非全绿 | `clippy -D warnings` 命中 3 个当前工作树问题；`cargo test --lib` 为 2374 passed / 13 failed / 1 ignored，失败集中在 resolver/files/serve fixture 等非本轮定向面；integration 编译还存在 `CodeReviewerDispatcher::dispatch` 测试桩签名未同步 | 相关基线问题单独修复后重跑全量门禁 |
+| VS Code devhost E2E 未进入场景断言 | `npm run test:e2e:vscode-devhost` 完成 build/compile 后，Electron 以仓库根目录为 Node 入口并报 `Cannot find module '/Users/yankeben/workspace/tomcat-agent'` | 修正 devhost 启动路径后重跑 selection flow |
 | `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；本轮在 HEAD 隔离工作树复跑仍红，与交付控制改动无关。 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-07-29 08:36）：定向 Rust 验证通过：`core::prompts::tests::load_test` 24/24、catalog 12/12、`tool_catalog_doc` 2/2、`prompt_size_budget` 3/3；`git diff --check` 通过。
+- 最新补充（2026-07-29 08:36）：VS Code `npm run gate:fast` 通过：24 个 extension/core 测试文件 282 个测试、52 个 GUI 测试文件 442 个测试全部通过；devhost 命令在场景执行前因上述启动路径问题退出。
+- 最新补充（2026-07-29 08:36）：工程规则审计确认 `.cursor/rules/engineering-standards.mdc:7` 的问题章节说明已按计划同步；明确排除 `:10` 的本地 todo 数量规则。Planner `ask_question`、`core_identity`、Plan/Code Reviewer、共享 64 轮预算和 `WebviewReference` wire 类型未被意外修改。
 - 最新补充（2026-07-28 16:10）：提交前补齐 `ServePlanEvent` union 收窄——`plan.explorer.started` 无 `planId`，webview `applyPlanEvent` 改为 `"planId" in event` 后再读；edit-display reload E2E `replays single-file and multi-file edit cards after a webview reload` 现已 `1 passing`。本轮 code review 根治项随此提交合入。
 - 最新补充（2026-07-28 09:38）：版本管理系统已完成并通过 code review。`release-versions.json` 成为 CLI `0.1.20`、扩展 `0.1.30` 与 bundled CLI `0.1.20` 的唯一来源，一条 Node 命令同步 Cargo/npm 必要镜像；PR/push CI 与 release guards 均只读阻止漂移。验证：Node `19/19`、guard `10/10`、extension integration `342 passed`、GUI `438/438`、Cargo locked release build、npm CI/compile/GUI build/VSIX 打包与包内版本断言全绿；完整扩展 `npm run build` 的 `gen:wire` 在当前 Agent 会话中仅因嵌套 Tomcat 安全保护拒绝启动，独立 compile/build/package 均已通过。
 - 最新补充（2026-07-28 16:05）：code review 根治项已用**本地源码二进制** `tomcat/target/debug/tomcat` 做最小真实链路复测，避免被系统已安装旧版 `tomcat 0.1.20` 污染。实测 prompt 走 `planning -> create_plan -> plan reviewer -> build -> update_plan -> code reviewer -> complete`：planning `119.896s`，exec 总墙钟 `381.499s`，`plan.code_review.started(07:59:41.286) -> plan.code_review(pass)(08:04:59.605)` 为 `318.363s`。子 transcript `subagent-sessions/1785225410130_905ad1d4de2614c9-child-code_reviewer-1.jsonl` 清楚记录了 `auto_retry_start{attempt:2, error_message:\"LLM调用错误: 流式空闲超时: stream_timeout_sec=180s\"}` 与后续 `auto_retry_end{success:true}`，说明 `180s` 阈值不会把高推理 code review 直接判死，而是会在真正静默时打断第 1 次 stale 尝试并让第 2 次尝试收口。主 transcript 同时已实测包含 `plan.code_review.started{child_session_id, transcript_path}` 与 `plan.code_review{child_session_id, ...}`，可直接回跳子 transcript 排障；重复 review 块回落为 1 次 started + 1 次最终 pass。 

@@ -4498,6 +4498,9 @@ export async function assertPlanPreviewCustomEditorFlow(
     "",
     "Body paragraph for the preview.",
     "",
+    "- First markdown selection",
+    "- Second markdown selection",
+    "",
     `Open \`${linkedDisplayPath}:2\` before building.`,
     "",
     "```mermaid",
@@ -4510,6 +4513,23 @@ export async function assertPlanPreviewCustomEditorFlow(
 
   const chipCount = (html: string): number =>
     (html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+  const captureStableChipCount = async (
+    expectedChips: number,
+    durationMs = 2_000,
+  ): Promise<Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>> => {
+    const deadline = Date.now() + durationMs;
+    let snapshot = await api.__testing.captureWebviewDom();
+    do {
+      snapshot = await api.__testing.captureWebviewDom();
+      assert.equal(
+        chipCount(snapshot.html),
+        expectedChips,
+        `expected composer chip count to remain ${expectedChips} while duplicate selection settles`,
+      );
+      await pause(100);
+    } while (Date.now() < deadline);
+    return snapshot;
+  };
 
   try {
     await fs.mkdir(scratchDir, { recursive: true });
@@ -4671,8 +4691,12 @@ export async function assertPlanPreviewCustomEditorFlow(
     const updatedLines = updatedText.split("\n");
     const headingLine = updatedLines.indexOf("# E2E heading") + 1;
     const paragraphLine = updatedLines.indexOf("Body paragraph for the preview.") + 1;
+    const firstListLine = updatedLines.indexOf("- First markdown selection") + 1;
+    const secondListLine = updatedLines.indexOf("- Second markdown selection") + 1;
     const headingChip = `${planBasename}:${headingLine}`;
     const paragraphChip = `${planBasename}:${paragraphLine}`;
+    const firstListChip = `${planBasename}:${firstListLine}`;
+    const secondListChip = `${planBasename}:${secondListLine}`;
 
     const hotUpdated = await waitForPlanPreviewDom(
       api,
@@ -4767,27 +4791,39 @@ export async function assertPlanPreviewCustomEditorFlow(
       `expected the floating button to add a plan selection chip with source line (${paragraphChip})`,
     );
 
-    // Selection → chat, path 3 (P0 regression): two DIFFERENT line-less
-    // selections from the same plan (todo items carry no source line) must BOTH
-    // land as distinct chips. Before the dedupe fix they collapsed to a single
-    // `selection::<path>::::` identity and every selection after the first was
-    // silently dropped — the "add to chat 总是失败" the user reported.
+    // Selection → chat, path 3: two different items in the same Markdown list
+    // must both land with their own exact source line. Re-adding the first item
+    // must keep the chip count unchanged because path/range/text are identical.
     for (const [index, expectedChips] of [
       [1, baseChips + 3],
       [2, baseChips + 4],
+      [1, baseChips + 4],
     ] as const) {
       await api.__testing.openPlanPreview(planPath);
       await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
       await api.__testing.dispatchPlanPreviewDomAction(planPath, {
         kind: "selectText",
-        selector: `.tc-plan-todos li:nth-child(${index}) .tc-plan-todo__content`,
+        selector: `.tc-plan-preview__body ul > li:nth-child(${index})`,
       });
       await api.__testing.executeCommand(TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND);
-      await waitForWebviewDomSnapshot(
-        api,
-        (snapshot) => (chipCount(snapshot.html) === expectedChips ? snapshot : undefined),
-        20_000,
+      const isDuplicate = index === 1 && expectedChips === baseChips + 4;
+      const selectionSnapshot = isDuplicate
+        ? await captureStableChipCount(expectedChips)
+        : await waitForWebviewDomSnapshot(
+            api,
+            (snapshot) => (chipCount(snapshot.html) === expectedChips ? snapshot : undefined),
+            20_000,
+          );
+      assert.ok(
+        selectionSnapshot.html.includes(firstListChip),
+        `expected the first Markdown list item chip to point to ${firstListChip}`,
       );
+      if (expectedChips >= baseChips + 4) {
+        assert.ok(
+          selectionSnapshot.html.includes(secondListChip),
+          `expected the second Markdown list item chip to point to ${secondListChip}`,
+        );
+      }
     }
 
     // A regression: switching to native hides the in-body strip.

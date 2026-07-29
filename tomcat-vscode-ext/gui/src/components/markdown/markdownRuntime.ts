@@ -7,6 +7,7 @@ const BLOCK_RENDERERS = [
   "heading",
   "paragraph",
   "list",
+  "listitem",
   "code",
   "blockquote",
   "hr",
@@ -81,17 +82,59 @@ export function splitTopLevelBlocks(markdown: string): string[] {
     .map((token) => token.raw);
 }
 
+function countNewlines(raw: string): number {
+  return (raw.match(/\n/gu) ?? []).length;
+}
+
+function stampTokenSourceLines(
+  tokens: Token[],
+  sourceLineMap: number[],
+  startBodyLine: number,
+): void {
+  let bodyLine = startBodyLine;
+  for (const token of tokens) {
+    const tokenWithSourceLine = token as TokenWithSourceLine;
+    const absolute = sourceLineMap[bodyLine - 1];
+    if (typeof absolute === "number") {
+      tokenWithSourceLine._sourceLine = absolute;
+    }
+
+    if (token.type === "list") {
+      stampListItemSourceLines(token.items, sourceLineMap, bodyLine);
+    } else if (token.type === "blockquote") {
+      // Blockquote child tokens omit the leading `> ` markers but preserve line
+      // breaks, so their first child shares the quote's source-line origin.
+      stampTokenSourceLines(token.tokens, sourceLineMap, bodyLine);
+    }
+
+    bodyLine += countNewlines(token.raw);
+  }
+}
+
+function stampListItemSourceLines(
+  items: Tokens.ListItem[],
+  sourceLineMap: number[],
+  startBodyLine: number,
+): void {
+  let itemBodyLine = startBodyLine;
+  for (const item of items) {
+    const itemWithSourceLine = item as Tokens.ListItem & { _sourceLine?: number };
+    const absolute = sourceLineMap[itemBodyLine - 1];
+    if (typeof absolute === "number") {
+      itemWithSourceLine._sourceLine = absolute;
+    }
+
+    // Reuse the same recursive block walker for direct nested lists and for
+    // lists wrapped in blockquotes (including blockquotes inside list items).
+    stampTokenSourceLines(item.tokens, sourceLineMap, itemBodyLine);
+    itemBodyLine += countNewlines(item.raw);
+  }
+}
+
 export function renderMarkdownHtml(markdown: string, sourceLineMap?: number[]): string {
   const tokens = lexMarkdownTokens(markdown);
   if (sourceLineMap && sourceLineMap.length > 0) {
-    let bodyLine = 1;
-    for (const token of tokens) {
-      const absolute = sourceLineMap[bodyLine - 1];
-      if (typeof absolute === "number") {
-        token._sourceLine = absolute;
-      }
-      bodyLine += (token.raw.match(/\n/gu) ?? []).length;
-    }
+    stampTokenSourceLines(tokens, sourceLineMap, 1);
   }
   return markedInstance.parser(tokens as unknown as Token[]);
 }

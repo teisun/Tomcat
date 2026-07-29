@@ -45,6 +45,38 @@ describe("MarkdownBody", () => {
     // The inline **bold** survives and no longer breaks the line mapping.
     expect(paragraph?.querySelector("strong")?.textContent).toBe("bold");
     expect(body.querySelector("ul")?.getAttribute("data-source-line")).toBe("9");
+    expect(
+      Array.from(body.querySelectorAll("li"), (item) => item.getAttribute("data-source-line")),
+    ).toEqual(["9", "10"]);
+  });
+
+  it("stamps continued and nested list items with their exact source lines", () => {
+    render(
+      <MarkdownBody
+        markdown={"- first line\n  continuation\n  - nested one\n  - nested two\n- final"}
+        onOpenLink={() => undefined}
+        sourceLineMap={[40, 41, 42, 43, 44]}
+      />,
+    );
+    const body = screen.getByTestId("plan-markdown-body");
+    expect(
+      Array.from(body.querySelectorAll("li"), (item) => item.getAttribute("data-source-line")),
+    ).toEqual(["40", "42", "43", "44"]);
+  });
+
+  it("stamps list items inside a blockquote with their exact source lines", () => {
+    render(
+      <MarkdownBody
+        markdown={"> - quoted one\n> - quoted two"}
+        onOpenLink={() => undefined}
+        sourceLineMap={[70, 71]}
+      />,
+    );
+    const body = screen.getByTestId("plan-markdown-body");
+    expect(body.querySelector("blockquote")?.getAttribute("data-source-line")).toBe("70");
+    expect(
+      Array.from(body.querySelectorAll("li"), (item) => item.getAttribute("data-source-line")),
+    ).toEqual(["70", "71"]);
   });
 
   it("omits data-source-line when no source map is provided", () => {

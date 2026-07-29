@@ -16,6 +16,41 @@ fn desc_of(name: &str) -> &'static str {
         .description
 }
 
+#[test]
+fn dispatch_agent_description_enforces_bounded_explorer_usage() {
+    let description = desc_of("dispatch_agent");
+
+    for forbidden in [
+        "a simple task",
+        "project rules or AGENTS/README files",
+        "a known file or symbol",
+        "confirmation of one implementation",
+        "one or two batches of direct-tool calls",
+        "self-review or final audit of your own Plan",
+        "work already covered by the automatic Plan/Code Reviewer",
+    ] {
+        assert!(
+            description.contains(forbidden),
+            "dispatch_agent description should forbid: {forbidden}"
+        );
+    }
+
+    for required in [
+        "Direct `search_files` / `read` calls are the default",
+        "(1) the task crosses multiple unknown subsystems",
+        "(2) the questions can be investigated independently in parallel",
+        "(3) returning the necessary raw reads would materially bloat the parent context",
+        "every currently known independent question into one `tasks` array",
+        "After reports return, prefer direct tools to fill evidence gaps",
+        "Dispatch again only if the reports reveal a new blocker that direct tools cannot answer",
+    ] {
+        assert!(
+            description.contains(required),
+            "dispatch_agent description should require: {required}"
+        );
+    }
+}
+
 /// 成功率红线：精简 description 时，影响调用成功率的格式/枚举/互斥/唯一性/坑点
 /// 必须留在原地。删了这些模型就会调错工具。
 #[test]

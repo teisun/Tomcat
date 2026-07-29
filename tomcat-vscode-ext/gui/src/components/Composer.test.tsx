@@ -461,6 +461,29 @@ describe("Composer", () => {
     expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
   });
 
+  it("keeps same-range selections with different text and deduplicates exact re-adds", async () => {
+    const { ref } = renderComposer();
+    const makeReference = (text: string) => ({
+      kind: "selection" as const,
+      label: "notes.plan.md:20",
+      lineEnd: 20,
+      lineStart: 20,
+      path: "plans/notes.plan.md",
+      text,
+      type: "reference" as const,
+    });
+
+    await act(async () => {
+      ref.current?.insertReference(makeReference("first list item"));
+      ref.current?.insertReference(makeReference("second list item"));
+      ref.current?.insertReference(makeReference("first list item"));
+    });
+
+    const chips = screen.getAllByTestId("composer-reference-chip");
+    expect(chips).toHaveLength(2);
+    expect(chips.every((chip) => chip.getAttribute("title") === "plans/notes.plan.md:20")).toBe(true);
+  });
+
   it("extracts drop uris across vscode mime variants without duplicates", () => {
     const file = Object.assign(new File([""], "local.ts"), {
       path: "/workspace/from-file.ts",

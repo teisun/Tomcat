@@ -241,6 +241,31 @@ describe("PlanPreviewApp", () => {
     expect(intents[0].data.lineEnd).toBe(12);
   });
 
+  it("derives distinct source lines for selections from consecutive list items", () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(makeState());
+
+    const items = Array.from(
+      document.querySelectorAll('[data-testid="plan-markdown-body"] li[data-source-line]'),
+    );
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.getAttribute("data-source-line"))).toEqual(["14", "15"]);
+
+    mockSelectionOn(items[0], "item one");
+    pushCaptureSelectionEvent();
+    mockSelectionOn(items[1], "item two");
+    pushCaptureSelectionEvent();
+
+    const intents = intentsOfType(api, "addSelectionToChat") as {
+      data: { lineEnd?: number; lineStart?: number; text: string };
+    }[];
+    expect(intents.map((intent) => intent.data)).toEqual([
+      { lineEnd: 14, lineStart: 14, text: "item one" },
+      { lineEnd: 15, lineStart: 15, text: "item two" },
+    ]);
+  });
+
   it("omits line numbers when the selection is outside any source-mapped block", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);
