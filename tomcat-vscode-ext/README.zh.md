@@ -70,6 +70,13 @@ help me understand this repository
 
 Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部的 session picker 可以切换会话或创建新会话。现在模型选择器里还带有 `Add Models...` 入口，可直接打开专门的设置中心，在 VS Code 内新增自定义 OpenAI-compatible 或 Anthropic 模型。
 
+当 Tomcat 提出澄清问题时：
+
+- 问题固定显示在 Composer 上方的 **Needs your answer** 区域，并且没有超时；
+- 其他会话有未回答问题时，session picker 会显示数量 badge；
+- 切会话或仅重载 Webview 不会丢失未提交选择；
+- 回答、整单跳过、中断、宿主断开会生成不同的历史卡片。VS Code Window / Extension Host reload 属于不可恢复断开，而仅重载 Webview 仍会继续等待。
+
 ## 可选设置
 
 大多数用户 **不需要** 手动配置任何内容。
@@ -130,8 +137,13 @@ Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部
 
 如果 Tomcat 在对话过程中退出：
 
-1. 运行 `Tomcat: Restart Serve`。
-2. 检查 `Tomcat` output channel 里的启动信息和 stderr 细节。
+1. 待回答的澄清问题会记录为 **Disconnected**，不会伪装成用户跳过。
+2. 运行 `Tomcat: Restart Serve`。
+3. 检查 `Tomcat` output channel 里的启动信息和 stderr 细节。
+
+`ask_question.timeout_ms`、`TOMCAT_ASK_QUESTION_TIMEOUT_MS` 与
+`TOMCAT__ASK_QUESTION__TIMEOUT_MS` 已删除。旧值仅触发迁移提示，不会创建问题截止时间，
+也没有替代的 timeout 配置。
 
 ## Changelog
 

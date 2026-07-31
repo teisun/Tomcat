@@ -19,13 +19,14 @@ use crate::core::llm::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind, ContextReference,
     ProviderKeyInput, ThinkingLevel,
 };
+use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::attachments::{
     safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore,
     REBUILDABLE_MAX_BYTES,
 };
-use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::transcript::{
-    entry_id, find_entry_line_offset, read_entry_at_offset, TranscriptEntry, TranscriptPage,
+    entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset,
+    TranscriptEntry, TranscriptPage,
 };
 use crate::infra::events::{AgentEvent, WireEvent};
 use crate::AppError;
@@ -34,11 +35,10 @@ use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
 use super::control;
 use super::types::{
     AttachmentMode, CacheThumbnailInput, IngestAttachmentInput, IngestAttachmentResponse,
-    ListModelsPayload,
-    ListProviderKeysPayload, ListSessionsScope, OutFrame, RemoveModelResponse, ResponseFrame,
-    ServeAttachment, ServeAttachmentKind, ServeCommand, ServeContentSegment, ServeContextRefKind,
-    ServeContextReference, ServeMessageParams, ServeSessionMode, SetPlanModeAction,
-    SetProviderKeyResponse, UpsertModelResponse,
+    ListModelsPayload, ListProviderKeysPayload, ListSessionsScope, OutFrame, RemoveModelResponse,
+    ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand, ServeContentSegment,
+    ServeContextRefKind, ServeContextReference, ServeMessageParams, ServeSessionMode,
+    SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse,
 };
 use super::{
     cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
@@ -106,6 +106,107 @@ fn encode_next_cursor(page: &TranscriptPage) -> Result<Option<String>, AppError>
     encode_get_messages_cursor(offset, page.entries.first().and_then(entry_id)).map(Some)
 }
 
+fn message_role(entry: &TranscriptEntry) -> Option<&str> {
+    let TranscriptEntry::Message(message) = entry else {
+        return None;
+    };
+    message
+        .message
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn tool_call_id(entry: &TranscriptEntry) -> Option<&str> {
+    let TranscriptEntry::Message(message) = entry else {
+        return None;
+    };
+    message
+        .message
+        .get("tool_call_id")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn assistant_declares_tool_call(entry: &TranscriptEntry, expected_id: &str) -> bool {
+    let TranscriptEntry::Message(message) = entry else {
+        return false;
+    };
+    message_role(entry) == Some("assistant")
+        && message
+            .message
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|calls| {
+                calls.iter().any(|call| {
+                    call.get("id").and_then(serde_json::Value::as_str) == Some(expected_id)
+                })
+            })
+}
+
+/// Keep an assistant tool-call declaration and its leading tool-result companions in one page.
+/// A tiny page may otherwise start with a tool result, which leaves clients unable to recover the
+/// tool name/arguments until a later pagination request. The durable `tool_call_id` is the join key;
+/// the response may exceed the requested limit by the size of this one tool-call group.
+fn complete_leading_tool_companions(
+    session: &SessionManager,
+    session_id: &str,
+    mut page: TranscriptPage,
+) -> Result<TranscriptPage, AppError> {
+    let Some(first) = page.entries.first() else {
+        return Ok(page);
+    };
+    if message_role(first) != Some("tool") {
+        return Ok(page);
+    }
+    let Some(first_id) = entry_id(first) else {
+        return Ok(page);
+    };
+    let Some(expected_tool_call_id) = tool_call_id(first) else {
+        return Ok(page);
+    };
+
+    let transcript_path = session.transcript_path(session_id);
+    let Some(first_offset) = find_entry_line_offset(&transcript_path, first_id)? else {
+        return Ok(page);
+    };
+    // Tool calls from one assistant message are bounded by the runtime catalog, so a bounded reverse
+    // read recovers the declaration and any earlier sibling results without loading the transcript.
+    let preceding = read_entries_tail_before(&transcript_path, 256, Some(first_offset))?;
+    let Some(owner_index) = preceding
+        .entries
+        .iter()
+        .rposition(|entry| assistant_declares_tool_call(entry, expected_tool_call_id))
+    else {
+        return Ok(page);
+    };
+    let owner_id = entry_id(&preceding.entries[owner_index]).map(ToOwned::to_owned);
+    let existing_ids = page
+        .entries
+        .iter()
+        .filter_map(entry_id)
+        .map(ToOwned::to_owned)
+        .collect::<std::collections::HashSet<String>>();
+    let mut companions = preceding
+        .entries
+        .into_iter()
+        .skip(owner_index)
+        .filter(|entry| entry_id(entry).is_none_or(|id| !existing_ids.contains(id)))
+        .collect::<Vec<_>>();
+    if companions.is_empty() {
+        return Ok(page);
+    }
+    companions.append(&mut page.entries);
+    page.entries = companions;
+
+    if let Some(owner_id) = owner_id {
+        if let Some(owner_offset) = find_entry_line_offset(&transcript_path, &owner_id)? {
+            let preceding = read_entries_tail_before(&transcript_path, 1, Some(owner_offset))?;
+            page.has_more = !preceding.entries.is_empty();
+            page.next_cursor_offset = page.has_more.then_some(owner_offset);
+        }
+    }
+    Ok(page)
+}
+
 fn parse_serve_thinking_level(level: &str) -> Option<ThinkingLevel> {
     ThinkingLevel::parse(level)
 }
@@ -137,14 +238,14 @@ pub(crate) async fn handle_command(
                 return Ok(());
             }
 
-            let (archival_message, mut input_message) = match build_turn_messages(&slot, text, &params)
-            {
-                Ok(pair) => pair,
-                Err(error) => {
-                    send_error(&state, id, Some(slot.session_id.clone()), error)?;
-                    return Ok(());
-                }
-            };
+            let (archival_message, mut input_message) =
+                match build_turn_messages(&slot, text, &params) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        send_error(&state, id, Some(slot.session_id.clone()), error)?;
+                        return Ok(());
+                    }
+                };
             let row_id = persist_turn_input_message(&slot, &archival_message, &params)?;
             input_message.msg_id = Some(row_id);
             release_attachment_leases(&slot, &params);
@@ -189,14 +290,14 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
-            let (archival_message, mut input_message) = match build_turn_messages(&slot, text, &params)
-            {
-                Ok(pair) => pair,
-                Err(error) => {
-                    send_error(&state, id, Some(slot.session_id.clone()), error)?;
-                    return Ok(());
-                }
-            };
+            let (archival_message, mut input_message) =
+                match build_turn_messages(&slot, text, &params) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        send_error(&state, id, Some(slot.session_id.clone()), error)?;
+                        return Ok(());
+                    }
+                };
             let row_id = persist_turn_input_message(&slot, &archival_message, &params)?;
             input_message.msg_id = Some(row_id);
             release_attachment_leases(&slot, &params);
@@ -216,6 +317,19 @@ pub(crate) async fn handle_command(
             start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
         }
         ServeCommand::NewSession { id, params } => {
+            if params.detached {
+                let entry = super::create_detached_session(&state, params)?;
+                let session_id = entry.session_id;
+                state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                    id,
+                    Some(session_id.clone()),
+                    Some(serde_json::json!({
+                        "detached": true,
+                        "sessionId": session_id,
+                    })),
+                )))?;
+                return Ok(());
+            }
             if state.registry.len() >= state.registry.max_sessions() {
                 send_error(&state, id, None, "too_many_sessions")?;
                 return Ok(());
@@ -331,6 +445,11 @@ pub(crate) async fn handle_command(
                 .map_err(|error| {
                     AppError::Config(format!("read session entries failed: {error}"))
                 })?;
+            let page = complete_leading_tool_companions(
+                &slot.ctx.session_runtime.session,
+                &slot.session_id,
+                page,
+            )?;
             let next_cursor = encode_next_cursor(&page).map_err(|error| {
                 AppError::Config(format!("encode get_messages cursor failed: {error}"))
             })?;
@@ -575,6 +694,54 @@ pub(crate) async fn handle_command(
                 }
                 Err(error) => {
                     send_error(&state, id, Some(slot.session_id.clone()), error)?;
+                }
+            }
+        }
+        ServeCommand::RetainAttachmentLeases {
+            id,
+            session_id,
+            params,
+        } => {
+            if params.attachments.len() > 512 {
+                send_error(&state, id, Some(session_id), "too_many_attachment_leases")?;
+                return Ok(());
+            }
+            let shas = params
+                .attachments
+                .into_iter()
+                .flat_map(|attachment| {
+                    std::iter::once(attachment.blob_sha).chain(attachment.provider_sha)
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            if shas.len() > 512 {
+                send_error(&state, id, Some(session_id), "too_many_attachment_leases")?;
+                return Ok(());
+            }
+            let Some(manager) = super::scoped_session_manager(&state) else {
+                send_error(&state, id, Some(session_id), "session_manager_unavailable")?;
+                return Ok(());
+            };
+            if manager.get_session_by_id(&session_id)?.is_none() {
+                send_error(&state, id, Some(session_id), "unknown_session")?;
+                return Ok(());
+            }
+            match manager
+                .attachment_store()
+                .retain_pending_batch(&session_id, shas)
+            {
+                Ok(retained) => {
+                    state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                        id,
+                        Some(session_id),
+                        Some(serde_json::to_value(
+                            super::types::RetainAttachmentLeasesResponse {
+                                retained_shas: retained,
+                            },
+                        )?),
+                    )))?;
+                }
+                Err(error) => {
+                    send_error(&state, id, Some(session_id), error.to_string())?;
                 }
             }
         }
@@ -926,11 +1093,37 @@ pub(crate) async fn handle_command(
                 ),
             )))?;
         }
+        ServeCommand::DiscardDetachedSession { id, session_id } => {
+            if state.registry.get(&session_id).is_some() {
+                send_error(&state, id, Some(session_id), "session_is_live")?;
+                return Ok(());
+            }
+            let sessions_dir = crate::resolve_sessions_dir(&state.cfg)?;
+            let lookup = SessionManager::new(sessions_dir.clone());
+            let Some(entry) = lookup.get_session_by_id(&session_id)? else {
+                state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                    id,
+                    Some(session_id.clone()),
+                    Some(serde_json::json!({ "discarded": false, "sessionId": session_id })),
+                )))?;
+                return Ok(());
+            };
+            let manager = SessionManager::new_scoped(sessions_dir, entry.session_key);
+            manager.delete_session(&session_id)?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(session_id.clone()),
+                Some(serde_json::json!({ "discarded": true, "sessionId": session_id })),
+            )))?;
+        }
         ServeCommand::CloseSession { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
                 return Ok(());
             };
+            state
+                .ask_question
+                .cancel_live_session(&slot.session_id, "close_session");
             cleanup_session_slot(&state, &slot, true, "close_session").await?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
@@ -1042,6 +1235,7 @@ async fn open_existing_session_slot(
         state,
         super::types::NewSessionParams {
             cwd: entry.cwd.or_else(|| base_slot.cwd.clone()),
+            detached: false,
             mode: Some(match base_slot.mode {
                 SessionMode::Code => ServeSessionMode::Code,
                 SessionMode::Claw => ServeSessionMode::Claw,
@@ -1447,10 +1641,7 @@ fn persist_turn_input_message(
                 .append_message_with_id(payload, forced_id);
         }
     }
-    slot.ctx
-        .session_runtime
-        .session
-        .append_message(payload)
+    slot.ctx.session_runtime.session.append_message(payload)
 }
 
 /// 发送成功后释放这一回合用到的全部附件租约。
@@ -1697,7 +1888,9 @@ fn resolve_attachment_part(
 ) -> Result<ChatMessageContentPart, String> {
     match (&attachment.blob_sha, &attachment.file_id) {
         (Some(_), Some(_)) => {
-            return Err("invalid_attachment: blobSha and fileId are mutually exclusive".to_string());
+            return Err(
+                "invalid_attachment: blobSha and fileId are mutually exclusive".to_string(),
+            );
         }
         (None, None) => {
             return Err(
@@ -1758,7 +1951,9 @@ fn resolve_attachment_part(
         .get(sha)
         .map_err(|error| format!("invalid_attachment: {error}"))?
         .ok_or_else(|| {
-            format!("invalid_attachment: unknown attachment blob {sha}; call ingest_attachment first")
+            format!(
+                "invalid_attachment: unknown attachment blob {sha}; call ingest_attachment first"
+            )
         })?;
     let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
 

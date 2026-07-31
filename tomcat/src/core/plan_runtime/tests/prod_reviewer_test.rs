@@ -5,7 +5,9 @@ use super::super::file_store::{
 use super::super::plan_reviewer::{build_review_prompt, plan_reviewer_allowed_tools_with_policy};
 use super::super::prod_reviewer::{ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher};
 use super::super::review::resolve_internal_tools;
-use super::super::{CodeReviewDispatchInfo, CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime};
+use super::super::{
+    CodeReviewDispatchInfo, CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime,
+};
 use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
 
 #[tokio::test]
@@ -149,7 +151,11 @@ fn dispatch_model_prefers_override_then_session_then_fallback() {
     use crate::core::plan_runtime::prod_reviewer::resolve_dispatch_model;
 
     assert_eq!(
-        resolve_dispatch_model(Some("reviewer-model"), Some("session-model"), "default-model"),
+        resolve_dispatch_model(
+            Some("reviewer-model"),
+            Some("session-model"),
+            "default-model"
+        ),
         "reviewer-model"
     );
     assert_eq!(

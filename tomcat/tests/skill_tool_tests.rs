@@ -111,8 +111,7 @@ impl FixedResolver {
     }
 
     fn resolved_call(&self, model: &str) -> ResolvedCall {
-        let mut call =
-            ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
         call.api = "openai".to_string();
         call.provider = "deepseek".to_string();
         call.base_url = Some(common::DEEPSEEK_TEST_API_BASE.to_string());

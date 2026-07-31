@@ -152,8 +152,7 @@ async fn aborted_code_review_keeps_plan_executing() {
 }
 
 #[tokio::test]
-async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back(
-) {
+async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -390,7 +389,11 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
     let round1 = Finding::new("concern".into(), "logic".into(), "missing guard".into());
-    let round2 = Finding::new("concern".into(), "tests".into(), "no regression test".into());
+    let round2 = Finding::new(
+        "concern".into(),
+        "tests".into(),
+        "no regression test".into(),
+    );
     let reviewer = std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
         CodeReviewSummary {
             aborted: false,
@@ -458,7 +461,11 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
     let seen = reviewer.open_findings_per_round();
     assert_eq!(seen.len(), 2);
     assert!(seen[0].is_empty(), "第 1 轮没有历史 finding");
-    assert_eq!(seen[1], vec![round1.clone()], "第 2 轮应收到第 1 轮的未清项");
+    assert_eq!(
+        seen[1],
+        vec![round1.clone()],
+        "第 2 轮应收到第 1 轮的未清项"
+    );
     // 第 2 轮没再报 round1 → 视为已修，只剩 round2。
     assert_eq!(rt.unresolved_finding_ids(&plan_id), vec![round2.id.clone()]);
     assert_ne!(round1.id, round2.id);
@@ -470,7 +477,11 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
 fn finding_id_is_content_derived_and_severity_independent() {
     let a = Finding::new("concern".into(), "logic".into(), "missing guard".into());
     let b = Finding::new("blocker".into(), "logic".into(), " missing guard ".into());
-    let c = Finding::new("concern".into(), "logic".into(), "missing null check".into());
+    let c = Finding::new(
+        "concern".into(),
+        "logic".into(),
+        "missing null check".into(),
+    );
     assert_eq!(a.id, b.id, "severity 与空白不参与派生");
     assert_ne!(a.id, c.id);
     assert!(a.id.starts_with("f-"));
@@ -482,19 +493,17 @@ async fn rebuild_resets_code_review_rounds() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    let reviewer = std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
-        CodeReviewSummary {
-            aborted: false,
-            verdict: Some("fail".into()),
-            summary: "round 1".into(),
-            findings: vec![Finding::new(
-                "concern".into(),
-                "logic".into(),
-                "missing guard".into(),
-            )],
-            ..Default::default()
-        },
-    ]));
+    let reviewer = std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![CodeReviewSummary {
+        aborted: false,
+        verdict: Some("fail".into()),
+        summary: "round 1".into(),
+        findings: vec![Finding::new(
+            "concern".into(),
+            "logic".into(),
+            "missing guard".into(),
+        )],
+        ..Default::default()
+    }]));
     rt.attach_code_reviewer(reviewer.clone());
     let plan_id = fresh_planning_plan(&rt);
     mark_plan_executing(&rt, &plan_id, "session-a");

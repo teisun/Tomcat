@@ -47,7 +47,13 @@ export interface PlanPreviewStateSnapshot {
 
 /** DOM/state readout the plan preview webview reports back during E2E tests. */
 export interface PlanPreviewDomSnapshot {
+  /** VS Code's unmodified webview base font size. */
+  baseFontSizePx: number | null;
   bodyHasContent: boolean;
+  /** Computed Plan body reading size; contract is baseFontSizePx + 1. */
+  bodyFontSizePx: number | null;
+  /** Computed inline code size; it must remain at the Plan reading size. */
+  codeFontSizePx: number | null;
   /** Left inset (px) of the rendered markdown body; proves the content column has
    * deliberate side padding instead of sitting flush against the editor edge. */
   bodyInsetLeft: number | null;
@@ -59,6 +65,8 @@ export interface PlanPreviewDomSnapshot {
   inlinePathCount: number;
   /** Rendered mermaid diagrams (fenced ```mermaid``` blocks turned into SVG). */
   mermaidSvgCount: number;
+  /** Computed font size of rendered Mermaid text when the graph contains text. */
+  mermaidFontSizePx: number | null;
   selectionButtonVisible: boolean;
   /** Left inset (px) of the action strip's bounding box; ~0 means it spans the
    * full editor width with no leftover VS Code body padding. */
@@ -66,12 +74,18 @@ export interface PlanPreviewDomSnapshot {
   /** True when the action strip is a sibling of (not nested in) the scroll column. */
   stripOutsideContent: boolean;
   todoCountText: string | null;
+  /** Computed todo copy size; contract is the same Plan reading size. */
+  todoFontSizePx: number | null;
   todoIconSizes: number[];
   todoItemCount: number;
   todoStatuses: PlanTodoStatus[];
+  /** VS Code-injected theme classes on the webview body. */
+  themeClassName: string;
   /** 1-based source line of the first visible markdown block, when present. */
   topVisibleSourceLine: number | null;
   toolbarStyle: PlanToolbarStyle;
+  /** Random id created once per webview document, used to prove Find does not reload it. */
+  webviewInstanceId: string;
 }
 
 /** Test-only DOM drive actions issued by the host during E2E tests. */

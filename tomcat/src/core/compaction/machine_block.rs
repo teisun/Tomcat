@@ -171,7 +171,9 @@ pub fn override_progress_section(summary: &str, plan: &PlanFile) -> String {
     let end = find_next_h2(after)
         .map(|offset| start + PROGRESS_HEADING.len() + offset)
         .unwrap_or(summary.len());
-    format!("{}{}\n\n{}", &summary[..start], rendered, &summary[end..]).trim_end().to_string()
+    format!("{}{}\n\n{}", &summary[..start], rendered, &summary[end..])
+        .trim_end()
+        .to_string()
 }
 
 fn find_heading(text: &str, heading: &str) -> Option<usize> {
@@ -187,7 +189,9 @@ fn find_next_h2(text: &str) -> Option<usize> {
 
 fn render_progress(todos: &[TodoItem]) -> String {
     let mut out = String::from(PROGRESS_HEADING);
-    out.push_str("\nRendered from the plan file by the runtime; this supersedes any prose below.\n");
+    out.push_str(
+        "\nRendered from the plan file by the runtime; this supersedes any prose below.\n",
+    );
     if todos.is_empty() {
         out.push_str("(the plan file has no todos)\n");
         return out;

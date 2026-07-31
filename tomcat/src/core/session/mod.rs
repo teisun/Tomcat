@@ -11,7 +11,9 @@ pub(crate) mod store;
 pub(crate) mod subagent_transcript;
 pub mod transcript;
 
-pub(crate) use append_message_chain::find_dangling_tail_tool_call_ids;
+pub(crate) use append_message_chain::{
+    find_dangling_tail_tool_call_ids, find_dangling_tail_tool_calls,
+};
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state, AgentMode,

@@ -5,6 +5,13 @@ import {
   makeThumbnailFromUrl,
   prepareAttachment,
 } from "./attachments/imagePipeline";
+import {
+  ApprovalCard,
+  approvalAnswerKey,
+  createApprovalAnswerDraft,
+  type ApprovalAnswerDraft,
+  type ApprovalAnswerState,
+} from "./components/ApprovalCard";
 import { AttachmentChips } from "./components/AttachmentChips";
 import { AttachmentStrip } from "./components/AttachmentStrip";
 import { injectCheckpointMarkers } from "./components/checkpointMarkers";
@@ -17,6 +24,7 @@ import { TodoListWidget } from "./components/TodoListWidget";
 import { warmRichRenderModules } from "./components/markdown/richRenderRuntime";
 import { TranscriptView } from "./components/TranscriptView";
 import { readContextSearchDebounceMs } from "./contextSearchConfig";
+import { ComposerWorkRegistry } from "./composerWorkRegistry";
 import { isWebviewReference } from "./contextReferences";
 import type {
   AskQuestionResult,
@@ -66,6 +74,78 @@ const COMPOSER_DRAFT_DEBOUNCE_MS = 250;
  * had long since given up on.
  */
 const ATTACHMENT_FEEDBACK_TIMEOUT_MS = 8000;
+
+interface PersistedGuiState {
+  approvalAnswers: Record<string, ApprovalAnswerState>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readPersistedApprovalAnswers(value: unknown): Record<string, ApprovalAnswerState> {
+  if (!isRecord(value) || !isRecord(value.approvalAnswers)) return {};
+  const restored: Record<string, ApprovalAnswerState> = {};
+  for (const [key, rawState] of Object.entries(value.approvalAnswers)) {
+    if (!isRecord(rawState) || !isRecord(rawState.draft)) continue;
+    const draft: ApprovalAnswerDraft = {};
+    let valid = true;
+    for (const [questionId, rawQuestion] of Object.entries(rawState.draft)) {
+      if (
+        !isRecord(rawQuestion) ||
+        typeof rawQuestion.customText !== "string" ||
+        (rawQuestion.optionId !== null && typeof rawQuestion.optionId !== "string")
+      ) {
+        valid = false;
+        break;
+      }
+      draft[questionId] = {
+        customText: rawQuestion.customText,
+        optionId: rawQuestion.optionId,
+      };
+    }
+    if (valid) {
+      restored[key] = { draft, submitting: rawState.submitting === true };
+    }
+  }
+  return restored;
+}
+
+function pruneApprovalAnswers(
+  snapshot: WebviewStateSnapshot,
+  current: Record<string, ApprovalAnswerState>,
+): Record<string, ApprovalAnswerState> {
+  const unresolved = new Set<string>();
+  for (const session of Object.values(snapshot.sessionViews)) {
+    for (const item of session.timeline) {
+      if (item.type === "approval" && !item.resolved) {
+        unresolved.add(approvalAnswerKey(item.sessionId ?? session.sessionId, item.request.requestId));
+      }
+    }
+  }
+  let changed = false;
+  const next: Record<string, ApprovalAnswerState> = {};
+  for (const [key, answer] of Object.entries(current)) {
+    if (unresolved.has(key)) {
+      next[key] = answer;
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? next : current;
+}
+
+function persistGuiState(
+  vscodeApi: VsCodeApiLike,
+  snapshot: WebviewStateSnapshot,
+  approvalAnswers: Record<string, ApprovalAnswerState>,
+): void {
+  const persisted: WebviewStateSnapshot & PersistedGuiState = {
+    ...snapshot,
+    approvalAnswers,
+  };
+  vscodeApi.setState?.(persisted);
+}
 
 interface ContextSearchState {
   loading: boolean;
@@ -545,6 +625,9 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   }
   return {
     activeSessionId: state.activeSessionId,
+    answerCardCount: document.querySelectorAll('[data-testid="answer-card"]').length,
+    answerOutcomes: [...document.querySelectorAll<HTMLElement>('[data-testid="answer-card"]')]
+      .map((card) => card.dataset.outcome ?? ""),
     approvalCount: document.querySelectorAll('[data-testid="approval-card"]').length,
     approvalInputTestIds,
     approvalOptionStates,
@@ -1081,12 +1164,14 @@ function runDomAction(action: WebviewDomAction): void {
 
 function answerQuestion(
   vscodeApi: VsCodeApiLike,
+  sessionId: string,
   requestId: string,
   result: AskQuestionResult,
 ): void {
   postIntent(vscodeApi, "answerQuestion", {
     requestId,
     result,
+    sessionId,
   });
 }
 
@@ -1128,6 +1213,10 @@ function submitPrompt(
 
 export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [state, setState] = useState<WebviewStateSnapshot>(EMPTY_STATE);
+  const [questionAnnouncement, setQuestionAnnouncement] = useState("");
+  const [approvalAnswers, setApprovalAnswers] = useState<Record<string, ApprovalAnswerState>>(
+    () => readPersistedApprovalAnswers(vscodeApi.getState?.()),
+  );
   const [contextSearch, setContextSearch] = useState<ContextSearchState>(
     EMPTY_CONTEXT_SEARCH_STATE,
   );
@@ -1141,9 +1230,21 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     /** Bumped on every report so a repeat of the same message still re-announces. */
     seq: number;
   } | null>(null);
+  const [draftForkFeedback, setDraftForkFeedback] = useState<{
+    error: string | null;
+    pending: boolean;
+  }>({ error: null, pending: false });
+  const pendingDraftForkRef = useRef<{
+    clickDraft: ComposerDraft;
+    cutoff: number;
+    operationId: string | null;
+    sourceSessionId: string;
+  } | null>(null);
   const attachmentFeedbackSeqRef = useRef(0);
   const stateRef = useRef<WebviewStateSnapshot>(EMPTY_STATE);
+  const approvalAnswersRef = useRef(approvalAnswers);
   const composerRef = useRef<ComposerHandle | null>(null);
+  const composerWorkRegistryRef = useRef(new ComposerWorkRegistry());
   const pendingInsertionsRef = useRef<Array<{ reference: WebviewReference; sessionId: string }>>([]);
   const pendingComposerSubmissionRef = useRef<PendingComposerSubmission | null>(null);
   const pendingDraftSyncRef = useRef<{
@@ -1175,6 +1276,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const sessionPatchResyncPendingRef = useRef<Set<string>>(new Set());
   const streamRef = useRef<HTMLElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
+  const announcedQuestionsRef = useRef(new Set<string>());
+  const previousActiveSessionRef = useRef<string | null>(null);
 
   const activeSession = useMemo(
     () =>
@@ -1184,6 +1287,50 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     [state.activeSessionId, state.sessionViews],
   );
   stateRef.current = state;
+  approvalAnswersRef.current = approvalAnswers;
+
+  const pendingQuestionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const [sessionId, session] of Object.entries(state.sessionViews)) {
+      counts[sessionId] = session.timeline.filter(
+        (item) => item.type === "approval" && !item.resolved,
+      ).length;
+    }
+    return counts;
+  }, [state.sessionViews]);
+
+  useEffect(() => {
+    const newlyPending: string[] = [];
+    for (const [sessionId, session] of Object.entries(state.sessionViews)) {
+      for (const item of session.timeline) {
+        if (item.type !== "approval" || item.resolved) continue;
+        const key = approvalAnswerKey(item.sessionId ?? sessionId, item.request.requestId);
+        if (!announcedQuestionsRef.current.has(key)) {
+          announcedQuestionsRef.current.add(key);
+          newlyPending.push(sessionId);
+        }
+      }
+    }
+    if (newlyPending.length > 0) {
+      const sessionId = newlyPending[newlyPending.length - 1];
+      const sessionTitle =
+        state.sessions.find((session) => session.sessionId === sessionId)?.title?.trim()
+        || "New session";
+      setQuestionAnnouncement(`Question waiting in ${sessionTitle}.`);
+    }
+  }, [state.sessionViews, state.sessions]);
+
+  useEffect(() => {
+    const previous = previousActiveSessionRef.current;
+    previousActiveSessionRef.current = state.activeSessionId;
+    if (!previous || !state.activeSessionId || previous === state.activeSessionId) return;
+    if ((pendingQuestionCounts[state.activeSessionId] ?? 0) === 0) return;
+    window.requestAnimationFrame(() => {
+      const panel = [...document.querySelectorAll<HTMLElement>("[data-pending-session-id]")]
+        .find((candidate) => candidate.dataset.pendingSessionId === state.activeSessionId);
+      panel?.querySelector<HTMLElement>("button:not([disabled]), input:not([disabled])")?.focus();
+    });
+  }, [pendingQuestionCounts, state.activeSessionId]);
 
   const flushComposerDraft = useCallback(() => {
     if (draftSyncTimerRef.current !== null) {
@@ -1245,7 +1392,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const latestUserMessageId = userMessages.at(-1)?.id ?? null;
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
-  const canPrompt = !activeSession?.busy;
+  const canPrompt = !activeSession?.busy && !draftForkFeedback.pending;
   const canInterrupt = true;
   const canBuildPlan = !!activeSession && !activeSession.busy;
   const modelAdminSupported = state.modelAdminSupported;
@@ -1519,8 +1666,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         sessionPatchResyncPendingRef.current.clear();
         const nextState = reconcileStateSnapshot(stateRef.current, frame.content);
         stateRef.current = nextState;
+        const nextAnswers = pruneApprovalAnswers(nextState, approvalAnswersRef.current);
+        approvalAnswersRef.current = nextAnswers;
+        setApprovalAnswers(nextAnswers);
         setState(nextState);
-        vscodeApi.setState?.(nextState);
+        persistGuiState(vscodeApi, nextState, nextAnswers);
         flushPendingInsertions();
         return;
       }
@@ -1529,8 +1679,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         sessionPatchResyncPendingRef.current.delete(frame.content.sessionId);
         const nextState = mergeSessionViewSnapshot(stateRef.current, frame.content);
         stateRef.current = nextState;
+        const nextAnswers = pruneApprovalAnswers(nextState, approvalAnswersRef.current);
+        approvalAnswersRef.current = nextAnswers;
+        setApprovalAnswers(nextAnswers);
         setState(nextState);
-        vscodeApi.setState?.(nextState);
+        persistGuiState(vscodeApi, nextState, nextAnswers);
         flushPendingInsertions();
         return;
       }
@@ -1552,8 +1705,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         expectedPatchSeqBySessionRef.current[frame.content.sessionId] =
           frame.content.seq + 1;
         stateRef.current = patched.state;
+        approvalAnswersRef.current = pruneApprovalAnswers(
+          patched.state,
+          approvalAnswersRef.current,
+        );
+        setApprovalAnswers(approvalAnswersRef.current);
         setState(patched.state);
-        vscodeApi.setState?.(patched.state);
+        persistGuiState(vscodeApi, patched.state, approvalAnswersRef.current);
         return;
       }
       if (
@@ -1572,6 +1730,127 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         return;
       }
       if (frame.channel === "event") {
+        if (
+          typeof frame.content === "object" &&
+          frame.content !== null &&
+          "type" in frame.content &&
+          frame.content.type === "answerQuestionResult" &&
+          "accepted" in frame.content &&
+          frame.content.accepted === false &&
+          "sessionId" in frame.content &&
+          typeof frame.content.sessionId === "string" &&
+          "requestId" in frame.content &&
+          typeof frame.content.requestId === "string"
+        ) {
+          const key = approvalAnswerKey(frame.content.sessionId, frame.content.requestId);
+          const current = approvalAnswersRef.current[key];
+          if (current?.submitting) {
+            const next = {
+              ...approvalAnswersRef.current,
+              [key]: { ...current, submitting: false },
+            };
+            approvalAnswersRef.current = next;
+            setApprovalAnswers(next);
+            persistGuiState(vscodeApi, stateRef.current, next);
+          }
+          return;
+        }
+        if (
+          typeof frame.content === "object" &&
+          frame.content !== null &&
+          "type" in frame.content &&
+          frame.content.type === "captureDraftForFork" &&
+          "operationId" in frame.content &&
+          typeof frame.content.operationId === "string" &&
+          "sourceSessionId" in frame.content &&
+          typeof frame.content.sourceSessionId === "string"
+        ) {
+          const operationId = frame.content.operationId;
+          const sourceSessionId = frame.content.sourceSessionId;
+          let pending = pendingDraftForkRef.current;
+          if (pending?.operationId && pending.operationId !== operationId) {
+            return;
+          }
+          if (!pending || pending.sourceSessionId !== sourceSessionId) {
+            const draft = composerRef.current?.getDraft() ?? {
+              hasContent: false,
+              segments: [],
+              text: "",
+            };
+            pending = {
+              clickDraft: {
+                ...draft,
+                segments: draft.segments.map((segment) => ({ ...segment })),
+              },
+              cutoff: composerWorkRegistryRef.current.cutoff(sourceSessionId),
+              operationId,
+              sourceSessionId,
+            };
+            pendingDraftForkRef.current = pending;
+          } else {
+            pending.operationId = operationId;
+          }
+          setDraftForkFeedback({ error: null, pending: true });
+          const cutoff = pending.cutoff;
+          void composerWorkRegistryRef.current.waitForCutoff(sourceSessionId, cutoff).then(() => {
+            const current = pendingDraftForkRef.current;
+            if (
+              !current
+              || current.operationId !== operationId
+              || current.sourceSessionId !== sourceSessionId
+            ) {
+              return;
+            }
+            const sourceStillActive = stateRef.current.activeSessionId === sourceSessionId;
+            if (sourceStillActive) flushComposerDraft();
+            const draft = sourceStillActive
+              ? composerRef.current?.getDraft() ?? current.clickDraft
+              : current.clickDraft;
+            postIntent(vscodeApi, "forkSession", {
+              cwd: null,
+              operationId,
+              segments: draft.segments,
+              sourceSessionId,
+              text: draft.text,
+            });
+          });
+          return;
+        }
+        if (
+          typeof frame.content === "object" &&
+          frame.content !== null &&
+          "type" in frame.content &&
+          frame.content.type === "draftForkResult" &&
+          "operationId" in frame.content &&
+          typeof frame.content.operationId === "string" &&
+          "success" in frame.content &&
+          typeof frame.content.success === "boolean"
+        ) {
+          const pending = pendingDraftForkRef.current;
+          if (!pending || pending.operationId !== frame.content.operationId) {
+            return;
+          }
+          pendingDraftForkRef.current = null;
+          const error =
+            !frame.content.success
+            && "error" in frame.content
+            && typeof frame.content.error === "string"
+              ? frame.content.error
+              : null;
+          setDraftForkFeedback({ error, pending: false });
+          return;
+        }
+        if (
+          typeof frame.content === "object" &&
+          frame.content !== null &&
+          "type" in frame.content &&
+          frame.content.type === "composerWorkResult" &&
+          "operationId" in frame.content &&
+          typeof frame.content.operationId === "string"
+        ) {
+          composerWorkRegistryRef.current.complete(frame.content.operationId);
+          return;
+        }
         if (
           typeof frame.content === "object" &&
           frame.content !== null &&
@@ -1674,9 +1953,48 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     };
   }, []);
 
+  const handleApprovalDraftChange = useCallback(
+    (sessionId: string, requestId: string, draft: ApprovalAnswerDraft) => {
+      const ownerSessionId = sessionId || stateRef.current.activeSessionId;
+      if (!ownerSessionId) return;
+      const key = approvalAnswerKey(ownerSessionId, requestId);
+      const next = {
+        ...approvalAnswersRef.current,
+        [key]: { draft, submitting: false },
+      };
+      approvalAnswersRef.current = next;
+      setApprovalAnswers(next);
+      persistGuiState(vscodeApi, stateRef.current, next);
+    },
+    [vscodeApi],
+  );
+
   const handleAnswerQuestion = useCallback(
-    (requestId: string, result: AskQuestionResult) => {
-      answerQuestion(vscodeApi, requestId, result);
+    (sessionId: string, requestId: string, result: AskQuestionResult) => {
+      const ownerSessionId = sessionId || stateRef.current.activeSessionId;
+      if (!ownerSessionId) return;
+      const key = approvalAnswerKey(ownerSessionId, requestId);
+      const approval = Object.values(stateRef.current.sessionViews)
+        .flatMap((session) => session.timeline)
+        .find(
+          (item) => item.type === "approval" && item.request.requestId === requestId,
+        );
+      const current = approvalAnswersRef.current[key] ?? {
+        draft:
+          approval?.type === "approval"
+            ? createApprovalAnswerDraft(approval)
+            : {},
+        submitting: false,
+      };
+      if (current.submitting) return;
+      const next = {
+        ...approvalAnswersRef.current,
+        [key]: { ...current, submitting: true },
+      };
+      approvalAnswersRef.current = next;
+      setApprovalAnswers(next);
+      persistGuiState(vscodeApi, stateRef.current, next);
+      answerQuestion(vscodeApi, ownerSessionId, requestId, result);
     },
     [vscodeApi],
   );
@@ -1937,19 +2255,65 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     oldestTimelineItemId,
   ]);
 
+  const handleNewSession = () => {
+    if (pendingDraftForkRef.current) return;
+    const sourceSessionId = stateRef.current.activeSessionId;
+    if (!sourceSessionId) {
+      postIntent(vscodeApi, "newSession");
+      return;
+    }
+    const draft = composerRef.current?.getDraft() ?? {
+      hasContent: false,
+      segments: [],
+      text: "",
+    };
+    pendingDraftForkRef.current = {
+      clickDraft: {
+        ...draft,
+        segments: draft.segments.map((segment) => ({ ...segment })),
+      },
+      cutoff: composerWorkRegistryRef.current.cutoff(sourceSessionId),
+      operationId: null,
+      sourceSessionId,
+    };
+    setDraftForkFeedback({ error: null, pending: true });
+    postIntent(vscodeApi, "newSession");
+  };
+
   return (
     <main className="tc-shell">
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
-        onNewSession={() => postIntent(vscodeApi, "newSession")}
+        creating={draftForkFeedback.pending}
+        onNewSession={handleNewSession}
         ready={state.ready}
-        onSwitchSession={(sessionId) =>
+        onSwitchSession={(sessionId) => {
+          if (draftForkFeedback.pending) return;
           postIntent(vscodeApi, "switchSession", {
             sessionId,
-          })
-        }
+          });
+        }}
+        pendingQuestionCounts={pendingQuestionCounts}
         sessions={state.sessions}
       />
+      <div
+        aria-atomic="true"
+        aria-live="polite"
+        className="tc-visually-hidden"
+        data-testid="question-announcement"
+        role="status"
+      >
+        {questionAnnouncement}
+      </div>
+      {draftForkFeedback.error ? (
+        <div
+          className="tc-session-create-feedback"
+          data-testid="draft-fork-error"
+          role="alert"
+        >
+          {draftForkFeedback.error}
+        </div>
+      ) : null}
 
       <div className="tc-stream-shell">
         <section className="tc-stream" data-testid="stream-container" ref={streamRef}>
@@ -1969,12 +2333,14 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             activeSession.historyLoading ||
             activeSession.hasMoreHistory ? (
               <TranscriptView
+                approvalAnswers={approvalAnswers}
                 availableModels={state.availableModels}
                 buildModel={state.buildModel ?? ""}
                 busy={!!activeSession.busy}
                 bottomSpacerHeight={bottomSpacerHeight}
                 mediaRoots={state.mediaRoots}
                 onAnswer={handleAnswerQuestion}
+                onApprovalDraftChange={handleApprovalDraftChange}
                 onSetBuildModel={handleSetBuildModel}
                 checkpoints={activeSession.checkpoints ?? []}
                 onOpenDiff={handleOpenDiff}
@@ -1990,7 +2356,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onRestoreCheckpoint={handleOpenRestoreDialog}
                 sessionModel={activeSession.model ?? ""}
                 sessionTodos={activeSession.sessionTodos ?? []}
-                timeline={activeSession.timeline}
+                timeline={activeSession.timeline.filter((item) => item.type !== "approval")}
                 transcriptRef={transcriptRef}
                 onZoomImage={handleZoomImage}
               />
@@ -2024,6 +2390,34 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           </button>
         ) : null}
       </div>
+
+      {activeSession
+        ? activeSession.timeline
+            .filter((item) => item.type === "approval" && !item.resolved)
+            .map((item) => {
+              const answerState = approvalAnswers[
+                approvalAnswerKey(item.sessionId ?? activeSession.sessionId, item.request.requestId)
+              ];
+              return (
+                <section
+                  aria-label="Needs your answer"
+                  className="tc-pending-question-panel"
+                  data-pending-session-id={item.sessionId ?? activeSession.sessionId}
+                  data-testid="pending-question-panel"
+                  key={item.id}
+                >
+                  <h2 className="tc-visually-hidden">Needs your answer</h2>
+                  <ApprovalCard
+                    draft={answerState?.draft}
+                    item={item}
+                    onAnswer={handleAnswerQuestion}
+                    onDraftChange={handleApprovalDraftChange}
+                    submitting={answerState?.submitting}
+                  />
+                </section>
+              );
+            })
+        : null}
 
       <TodoListWidget
         busy={!!activeSession?.busy}
@@ -2103,11 +2497,15 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         onContextSearchClose={handleContextSearchClose}
         onContextSearchOpen={handleContextSearchOpen}
         onContextSearchQueryChange={handleContextSearchQueryChange}
-        onPickContext={() =>
+        onPickContext={() => {
+          const sessionId = stateRef.current.activeSessionId;
+          if (!sessionId) return;
+          const ticket = composerWorkRegistryRef.current.begin(sessionId, "picker");
           postIntent(vscodeApi, "pickContext", {
-            sessionId: activeSession?.sessionId ?? null,
-          })
-        }
+            operationId: ticket.operationId,
+            sessionId,
+          });
+        }}
         onDraftChange={(draft) => {
           if (activeSession?.sessionId) {
             scheduleComposerDraftSync(activeSession.sessionId, draft);
@@ -2140,20 +2538,31 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId: activeSession.sessionId,
           });
         }}
-        onAttachFiles={(files) => {
-          if (activeSession) {
+        onPrepareAttachments={(work) => {
+          const sessionId = stateRef.current.activeSessionId;
+          if (!sessionId) return;
+          const ticket = composerWorkRegistryRef.current.begin(sessionId, "paste");
+          void work.then((files) => {
             postIntent(vscodeApi, "attachFiles", {
-              sessionId: activeSession.sessionId,
               files,
+              operationId: ticket.operationId,
+              sessionId,
             });
-          }
+          }).catch(() => {
+            // Composer restores text fallback; no host work was started.
+            composerWorkRegistryRef.current.complete(ticket.operationId);
+          });
         }}
-        onResolveDrop={(uris) =>
+        onResolveDrop={(uris) => {
+          const sessionId = stateRef.current.activeSessionId;
+          if (!sessionId) return;
+          const ticket = composerWorkRegistryRef.current.begin(sessionId, "drop");
           postIntent(vscodeApi, "resolveDrop", {
-            sessionId: activeSession?.sessionId ?? null,
+            operationId: ticket.operationId,
+            sessionId,
             uris,
-          })
-        }
+          });
+        }}
         onInterrupt={() => {
           if (!activeSession?.sessionId) {
             return;

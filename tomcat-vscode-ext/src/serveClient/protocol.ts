@@ -39,6 +39,8 @@ export interface AskQuestion {
 export interface AskQuestionWireRequest {
   requestId: string;
   responseEvent: string;
+  sessionId?: string;
+  toolCallId?: string;
   questions: AskQuestion[];
 }
 
@@ -50,9 +52,22 @@ export interface AskQuestionAnswer {
   pickedRecommended: boolean;
 }
 
+export type AskQuestionOutcome =
+  | "answered"
+  | "skipped"
+  | "interrupted"
+  | "host_disconnected"
+  | "cancelled_unknown";
+
 export interface AskQuestionResult {
   answers: AskQuestionAnswer[];
+  /** Legacy compatibility. New peers also send `outcome`; there is no timeout outcome. */
   cancelled: boolean;
+  outcome?: AskQuestionOutcome;
+}
+
+export function askQuestionOutcome(result: AskQuestionResult): AskQuestionOutcome {
+  return result.outcome ?? (result.cancelled ? "cancelled_unknown" : "answered");
 }
 
 export interface AskQuestionWireResponse {
@@ -167,7 +182,13 @@ export function isAskQuestionResult(value: unknown): value is AskQuestionResult 
     isRecord(value) &&
     Array.isArray(value.answers) &&
     value.answers.every(isAskQuestionAnswer) &&
-    typeof value.cancelled === "boolean"
+    typeof value.cancelled === "boolean" &&
+    (value.outcome === undefined ||
+      value.outcome === "answered" ||
+      value.outcome === "skipped" ||
+      value.outcome === "interrupted" ||
+      value.outcome === "host_disconnected" ||
+      value.outcome === "cancelled_unknown")
   );
 }
 
@@ -188,9 +209,18 @@ export function parseAskQuestionRequest(payload: unknown): AskQuestionWireReques
     throw new Error("ask_question payload is missing questions");
   }
 
+  if (
+    (payload.sessionId !== undefined && typeof payload.sessionId !== "string") ||
+    (payload.toolCallId !== undefined && typeof payload.toolCallId !== "string")
+  ) {
+    throw new Error("ask_question payload has invalid durable identity");
+  }
+
   return {
     requestId: payload.requestId,
     responseEvent: payload.responseEvent,
+    sessionId: payload.sessionId,
+    toolCallId: payload.toolCallId,
     questions: payload.questions,
   };
 }
@@ -208,6 +238,9 @@ export function normalizeAskQuestionResponse(
   payload: AskQuestionResult | AskQuestionWireResponse,
 ): AskQuestionWireResponse {
   if (isAskQuestionWireResponse(payload)) {
+    if (payload.requestId !== requestId) {
+      throw new Error("ask_question response requestId mismatch");
+    }
     return payload;
   }
 

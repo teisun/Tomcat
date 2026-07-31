@@ -21,13 +21,19 @@ pub(crate) fn collect_recent_chat_messages_from_tail(entries: &[TranscriptEntry]
     msgs
 }
 
-/// 从尾部消息序列中找出尚未闭合的 tool_call_ids（若尾巴合法或无法安全判断则返回 None）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DanglingToolCall {
+    pub id: String,
+    pub name: String,
+}
+
+/// 从尾部消息序列中找出尚未闭合的 tool calls（若尾巴合法或无法安全判断则返回 None）。
 ///
 /// 语义约束与 hydrate 自愈保持一致：
 /// - 只在尾部是 `assistant.tool_calls` / `tool*` 连续块时返回缺失 ids；
 /// - 若尾部中间夹杂 `user/assistant(without tool_calls)/system` 等非 tool 序列，返回 None；
 /// - 返回顺序与 owning assistant 的 `tool_calls` 顺序一致。
-pub(crate) fn find_dangling_tail_tool_call_ids(recent: &[Value]) -> Option<Vec<String>> {
+pub(crate) fn find_dangling_tail_tool_calls(recent: &[Value]) -> Option<Vec<DanglingToolCall>> {
     let mut trailing_tool_ids_rev: Vec<&str> = Vec::new();
     for msg in recent.iter().rev() {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
@@ -52,17 +58,31 @@ pub(crate) fn find_dangling_tail_tool_call_ids(recent: &[Value]) -> Option<Vec<S
                         return None;
                     }
                 }
-                let missing: Vec<String> = tool_call_ids
+                let missing: Vec<DanglingToolCall> = tool_calls
                     .iter()
                     .skip(trailing_tool_ids.len())
-                    .map(|id| (*id).to_string())
-                    .collect();
+                    .map(|tool_call| {
+                        Some(DanglingToolCall {
+                            id: tool_call.get("id")?.as_str()?.to_string(),
+                            name: tool_call
+                                .get("function")?
+                                .get("name")?
+                                .as_str()?
+                                .to_string(),
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
                 return (!missing.is_empty()).then_some(missing);
             }
             _ => return None,
         }
     }
     None
+}
+
+pub(crate) fn find_dangling_tail_tool_call_ids(recent: &[Value]) -> Option<Vec<String>> {
+    find_dangling_tail_tool_calls(recent)
+        .map(|calls| calls.into_iter().map(|call| call.id).collect())
 }
 
 /// 校验即将追加的消息是否满足 OpenAI 消息链约束（规则 A–E）。

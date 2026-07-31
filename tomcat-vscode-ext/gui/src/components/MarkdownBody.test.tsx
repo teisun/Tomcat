@@ -162,8 +162,12 @@ describe("MarkdownBody", () => {
     expect((window as unknown as { __pwned?: boolean }).__pwned).toBeUndefined();
   });
 
-  it("renders a mermaid code block into an inline SVG diagram", async () => {
+  it("renders a mermaid code block into an inline SVG diagram with the Plan reading size", async () => {
     renderMock.mockClear();
+    initializeMock.mockClear();
+    const computedStyle = vi
+      .spyOn(window, "getComputedStyle")
+      .mockReturnValue({ fontSize: "14px" } as CSSStyleDeclaration);
     render(
       <MarkdownBody
         markdown={"# Flow\n\n```mermaid\nflowchart LR\n  a --> b\n```\n"}
@@ -175,7 +179,14 @@ describe("MarkdownBody", () => {
     expect(figure.tagName.toLowerCase()).toBe("figure");
     expect(figure.querySelector("svg")).not.toBeNull();
     expect(renderMock).toHaveBeenCalledTimes(1);
+    expect(initializeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fontSize: 14,
+        themeVariables: { fontSize: "14px" },
+      }),
+    );
     expect(renderMock.mock.calls[0][1]).toContain("flowchart LR");
+    computedStyle.mockRestore();
     // The original <pre>/<code.language-mermaid> is replaced by the figure.
     expect(
       screen.getByTestId("plan-markdown-body").querySelector("code.language-mermaid"),

@@ -27,6 +27,8 @@ body {
  * so drop that default here (scoped to the plan webview; the chat sidebar is
  * intentionally left untouched). */
 body.tc-plan-webview {
+  background: var(--vscode-editor-background);
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
   padding: 0;
 }
 
@@ -62,6 +64,24 @@ input:focus-visible {
   overflow: hidden;
   padding: 10px;
   position: relative;
+}
+
+.tc-pending-question-panel {
+  background: var(--tc-panel-bg);
+  border-block: 1px solid var(--tc-panel-border);
+  max-height: min(48vh, 32rem);
+  overflow: auto;
+  padding: 0.55rem 0.75rem;
+  scrollbar-gutter: stable;
+}
+
+.tc-pending-question-panel .tc-approval-card {
+  margin: 0;
+}
+
+.tc-pending-question-panel .tc-approval-question__prompt p,
+.tc-pending-question-panel .tc-approval-option__label {
+  overflow-wrap: anywhere;
 }
 
 .tc-card__header,
@@ -324,6 +344,13 @@ span.tc-attachment-strip__file-chip {
   flex-shrink: 0;
 }
 
+.tc-session-create-feedback {
+  color: var(--vscode-errorForeground, #f14c4c);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 2px 4px;
+}
+
 .tc-topbar__trigger {
   align-items: center;
   background: var(--vscode-dropdown-background, rgba(0, 0, 0, 0.2));
@@ -454,11 +481,13 @@ span.tc-attachment-strip__file-chip {
 }
 
 .tc-session-item {
+  align-items: center;
   background: transparent;
   border: 0;
   color: var(--vscode-dropdown-foreground, inherit);
   cursor: pointer;
   display: flex;
+  gap: 8px;
   padding: 6px 14px;
   text-align: left;
   width: 100%;
@@ -478,6 +507,21 @@ span.tc-attachment-strip__file-chip {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tc-session-item__pending-badge {
+  align-items: center;
+  background: var(--vscode-badge-background);
+  border-radius: 999px;
+  color: var(--vscode-badge-foreground);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  font-weight: 600;
+  justify-content: center;
+  min-height: 1.25rem;
+  min-width: 1.25rem;
+  padding-inline: 0.3rem;
 }
 
 .tc-context-search-dropdown {
@@ -2079,6 +2123,25 @@ span.tc-attachment-strip__file-chip {
 
 .tc-answer-card__option {
   cursor: default;
+}
+
+.tc-answer-card__option--unselected {
+  background: transparent;
+  border-color: var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-answer-card__status {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  margin-left: auto;
+}
+
+.tc-answer-card--interrupted,
+.tc-answer-card--host_disconnected,
+.tc-answer-card--cancelled_unknown {
+  border-color: var(--vscode-inputValidation-warningBorder, #cca700);
 }
 
 .tc-approval-questions {
@@ -3895,6 +3958,7 @@ span.tc-attachment-strip__file-chip {
 /* ── Plan preview custom editor ─────────────────────────────────────────── */
 
 .tc-plan-preview {
+  --tc-plan-reading-font-size: calc(var(--vscode-font-size, 13px) + 1px);
   --tc-todo-icon-size: 18px;
   --tc-build-btn: #e5b567;
   --tc-build-btn-fg: #1c1c1c;
@@ -4024,6 +4088,7 @@ span.tc-attachment-strip__file-chip {
   flex: 1 1 auto;
   /* min-height:0 lets this flex child shrink so overflow-y actually scrolls. */
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   /* Extra bottom padding so the last todo never sits flush against the editor
    * status bar when scrolled to the end. */
@@ -4034,6 +4099,7 @@ span.tc-attachment-strip__file-chip {
 }
 
 .tc-plan-preview__body {
+  font-size: var(--tc-plan-reading-font-size);
   line-height: 1.6;
   margin: 0 auto;
   max-width: 920px;
@@ -4065,7 +4131,7 @@ span.tc-attachment-strip__file-chip {
   background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.16));
   border-radius: 4px;
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.9em;
+  font-size: 1em;
   padding: 0.1em 0.35em;
 }
 
@@ -4107,8 +4173,9 @@ span.tc-attachment-strip__file-chip {
 
 .tc-plan-preview__todos-count {
   color: var(--vscode-foreground);
-  font-size: 15px;
+  font-size: var(--tc-plan-reading-font-size);
   font-weight: 600;
+  margin-bottom: 0;
   margin-left: auto;
   margin-right: auto;
   margin-top: 28px;
@@ -4125,6 +4192,7 @@ span.tc-attachment-strip__file-chip {
 .tc-plan-todos {
   display: flex;
   flex-direction: column;
+  font-size: var(--tc-plan-reading-font-size);
   gap: 10px;
   list-style: none;
   margin: 0 auto;
@@ -4134,6 +4202,10 @@ span.tc-attachment-strip__file-chip {
 
 .tc-plan-todos__empty {
   color: var(--vscode-descriptionForeground);
+  font-size: var(--tc-plan-reading-font-size);
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 920px;
 }
 
 .tc-plan-todo {
@@ -4141,6 +4213,12 @@ span.tc-attachment-strip__file-chip {
   display: flex;
   gap: 10px;
   line-height: 1.5;
+  min-width: 0;
+}
+
+.tc-plan-todo__content {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .tc-plan-todo__icon {
@@ -4179,4 +4257,44 @@ span.tc-attachment-strip__file-chip {
 
 .tc-plan-todo[data-status="completed"] .tc-plan-todo__content {
   color: var(--vscode-descriptionForeground);
+}
+
+/* Browser zoom reduces the CSS viewport width. This keeps the reading column and
+ * long todo text usable at 200% without introducing a page-level horizontal scroll. */
+@media (max-width: 480px) {
+  .tc-plan-action-strip {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .tc-plan-preview__content {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .tc-plan-todo {
+    gap: 8px;
+  }
+}
+
+/* VS Code's high-contrast themes expose forced system colors. Keep every todo
+ * state distinguishable when authored fills and theme colors are overridden. */
+@media (forced-colors: active) {
+  .tc-plan-preview__divider,
+  .tc-plan-action-strip {
+    border-color: CanvasText;
+  }
+
+  .tc-plan-todo__icon-ring,
+  .tc-plan-todo__icon-slash {
+    stroke: CanvasText;
+  }
+
+  .tc-plan-todo__icon-fill {
+    fill: Highlight;
+  }
+
+  .tc-plan-todo__icon-check {
+    stroke: HighlightText;
+  }
 }

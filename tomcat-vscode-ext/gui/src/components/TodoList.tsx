@@ -1,5 +1,19 @@
 import type { PlanTodo, PlanTodoStatus } from "../../../src/shared/planPreviewProtocol";
 
+function todoStatusLabel(status: PlanTodoStatus): string {
+  switch (status) {
+    case "completed":
+      return "Completed";
+    case "in_progress":
+      return "In progress";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return "Pending";
+  }
+}
+
+
 function TodoIcon({ status }: { status: PlanTodoStatus }) {
   const common = {
     "aria-hidden": true,
@@ -44,19 +58,34 @@ function TodoIcon({ status }: { status: PlanTodoStatus }) {
   }
 }
 
-export function TodoList({ todos }: { todos: PlanTodo[] }) {
+export function TodoList({
+  labelledBy,
+  todos,
+}: {
+  labelledBy?: string;
+  todos: PlanTodo[];
+}) {
   if (todos.length === 0) {
     return (
-      <p className="tc-plan-todos__empty" data-testid="plan-todo-empty">
+      <p
+        aria-labelledby={labelledBy}
+        className="tc-plan-todos__empty"
+        data-testid="plan-todo-empty"
+      >
         No to-dos yet.
       </p>
     );
   }
   return (
-    <ul className="tc-plan-todos" data-testid="plan-todo-list">
+    <ul
+      aria-labelledby={labelledBy}
+      className="tc-plan-todos"
+      data-testid="plan-todo-list"
+    >
       {todos.map((todo) => (
         <li className="tc-plan-todo" data-status={todo.status} data-testid="plan-todo-item" key={todo.id}>
           <TodoIcon status={todo.status} />
+          <span className="tc-visually-hidden">{todoStatusLabel(todo.status)}: </span>
           <span className="tc-plan-todo__content">{todo.content || todo.id}</span>
         </li>
       ))}

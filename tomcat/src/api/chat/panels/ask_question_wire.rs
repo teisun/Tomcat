@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,11 +8,24 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::oneshot;
 
 use crate::core::plan_runtime::panels::{
-    Answer, AskQuestionPanel, AskQuestionResult, Question, QuestionOption,
+    Answer, AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
+    AskQuestionTermination, Question, QuestionOption,
 };
+use crate::infra::event_bus::EventListenerId;
 use crate::infra::{wire, EventBus, ScopedEventEmitter};
 
 const CANCEL_POLL_MS: Duration = Duration::from_millis(10);
+
+struct ResponseListenerGuard {
+    event_bus: Arc<dyn EventBus>,
+    listener_id: EventListenerId,
+}
+
+impl Drop for ResponseListenerGuard {
+    fn drop(&mut self) {
+        self.event_bus.off(self.listener_id);
+    }
+}
 
 /// `ask_question` 宿主桥接请求。
 ///
@@ -26,6 +39,10 @@ pub struct AskQuestionWireRequest {
     pub request_id: String,
     #[serde(alias = "response_event")]
     pub response_event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     #[serde(with = "wire_questions")]
     pub questions: Vec<Question>,
 }
@@ -144,24 +161,35 @@ impl From<WireAnswer> for Answer {
 #[serde(rename_all = "camelCase")]
 struct WireAskQuestionResult {
     answers: Vec<WireAnswer>,
-    #[serde(default)]
-    cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outcome: Option<AskQuestionOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cancelled: Option<bool>,
 }
 
 impl From<AskQuestionResult> for WireAskQuestionResult {
     fn from(value: AskQuestionResult) -> Self {
+        let cancelled = value.legacy_cancelled();
         Self {
             answers: value.answers.into_iter().map(Into::into).collect(),
-            cancelled: value.cancelled,
+            outcome: Some(value.outcome),
+            cancelled: Some(cancelled),
         }
     }
 }
 
 impl From<WireAskQuestionResult> for AskQuestionResult {
     fn from(value: WireAskQuestionResult) -> Self {
+        let outcome = value.outcome.unwrap_or_else(|| {
+            if value.cancelled.unwrap_or(false) {
+                AskQuestionOutcome::CancelledUnknown
+            } else {
+                AskQuestionOutcome::Answered
+            }
+        });
         Self {
             answers: value.answers.into_iter().map(Into::into).collect(),
-            cancelled: value.cancelled,
+            outcome,
         }
     }
 }
@@ -266,10 +294,20 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
     async fn ask(
         &self,
         questions: Vec<Question>,
-        cancel_signal: Arc<AtomicBool>,
+        termination: AskQuestionTermination,
     ) -> AskQuestionResult {
-        if cancel_signal.load(Ordering::Relaxed) {
-            return cancelled_result();
+        self.ask_with_identity(AskQuestionIdentity::default(), questions, termination)
+            .await
+    }
+
+    async fn ask_with_identity(
+        &self,
+        identity: AskQuestionIdentity,
+        questions: Vec<Question>,
+        termination: AskQuestionTermination,
+    ) -> AskQuestionResult {
+        if let Some(result) = termination.result() {
+            return result;
         }
 
         let request_id = self.next_request_id();
@@ -293,16 +331,22 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
             }),
         );
 
+        let _listener_guard = ResponseListenerGuard {
+            event_bus: Arc::clone(&self.event_bus),
+            listener_id,
+        };
+
         let request = AskQuestionWireRequest {
             request_id,
             response_event: response_event.clone(),
+            session_id: identity.session_id,
+            tool_call_id: identity.tool_call_id,
             questions,
         };
         let payload = match serde_json::to_value(&request) {
             Ok(payload) => payload,
             Err(_) => {
-                self.event_bus.off(listener_id);
-                return cancelled_result();
+                return AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected);
             }
         };
         if self
@@ -310,32 +354,30 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
             .emit_payload(ask_question_request_event_name(), payload)
             .is_err()
         {
-            self.event_bus.off(listener_id);
-            return cancelled_result();
+            return AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected);
         }
 
         let cancel_wait = async move {
-            while !cancel_signal.load(Ordering::Relaxed) {
+            while termination.reason().is_none() {
                 tokio::time::sleep(CANCEL_POLL_MS).await;
             }
+            termination
+                .result()
+                .expect("termination reason was observed")
         };
         tokio::pin!(cancel_wait);
 
         let result = tokio::select! {
             response = rx => match response {
                 Ok(result) => result,
-                Err(_) => cancelled_result(),
+                Err(_) => AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected),
             },
-            _ = &mut cancel_wait => cancelled_result(),
+            result = &mut cancel_wait => result,
         };
-        self.event_bus.off(listener_id);
         result
     }
 }
 
 fn cancelled_result() -> AskQuestionResult {
-    AskQuestionResult {
-        answers: vec![],
-        cancelled: true,
-    }
+    AskQuestionResult::terminal(AskQuestionOutcome::CancelledUnknown)
 }

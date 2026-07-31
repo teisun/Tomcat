@@ -76,6 +76,13 @@ The model picker now also includes an `Add Models...` entry that opens the
 dedicated settings center, so you can add custom OpenAI-compatible or
 Anthropic-backed models without leaving VS Code.
 
+When Tomcat asks a clarification question:
+
+- it stays in a fixed **Needs your answer** area above the composer and has no timeout;
+- unanswered questions in other sessions show a badge in the session picker;
+- switching sessions or reloading the webview keeps your unsubmitted selection;
+- answering, skipping the whole request, interrupting, or losing the host connection produces a distinct history card. A VS Code window / Extension Host restart is an irrecoverable disconnect, while a webview-only reload keeps the live question pending.
+
 ## Optional settings
 
 Most users do **not** need to configure anything manually.
@@ -136,8 +143,13 @@ If Tomcat was found but still cannot initialize:
 
 If Tomcat exits during a conversation:
 
-1. Run `Tomcat: Restart Serve`.
-2. Check the `Tomcat` output channel for startup and stderr details.
+1. Any pending clarification question is recorded as **Disconnected**; it is not treated as a user skip.
+2. Run `Tomcat: Restart Serve`.
+3. Check the `Tomcat` output channel for startup and stderr details.
+
+`ask_question.timeout_ms`, `TOMCAT_ASK_QUESTION_TIMEOUT_MS`, and
+`TOMCAT__ASK_QUESTION__TIMEOUT_MS` were removed. Old values are ignored with a
+migration warning and never create a question deadline.
 
 ## Changelog
 

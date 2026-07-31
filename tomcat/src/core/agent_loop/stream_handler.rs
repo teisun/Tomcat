@@ -433,8 +433,7 @@ pub(super) async fn run_chat_stream(
                 message.clone(),
                 error_code.clone(),
             ));
-            let will_retry =
-                matches!(&loop_err, LoopError::Retryable(_)) && attempt < max_attempts;
+            let will_retry = matches!(&loop_err, LoopError::Retryable(_)) && attempt < max_attempts;
             warn!(
                 target: "tomcat_chat_diag",
                 phase = "stream_terminal_error",

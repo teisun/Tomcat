@@ -73,6 +73,7 @@ import {
   PLAN_PREVIEW_VIEW_TYPE,
   PlanPreviewEditorProvider,
 } from "./ui/planPreview/PlanPreviewEditorProvider";
+import { PLAN_PREVIEW_EDITOR_OPTIONS } from "./ui/planPreview/registrationOptions";
 import { TomcatWebviewViewProvider } from "./ui/webview/provider";
 
 export type { WebviewIntent } from "./ui/webview/protocol";
@@ -106,6 +107,8 @@ export interface TomcatExtensionApi {
     captureImagePreviewDom(): Promise<ImagePreviewDomSnapshot>;
     captureWebviewDom(): Promise<{
       activeSessionId: string | null;
+      answerCardCount: number;
+      answerOutcomes: string[];
       approvalCount: number;
       composerControlMetrics: Record<
         string,
@@ -996,8 +999,8 @@ export async function activate(
   );
 
   const askQuestionHandler = messenger.registerAskQuestionHandler(
-    async (request, frame) => {
-      return webviewProvider.askUser(request, frame.sessionId);
+    async (request, frame, context) => {
+      return webviewProvider.askUser(request, frame.sessionId, context.signal);
     },
   );
   const stderrSubscription = messenger.onStderr((chunk) => {
@@ -1059,7 +1062,7 @@ export async function activate(
     TOMCAT_NEW_SESSION_COMMAND,
     async () => {
       await ensureInitialized();
-      const sessionId = await sessionRouter.newSession();
+      const sessionId = await webviewProvider.beginNewSession();
       await showInformationMessage(promptHistory, `Created Tomcat session: ${sessionId ?? "unknown"}`);
     },
   );
@@ -1159,12 +1162,7 @@ export async function activate(
   const planPreviewRegistration = vscode.window.registerCustomEditorProvider(
     PLAN_PREVIEW_VIEW_TYPE,
     planPreviewProvider,
-    {
-      supportsMultipleEditorsPerDocument: false,
-      webviewOptions: {
-        retainContextWhenHidden: true,
-      },
-    },
+    PLAN_PREVIEW_EDITOR_OPTIONS,
   );
   const configurationSubscription = vscode.workspace.onDidChangeConfiguration(
     (event) => {

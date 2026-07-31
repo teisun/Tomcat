@@ -603,7 +603,7 @@ pi.registerTool({
         config,
         cancel.clone(),
     )
-        .with_tool_registry(harness.registry.clone());
+    .with_tool_registry(harness.registry.clone());
 
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

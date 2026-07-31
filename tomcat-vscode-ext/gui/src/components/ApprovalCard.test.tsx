@@ -1,8 +1,17 @@
+import { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { WebviewApprovalCard, WebviewApprovalQuestion } from "../types";
-import { ApprovalCard } from "./ApprovalCard";
+import type {
+  AskQuestionResult,
+  WebviewApprovalCard,
+  WebviewApprovalQuestion,
+} from "../types";
+import {
+  ApprovalCard,
+  createApprovalAnswerDraft,
+  type ApprovalAnswerDraft,
+} from "./ApprovalCard";
 
 function buildQuestion(
   id: string,
@@ -37,10 +46,28 @@ function buildItem(
   };
 }
 
+function ControlledApprovalCard({
+  item,
+  onAnswer,
+}: {
+  item: WebviewApprovalCard;
+  onAnswer: (sessionId: string, requestId: string, result: AskQuestionResult) => void;
+}) {
+  const [draft, setDraft] = useState<ApprovalAnswerDraft>(() => createApprovalAnswerDraft(item));
+  return (
+    <ApprovalCard
+      draft={draft}
+      item={item}
+      onAnswer={onAnswer}
+      onDraftChange={(_sessionId, _requestId, next) => setDraft(next)}
+    />
+  );
+}
+
 describe("ApprovalCard", () => {
   it("renders numbered questions, coded options, recommended badge, and action buttons", () => {
     render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([
           buildQuestion("q1", "When do you prefer to code?"),
           buildQuestion("q2", "Which language do you want to use?"),
@@ -63,7 +90,7 @@ describe("ApprovalCard", () => {
 
   it("does not render resolved cards", () => {
     const { container } = render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([buildQuestion("q1", "Proceed?")], { resolved: true })}
         onAnswer={vi.fn()}
       />,
@@ -75,7 +102,7 @@ describe("ApprovalCard", () => {
   it("keeps Continue disabled until every question is answered", () => {
     const onAnswer = vi.fn();
     render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([
           buildQuestion("q1", "Pick a time"),
           buildQuestion("q2", "Pick a language"),
@@ -99,7 +126,7 @@ describe("ApprovalCard", () => {
 
   it("keeps radio selection exclusive within a question and independent across questions", () => {
     render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([
           buildQuestion("q1", "Pick a time"),
           buildQuestion("q2", "Pick a language"),
@@ -126,7 +153,7 @@ describe("ApprovalCard", () => {
   it("submits ordered batch answers with pickedRecommended flags", () => {
     const onAnswer = vi.fn();
     render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([
           buildQuestion("q1", "Pick a time"),
           buildQuestion("q2", "Pick a language"),
@@ -139,7 +166,7 @@ describe("ApprovalCard", () => {
     fireEvent.click(screen.getByTestId("approval-option-q2-q2-b"));
     fireEvent.click(screen.getByTestId("approval-continue"));
 
-    expect(onAnswer).toHaveBeenCalledWith("request-1", {
+    expect(onAnswer).toHaveBeenCalledWith("session-1", "request-1", {
       answers: [
         {
           optionIds: ["q1-a"],
@@ -153,13 +180,14 @@ describe("ApprovalCard", () => {
         },
       ],
       cancelled: false,
+      outcome: "answered",
     });
   });
 
   it("requires non-empty custom text for Other and trims it on submit", () => {
     const onAnswer = vi.fn();
     render(
-      <ApprovalCard item={buildItem([buildQuestion("q1", "Pick a time")])} onAnswer={onAnswer} />,
+      <ControlledApprovalCard item={buildItem([buildQuestion("q1", "Pick a time")])} onAnswer={onAnswer} />,
     );
 
     fireEvent.click(screen.getByTestId("approval-option-q1-__custom__"));
@@ -177,7 +205,7 @@ describe("ApprovalCard", () => {
     expect((continueButton as HTMLButtonElement).disabled).toBe(false);
 
     fireEvent.click(continueButton);
-    expect(onAnswer).toHaveBeenCalledWith("request-1", {
+    expect(onAnswer).toHaveBeenCalledWith("session-1", "request-1", {
       answers: [
         {
           customText: "Svelte",
@@ -187,27 +215,29 @@ describe("ApprovalCard", () => {
         },
       ],
       cancelled: false,
+      outcome: "answered",
     });
   });
 
   it("submits a cancelled result when Skip is clicked", () => {
     const onAnswer = vi.fn();
     render(
-      <ApprovalCard item={buildItem([buildQuestion("q1", "Pick a time")])} onAnswer={onAnswer} />,
+      <ControlledApprovalCard item={buildItem([buildQuestion("q1", "Pick a time")])} onAnswer={onAnswer} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Skip" }));
 
-    expect(onAnswer).toHaveBeenCalledWith("request-1", {
+    expect(onAnswer).toHaveBeenCalledWith("session-1", "request-1", {
       answers: [],
       cancelled: true,
+      outcome: "skipped",
     });
   });
 
   it("isolates local selection state between multiple cards", () => {
     render(
       <>
-        <ApprovalCard
+        <ControlledApprovalCard
           item={buildItem([buildQuestion("q1", "Pick a time")], {
             id: "approval-1",
             request: {
@@ -218,7 +248,7 @@ describe("ApprovalCard", () => {
           })}
           onAnswer={vi.fn()}
         />
-        <ApprovalCard
+        <ControlledApprovalCard
           item={buildItem([buildQuestion("q2", "Pick a language")], {
             id: "approval-2",
             request: {

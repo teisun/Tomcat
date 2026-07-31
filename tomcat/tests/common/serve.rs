@@ -115,6 +115,24 @@ impl ServeChild {
         })
     }
 
+    pub fn recv_available(&self, wait: Duration) -> Vec<Value> {
+        let deadline = Instant::now() + wait;
+        let mut out = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return out;
+            }
+            match self.stdout_rx.recv_timeout(remaining) {
+                Ok(line) => out.push(serde_json::from_str(&line).unwrap_or_else(|err| {
+                    panic!("stdout line should be json: {err}; line={line}");
+                })),
+                Err(mpsc::RecvTimeoutError::Timeout) => return out,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return out,
+            }
+        }
+    }
+
     pub fn recv_until<F>(&self, timeout: Duration, predicate: F) -> Vec<Value>
     where
         F: Fn(&Value) -> bool,

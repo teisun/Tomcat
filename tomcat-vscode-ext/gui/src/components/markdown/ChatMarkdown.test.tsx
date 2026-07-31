@@ -234,8 +234,9 @@ describe("ChatMarkdown", () => {
     expect(code?.textContent).toBe("const answer = 42;\n");
   });
 
-  it("renders mermaid fences into inline diagrams", async () => {
+  it("renders mermaid fences into inline diagrams without overriding chat typography", async () => {
     renderMock.mockClear();
+    initializeMock.mockClear();
     render(
       <ChatMarkdown
         markdown={"```mermaid\nflowchart LR\n  a --> b\n```\n"}
@@ -246,6 +247,9 @@ describe("ChatMarkdown", () => {
     const figure = await screen.findByTestId("plan-mermaid");
     expect(figure.querySelector("svg")).not.toBeNull();
     expect(renderMock).toHaveBeenCalledTimes(1);
+    expect(initializeMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ fontSize: expect.anything() }),
+    );
   });
 
   it("highlights code synchronously while leaving mermaid rendering async", async () => {

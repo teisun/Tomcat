@@ -83,9 +83,7 @@ fn any_transcript_references_blob_ignores_non_transcript_files() {
 fn delete_session_reclaims_its_unsent_attachment_bytes() {
     let dir = fresh_dir();
     let mgr = SessionManager::new(dir.clone());
-    let entry = mgr
-        .create_session(mgr.current_session_key(), None)
-        .unwrap();
+    let entry = mgr.create_session(mgr.current_session_key(), None).unwrap();
 
     let store = mgr.attachment_store();
     let sha = store.put(b"unsent image bytes").unwrap();
@@ -104,9 +102,7 @@ fn delete_session_reclaims_its_unsent_attachment_bytes() {
 fn delete_session_keeps_bytes_another_session_still_references() {
     let dir = fresh_dir();
     let mgr = SessionManager::new(dir.clone());
-    let doomed = mgr
-        .create_session(mgr.current_session_key(), None)
-        .unwrap();
+    let doomed = mgr.create_session(mgr.current_session_key(), None).unwrap();
 
     let store = mgr.attachment_store();
     let sha = store.put(b"shared image bytes").unwrap();

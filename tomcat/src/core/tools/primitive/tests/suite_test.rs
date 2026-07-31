@@ -513,7 +513,12 @@ async fn bash_registry_empty_string_cwd_treated_as_none() {
     let registry = BashTaskRegistry::new(dir.join("tool-results"));
 
     let ticket = registry
-        .spawn_tracked("pwd".to_string(), None::<Vec<String>>, Some(PathBuf::from("")), false)
+        .spawn_tracked(
+            "pwd".to_string(),
+            None::<Vec<String>>,
+            Some(PathBuf::from("")),
+            false,
+        )
         .await
         .expect("空 cwd 应视同未传");
     registry

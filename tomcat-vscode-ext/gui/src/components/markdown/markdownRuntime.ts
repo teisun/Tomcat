@@ -167,6 +167,11 @@ async function waitForNextFrame(container: HTMLElement): Promise<void> {
   });
 }
 
+export interface MermaidRenderOptions {
+  /** Resolved CSS pixel size for diagram labels. Omitted callers keep Mermaid's default. */
+  fontSize?: number;
+}
+
 /**
  * Render mermaid fenced code blocks (```mermaid```) into inline SVG diagrams.
  * The import stays lazy so regular markdown pays nothing for mermaid.
@@ -174,6 +179,7 @@ async function waitForNextFrame(container: HTMLElement): Promise<void> {
 export async function renderMermaidBlocks(
   container: HTMLElement,
   isCancelled: () => boolean,
+  options: MermaidRenderOptions = {},
 ): Promise<void> {
   let blocks = collectMermaidCodeBlocks(container);
   let retryCount = 0;
@@ -199,8 +205,15 @@ export async function renderMermaidBlocks(
   const dark =
     documentRef.body.classList.contains("vscode-dark")
     || documentRef.body.classList.contains("vscode-high-contrast");
+  const planTypography = options.fontSize === undefined
+    ? {}
+    : {
+        fontSize: options.fontSize,
+        themeVariables: { fontSize: `${options.fontSize}px` },
+      };
   mermaid.initialize({
     fontFamily: "var(--vscode-font-family, sans-serif)",
+    ...planTypography,
     securityLevel: "strict",
     startOnLoad: false,
     theme: dark ? "dark" : "default",

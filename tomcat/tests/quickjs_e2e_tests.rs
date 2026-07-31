@@ -10,12 +10,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tomcat::{
     parse_manifest, BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse,
-    ChatResponseChoice,
-    DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult, EditOperation,
-    FunctionRegistry, HostApiDispatcher, LlmProvider, LlmResolver, LlmScene, PluginEngine,
-    PluginEngineConfig, PluginFunctionInvoker, PluginInstance, PluginManager, PluginRuntimeManager,
-    PluginStatus, PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation, ResolvedCall,
-    SharedPluginRuntimeManager, StreamEvent, Tool, ToolExecutor, ToolRegistry,
+    ChatResponseChoice, DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult,
+    EditOperation, FunctionRegistry, HostApiDispatcher, LlmProvider, LlmResolver, LlmScene,
+    PluginEngine, PluginEngineConfig, PluginFunctionInvoker, PluginInstance, PluginManager,
+    PluginRuntimeManager, PluginStatus, PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation,
+    ResolvedCall, SharedPluginRuntimeManager, StreamEvent, Tool, ToolExecutor, ToolRegistry,
     TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
 };
 

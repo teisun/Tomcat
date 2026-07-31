@@ -32,6 +32,46 @@ fn create_session_and_list() {
 }
 
 #[test]
+fn detached_session_is_listable_without_changing_durable_or_pinned_current() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let current = mgr
+        .new_current_session(Some("/tmp/source".to_string()))
+        .unwrap();
+    mgr.pin_session(&current.session_id);
+    let durable_before = mgr
+        .load_store()
+        .unwrap()
+        .current
+        .get(mgr.current_session_key())
+        .cloned();
+    let pinned_before = mgr.current_session_id().unwrap();
+
+    let detached = mgr
+        .create_detached_session(mgr.current_session_key(), Some("/tmp/source".to_string()))
+        .unwrap();
+
+    assert_ne!(detached.session_id, current.session_id);
+    assert_eq!(
+        mgr.load_store()
+            .unwrap()
+            .current
+            .get(mgr.current_session_key())
+            .cloned(),
+        durable_before,
+    );
+    assert_eq!(mgr.current_session_id().unwrap(), pinned_before);
+    assert!(mgr
+        .list_session_ids()
+        .unwrap()
+        .contains(&detached.session_id));
+    assert!(mgr.transcript_path(&detached.session_id).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn new_current_session_repoints_default_key_and_keeps_history() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

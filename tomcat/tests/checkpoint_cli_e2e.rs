@@ -1,4 +1,8 @@
+#[path = "checkpoint_cli_e2e/child_harness.rs"]
+mod child_harness;
 mod common;
+#[path = "checkpoint_cli_e2e/mock_protocol.rs"]
+mod mock_protocol;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -6,7 +10,7 @@ use serde_json::json;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
+use std::process::Command as StdCommand;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,6 +20,9 @@ use tomcat::{
     CheckpointRecordRequest, CheckpointStore, SessionManager, ShadowGitStore, TranscriptEntry,
 };
 use tracing::{info, info_span};
+
+use child_harness::CheckpointChild;
+use mock_protocol::{classify_mock_request, MockRequestClass};
 
 #[allow(deprecated)]
 fn cmd() -> Command {
@@ -216,24 +223,6 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
 }
 
 #[cfg(unix)]
-fn extract_last_task_id_from_request(request: &str) -> Option<String> {
-    let (_, body) = request.split_once("\r\n\r\n")?;
-    let payload: serde_json::Value = serde_json::from_str(body).ok()?;
-    let messages = payload.get("messages")?.as_array()?;
-    for message in messages.iter().rev() {
-        if message.get("role").and_then(|v| v.as_str()) != Some("tool") {
-            continue;
-        }
-        let content = message.get("content").and_then(|v| v.as_str())?;
-        let tool_payload: serde_json::Value = serde_json::from_str(content).ok()?;
-        if let Some(task_id) = tool_payload.get("taskId").and_then(|v| v.as_str()) {
-            return Some(task_id.to_string());
-        }
-    }
-    None
-}
-
-#[cfg(unix)]
 fn write_sse_chunk(stream: &mut std::net::TcpStream, chunk: serde_json::Value) {
     let headers =
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
@@ -243,47 +232,85 @@ fn write_sse_chunk(stream: &mut std::net::TcpStream, chunk: serde_json::Value) {
     let _ = stream.flush();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MockServerState {
+    AwaitInitialUser,
+    AwaitBackgroundResult,
+    AwaitInterruptedFollowup,
+    AwaitStopResult,
+    AwaitRecoveryWriteResult,
+    Complete,
+}
+
+#[cfg(unix)]
+fn write_http_error(stream: &mut std::net::TcpStream, status: &str, message: &str) {
+    let body = serde_json::json!({ "error": message }).to_string();
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
 #[cfg(unix)]
 fn spawn_tool_then_text_openai_stream_server(
+    background_pid_path: PathBuf,
 ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
     let stage = Arc::new(AtomicUsize::new(0));
     let stage_clone = Arc::clone(&stage);
+    let background_args = serde_json::json!({
+        "command": format!("printf '%s' $$ > {:?}; sleep 60", background_pid_path),
+        "run_in_background": true,
+    })
+    .to_string();
+    let recovery_write_args = serde_json::json!({
+        "command": format!(
+            "printf 'recovered' > {:?}",
+            background_pid_path.with_file_name("checkpoint-turn-end.txt")
+        ),
+        "run_in_background": false,
+    })
+    .to_string();
     let handle = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(30);
-        let mut emitted_background_tool = false;
-        let mut emitted_wait_tool = false;
-        while stage_clone.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
+        let mut state = MockServerState::AwaitInitialUser;
+        let mut background_task_id = None::<String>;
+        while state != MockServerState::Complete && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                     let request = read_http_request(&mut stream);
-                    if !emitted_background_tool {
-                        let tool_turn = serde_json::json!({
-                            "choices": [{
-                                "delta": {
-                                    "tool_calls": [{
-                                        "index": 0,
-                                        "id": "call_bg",
-                                        "function": {
-                                            "name": "bash",
-                                            "arguments": "{\"command\":\"sleep 5\",\"run_in_background\":true}"
-                                        }
-                                    }]
-                                },
-                                "finish_reason": "tool_calls"
-                            }]
-                        });
-                        write_sse_chunk(&mut stream, tool_turn);
-                        emitted_background_tool = true;
-                        stage_clone.store(1, Ordering::SeqCst);
-                        continue;
-                    }
-
-                    if !emitted_wait_tool {
-                        if let Some(task_id) = extract_last_task_id_from_request(&request) {
+                    let class = classify_mock_request(&request, "continue after interrupt");
+                    match (state, class) {
+                        (MockServerState::AwaitInitialUser, MockRequestClass::InitialUserTurn) => {
+                            let tool_turn = serde_json::json!({
+                                "choices": [{
+                                    "delta": {
+                                        "tool_calls": [{
+                                            "index": 0,
+                                            "id": "call_bg",
+                                            "function": {
+                                                "name": "bash",
+                                                "arguments": background_args.clone()
+                                            }
+                                        }]
+                                    },
+                                    "finish_reason": "tool_calls"
+                                }]
+                            });
+                            write_sse_chunk(&mut stream, tool_turn);
+                            state = MockServerState::AwaitBackgroundResult;
+                            stage_clone.store(1, Ordering::SeqCst);
+                        }
+                        (
+                            MockServerState::AwaitBackgroundResult,
+                            MockRequestClass::BackgroundToolResult { task_id },
+                        ) => {
+                            background_task_id = Some(task_id.clone());
                             let tool_turn = serde_json::json!({
                                 "choices": [{
                                     "delta": {
@@ -293,7 +320,7 @@ fn spawn_tool_then_text_openai_stream_server(
                                             "function": {
                                                 "name": "task_output",
                                                 "arguments": format!(
-                                                    "{{\"task_id\":\"{}\",\"since\":0,\"block\":true,\"timeout_ms\":30000}}",
+                                                    "{{\"task_id\":\"{}\",\"since\":0,\"block\":true,\"wait_ms\":30000}}",
                                                     task_id
                                                 )
                                             }
@@ -303,18 +330,31 @@ fn spawn_tool_then_text_openai_stream_server(
                                 }]
                             });
                             write_sse_chunk(&mut stream, tool_turn);
-                            emitted_wait_tool = true;
+                            state = MockServerState::AwaitInterruptedFollowup;
                             stage_clone.store(2, Ordering::SeqCst);
-                        } else {
+                        }
+                        (
+                            MockServerState::AwaitInterruptedFollowup,
+                            MockRequestClass::ExactFollowup,
+                        ) => {
+                            let Some(task_id) = background_task_id.as_deref() else {
+                                write_http_error(
+                                    &mut stream,
+                                    "500 Internal Server Error",
+                                    "checkpoint mock lost background task id",
+                                );
+                                stage_clone.store(usize::MAX, Ordering::SeqCst);
+                                break;
+                            };
                             let tool_turn = serde_json::json!({
                                 "choices": [{
                                     "delta": {
                                         "tool_calls": [{
                                             "index": 0,
-                                            "id": "call_bg",
+                                            "id": "call_stop",
                                             "function": {
-                                                "name": "bash",
-                                                "arguments": "{\"command\":\"sleep 5\",\"run_in_background\":true}"
+                                                "name": "task_stop",
+                                                "arguments": format!("{{\"task_id\":\"{}\"}}", task_id)
                                             }
                                         }]
                                     },
@@ -322,19 +362,60 @@ fn spawn_tool_then_text_openai_stream_server(
                                 }]
                             });
                             write_sse_chunk(&mut stream, tool_turn);
+                            state = MockServerState::AwaitStopResult;
+                            stage_clone.store(3, Ordering::SeqCst);
                         }
-                        continue;
+                        (MockServerState::AwaitStopResult, MockRequestClass::StopToolResult) => {
+                            let tool_turn = serde_json::json!({
+                                "choices": [{
+                                    "delta": {
+                                        "tool_calls": [{
+                                            "index": 0,
+                                            "id": "call_recovery_write",
+                                            "function": {
+                                                "name": "bash",
+                                                "arguments": recovery_write_args.clone()
+                                            }
+                                        }]
+                                    },
+                                    "finish_reason": "tool_calls"
+                                }]
+                            });
+                            write_sse_chunk(&mut stream, tool_turn);
+                            state = MockServerState::AwaitRecoveryWriteResult;
+                            stage_clone.store(4, Ordering::SeqCst);
+                        }
+                        (
+                            MockServerState::AwaitRecoveryWriteResult,
+                            MockRequestClass::RecoveryWriteToolResult,
+                        ) => {
+                            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+                            let reply = "data: {\"choices\":[{\"delta\":{\"content\":\"RECOVERED_E2E\"}}]}\n\n";
+                            let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
+                            let _ = stream.write_all(headers.as_bytes());
+                            let _ = stream.write_all(reply.as_bytes());
+                            let _ = stream.write_all(finish.as_bytes());
+                            let _ = stream.flush();
+                            state = MockServerState::Complete;
+                            stage_clone.store(5, Ordering::SeqCst);
+                        }
+                        (_, MockRequestClass::Unexpected { summary })
+                            if summary == "request has no HTTP body" =>
+                        {
+                            // A transport-level probe/abandoned connection carries no protocol
+                            // message and must not advance or poison the explicit mock state.
+                            write_http_error(&mut stream, "400 Bad Request", &summary);
+                        }
+                        (expected_state, actual) => {
+                            let message = format!(
+                                "premature or unexpected checkpoint mock request: expected={expected_state:?} actual={actual:?}"
+                            );
+                            eprintln!("{message}");
+                            write_http_error(&mut stream, "409 Conflict", &message);
+                            stage_clone.store(usize::MAX, Ordering::SeqCst);
+                            break;
+                        }
                     }
-
-                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
-                    let reply =
-                        "data: {\"choices\":[{\"delta\":{\"content\":\"RECOVERED_E2E\"}}]}\n\n";
-                    let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
-                    let _ = stream.write_all(headers.as_bytes());
-                    let _ = stream.write_all(reply.as_bytes());
-                    let _ = stream.write_all(finish.as_bytes());
-                    let _ = stream.flush();
-                    stage_clone.store(3, Ordering::SeqCst);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(20));
@@ -350,7 +431,13 @@ fn spawn_tool_then_text_openai_stream_server(
 fn wait_for_stage(stage: &Arc<AtomicUsize>, target: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if stage.load(Ordering::SeqCst) >= target {
+        let current = stage.load(Ordering::SeqCst);
+        assert_ne!(
+            current,
+            usize::MAX,
+            "checkpoint mock reported a premature or unexpected request",
+        );
+        if current >= target {
             return;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -363,21 +450,74 @@ fn wait_for_stage(stage: &Arc<AtomicUsize>, target: usize, timeout: Duration) {
 }
 
 #[cfg(unix)]
-fn wait_for_child_output(
-    mut child: std::process::Child,
+fn transcript_has_tool_call(entries: &[TranscriptEntry], call_id: &str) -> bool {
+    entries.iter().any(|entry| {
+        matches!(
+            entry,
+            TranscriptEntry::Message(message)
+                if message.message.get("role").and_then(|value| value.as_str()) == Some("assistant")
+                    && message
+                        .message
+                        .get("tool_calls")
+                        .and_then(|value| value.as_array())
+                        .is_some_and(|calls| calls.iter().any(|call| {
+                            call.get("id").and_then(|value| value.as_str()) == Some(call_id)
+                        }))
+        )
+    })
+}
+
+#[cfg(unix)]
+fn wait_for_transcript(
+    path: &Path,
     timeout: Duration,
-) -> std::process::Output {
+    description: &str,
+    accept: impl Fn(&[TranscriptEntry]) -> bool,
+) -> Vec<TranscriptEntry> {
     let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(_status) = child.try_wait().unwrap() {
-            return child.wait_with_output().unwrap();
+    let mut last_entries = Vec::new();
+    while Instant::now() < deadline {
+        last_entries = read_entries_tail(path, 64).expect("read checkpoint transcript barrier");
+        if accept(&last_entries) {
+            return last_entries;
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            panic!("child did not exit within {:?}", timeout);
-        }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(20));
     }
+    panic!(
+        "transcript barrier {description:?} was not reached within {timeout:?}; entries={last_entries:?}",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn transcript_barrier_observes_the_persisted_assistant_tool_call() {
+    if !git_available() {
+        return;
+    }
+    let fx = setup_fixture();
+    fx.session
+        .append_message(json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call_barrier",
+                "type": "function",
+                "function": { "name": "task_output", "arguments": "{}" }
+            }]
+        }))
+        .expect("append barrier fixture");
+    let transcript_path = fx
+        .session
+        .current_transcript_path()
+        .expect("resolve transcript")
+        .expect("transcript path");
+
+    let entries = wait_for_transcript(
+        &transcript_path,
+        Duration::from_secs(1),
+        "assistant tool call",
+        |entries| transcript_has_tool_call(entries, "call_barrier"),
+    );
+    assert!(transcript_has_tool_call(&entries, "call_barrier"));
 }
 
 #[test]
@@ -723,7 +863,13 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     )
     .unwrap();
 
-    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"))
+    let transcript_path = fx
+        .session
+        .current_transcript_path()
+        .unwrap()
+        .expect("transcript path");
+    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"));
+    command
         .current_dir(&fx.workdir)
         .arg("code")
         .env("HOME", &fx.home_path)
@@ -735,29 +881,19 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
-        .env("no_proxy", "127.0.0.1,localhost")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("chat child should start");
-
-    let mut stdin = child.stdin.take().expect("stdin should be piped");
-    stdin.write_all(b"say hi\n").unwrap();
-    stdin.flush().unwrap();
+        .env("no_proxy", "127.0.0.1,localhost");
+    let mut child = CheckpointChild::spawn(&mut command);
+    child.write_line("say hi");
 
     wait_for_stage(&stage, 2, Duration::from_secs(3));
-    // stage=2 仅表示 mock server 已把首段 delta 写到 socket；给客户端一点时间消费，
-    // 避免 SIGHUP 抢在 content_buf 吃到 partial 之前，导致用例退化成“建连后立刻中断”。
-    std::thread::sleep(Duration::from_millis(250));
-    // 运行中 SIGHUP 等价软中断；随后关闭 stdin 让进程在回到 prompt 后自然退出。
+    child.wait_for_stdout("partial from mock", Duration::from_secs(3));
     unsafe {
-        libc::kill(child.id() as i32, libc::SIGINT);
+        libc::kill(child.pid() as i32, libc::SIGINT);
     }
-    drop(stdin);
+    child.close_stdin();
 
-    let output = wait_for_child_output(child, Duration::from_secs(10));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let output = child.finish(Duration::from_secs(10));
+    let stderr = &output.stderr;
     assert!(
         output.status.success(),
         "运行中挂断后子进程应在 soft interrupt + EOF 下正常退出，stderr={stderr}"
@@ -767,11 +903,6 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         "挂断应走 Interrupted 持久化路径，stderr={stderr}"
     );
 
-    let transcript_path = fx
-        .session
-        .current_transcript_path()
-        .unwrap()
-        .expect("transcript path");
     let entries = read_entries_tail(&transcript_path, 16).unwrap();
     assert!(
         entries.iter().any(|entry| matches!(
@@ -812,7 +943,9 @@ fn test_hangup_during_tool_run_allows_same_process_followup() {
     common::setup_logging();
     let _span = info_span!("test_hangup_during_tool_run_allows_same_process_followup").entered();
     let fx = setup_fixture();
-    let (base_url, stage, handle) = spawn_tool_then_text_openai_stream_server();
+    let background_pid_path = fx.workdir.join("checkpoint-background.pid");
+    let (base_url, stage, handle) =
+        spawn_tool_then_text_openai_stream_server(background_pid_path.clone());
 
     let models_toml = fx.home_path.join(".tomcat").join("models.toml");
     fs::write(
@@ -831,7 +964,13 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     )
     .unwrap();
 
-    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"))
+    let transcript_path = fx
+        .session
+        .current_transcript_path()
+        .unwrap()
+        .expect("transcript path");
+    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"));
+    command
         .current_dir(&fx.workdir)
         .arg("code")
         .env("HOME", &fx.home_path)
@@ -843,29 +982,47 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
-        .env("no_proxy", "127.0.0.1,localhost")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("chat child should start");
-
-    let mut stdin = child.stdin.take().expect("stdin should be piped");
-    stdin.write_all(b"run slow tool\n").unwrap();
-    stdin.flush().unwrap();
+        .env("no_proxy", "127.0.0.1,localhost");
+    let mut child = CheckpointChild::spawn(&mut command);
+    let chat_pid = child.pid();
+    child.write_line("run slow tool");
 
     wait_for_stage(&stage, 2, Duration::from_secs(5));
-    std::thread::sleep(Duration::from_millis(250));
+    wait_for_transcript(
+        &transcript_path,
+        Duration::from_secs(5),
+        "assistant call_wait persisted before SIGINT",
+        |entries| transcript_has_tool_call(entries, "call_wait"),
+    );
+    child.wait_for_stderr("[tool] task_output", Duration::from_secs(5));
     unsafe {
-        libc::kill(child.id() as i32, libc::SIGINT);
+        libc::kill(chat_pid as i32, libc::SIGINT);
     }
-    std::thread::sleep(Duration::from_millis(250));
-    stdin.write_all(b"continue after interrupt\n").unwrap();
-    stdin.flush().unwrap();
-    drop(stdin);
+    child.wait_for_stderr("^C 已中断（partial 已保存）", Duration::from_secs(5));
+    wait_for_transcript(
+        &transcript_path,
+        Duration::from_secs(5),
+        "interrupted tool result persisted before followup",
+        |entries| {
+            entries.iter().any(|entry| matches!(
+                entry,
+                TranscriptEntry::Message(message)
+                    if message.message.get("role").and_then(|value| value.as_str()) == Some("tool")
+                        && message.message.get("tool_call_id").and_then(|value| value.as_str()) == Some("call_wait")
+                        && message.message.get("content").and_then(|value| value.as_str()) == Some("[interrupted]")
+            ))
+        },
+    );
+    assert_eq!(
+        child.pid(),
+        chat_pid,
+        "followup must use the original chat process"
+    );
+    child.write_line("continue after interrupt");
+    child.close_stdin();
 
-    let output = wait_for_child_output(child, Duration::from_secs(30));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let output = child.finish(Duration::from_secs(30));
+    let stderr = &output.stderr;
     assert!(
         output.status.success(),
         "同一子进程应在软中断后继续处理下一条输入并正常退出，stderr={stderr}"
@@ -875,15 +1032,14 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         "第二轮不应因 append_message_chain 退出，stderr={stderr}"
     );
     assert!(
-        stage.load(Ordering::SeqCst) >= 3,
-        "第二轮请求应命中 mock server，actual stage={}",
+        stderr.contains("^C 已中断（partial 已保存）"),
+        "soft interrupt prompt must be visible before same-process followup; stderr={stderr}",
+    );
+    assert!(
+        stage.load(Ordering::SeqCst) >= 5,
+        "exact followup, task cleanup, recovery write, and reply should complete; actual stage={}",
         stage.load(Ordering::SeqCst)
     );
-    let transcript_path = fx
-        .session
-        .current_transcript_path()
-        .unwrap()
-        .expect("transcript path");
     let entries = read_entries_tail(&transcript_path, 32).unwrap();
     assert!(
         entries.iter().any(|entry| matches!(
@@ -894,6 +1050,21 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
                     && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
         )),
         "第一轮被打断的工具调用应补 `[interrupted]` 到 transcript"
+    );
+
+    assert!(
+        entries.iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::Message(message)
+                if message.message.get("role").and_then(|value| value.as_str()) == Some("tool")
+                    && message.message.get("tool_call_id").and_then(|value| value.as_str()) == Some("call_stop")
+                    && message
+                        .message
+                        .get("content")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|content| content.contains("stopped") || content.contains("已停止"))
+        )),
+        "background task must be explicitly stopped before RECOVERED_E2E; entries={entries:?}",
     );
 
     let interrupted_idx = entries
@@ -927,6 +1098,39 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     assert!(
         interrupted_idx < user_idx && user_idx < assistant_idx,
         "第二轮输入与回复应位于 `[interrupted]` 之后；entries={entries:?}"
+    );
+
+    let checkpoints = fx
+        .store
+        .list(&fx.session_id, Default::default())
+        .expect("list checkpoint kinds after same-process recovery");
+    assert!(
+        checkpoints
+            .iter()
+            .any(|checkpoint| matches!(checkpoint.kind, CheckpointKind::Interrupt)),
+        "first turn must persist an Interrupt checkpoint; checkpoints={checkpoints:?}",
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .any(|checkpoint| matches!(checkpoint.kind, CheckpointKind::TurnEnd)),
+        "recovered turn must persist a TurnEnd checkpoint; checkpoints={checkpoints:?}",
+    );
+
+    let background_pid: i32 = fs::read_to_string(&background_pid_path)
+        .expect("background task should record its PID")
+        .trim()
+        .parse()
+        .expect("background PID should be numeric");
+    let alive = unsafe { libc::kill(background_pid, 0) };
+    assert_eq!(
+        alive, -1,
+        "task_stop must leave no orphaned background PID {background_pid}",
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "background PID should no longer exist",
     );
 
     handle.join().unwrap();

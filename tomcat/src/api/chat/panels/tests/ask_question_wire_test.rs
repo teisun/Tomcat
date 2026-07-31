@@ -1,13 +1,12 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
 
 use super::super::{
-    ask_question_request_event_name, ask_question_response_event_name, Answer, AskQuestionPanel,
-    AskQuestionResult, AskQuestionWireRequest, AskQuestionWireResponse, EventBusAskQuestionPanel,
-    Question, QuestionOption,
+    ask_question_request_event_name, ask_question_response_event_name, Answer, AskQuestionOutcome,
+    AskQuestionPanel, AskQuestionResult, AskQuestionTermination, AskQuestionWireRequest,
+    AskQuestionWireResponse, EventBusAskQuestionPanel, Question, QuestionOption,
 };
 use crate::infra::{DefaultEventBus, EventBus, EventContext};
 
@@ -39,7 +38,7 @@ fn sample_result() -> AskQuestionResult {
             skipped: false,
             picked_recommended: true,
         }],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }
 }
 
@@ -87,11 +86,11 @@ async fn event_bus_panel_round_trips_via_mock_host() {
     });
 
     let result = panel
-        .ask(vec![sample_question()], Arc::new(AtomicBool::new(false)))
+        .ask(vec![sample_question()], AskQuestionTermination::default())
         .await;
     host.await.expect("host task");
 
-    assert!(!result.cancelled);
+    assert_eq!(result.outcome, AskQuestionOutcome::Answered);
     assert_eq!(result.answers.len(), 1);
     assert_eq!(result.answers[0].question_id, "color");
     assert_eq!(result.answers[0].option_ids, vec!["red"]);
@@ -108,25 +107,25 @@ async fn event_bus_panel_round_trips_via_mock_host() {
 }
 
 #[tokio::test]
-async fn event_bus_panel_returns_cancelled_when_wait_is_aborted() {
+async fn event_bus_panel_returns_interrupted_when_wait_is_aborted() {
     let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
     let panel = EventBusAskQuestionPanel::new(bus);
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_for_task = cancel.clone();
+    let termination = AskQuestionTermination::default();
+    let termination_for_task = termination.clone();
     let aborter = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(30)).await;
-        cancel_for_task.store(true, Ordering::Relaxed);
+        termination_for_task.interrupt();
     });
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        panel.ask(vec![sample_question()], cancel),
+        panel.ask(vec![sample_question()], termination),
     )
     .await
     .expect("panel should observe cancel promptly");
     aborter.await.expect("abort task");
 
-    assert!(result.cancelled);
+    assert_eq!(result.outcome, AskQuestionOutcome::Interrupted);
     assert!(result.answers.is_empty());
 }
 
@@ -164,7 +163,7 @@ async fn event_bus_panel_request_event_carries_session_id() {
             request_id: req.request_id.clone(),
             result: AskQuestionResult {
                 answers: vec![],
-                cancelled: true,
+                outcome: crate::core::plan_runtime::AskQuestionOutcome::CancelledUnknown,
             },
         };
         bus_for_host
@@ -179,11 +178,11 @@ async fn event_bus_panel_request_event_carries_session_id() {
     });
 
     let result = panel
-        .ask(vec![sample_question()], Arc::new(AtomicBool::new(false)))
+        .ask(vec![sample_question()], AskQuestionTermination::default())
         .await;
     host.await.expect("host task");
 
-    assert!(result.cancelled);
+    assert_eq!(result.outcome, AskQuestionOutcome::CancelledUnknown);
     let ctx = captured_ctx
         .lock()
         .clone()
@@ -200,6 +199,8 @@ fn ask_question_wire_payload_serializes_as_camel_case() {
     let request = AskQuestionWireRequest {
         request_id: "ask-serde".into(),
         response_event: ask_question_response_event_name("ask-serde"),
+        session_id: Some("sid-ask-question".into()),
+        tool_call_id: Some("tool-call-serde".into()),
         questions: vec![sample_question()],
     };
     let request_value = serde_json::to_value(&request).expect("serialize wire request");
@@ -215,6 +216,8 @@ fn ask_question_wire_payload_serializes_as_camel_case() {
         request_value.get("responseEvent").and_then(|v| v.as_str()),
         Some(ask_question_response_event_name("ask-serde").as_str())
     );
+    assert_eq!(request_value["sessionId"], "sid-ask-question");
+    assert_eq!(request_value["toolCallId"], "tool-call-serde");
 
     let response = AskQuestionWireResponse {
         request_id: "ask-serde".into(),
@@ -266,5 +269,30 @@ fn ask_question_wire_payload_deserializes_camel_case_host_response() {
         response.result.answers[0].custom_text.as_deref(),
         Some("navy")
     );
+    assert_eq!(response.result.outcome, AskQuestionOutcome::Answered);
     assert!(!response.result.answers[0].picked_recommended);
+}
+
+#[tokio::test(start_paused = true)]
+async fn event_bus_panel_has_no_wall_clock_deadline_even_after_many_hours() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let panel = EventBusAskQuestionPanel::new(Arc::clone(&bus));
+    let termination = AskQuestionTermination::default();
+    let termination_for_task = termination.clone();
+    let task = tokio::spawn(async move {
+        panel
+            .ask(vec![sample_question()], termination_for_task)
+            .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(12 * 60 * 60)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "ask_question must remain pending without user input"
+    );
+
+    termination.interrupt();
+    let result = task.await.expect("panel task");
+    assert_eq!(result.outcome, AskQuestionOutcome::Interrupted);
 }

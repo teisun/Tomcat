@@ -1,4 +1,5 @@
 import type {
+  AskQuestionResult,
   AskQuestionWireRequest,
   ControlRequestFrame,
 } from "../../serveClient/protocol";
@@ -897,6 +898,71 @@ function buildHistoryToolArgsLookup(
   return lookup;
 }
 
+function buildHistoryToolResultIds(entries: unknown[]): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (
+      isRecord(entry) &&
+      entry.type === "message" &&
+      isRecord(entry.message) &&
+      entry.message.role === "tool"
+    ) {
+      const toolCallId = extractToolCallId(entry.message);
+      if (toolCallId) ids.add(toolCallId);
+    }
+  }
+  return ids;
+}
+
+function legacyAskQuestionPayload(entry: Record<string, unknown>): {
+  questions: unknown[];
+  result: Record<string, unknown>;
+  toolCallId: string;
+} | null {
+  const event = typeof entry.event === "string" ? entry.event : "";
+  if (![
+    "ask_question",
+    "ask_question.result",
+    "plan.ask_question",
+    "plan.ask_question.result",
+  ].includes(event)) return null;
+  const payload = isRecord(entry.payload) ? entry.payload : entry;
+  const request = isRecord(payload.request) ? payload.request : payload;
+  const questions = Array.isArray(request.questions) ? request.questions : null;
+  const result = isRecord(payload.result) ? payload.result : null;
+  const toolCallId =
+    asNonEmptyString(entry.tool_call_id) ??
+    asNonEmptyString(entry.toolCallId) ??
+    asNonEmptyString(payload.tool_call_id) ??
+    asNonEmptyString(payload.toolCallId);
+  return questions && result && toolCallId ? { questions, result, toolCallId } : null;
+}
+
+function applyLegacyAskQuestionCustomEntry(
+  session: WebviewSessionSnapshot,
+  entry: Record<string, unknown>,
+  historyToolArgs: Map<string, Record<string, unknown>>,
+  standardToolResultIds: Set<string>,
+  toolCallToAssistant: Map<string, string>,
+): boolean {
+  const legacy = legacyAskQuestionPayload(entry);
+  if (!legacy) return false;
+  if (standardToolResultIds.has(legacy.toolCallId)) return true;
+  const id = asNonEmptyString(entry.id) ?? `legacy-ask-question-${legacy.toolCallId}`;
+  session.timeline.push({
+    args: historyToolArgs.get(legacy.toolCallId) ?? { questions: legacy.questions },
+    assistantMessageId: toolCallToAssistant.get(legacy.toolCallId),
+    id,
+    isError: false,
+    status: "complete",
+    summary: JSON.stringify(legacy.result),
+    toolCallId: legacy.toolCallId,
+    toolName: "ask_question",
+    type: "tool",
+  });
+  return true;
+}
+
 function parseToolArgs(value: unknown): Record<string, unknown> | undefined {
   if (isRecord(value)) {
     return value;
@@ -1379,6 +1445,7 @@ function applyHistoryEntry(
   historyToolNames: Map<string, string>,
   toolCallToAssistant: Map<string, string>,
   historyToolArgs: Map<string, Record<string, unknown>>,
+  standardToolResultIds: Set<string>,
 ): void {
   if (!isRecord(entry) || typeof entry.type !== "string") {
     return;
@@ -1521,6 +1588,17 @@ function applyHistoryEntry(
   }
 
   if (entry.type === "custom") {
+    if (
+      applyLegacyAskQuestionCustomEntry(
+        session,
+        entry,
+        historyToolArgs,
+        standardToolResultIds,
+        toolCallToAssistant,
+      )
+    ) {
+      return;
+    }
     applyHistoryPlanCustomEntry(session, entry);
   }
 }
@@ -1946,6 +2024,7 @@ function shouldRetainLiveTimelineItem(
       return (
         item.status === "running" ||
         item.status === "streaming" ||
+        (item.toolName === "ask_question" && typeof item.summary === "string") ||
         (typeof item.assistantMessageId === "string" &&
           assistantGroupIds.has(item.assistantMessageId))
       );
@@ -2435,11 +2514,24 @@ export class WebviewStateStore {
     delete message.retryable;
   }
 
-  resolveApproval(requestId: string): void {
+  resolveApproval(requestId: string, result?: AskQuestionResult): void {
     for (const session of Object.values(this.state.sessionViews)) {
       for (const item of session.timeline) {
         if (item.type === "approval" && item.request.requestId === requestId) {
           item.resolved = true;
+          if (result) {
+            const toolCallId = item.request.toolCallId ?? item.request.requestId;
+            upsertTimelineItem(session, {
+              args: { questions: item.request.questions },
+              id: `ask-question-result-${toolCallId}`,
+              isError: false,
+              status: "complete",
+              summary: JSON.stringify(result),
+              toolCallId,
+              toolName: "ask_question",
+              type: "tool",
+            });
+          }
         }
       }
     }
@@ -2453,6 +2545,9 @@ export class WebviewStateStore {
       frame.type === "insertReference" ||
       frame.type === "attachFilesResult" ||
       frame.type === "attachmentFeedback" ||
+      frame.type === "composerWorkResult" ||
+      frame.type === "draftForkResult" ||
+      frame.type === "captureDraftForFork" ||
       frame.type === "preview.ready" ||
       frame.type === "preview.select" ||
       frame.type === "preview.save" ||
@@ -2882,6 +2977,7 @@ export class WebviewStateStore {
     const historyToolNames = buildHistoryToolNameLookup(renderableEntries);
     const toolCallToAssistant = buildToolCallToAssistantMap(renderableEntries);
     const historyToolArgs = buildHistoryToolArgsLookup(renderableEntries);
+    const standardToolResultIds = buildHistoryToolResultIds(renderableEntries);
     const historySession = createEmptySession(sessionId);
     for (const entry of renderableEntries) {
       applyHistoryEntry(
@@ -2890,6 +2986,7 @@ export class WebviewStateStore {
         historyToolNames,
         toolCallToAssistant,
         historyToolArgs,
+        standardToolResultIds,
       );
     }
     const existingKeys = new Set(

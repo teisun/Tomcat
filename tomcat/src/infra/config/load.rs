@@ -41,6 +41,7 @@ fn load_config_impl(
     // 防止 shell 中误设的 `TOMCAT__SECURITY__*` / `TOMCAT__LLM__API_KEY*`
     // 静默覆盖磁盘配置造成提权。
     sanitize_sensitive_env(config_path);
+    warn_removed_ask_question_timeout(config_path);
 
     let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
@@ -65,6 +66,43 @@ fn load_config_impl(
         .map_err(|e| AppError::Config(e.to_string()))?;
     validate_config(&merged)?;
     Ok(merged)
+}
+
+fn warn_removed_ask_question_timeout(config_path: Option<&Path>) {
+    for source in removed_ask_question_timeout_sources(config_path) {
+        tracing::warn!(
+            target: "config",
+            source,
+            "ask_question timeout was removed and is ignored; questions now wait until answered, interrupted, or disconnected"
+        );
+    }
+}
+
+pub(crate) fn removed_ask_question_timeout_sources(
+    config_path: Option<&Path>,
+) -> Vec<&'static str> {
+    let mut sources = Vec::new();
+    if config_path.is_some_and(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| content.parse::<toml::Value>().ok())
+            .and_then(|value| {
+                value
+                    .get("ask_question")
+                    .and_then(|table| table.get("timeout_ms"))
+                    .cloned()
+            })
+            .is_some()
+    }) {
+        sources.push("ask_question.timeout_ms");
+    }
+    if std::env::var_os("TOMCAT_ASK_QUESTION_TIMEOUT_MS").is_some() {
+        sources.push("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
+    }
+    if std::env::var_os("TOMCAT__ASK_QUESTION__TIMEOUT_MS").is_some() {
+        sources.push("TOMCAT__ASK_QUESTION__TIMEOUT_MS");
+    }
+    sources
 }
 
 /// 把 TOML 文件中已声明的敏感 key 对应的 env vars 从进程环境中移除，避免

@@ -6,6 +6,7 @@ const repoRoot = path.resolve(__dirname, "../../../");
 type HostE2eHelper = {
   assertWebviewPlanModeSwitchFlow(api: unknown): Promise<void>;
   assertWebviewAnswerCardFlow(api: unknown): Promise<void>;
+  assertWebviewQuestionDisconnectFlow(api: unknown): Promise<void>;
   assertTranscriptUiFlow(api: unknown): Promise<void>;
   assertTranscriptSwitchBackOrder(api: unknown): Promise<void>;
   assertWebviewAddModelsFlow(api: unknown): Promise<void>;
@@ -157,6 +158,11 @@ suite("Installed Tomcat extension", () => {
   test("renders ask_question answers in the Tomcat webview transcript", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewAnswerCardFlow(api);
+  });
+
+  test("hydrates Disconnected after an irrecoverable serve/extension-host restart", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewQuestionDisconnectFlow(api);
   });
 
   test("resets interrupted Tomcat webview sessions back to send mode", async () => {

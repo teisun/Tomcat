@@ -68,7 +68,10 @@ fn summarization_prompt_contains_all_section_headings() {
 #[test]
 fn summarization_prompt_no_longer_asks_the_model_for_user_quotes() {
     // 让模型复述用户原话正是伪造用户指令的来源；改由 machine_block 逐字拼接。
-    for banned in ["## Recent User Messages", "10 most recent non-tool user messages"] {
+    for banned in [
+        "## Recent User Messages",
+        "10 most recent non-tool user messages",
+    ] {
         assert!(
             !SUMMARIZATION_PROMPT.contains(banned),
             "BASE prompt 不应再要求模型复述用户消息：{banned}",

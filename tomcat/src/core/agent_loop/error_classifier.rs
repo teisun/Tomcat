@@ -29,9 +29,7 @@ use crate::infra::error::{
 };
 use crate::infra::events::AgentEvent;
 
-use super::types::{
-    AgentLoop, LoopError, OverflowTrimStats, UnsupportedMultimodalRetryStats,
-};
+use super::types::{AgentLoop, LoopError, OverflowTrimStats, UnsupportedMultimodalRetryStats};
 
 fn err_snippet(s: &str) -> String {
     s.chars().take(200).collect()

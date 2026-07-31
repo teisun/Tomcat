@@ -21,15 +21,19 @@ function formatSessionLabel(session: WebviewSessionTab): string {
 
 export function SessionBar({
   activeSessionId,
+  creating = false,
   onNewSession,
   ready,
   onSwitchSession,
+  pendingQuestionCounts = {},
   sessions,
 }: {
   activeSessionId: string | null;
+  creating?: boolean;
   onNewSession(): void;
   ready: boolean;
   onSwitchSession(sessionId: string): void;
+  pendingQuestionCounts?: Record<string, number>;
   sessions: WebviewSessionTab[];
 }) {
   const [open, setOpen] = useState(false);
@@ -42,6 +46,10 @@ export function SessionBar({
     () => sessions.find((session) => session.sessionId === activeSessionId) ?? null,
     [sessions, activeSessionId],
   );
+
+  useEffect(() => {
+    if (creating) setOpen(false);
+  }, [creating]);
 
   useEffect(() => {
     if (!open) {
@@ -104,6 +112,7 @@ export function SessionBar({
         aria-label="Tomcat session"
         className="tc-topbar__trigger"
         data-testid="session-select"
+        disabled={creating}
         onClick={() => setOpen((value) => !value)}
         type="button"
       >
@@ -113,13 +122,15 @@ export function SessionBar({
         </span>
       </button>
       <button
-        aria-label="Create new session"
+        aria-busy={creating}
+        aria-label={creating ? "Creating new session" : "Create new session"}
         className="tc-icon-button tc-topbar__new"
         data-testid="new-session-button"
+        disabled={creating}
         onClick={onNewSession}
         type="button"
       >
-        +
+        {creating ? "…" : "+"}
       </button>
       {open ? (
         <div className="tc-session-dropdown" data-testid="session-dropdown" role="listbox">
@@ -139,9 +150,17 @@ export function SessionBar({
                   </h3>
                   {visible.map((session) => {
                     const isActive = session.sessionId === activeSessionId;
+                    const pendingCount = isActive
+                      ? 0
+                      : (pendingQuestionCounts[session.sessionId] ?? 0);
                     return (
                       <button
                         aria-current={isActive ? "true" : undefined}
+                        aria-label={`${formatSessionLabel(session)}${
+                          pendingCount > 0
+                            ? `, ${pendingCount} pending ${pendingCount === 1 ? "question" : "questions"}`
+                            : ""
+                        }`}
                         className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
                         data-testid="session-option"
                         key={session.sessionId}
@@ -152,6 +171,15 @@ export function SessionBar({
                         <span className="tc-session-item__title">
                           {formatSessionLabel(session)}
                         </span>
+                        {pendingCount > 0 ? (
+                          <span
+                            aria-hidden="true"
+                            className="tc-session-item__pending-badge"
+                            data-testid="session-pending-badge"
+                          >
+                            {pendingCount}
+                          </span>
+                        ) : null}
                       </button>
                     );
                   })}

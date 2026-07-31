@@ -55,9 +55,6 @@ pub struct AppConfig {
     /// reviewer 内联子 Agent 派发参数（T2-P1-004 RV-A/B/E）。
     #[serde(default)]
     pub reviewer: ReviewerConfig,
-    /// `ask_question` 工具参数（GAP-N12）。
-    #[serde(default)]
-    pub ask_question: AskQuestionConfig,
     /// session-local todos 工具参数（GAP-N12 / G3）。
     #[serde(default)]
     pub todos: TodosConfig,

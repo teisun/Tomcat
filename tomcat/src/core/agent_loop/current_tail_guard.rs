@@ -293,7 +293,10 @@ fn reduce_before_next_llm(
             ctx_state.invalidate_api_usage();
         }
         for tool_call_id in &placeholder.tool_call_ids {
-            agent.config.read_file_state.invalidate_tool_call(tool_call_id);
+            agent
+                .config
+                .read_file_state
+                .invalidate_tool_call(tool_call_id);
         }
         placeholder.chars_freed
     };
@@ -432,7 +435,10 @@ fn reduce_current_tail_messages(
 
     rewrite_transcript_best_effort(&ctx_state.transcript_path, transcript_rewrites);
     for tool_call_id in &evicted_tool_call_ids {
-        agent.config.read_file_state.invalidate_tool_call(tool_call_id);
+        agent
+            .config
+            .read_file_state
+            .invalidate_tool_call(tool_call_id);
     }
     Ok(result)
 }
@@ -648,14 +654,8 @@ pub async fn build_collapse_summary_artifacts_for_test(
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // 这里不再自己拼一份 keepalive —— 两份机器区块只会互相矛盾。
     let control = plan_runtime.map(|rt| rt.control_snapshot(session_model));
-    let summary_text = generate_summary(
-        &working,
-        None,
-        llm,
-        compaction_model,
-        control.as_ref(),
-    )
-    .await?;
+    let summary_text =
+        generate_summary(&working, None, llm, compaction_model, control.as_ref()).await?;
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
     let covered_count = working
         .iter()
@@ -832,10 +832,6 @@ fn log_aggregate_precheck_decision(decision: &AggregatePrecheckDecision) {
         after_collapse = ?decision.after_collapse
     );
 }
-
-
-
-
 
 fn text_content_mut(msg: &mut ChatMessage) -> Option<&mut String> {
     match msg.content.as_mut() {

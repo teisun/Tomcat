@@ -590,7 +590,6 @@ async fn inprocess_full_plan_path_with_real_llm() {
     common::setup_logging();
     let _home_guard = common::TempHomeGuard::new();
     ensure_plans_dir();
-    std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "5000");
     std::env::set_var("TOMCAT__LLM__DEFAULT_MODEL", default_model());
     std::env::set_var("TOMCAT__LLM__PROVIDER", "openai");
     std::env::set_var("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE);

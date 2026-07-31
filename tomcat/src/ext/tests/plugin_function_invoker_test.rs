@@ -6,8 +6,8 @@ use crate::ext::{
 };
 use crate::infra::{DefaultEventBus, TracingAuditRecorder};
 use crate::{
-    AppError, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider,
-    LlmResolver, LlmScene, ResolvedCall, StreamEvent,
+    AppError, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, LlmResolver,
+    LlmScene, ResolvedCall, StreamEvent,
 };
 use async_trait::async_trait;
 use futures_util::stream;

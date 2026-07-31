@@ -8,7 +8,12 @@ import type {
   WebviewTimelineItem,
   WebviewTodo,
 } from "../types";
-import { ApprovalCard } from "./ApprovalCard";
+import {
+  ApprovalCard,
+  approvalAnswerKey,
+  type ApprovalAnswerDraft,
+  type ApprovalAnswerState,
+} from "./ApprovalCard";
 import { BoundaryBlock } from "./BoundaryBlock";
 import { CheckpointMarker } from "./CheckpointMarker";
 import { injectCheckpointMarkers } from "./checkpointMarkers";
@@ -106,6 +111,7 @@ export function partitionAssistantResponseGroup(
 }
 
 export function TranscriptView({
+  approvalAnswers = {},
   availableModels = [],
   buildModel = "",
   busy,
@@ -113,6 +119,7 @@ export function TranscriptView({
   canBuildPlan,
   checkpoints = [],
   onAnswer,
+  onApprovalDraftChange,
   onBuildPlan,
   onOpenDiff,
   onOpenFile,
@@ -131,13 +138,19 @@ export function TranscriptView({
   mediaRoots,
   transcriptRef,
 }: {
+  approvalAnswers?: Record<string, ApprovalAnswerState>;
   availableModels?: string[];
   buildModel?: string;
   busy: boolean;
   bottomSpacerHeight?: number;
   canBuildPlan: boolean;
   checkpoints?: WebviewCheckpoint[];
-  onAnswer(requestId: string, result: AskQuestionResult): void;
+  onAnswer(sessionId: string, requestId: string, result: AskQuestionResult): void;
+  onApprovalDraftChange(
+    sessionId: string,
+    requestId: string,
+    draft: ApprovalAnswerDraft,
+  ): void;
   onBuildPlan(planId: string | null, path: string): void;
   onOpenDiff?(toolCallId: string): void;
   onOpenFile(path: string, line?: number): void;
@@ -231,8 +244,21 @@ export function TranscriptView({
           return null;
         case "review":
           return <ReviewRow item={item} key={item.id} />;
-        case "approval":
-          return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
+        case "approval": {
+          const answerState = approvalAnswers[
+            approvalAnswerKey(item.sessionId ?? "", item.request.requestId)
+          ];
+          return (
+            <ApprovalCard
+              draft={answerState?.draft}
+              item={item}
+              key={item.id}
+              onAnswer={onAnswer}
+              onDraftChange={onApprovalDraftChange}
+              submitting={answerState?.submitting}
+            />
+          );
+        }
       }
     };
 

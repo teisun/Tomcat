@@ -13,13 +13,13 @@ use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcom
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::system_prompt::render_available_skills_prompt;
 use crate::core::llm::{ChatMessage, LlmProvider, LlmResolver, LlmScene, ResolvedCall};
-use crate::core::plan_runtime::explorer::{
-    build_explorer_prompt, explorer_system_prompt_text, ExplorerReport, ExplorerTask,
-    EXPLORER_ALLOWED_TOOLS,
-};
 use crate::core::plan_runtime::code_reviewer::{
     build_code_review_prompt, code_review_system_prompt_text,
     code_reviewer_allowed_tools_with_policy, collect_git_diff_context, CodeReviewSummary,
+};
+use crate::core::plan_runtime::explorer::{
+    build_explorer_prompt, explorer_system_prompt_text, ExplorerReport, ExplorerTask,
+    EXPLORER_ALLOWED_TOOLS,
 };
 use crate::core::plan_runtime::plan_reviewer::{
     build_review_prompt, plan_reviewer_allowed_tools_with_policy, reviewer_system_prompt_text,
@@ -764,7 +764,10 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
         let Some(deps) = self.deps.as_ref() else {
             return ExplorerReport::aborted_with(
                 &task.id,
-                format!("[{}] explorer 子 Agent 未注入依赖（stub 模式）", self.origin),
+                format!(
+                    "[{}] explorer 子 Agent 未注入依赖（stub 模式）",
+                    self.origin
+                ),
             );
         };
         let Some(plan_runtime) = deps.plan_runtime.upgrade() else {

@@ -400,7 +400,6 @@ fn run_tomcat_chat(
         .args(args)
         .env("SHELL", "/bin/zsh")
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, &fx.api_key)
-        .env("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "5000")
         .env("TOMCAT__LLM__PROVIDER", "openai")
         .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
         .env(

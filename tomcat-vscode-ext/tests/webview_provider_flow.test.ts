@@ -2891,6 +2891,7 @@ describe("webview provider integration", () => {
     await provider.dispatchTestIntent({
       data: {
         requestId: "ask-1",
+        sessionId: "session-1",
         result: {
           answers: [
             {
@@ -2970,6 +2971,7 @@ describe("webview provider integration", () => {
     await provider.dispatchTestIntent({
       data: {
         requestId: "ask-2",
+        sessionId: "session-1",
         result: {
           answers: [],
           cancelled: true,
@@ -2987,6 +2989,70 @@ describe("webview provider integration", () => {
       },
     });
 
+    provider.dispose();
+  });
+
+  it("keeps pending questions across webview reload, finalizes on child exit, and rejects late clicks", async () => {
+    const { provider } = buildProvider();
+    await provider.dispatchTestIntent({ messageId: "ready-before-reload", type: "ready" });
+    const childLifetime = new AbortController();
+    const responsePromise = provider.askUser(
+      {
+        questions: [{
+          id: "q-exit",
+          options: [{ id: "continue", label: "Continue", recommended: true }],
+          prompt: "Continue after reload?",
+        }],
+        requestId: "ask-exit",
+        responseEvent: "response-ask-exit",
+      },
+      "session-1",
+      childLifetime.signal,
+    );
+
+    await provider.dispatchTestIntent({ messageId: "ready-after-reload", type: "ready" });
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          request: expect.objectContaining({ requestId: "ask-exit" }),
+          resolved: false,
+          type: "approval",
+        }),
+      ]),
+    );
+
+    childLifetime.abort(new Error("serve pipe closed"));
+    await expect(responsePromise).resolves.toEqual({
+      requestId: "ask-exit",
+      result: { answers: [], cancelled: true, outcome: "host_disconnected" },
+    });
+
+    await provider.dispatchTestIntent({
+      data: {
+        requestId: "ask-exit",
+        sessionId: "session-1",
+        result: {
+          answers: [{
+            optionIds: ["continue"],
+            pickedRecommended: true,
+            questionId: "q-exit",
+          }],
+          cancelled: false,
+          outcome: "answered",
+        },
+      },
+      messageId: "late-answer-after-exit",
+      type: "answerQuestion",
+    });
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "notice",
+          text: expect.stringContaining("no longer active"),
+          type: "message",
+        }),
+      ]),
+    );
     provider.dispose();
   });
 

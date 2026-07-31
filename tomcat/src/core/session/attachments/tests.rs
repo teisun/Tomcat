@@ -273,7 +273,10 @@ fn mark_and_list_pending() {
     let sha = store.put(&minimal_png()).unwrap();
     store.mark_pending("s1", &sha).unwrap();
     assert_eq!(store.list_pending("s1").unwrap(), vec![sha]);
-    assert!(store.list_pending("s2").unwrap().is_empty(), "会话之间必须隔离");
+    assert!(
+        store.list_pending("s2").unwrap().is_empty(),
+        "会话之间必须隔离"
+    );
 }
 
 #[test]
@@ -325,6 +328,90 @@ fn touch_pending_ignores_missing_blob() {
     assert!(store.list_pending("s1").unwrap().is_empty());
 }
 
+#[test]
+fn retain_pending_batch_deduplicates_and_is_idempotent() {
+    let (_tmp, store) = setup();
+    let blob_sha = store.put(b"original rendition").unwrap();
+    let provider_sha = store.put(b"provider rendition").unwrap();
+    store.mark_pending("source", &blob_sha).unwrap();
+    store.mark_pending("target", &blob_sha).unwrap();
+    let existing_path = store.root().join("pending/target").join(&blob_sha);
+    let existing_mtime = std::fs::metadata(&existing_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let retained = store
+        .retain_pending_batch(
+            "target",
+            vec![blob_sha.clone(), provider_sha.clone(), blob_sha.clone()],
+        )
+        .unwrap();
+    let mut expected = vec![blob_sha.clone(), provider_sha.clone()];
+    expected.sort();
+    assert_eq!(retained, expected);
+    assert_eq!(store.list_pending("target").unwrap(), expected);
+    assert_eq!(
+        std::fs::metadata(existing_path)
+            .unwrap()
+            .modified()
+            .unwrap(),
+        existing_mtime,
+        "幂等 retain 不得重写已有 marker"
+    );
+    assert_eq!(
+        store.list_pending("source").unwrap(),
+        vec![blob_sha],
+        "目标 retain 不得改动源租约"
+    );
+}
+
+#[test]
+fn retain_pending_batch_validates_every_sha_before_writing() {
+    let (_tmp, store) = setup();
+    let valid = store.put(b"valid blob").unwrap();
+    let missing = "1".repeat(64);
+    assert!(store
+        .retain_pending_batch("target", vec![valid.clone(), missing])
+        .is_err());
+    assert!(store.list_pending("target").unwrap().is_empty());
+
+    assert!(store
+        .retain_pending_batch("target", vec![valid, "not-a-sha".to_string()])
+        .is_err());
+    assert!(store.list_pending("target").unwrap().is_empty());
+}
+
+#[test]
+fn retain_pending_batch_rolls_back_only_markers_created_by_that_call() {
+    let (_tmp, store) = setup();
+    let mut shas = vec![
+        store.put(b"first").unwrap(),
+        store.put(b"second").unwrap(),
+        store.put(b"third").unwrap(),
+    ];
+    shas.sort();
+    store.mark_pending("target", &shas[0]).unwrap();
+
+    let error = store
+        .retain_pending_batch_inner("target", shas.clone(), |index, _| {
+            if index == 2 {
+                Err(crate::AppError::Config(
+                    "injected lease failure".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("injected lease failure"));
+    assert_eq!(
+        store.list_pending("target").unwrap(),
+        vec![shas[0].clone()],
+        "已有 marker 必须保留，本次在失败前创建的 marker 必须回滚"
+    );
+}
+
 // ── TTL GC 三分支 ─────────────────────────────────────────────────────
 
 #[test]
@@ -367,7 +454,9 @@ fn gc_leaves_fresh_lease_alone() {
     let sha = store.put(&minimal_png()).unwrap();
     store.mark_pending("s1", &sha).unwrap();
 
-    let report = store.gc_pending(PENDING_BLOB_TTL, &nothing_referenced).unwrap();
+    let report = store
+        .gc_pending(PENDING_BLOB_TTL, &nothing_referenced)
+        .unwrap();
 
     assert_eq!(report, Default::default(), "未超期的租约不应被动");
     assert!(store.exists(&sha));
@@ -396,7 +485,9 @@ fn gc_keeps_blob_still_leased_by_another_session() {
 fn gc_on_empty_store_is_a_no_op() {
     let (_tmp, store) = setup();
     assert_eq!(
-        store.gc_pending(PENDING_BLOB_TTL, &nothing_referenced).unwrap(),
+        store
+            .gc_pending(PENDING_BLOB_TTL, &nothing_referenced)
+            .unwrap(),
         Default::default()
     );
 }
@@ -444,7 +535,14 @@ fn invalid_session_ids_are_rejected_inside_the_module() {
     // 不把路径安全性寄托在调用方：即使今天所有调用方都传可信 id，模块也要自己守住。
     let (_tmp, store) = setup();
     let sha = store.put(&minimal_png()).unwrap();
-    for bad in ["", "../escape", "a/b", "with space", "dot.dot", &"x".repeat(129)] {
+    for bad in [
+        "",
+        "../escape",
+        "a/b",
+        "with space",
+        "dot.dot",
+        &"x".repeat(129),
+    ] {
         assert!(
             store.mark_pending(bad, &sha).is_err(),
             "session id {bad:?} 应被拒绝"
@@ -478,11 +576,20 @@ fn exposes_roots_for_webview_resource_configuration() {
 
 #[test]
 fn safe_filename_strips_path_components_and_fills_defaults() {
-    assert_eq!(safe_filename(Some("../../etc/passwd"), "image/png"), "passwd");
+    assert_eq!(
+        safe_filename(Some("../../etc/passwd"), "image/png"),
+        "passwd"
+    );
     assert_eq!(safe_filename(Some("a\\b\\c.png"), "image/png"), "c.png");
     assert_eq!(safe_filename(None, "image/png"), "pasted-image.png");
-    assert_eq!(safe_filename(Some("  "), "image/svg+xml"), "pasted-image.svg");
-    assert_eq!(safe_filename(Some(".."), "application/pdf"), "attached-file.pdf");
+    assert_eq!(
+        safe_filename(Some("  "), "image/svg+xml"),
+        "pasted-image.svg"
+    );
+    assert_eq!(
+        safe_filename(Some(".."), "application/pdf"),
+        "attached-file.pdf"
+    );
 
     let long = format!("{}.png", "n".repeat(300));
     let truncated = safe_filename(Some(&long), "image/png");
@@ -541,7 +648,9 @@ fn eviction_leaves_unreferenced_garbage_to_the_collector() {
         .unwrap();
     assert_eq!(freed, 0);
 
-    let report = store.gc_pending(Duration::ZERO, &nothing_referenced).unwrap();
+    let report = store
+        .gc_pending(Duration::ZERO, &nothing_referenced)
+        .unwrap();
     assert_eq!(report.blobs_deleted, 0, "没有租约就不会进入 GC 的扫描范围");
     assert!(store.exists(&sha));
 }
@@ -558,7 +667,10 @@ fn eviction_drops_thumbnails_before_anything_else_when_over_budget() {
         .unwrap();
 
     assert!(freed >= 2048);
-    assert!(!store.has_thumbnail(&source), "缩略图可以重新生成，先淘汰它");
+    assert!(
+        !store.has_thumbnail(&source),
+        "缩略图可以重新生成，先淘汰它"
+    );
     assert!(store.exists(&source), "源字节仍在租约里，必须留下");
 }
 
@@ -579,7 +691,9 @@ fn eviction_is_a_no_op_within_budget() {
 fn materialize_from_transcript_does_not_create_a_lease() {
     // 历史图落盘只是「为了有个 URL 可以指」，不是未发送内容，不该占租约。
     let (_tmp, store) = setup();
-    let sha = store.materialize_from_transcript(b"history image bytes").unwrap();
+    let sha = store
+        .materialize_from_transcript(b"history image bytes")
+        .unwrap();
 
     assert!(store.exists(&sha));
     assert!(store.list_pending("sid_any").unwrap().is_empty());

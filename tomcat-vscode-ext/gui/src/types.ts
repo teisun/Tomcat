@@ -1,4 +1,8 @@
 import type { AttachmentCandidate } from "../../src/shared/attachmentProtocol";
+import type {
+  DraftForkCapture,
+  DraftForkResult,
+} from "../../src/shared/draftForkProtocol";
 
 export type WebviewReferenceKind = "selection" | "file";
 
@@ -277,9 +281,17 @@ export interface AskQuestionAnswer {
   skipped?: boolean;
 }
 
+export type AskQuestionOutcome =
+  | "answered"
+  | "skipped"
+  | "interrupted"
+  | "host_disconnected"
+  | "cancelled_unknown";
+
 export interface AskQuestionResult {
   answers: AskQuestionAnswer[];
   cancelled: boolean;
+  outcome?: AskQuestionOutcome;
 }
 
 export interface WebviewApprovalCard {
@@ -423,6 +435,25 @@ export type HostToWebviewFrame =
             type: "insertReference";
           }
         | {
+            error?: string;
+            operationId: string;
+            sessionId: string;
+            success: boolean;
+            type: "composerWorkResult";
+          }
+        | {
+            accepted: boolean;
+            requestId: string;
+            sessionId: string;
+            type: "answerQuestionResult";
+          }
+        | (DraftForkResult & { type: "draftForkResult" })
+        | {
+            operationId: string;
+            sourceSessionId: string;
+            type: "captureDraftForFork";
+          }
+        | {
             type: "__test.capture_dom";
           }
         | {
@@ -463,6 +494,7 @@ export type WebviewIntent =
       data: {
         requestId: string;
         result: AskQuestionResult;
+        sessionId: string;
       };
     }
   | {
@@ -499,6 +531,11 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "forkSession";
+      data: DraftForkCapture;
+    }
+  | {
+      messageId: string;
       type: "prompt" | "steer";
       data: {
         segments?: WebviewMessageSegment[];
@@ -511,6 +548,7 @@ export type WebviewIntent =
       messageId: string;
       type: "pickContext";
       data?: {
+        operationId?: string;
         sessionId?: string | null;
       };
     }
@@ -567,6 +605,7 @@ export type WebviewIntent =
       type: "attachFiles";
       data: {
         files: AttachmentCandidate[];
+        operationId?: string;
         sessionId: string;
       };
     }
@@ -645,6 +684,7 @@ export type WebviewIntent =
       messageId: string;
       type: "resolveDrop";
       data: {
+        operationId?: string;
         sessionId?: string | null;
         uris: string[];
       };
@@ -687,6 +727,8 @@ export type WebviewIntent =
       type: "__test.dom_snapshot";
       data: {
         activeSessionId: string | null;
+        answerCardCount: number;
+        answerOutcomes: string[];
         approvalCount: number;
         approvalInputTestIds: string[];
         approvalOptionStates: Array<{
@@ -778,6 +820,7 @@ export type WebviewIntent =
     };
 
 export interface VsCodeApiLike {
+  getState?(): unknown;
   postMessage(message: WebviewIntent): void;
   setState?(state: unknown): void;
 }

@@ -2,8 +2,6 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 
-import { runTests } from "@vscode/test-electron";
-
 import {
   createHostE2eFixture,
   resolveVsCodeCli,
@@ -17,9 +15,16 @@ async function main(): Promise<void> {
   const harnessRoot = path.resolve(extensionRoot, "e2e-harness");
   const harnessTestsPath = path.resolve(harnessRoot, "out/test/index.js");
   const installRoot = await fs.mkdtemp("/tmp/tvsi-");
-  const extensionsDir = path.join(installRoot, "extensions");
+  const originalCwd = process.cwd();
+  process.chdir(installRoot);
+  const { runTests } = await import("@vscode/test-electron");
+  process.chdir(originalCwd);
+  const extensionsDir = path.join(installRoot, ".vscode-test", "extensions");
   const userDataDir = path.join(installRoot, "user-data");
   const fixture = await createHostE2eFixture();
+  const electronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
+  delete process.env.ELECTRON_RUN_AS_NODE;
+  delete fixture.env.ELECTRON_RUN_AS_NODE;
 
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
@@ -56,14 +61,18 @@ async function main(): Promise<void> {
       extensionTestsEnv: fixture.env,
       extensionTestsPath: harnessTestsPath,
       launchArgs: [
-        path.resolve(extensionRoot, ".."),
-        `--extensions-dir=${extensionsDir}`,
         `--user-data-dir=${userDataDir}`,
+        path.resolve(extensionRoot, ".."),
       ],
-      reuseMachineInstall: true,
+      reuseMachineInstall: false,
       vscodeExecutablePath: resolveVsCodeExecutable(),
     });
   } finally {
+    if (electronRunAsNode === undefined) {
+      delete process.env.ELECTRON_RUN_AS_NODE;
+    } else {
+      process.env.ELECTRON_RUN_AS_NODE = electronRunAsNode;
+    }
     await fixture.cleanup();
     await fs.rm(installRoot, { force: true, recursive: true });
   }

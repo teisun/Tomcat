@@ -96,7 +96,8 @@ fn should_apply_completion_guard(agent: &AgentLoop) -> Option<String> {
     if !agent.config.subagent_type.is_root() {
         return None;
     }
-    agent.config
+    agent
+        .config
         .plan_runtime
         .as_ref()
         .and_then(|rt| completion_guard_instruction(rt))
@@ -171,7 +172,10 @@ pub(super) async fn finalize_turn_after_text(
         // 正文已经不在上下文里了，对应的 read stamp 必须一起作废，否则下一次 read
         // 会拿到「和上次一样，参考上次结果」——而上次结果现在是个占位符。
         for tool_call_id in &l0.evicted_tool_call_ids {
-            agent.config.read_file_state.invalidate_tool_call(tool_call_id);
+            agent
+                .config
+                .read_file_state
+                .invalidate_tool_call(tool_call_id);
         }
         let persist_tok = estimated_tokens_from_chars(l0.persist_chars_freed);
         let placeholder_tok = estimated_tokens_from_chars(l0.placeholder_chars_freed);

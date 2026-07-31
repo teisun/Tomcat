@@ -14,7 +14,7 @@ use crate::core::session::transcript::{
     read_entries_tail_with_stats, BranchSummaryEntry, TranscriptEntry, TranscriptReadStats,
 };
 use crate::core::session::{
-    append_message_chain::collect_recent_chat_messages_from_tail, find_dangling_tail_tool_call_ids,
+    append_message_chain::collect_recent_chat_messages_from_tail, find_dangling_tail_tool_calls,
 };
 use crate::infra::config::{compute_context_budget_chars, ContextConfig, ResumeHydrationMode};
 use crate::infra::error::AppError;
@@ -574,20 +574,30 @@ fn heal_dangling_tail_tool_call(
     entries: &[TranscriptEntry],
 ) -> Result<bool, AppError> {
     let recent = collect_recent_chat_messages_from_tail(entries);
-    let Some(tool_call_ids) = find_dangling_tail_tool_call_ids(&recent) else {
+    let Some(tool_calls) = find_dangling_tail_tool_calls(&recent) else {
         return Ok(false);
     };
 
     tracing::warn!(
-        tool_call_ids = ?tool_call_ids,
+        tool_call_ids = ?tool_calls.iter().map(|call| &call.id).collect::<Vec<_>>(),
         "hydrate detected dangling tail tool_call block; appending synthetic interrupted tool results"
     );
 
-    for tool_call_id in tool_call_ids {
+    for tool_call in tool_calls {
+        let content = if tool_call.name == "ask_question" {
+            serde_json::json!({
+                "answers": [],
+                "cancelled": true,
+                "outcome": "host_disconnected",
+            })
+            .to_string()
+        } else {
+            INTERRUPTED_TOOL_RESULT_TEXT.to_string()
+        };
         session.append_message(serde_json::json!({
             "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": INTERRUPTED_TOOL_RESULT_TEXT,
+            "tool_call_id": tool_call.id,
+            "content": content,
         }))?;
     }
 

@@ -733,10 +733,7 @@ impl BashTaskRegistry {
         };
         let bash_scope_grant = if apply_guard {
             if let Some(guard) = self.background_guard.as_ref() {
-                match guard
-                    .bash_preflight_and_gate(&audit_cmd, &cwd)
-                    .await
-                {
+                match guard.bash_preflight_and_gate(&audit_cmd, &cwd).await {
                     Ok(scope_grant) => Some(scope_grant),
                     Err(err) => {
                         guard.record_failure(&audit_cmd, &err);

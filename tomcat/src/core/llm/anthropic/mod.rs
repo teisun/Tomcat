@@ -394,14 +394,14 @@ impl LlmProvider for AnthropicProvider {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use tokio_stream::StreamExt;
     use tokio_stream::wrappers::IntervalStream;
+    use tokio_stream::StreamExt;
 
     #[tokio::test(start_paused = true)]
     async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
         let interval = tokio::time::interval(Duration::from_millis(200));
-        let source = IntervalStream::new(interval)
-            .map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
+        let source =
+            IntervalStream::new(interval).map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
         let event_stream = stream::AnthropicStream::new(
             source,
             ProviderCompatProfile::anthropic_messages("claude-opus-4-8"),
@@ -419,9 +419,16 @@ mod tests {
             .expect("should produce timeout error");
         match item {
             Err(err) => {
-                assert_eq!(crate::infra::error::llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
+                assert_eq!(
+                    crate::infra::error::llm_stage(&err),
+                    Some(LlmErrorStage::IdleTimeout)
+                );
                 let msg = crate::infra::error::llm_summary(&err).unwrap_or_else(|| err.to_string());
-                assert!(msg.contains("stream_timeout_sec=1s"), "unexpected msg: {}", msg);
+                assert!(
+                    msg.contains("stream_timeout_sec=1s"),
+                    "unexpected msg: {}",
+                    msg
+                );
             }
             other => panic!("expected timeout AppError, got {:?}", other),
         }

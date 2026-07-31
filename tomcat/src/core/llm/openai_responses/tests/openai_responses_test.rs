@@ -314,18 +314,12 @@ fn responses_payload_incomplete_content_filter_maps_to_error_metadata() {
         "output": []
     });
     let r = responses_payload_to_chat_response(&raw);
-    assert_eq!(
-        r.choices[0].finish_reason.as_deref(),
-        Some("error")
-    );
+    assert_eq!(r.choices[0].finish_reason.as_deref(), Some("error"));
     assert_eq!(
         r.choices[0].message.error_message.as_deref(),
         Some("content_filter")
     );
-    assert_eq!(
-        r.choices[0].message.finish_reason.as_deref(),
-        Some("error")
-    );
+    assert_eq!(r.choices[0].message.finish_reason.as_deref(), Some("error"));
 }
 
 #[test]
@@ -1853,8 +1847,11 @@ async fn responses_keepalive_bytes_still_trigger_idle_timeout_when_no_events_arr
     use tokio_stream::StreamExt;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
-    let source = IntervalStream::new(interval)
-        .map(|_| Ok(Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n")));
+    let source = IntervalStream::new(interval).map(|_| {
+        Ok(Bytes::from_static(
+            b"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+        ))
+    });
     let event_stream = new_responses_stream(source, false);
     let mut stream = apply_stream_idle_timeout(event_stream, 1);
     let next_task = tokio::spawn(async move { stream.next().await });
@@ -1870,7 +1867,11 @@ async fn responses_keepalive_bytes_still_trigger_idle_timeout_when_no_events_arr
         Err(err) => {
             let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
             assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
-            assert!(msg.contains("stream_timeout_sec=1s"), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains("stream_timeout_sec=1s"),
+                "unexpected msg: {}",
+                msg
+            );
         }
         other => panic!("expected timeout AppError, got {:?}", other),
     }

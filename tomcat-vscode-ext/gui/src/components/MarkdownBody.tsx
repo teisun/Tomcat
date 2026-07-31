@@ -31,7 +31,12 @@ export function MarkdownBody({
       return;
     }
     let cancelled = false;
-    void renderMermaidBlocks(container, () => cancelled);
+    const resolvedFontSize = Number.parseFloat(
+      container.ownerDocument.defaultView?.getComputedStyle(container).fontSize ?? "",
+    );
+    void renderMermaidBlocks(container, () => cancelled, {
+      fontSize: Number.isFinite(resolvedFontSize) ? resolvedFontSize : undefined,
+    });
     return () => {
       cancelled = true;
     };

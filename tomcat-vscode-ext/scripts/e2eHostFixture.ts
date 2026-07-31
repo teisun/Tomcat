@@ -122,6 +122,7 @@ const providerKeys = new Map(
   BUILTIN_MODELS.map((model) => [model.apiKeyEnv, { keyPresent: true, provider: model.provider }]),
 );
 const sessions = new Map();
+const attachmentLeases = new Map();
 let sessionCounter = 1;
 let historyCounter = 1;
 let assistantMessageCounter = 1;
@@ -137,7 +138,7 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.20";
+const serverVersion = "0.1.21";
 
 if (process.argv[2] === "--version") {
   process.stdout.write("tomcat fake " + serverVersion + "\\n");
@@ -1829,7 +1830,9 @@ function handleCommand(frame) {
               "prompt",
               "ask_question",
               "ingest_attachment",
+              "retain_attachment_leases",
               "cache_attachment_thumbnail",
+              "discard_detached_session",
               "new_session",
               "switch_session",
               "list_sessions",
@@ -1861,7 +1864,9 @@ function handleCommand(frame) {
       break;
     case "new_session": {
       const sessionId = createSession();
-      activeSessionId = sessionId;
+      if (!frame.params || frame.params.detached !== true) {
+        activeSessionId = sessionId;
+      }
       send({
         id: frame.id,
         payload: { sessionId },
@@ -2001,6 +2006,7 @@ function handleCommand(frame) {
     }
     case "close_session":
       sessions.delete(frame.sessionId);
+      attachmentLeases.delete(frame.sessionId);
       if (activeSessionId === frame.sessionId) {
         activeSessionId = sessions.keys().next().value || null;
       }
@@ -2169,6 +2175,49 @@ function handleCommand(frame) {
       }, 10);
       break;
     }
+    case "retain_attachment_leases": {
+      const sessionId = frame.sessionId;
+      if (!sessions.has(sessionId)) {
+        send({ error: "unknown_session", id: frame.id, sessionId, success: false, type: "response" });
+        break;
+      }
+      const attachments = frame.params && Array.isArray(frame.params.attachments)
+        ? frame.params.attachments
+        : [];
+      const retainedShas = [...new Set(attachments.flatMap((attachment) => [
+        attachment && attachment.blobSha,
+        attachment && attachment.providerSha,
+      ]).filter((sha) => typeof sha === "string"))].sort();
+      const missing = retainedShas.find((sha) => !fs.existsSync(path.join(BLOBS_DIR, sha)));
+      if (missing) {
+        send({ error: \`missing_attachment_blob: \${missing}\`, id: frame.id, sessionId, success: false, type: "response" });
+        break;
+      }
+      attachmentLeases.set(sessionId, new Set([
+        ...(attachmentLeases.get(sessionId) || []),
+        ...retainedShas,
+      ]));
+      send({
+        id: frame.id,
+        payload: { retainedShas },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "discard_detached_session": {
+      const discarded = sessions.delete(frame.sessionId);
+      attachmentLeases.delete(frame.sessionId);
+      send({
+        id: frame.id,
+        payload: { discarded, sessionId: frame.sessionId },
+        sessionId: frame.sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
     case "ingest_attachment":
       handleIngestAttachment(frame);
       break;
@@ -2271,6 +2320,6 @@ export function resolveVsCodeCli(): string {
 export function resolveVsCodeExecutable(): string {
   return (
     process.env.VSCODE_EXECUTABLE_PATH ||
-    "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"
+    "/Applications/Visual Studio Code.app/Contents/MacOS/Code"
   );
 }

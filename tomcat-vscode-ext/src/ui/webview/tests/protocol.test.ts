@@ -72,6 +72,23 @@ describe("webview protocol helpers", () => {
     expect(
       isWebviewIntent({
         data: {
+          cwd: "/workspace",
+          operationId: "fork-op-1",
+          segments: [
+            { text: "Inspect ", type: "text" },
+            { kind: "file", label: "app.ts", path: "app.ts", type: "reference" },
+          ],
+          sourceSessionId: "s1",
+          text: "Inspect app.ts",
+        },
+        messageId: "fork-1",
+        type: "forkSession",
+      }),
+    ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
           segments: [
             { text: "Inspect ", type: "text" },
             {
@@ -157,6 +174,25 @@ describe("webview protocol helpers", () => {
         type: "resyncSessionView",
       }),
     ).toBe(true);
+  });
+
+  it("strictly rejects malformed or oversized draft fork captures", () => {
+    const base = {
+      cwd: "/workspace",
+      operationId: "fork-op",
+      segments: [{ text: "draft", type: "text" }],
+      sourceSessionId: "s1",
+      text: "draft",
+    };
+    for (const data of [
+      { ...base, operationId: "" },
+      { ...base, sourceSessionId: "" },
+      { ...base, text: "x".repeat(1024 * 1024 + 1) },
+      { ...base, segments: [{ bytes: "raw", type: "image" }] },
+      { ...base, cwd: 42 },
+    ]) {
+      expect(isWebviewIntent({ data, messageId: "fork-bad", type: "forkSession" })).toBe(false);
+    }
   });
 
   it("accepts every supported thinking level from the shared source of truth", () => {

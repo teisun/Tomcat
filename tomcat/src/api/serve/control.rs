@@ -51,7 +51,9 @@ pub(crate) async fn handle_control_or_interrupt(
                             "switch_session",
                             "get_messages",
                             "ingest_attachment",
+                            "retain_attachment_leases",
                             "cache_attachment_thumbnail",
+                            "discard_detached_session",
                             "close_session",
                             "list_sessions",
                             "interrupt",
@@ -116,6 +118,9 @@ pub(crate) async fn handle_control_or_interrupt(
                 .registry
                 .get(&resolved)
                 .ok_or_else(|| AppError::Config("unknown_session".to_string()))?;
+            state
+                .ask_question
+                .cancel_live_session(&resolved, "interrupt");
             slot.ctx.session_runtime.cancel_token.lock().cancel();
             slot.ctx.agent_registry.cascade_abort(&resolved);
             state.writer.send(OutFrame::Response(ResponseFrame::ok(

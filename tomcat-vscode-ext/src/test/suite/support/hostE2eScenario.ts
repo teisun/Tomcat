@@ -18,6 +18,7 @@ import type {
   WebviewIntent,
 } from "../../../extension";
 import type { SettingsIntent } from "../../../shared/settingsProtocol";
+import { WorkbenchFindDriver } from "./workbenchFindDriver";
 
 let dummyLanguageModelRegistration: vscode.Disposable | undefined;
 type LanguageModelRegistry = {
@@ -496,7 +497,6 @@ async function setComposerInputValue(
 ): Promise<void> {
   await api.__testing.sendWebviewDomAction({
     kind: "setInputValue",
-    testId: "composer-input",
     value,
   });
 }
@@ -732,10 +732,10 @@ export async function assertWebviewAddModelsFlow(
     builtinModels.length > 0,
     "expected the settings panel to expose builtin models so official presets are available",
   );
-  assert.strictEqual(
-    settingsSnapshot.state.serverVersion,
-    "0.1.20",
-    "expected the settings panel state to carry the fake serve version",
+  assert.match(
+    settingsSnapshot.state.serverVersion ?? "",
+    /^0\.1\.\d+$/u,
+    "expected the settings panel state to carry the active serve version",
   );
   assert.strictEqual(
     settingsSnapshot.state.expectedCliVersion,
@@ -1655,10 +1655,53 @@ export async function assertWebviewAnswerCardFlow(
     },
     20_000,
   );
+  const pendingSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId && candidate.approvalCount >= 1
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.equal(pendingSnapshot.approvalCount, 1);
+
+  const otherSessionId = await claimDifferentWebviewSession(
+    api,
+    sessionId,
+    "webview-answer-card-switch-away",
+    20_000,
+  );
+  assert.notEqual(otherSessionId, sessionId);
+  const switchedAway = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) => candidate.activeSessionId === otherSessionId ? candidate : undefined,
+    20_000,
+  );
+  void switchedAway;
+
+  await api.__testing.reloadWebview();
+  await api.__testing.waitForWebviewReady();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId },
+      messageId: "webview-answer-card-switch-back",
+      type: "switchSession",
+    }),
+  );
+  await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId && candidate.approvalCount >= 1
+        ? candidate
+        : undefined,
+    20_000,
+  );
+
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: {
         requestId: approval.pending.request.requestId,
+        sessionId,
         result: {
           answers: [
             {
@@ -1695,6 +1738,91 @@ export async function assertWebviewAnswerCardFlow(
     `expected the answered ask_question row to stay visible, got ${snapshot.actionToolRowCount}`,
   );
   assert.doesNotMatch(snapshot.html, /"optionIds"\s*:/u);
+
+  await api.__testing.reloadWebview();
+  const refreshedHistory = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.html.includes('data-testid="answer-card"') &&
+      candidate.html.includes("Deploy where?") &&
+      candidate.html.includes("Staging") &&
+      !candidate.html.includes('data-testid="pending-question-panel"')
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    refreshedHistory.html.includes('data-outcome="answered"'),
+    "expected history hydration to preserve the answered outcome",
+  );
+}
+
+export async function assertWebviewQuestionDisconnectFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await claimActiveWebviewSession(
+    api,
+    "webview-question-disconnect-claim",
+    20_000,
+  );
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId, text: "answer card showcase" },
+      messageId: "webview-question-disconnect-prompt",
+      type: "prompt",
+    }),
+  );
+  await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId && candidate.approvalCount >= 1
+        ? candidate
+        : undefined,
+    20_000,
+  );
+
+  await api.__testing.restartServe();
+  await api.__testing.waitForWebviewReady();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId },
+      messageId: "webview-question-disconnect-reselect",
+      type: "switchSession",
+    }),
+  );
+  const disconnectedState = await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionId];
+      const disconnectedTool = session?.timeline.find(
+        (item): item is Extract<typeof session.timeline[number], { type: "tool" }> =>
+          item.type === "tool" &&
+          item.toolName === "ask_question" &&
+          item.summary?.includes('"outcome":"host_disconnected"') === true,
+      );
+      return disconnectedTool ? { disconnectedTool, session } : undefined;
+    },
+    30_000,
+  );
+  assert.ok(
+    disconnectedState.disconnectedTool.summary?.includes('"outcome":"host_disconnected"'),
+    "expected irrecoverable serve/extension-host restart to hydrate host_disconnected",
+  );
+  const disconnected = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.approvalCount === 0 &&
+      candidate.actionToolRowCount >= 1
+        ? candidate
+        : undefined,
+    30_000,
+  );
+  assert.equal(disconnected.approvalCount, 0);
 }
 
 export async function assertWebviewDiffFlow(
@@ -1746,6 +1874,7 @@ export async function assertWebviewDiffFlow(
     buildWebviewIntent({
       data: {
         requestId: approval.request.requestId,
+        sessionId: activeSessionId,
         result: {
           answers: [
             {
@@ -2260,7 +2389,38 @@ export async function assertWebviewMultiSessionFlow(
   );
   await waitForEvent(api, { sessionId: sessionA!, type: "agent_end" });
 
-  const sessionB = await createFreshWebviewSession(api, "webview-new-session-b");
+  await setComposerInputValue(api, "draft fork survives immediate new session");
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) => snapshot.html.includes("draft fork survives immediate new session")
+      ? snapshot
+      : undefined,
+    10_000,
+  );
+  const knownBeforeFork = new Set(
+    api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
+  );
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "new-session-button",
+  });
+  const sessionB = await waitForWebviewState(
+    api,
+    (state) => {
+      const active = state.activeSessionId;
+      return active && !knownBeforeFork.has(active) ? active : undefined;
+    },
+    20_000,
+  );
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionB
+      && snapshot.html.includes("draft fork survives immediate new session")
+        ? snapshot
+        : undefined,
+    20_000,
+  );
   const stateB = api.__testing.getWebviewState();
   assert.notEqual(sessionA, sessionB);
 
@@ -2283,6 +2443,23 @@ export async function assertWebviewMultiSessionFlow(
   );
   assert.ok(sessions.includes(sessionA!), "expected session A to remain tracked");
   assert.ok(sessions.includes(sessionB!), "expected session B to be tracked");
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId: sessionA },
+      messageId: "webview-draft-fork-source-restore",
+      type: "switchSession",
+    }),
+  );
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionA
+      && snapshot.html.includes("draft fork survives immediate new session")
+        ? snapshot
+        : undefined,
+    20_000,
+  );
 }
 
 export async function assertWebviewSessionSwitchRestoreFlow(
@@ -4472,6 +4649,8 @@ export async function assertPlanPreviewCustomEditorFlow(
     .join("/");
   const planUri = vscode.Uri.file(planPath);
   const planId = `e2e-plan-${Date.now().toString(36)}`;
+  const bodyFindToken = `PLAN_BODY_FIND_${planId}`;
+  const todoFindToken = `PLAN_TODO_FIND_${planId}`;
   const fillerParagraphs = Array.from(
     { length: 24 },
     (_, index) => `Scroll filler paragraph ${index + 1}.`,
@@ -4490,13 +4669,13 @@ export async function assertPlanPreviewCustomEditorFlow(
     "  content: Second task",
     "  status: in_progress",
     "- id: t3",
-    "  content: Third task",
+    `  content: ${todoFindToken}`,
     "  status: pending",
     "---",
     "",
     "# E2E heading",
     "",
-    "Body paragraph for the preview.",
+    `Body paragraph for the preview. ${bodyFindToken} with \`inline-code\`.`,
     "",
     "- First markdown selection",
     "- Second markdown selection",
@@ -4598,6 +4777,50 @@ export async function assertPlanPreviewCustomEditorFlow(
       `expected a "3 To-dos" count header, got ${preview.todoCountText}`,
     );
     assert.equal(preview.bodyHasContent, true, "expected the rendered body to have content");
+    assert.ok(
+      preview.baseFontSizePx !== null
+      && preview.bodyFontSizePx !== null
+      && Math.abs(preview.bodyFontSizePx - (preview.baseFontSizePx + 1)) <= 0.1,
+      `expected Plan body font to equal VS Code base + 1px, base=${String(preview.baseFontSizePx)} body=${String(preview.bodyFontSizePx)}`,
+    );
+    assert.ok(
+      preview.codeFontSizePx !== null
+      && preview.bodyFontSizePx !== null
+      && Math.abs(preview.codeFontSizePx - preview.bodyFontSizePx) <= 0.1,
+      `expected inline code to keep the Plan reading size, body=${String(preview.bodyFontSizePx)} code=${String(preview.codeFontSizePx)}`,
+    );
+    assert.ok(
+      preview.todoFontSizePx !== null
+      && preview.bodyFontSizePx !== null
+      && Math.abs(preview.todoFontSizePx - preview.bodyFontSizePx) <= 0.1,
+      `expected todo copy to keep the Plan reading size, body=${String(preview.bodyFontSizePx)} todo=${String(preview.todoFontSizePx)}`,
+    );
+
+    // Drive the actual workbench, not the webview DOM: platform Cmd/Ctrl+F must
+    // open VS Code's built-in Find Widget and find both rendered body and todo copy.
+    const findDriver = await WorkbenchFindDriver.connectFromEnvironment();
+    try {
+      const instanceBeforeFind = preview.webviewInstanceId;
+      await findDriver.findUniqueText(bodyFindToken);
+      await findDriver.closeFind();
+      let afterFind = await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+      assert.equal(
+        afterFind.webviewInstanceId,
+        instanceBeforeFind,
+        "expected closing Find after a body match not to rebuild the Plan webview",
+      );
+
+      await findDriver.findUniqueText(todoFindToken);
+      await findDriver.closeFind();
+      afterFind = await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+      assert.equal(
+        afterFind.webviewInstanceId,
+        instanceBeforeFind,
+        "expected closing Find after a todo match not to rebuild the Plan webview",
+      );
+    } finally {
+      findDriver.close();
+    }
 
     // The ```mermaid``` fence renders to an inline SVG diagram (lazy-loaded).
     const mermaid = await waitForPlanPreviewDom(
@@ -4610,6 +4833,42 @@ export async function assertPlanPreviewCustomEditorFlow(
       mermaid.mermaidSvgCount >= 1,
       `expected at least one rendered mermaid SVG, got ${mermaid.mermaidSvgCount}`,
     );
+    assert.ok(
+      mermaid.mermaidFontSizePx !== null
+      && mermaid.bodyFontSizePx !== null
+      && Math.abs(mermaid.mermaidFontSizePx - mermaid.bodyFontSizePx) <= 0.5,
+      `expected Mermaid text to use the Plan reading size, body=${String(mermaid.bodyFontSizePx)} mermaid=${String(mermaid.mermaidFontSizePx)}`,
+    );
+
+    // The same +1px reading contract must survive VS Code's built-in light,
+    // dark and high-contrast theme projections.
+    const themeConfig = vscode.workspace.getConfiguration("workbench");
+    const originalTheme = themeConfig.inspect<string>("colorTheme")?.globalValue;
+    const themeCases = [
+      { bodyClass: "vscode-light", name: "Default Light Modern" },
+      { bodyClass: "vscode-dark", name: "Default Dark Modern" },
+      { bodyClass: "vscode-high-contrast", name: "Default High Contrast" },
+    ] as const;
+    for (const themeCase of themeCases) {
+      await themeConfig.update(
+        "colorTheme",
+        themeCase.name,
+        vscode.ConfigurationTarget.Global,
+      );
+      const themed = await waitForPlanPreviewDom(
+        api,
+        planPath,
+        (snapshot) => snapshot.themeClassName.includes(themeCase.bodyClass),
+        20_000,
+      );
+      assert.ok(
+        themed.baseFontSizePx !== null
+        && themed.bodyFontSizePx !== null
+        && Math.abs(themed.bodyFontSizePx - (themed.baseFontSizePx + 1)) <= 0.1,
+        `expected ${themeCase.name} to preserve Plan base + 1px, base=${String(themed.baseFontSizePx)} body=${String(themed.bodyFontSizePx)}`,
+      );
+    }
+    await themeConfig.update("colorTheme", originalTheme, vscode.ConfigurationTarget.Global);
 
     const inlinePathSnapshot = await waitForPlanPreviewDom(
       api,
@@ -4690,7 +4949,9 @@ export async function assertPlanPreviewCustomEditorFlow(
     // (post hot-update) document so the assertions can't drift.
     const updatedLines = updatedText.split("\n");
     const headingLine = updatedLines.indexOf("# E2E heading") + 1;
-    const paragraphLine = updatedLines.indexOf("Body paragraph for the preview.") + 1;
+    const paragraphLine = updatedLines.indexOf(
+      `Body paragraph for the preview. ${bodyFindToken} with \`inline-code\`.`,
+    ) + 1;
     const firstListLine = updatedLines.indexOf("- First markdown selection") + 1;
     const secondListLine = updatedLines.indexOf("- Second markdown selection") + 1;
     const headingChip = `${planBasename}:${headingLine}`;
@@ -4727,6 +4988,14 @@ export async function assertPlanPreviewCustomEditorFlow(
         api,
         planPath,
         (snapshot) => snapshot.buildModelValue === targetModel,
+      );
+      await waitFor(
+        () =>
+          vscode.workspace
+            .getConfiguration("tomcat")
+            .get<string>("plan.buildModel", "") === targetModel,
+        10_000,
+        `expected tomcat.plan.buildModel to persist ${targetModel}`,
       );
       const persisted = vscode.workspace
         .getConfiguration("tomcat")

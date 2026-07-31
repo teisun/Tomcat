@@ -286,8 +286,7 @@ impl FixedResolver {
             reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
             web_search: false,
         };
-        let mut call =
-            ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
         call.api = api.to_string();
         call.provider = provider.to_string();
         call.base_url = Some(base_url.to_string());

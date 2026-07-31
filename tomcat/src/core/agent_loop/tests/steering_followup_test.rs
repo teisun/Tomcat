@@ -153,7 +153,13 @@ async fn run_follow_up_continues_in_same_context() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     loop_.follow_up("next".to_string());
     let messages = vec![ChatMessage::user("first")];
     let result = loop_.run(messages).await.unwrap();
@@ -195,8 +201,14 @@ async fn run_follow_up_drains_at_tool_batch_boundary_before_next_llm_request() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm.clone(), "gpt-4"), primitive, event_bus, config, abort)
-        .with_shared_follow_up_queue(follow_up_queue.clone());
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm.clone(), "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    )
+    .with_shared_follow_up_queue(follow_up_queue.clone());
 
     let result = loop_.run(vec![ChatMessage::user("start")]).await.unwrap();
     assert!(
@@ -256,8 +268,14 @@ async fn run_follow_up_does_not_bypass_max_tool_rounds() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm.clone(), "gpt-4"), primitive, event_bus, config, abort)
-        .with_shared_follow_up_queue(follow_up_queue.clone());
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm.clone(), "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    )
+    .with_shared_follow_up_queue(follow_up_queue.clone());
 
     let result = loop_.run(vec![ChatMessage::user("start")]).await.unwrap();
     assert!(

@@ -194,6 +194,19 @@ function parseDraft(raw: string): ComposerDraft | null {
   };
 }
 
+function cloneDraft(draft: ComposerDraft): ComposerDraft {
+  return {
+    attachments: draft.attachments.map((attachment) => ({ ...attachment })),
+    segments: draft.segments.map((segment) => ({ ...segment })),
+    text: draft.text,
+  };
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof vscode.FileSystemError
+    && (error.code === "FileNotFound" || /not found/iu.test(error.message));
+}
+
 /**
  * Per-session draft storage backed by the extension's own storage directory.
  *
@@ -318,7 +331,9 @@ export class ComposerDraftStore {
     }
     const timer = setTimeout(() => {
       this.pendingWrites.delete(sessionId);
-      void this.writeNow(sessionId);
+      void this.writeNow(sessionId).catch((error) => {
+        console.warn(`Tomcat could not save the draft for ${sessionId}`, error);
+      });
     }, this.debounceMs);
     // Do not hold the extension host open just to save a draft.
     (timer as unknown as { unref?(): void }).unref?.();
@@ -350,7 +365,7 @@ export class ComposerDraftStore {
         await vscode.workspace.fs.rename(temp, target, { overwrite: true });
       } catch (error) {
         await this.deleteFile(temp);
-        console.warn(`Tomcat could not save the draft for ${sessionId}`, error);
+        throw error;
       }
     });
     this.inFlight.set(sessionId, write);
@@ -381,6 +396,95 @@ export class ComposerDraftStore {
     await this.deleteFile(this.draftUri(sessionId));
   }
 
+  /**
+   * Transactional counterpart to `discard`: only "already absent" is ignored. A permission or
+   * I/O failure remains observable so fork compensation cannot claim success while target state
+   * is still durable on disk.
+   */
+  async discardStrict(sessionId: string): Promise<void> {
+    this.assertSessionId(sessionId);
+    const pending = this.pendingWrites.get(sessionId);
+    if (pending) {
+      clearTimeout(pending);
+      this.pendingWrites.delete(sessionId);
+    }
+    await this.inFlight.get(sessionId);
+    try {
+      await vscode.workspace.fs.delete(this.draftUri(sessionId), { useTrash: false });
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
+    }
+    this.drafts.delete(sessionId);
+  }
+
+  /**
+   * Replace one draft and certify that the new value reached disk. Unlike the keystroke
+   * path this propagates I/O failures because a fork may not commit on best effort.
+   */
+  async replaceAndFlush(sessionId: string, draft: ComposerDraft): Promise<ComposerDraft> {
+    this.assertSessionId(sessionId);
+    const pending = this.pendingWrites.get(sessionId);
+    if (pending) {
+      clearTimeout(pending);
+      this.pendingWrites.delete(sessionId);
+    }
+    await this.inFlight.get(sessionId);
+    const previous = this.drafts.get(sessionId);
+    const owned = cloneDraft(draft);
+    this.drafts.set(sessionId, owned);
+    try {
+      await this.writeNow(sessionId);
+      return cloneDraft(owned);
+    } catch (error) {
+      if (previous) this.drafts.set(sessionId, previous);
+      else this.drafts.delete(sessionId);
+      throw error;
+    }
+  }
+
+  /**
+   * Atomically install a target draft only when both the cold disk state and memory are
+   * empty. The disk is always inspected, so a stale/empty cache cannot overwrite data.
+   */
+  async installIfEmpty(sessionId: string, draft: ComposerDraft): Promise<ComposerDraft> {
+    this.assertSessionId(sessionId);
+    const pending = this.pendingWrites.get(sessionId);
+    if (pending) {
+      clearTimeout(pending);
+      this.pendingWrites.delete(sessionId);
+    }
+    await this.inFlight.get(sessionId);
+
+    const cached = this.drafts.get(sessionId);
+    if (cached && !isDraftEmpty(cached)) {
+      throw new Error(`draft conflict: target session ${sessionId} is not empty in memory`);
+    }
+    const uri = this.draftUri(sessionId);
+    try {
+      const raw = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+      const existing = parseDraft(raw);
+      if (!existing) {
+        throw new Error(`draft conflict: target session ${sessionId} has invalid persisted data`);
+      }
+      if (!isDraftEmpty(existing)) {
+        throw new Error(`draft conflict: target session ${sessionId} is not empty on disk`);
+      }
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
+    }
+
+    const owned = cloneDraft(draft);
+    this.drafts.set(sessionId, owned);
+    try {
+      await this.writeNow(sessionId);
+      return cloneDraft(owned);
+    } catch (error) {
+      if (cached) this.drafts.set(sessionId, cached);
+      else this.drafts.delete(sessionId);
+      throw error;
+    }
+  }
+
   /** Await every scheduled write. Used before send and on deactivate. */
   async flush(sessionId?: string): Promise<void> {
     const ids = sessionId ? [sessionId] : [...this.pendingWrites.keys()];
@@ -393,9 +497,7 @@ export class ComposerDraftStore {
       }
     }
     await Promise.all(
-      (sessionId ? [this.inFlight.get(sessionId)] : [...this.inFlight.values()]).map((task) =>
-        task?.catch(() => undefined),
-      ),
+      sessionId ? [this.inFlight.get(sessionId)] : [...this.inFlight.values()],
     );
   }
 

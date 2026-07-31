@@ -107,6 +107,17 @@ fn serve_ask_question_roundtrip_resumes_turn() {
         .as_str()
         .expect("ask_question request id");
 
+    let pending_frames = child.recv_available(Duration::from_millis(750));
+    assert!(
+        !pending_frames.iter().any(|value| {
+            matches!(
+                value.get("type").and_then(|v| v.as_str()),
+                Some("agent_end" | "tool_execution_end" | "control_cancel")
+            )
+        }),
+        "unanswered ask_question must stay live without a deadline: {pending_frames:?}"
+    );
+
     child.send_value(&json!({
         "type": "control_response",
         "requestId": request_id,
@@ -119,7 +130,8 @@ fn serve_ask_question_roundtrip_resumes_turn() {
                 "skipped": false,
                 "picked_recommended": true
             }],
-            "cancelled": false
+            "cancelled": false,
+            "outcome": "answered"
         }
     }));
 
@@ -183,9 +195,12 @@ fn serve_ask_question_cancel_roundtrip_does_not_hang() {
                 && value
                     .get("result")
                     .and_then(|v| v.as_str())
-                    .is_some_and(|result| result.contains("\"cancelled\":true"))
+                    .is_some_and(|result| {
+                        result.contains("\"cancelled\":true")
+                            && result.contains("\"outcome\":\"interrupted\"")
+                    })
         }),
-        "expected cancelled ask_question result before settling, got {frames:?}"
+        "expected interrupted ask_question result before settling, got {frames:?}"
     );
     assert!(
         frames.iter().any(|value| {
@@ -279,7 +294,8 @@ fn serve_ask_question_routes_by_session() {
                 "skipped": false,
                 "picked_recommended": true
             }],
-            "cancelled": false
+            "cancelled": false,
+            "outcome": "answered"
         }
     }));
 

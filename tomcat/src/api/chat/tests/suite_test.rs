@@ -783,20 +783,13 @@ fn pdf_user_message() -> crate::ChatMessage {
     );
     crate::ChatMessage::user_with_parts(vec![
         crate::ChatMessageContentPart::text("Read this PDF"),
-        crate::ChatMessageContentPart::file_base64_data(
-            "brief.pdf",
-            "application/pdf",
-            pdf_b64,
-        )
-        .expect("build pdf part"),
+        crate::ChatMessageContentPart::file_base64_data("brief.pdf", "application/pdf", pdf_b64)
+            .expect("build pdf part"),
     ])
 }
 
 fn image_user_message() -> crate::ChatMessage {
-    let image_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        b"fake-png",
-    );
+    let image_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"fake-png");
     crate::ChatMessage::user_with_parts(vec![
         crate::ChatMessageContentPart::text("Inspect this image"),
         crate::ChatMessageContentPart::image_base64_data("image/png", image_b64)
@@ -1517,10 +1510,11 @@ fn user_prompt_for_mode_formats_all_states() {
 async fn validate_capabilities_rejects_pdf_before_appending_user_message() {
     const ENV_KEY: &str = "TOMCAT_VALIDATE_PDF_BEFORE_APPEND_KEY";
     let _api_guard = EnvGuard::set(ENV_KEY, "stub");
-    let (_dir, ctx, transcript_path) = chat_turn_test_context(&[crate::test_support::TestModelOverride {
-        files: false,
-        ..crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
-    }]);
+    let (_dir, ctx, transcript_path) =
+        chat_turn_test_context(&[crate::test_support::TestModelOverride {
+            files: false,
+            ..crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
+        }]);
     let before = fs::read(&transcript_path).expect("read transcript before");
     let mut context_state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
@@ -1537,7 +1531,10 @@ async fn validate_capabilities_rejects_pdf_before_appending_user_message() {
 
     assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
     let after = fs::read(&transcript_path).expect("read transcript after");
-    assert_eq!(before, after, "capability reject 不应把这条 user turn 写进 transcript");
+    assert_eq!(
+        before, after,
+        "capability reject 不应把这条 user turn 写进 transcript"
+    );
     let rendered = String::from_utf8_lossy(&after);
     assert!(!rendered.contains("brief.pdf"));
 }
@@ -1569,8 +1566,15 @@ async fn validate_capabilities_accepts_pdf_when_files_enabled() {
 
     assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
     let rendered = fs::read_to_string(&transcript_path).expect("read transcript after");
-    assert!(rendered.contains("brief.pdf"), "正常路径应保留 user transcript");
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "通过校验后应实际发起一次请求");
+    assert!(
+        rendered.contains("brief.pdf"),
+        "正常路径应保留 user transcript"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "通过校验后应实际发起一次请求"
+    );
     handle.join().unwrap();
 }
 
@@ -1579,10 +1583,11 @@ async fn validate_capabilities_accepts_pdf_when_files_enabled() {
 async fn validate_capabilities_rejects_image_before_appending_user_message() {
     const ENV_KEY: &str = "TOMCAT_VALIDATE_IMAGE_BEFORE_APPEND_KEY";
     let _api_guard = EnvGuard::set(ENV_KEY, "stub");
-    let (_dir, ctx, transcript_path) = chat_turn_test_context(&[crate::test_support::TestModelOverride {
-        vision: false,
-        ..crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
-    }]);
+    let (_dir, ctx, transcript_path) =
+        chat_turn_test_context(&[crate::test_support::TestModelOverride {
+            vision: false,
+            ..crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
+        }]);
     let before = fs::read(&transcript_path).expect("read transcript before");
     let mut context_state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
@@ -1599,7 +1604,10 @@ async fn validate_capabilities_rejects_image_before_appending_user_message() {
 
     assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
     let after = fs::read(&transcript_path).expect("read transcript after");
-    assert_eq!(before, after, "vision reject 不应把这条 user turn 写进 transcript");
+    assert_eq!(
+        before, after,
+        "vision reject 不应把这条 user turn 写进 transcript"
+    );
     let rendered = String::from_utf8_lossy(&after);
     assert!(!rendered.contains("image/png"));
 }

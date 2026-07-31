@@ -1,15 +1,14 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use async_trait::async_trait;
 
 use crate::core::plan_runtime::panels::{
-    Answer, AskQuestionPanel, AskQuestionResult, Question, QuestionOption, CUSTOM_OPTION_ID,
+    Answer, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination,
+    Question, QuestionOption, CUSTOM_OPTION_ID,
 };
 
 const ASK_QUESTION_TEST_AUTO_PICK_ENV: &str = "TOMCAT_ASK_QUESTION_TEST_AUTO_PICK";
 
-/// CLI MVP：通过 stdin 编号选择。
+/// CLI panel with one cancel-safe stdin owner. On Unix `poll` bounds every read wait, so an
+/// interrupt releases ownership before the chat prompt starts reading the next line.
 pub struct CliAskQuestionPanel;
 
 #[async_trait]
@@ -17,60 +16,50 @@ impl AskQuestionPanel for CliAskQuestionPanel {
     async fn ask(
         &self,
         questions: Vec<Question>,
-        cancel_signal: Arc<AtomicBool>,
+        termination: AskQuestionTermination,
     ) -> AskQuestionResult {
         let mut answers = Vec::with_capacity(questions.len());
-        for q in &questions {
-            if cancel_signal.load(Ordering::Relaxed) {
-                return AskQuestionResult {
-                    answers: vec![],
-                    cancelled: true,
-                };
+        for question in &questions {
+            if let Some(result) = termination.result() {
+                return result;
             }
-            if let Some(answer) = auto_pick_answer_for_test(q) {
+            if let Some(answer) = auto_pick_answer_for_test(question) {
                 let picked = answer.option_ids.join(",");
                 eprintln!(
                     "[ask_question:auto-pick] qid={} strategy=recommended picks={picked}",
-                    q.id
+                    question.id
                 );
                 answers.push(answer);
                 continue;
             }
             loop {
-                if cancel_signal.load(Ordering::Relaxed) {
-                    return AskQuestionResult {
-                        answers: vec![],
-                        cancelled: true,
-                    };
+                if let Some(result) = termination.result() {
+                    return result;
                 }
-                eprintln!("\n{}", q.prompt);
-                for (i, opt) in q.options.iter().enumerate() {
-                    let suffix = if opt.recommended { " — 推荐" } else { "" };
-                    eprintln!("  {}. {}{}", i + 1, opt.label, suffix);
+                eprintln!("\n{}", question.prompt);
+                for (index, option) in question.options.iter().enumerate() {
+                    let suffix = if option.recommended {
+                        " — 推荐"
+                    } else {
+                        ""
+                    };
+                    eprintln!("  {}. {}{}", index + 1, option.label, suffix);
                 }
                 eprintln!("  c. 自定义…");
                 eprintln!("  skip. 跳过本题");
                 eprint!("单选/c/skip > ");
 
-                let line = match read_one_line_blocking().await {
+                let line = match read_one_line(&termination).await {
                     Ok(line) => line,
-                    Err(_) => {
-                        return AskQuestionResult {
-                            answers: vec![],
-                            cancelled: true,
-                        };
-                    }
+                    Err(result) => return result,
                 };
-                if cancel_signal.load(Ordering::Relaxed) {
-                    return AskQuestionResult {
-                        answers: vec![],
-                        cancelled: true,
-                    };
+                if let Some(result) = termination.result() {
+                    return result;
                 }
                 let line = line.trim();
                 if line.eq_ignore_ascii_case("skip") {
                     answers.push(Answer {
-                        question_id: q.id.clone(),
+                        question_id: question.id.clone(),
                         option_ids: vec![],
                         custom_text: None,
                         skipped: true,
@@ -78,21 +67,22 @@ impl AskQuestionPanel for CliAskQuestionPanel {
                     });
                     break;
                 }
-                if let Some(answer) = parse_custom_answer(q, line).await {
-                    answers.push(answer);
-                    break;
+                match parse_custom_answer(question, line, &termination).await {
+                    Ok(Some(answer)) => {
+                        answers.push(answer);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(result) => return result,
                 }
-                if let Some(answer) = parse_single_choice_answer(q, line) {
+                if let Some(answer) = parse_single_choice_answer(question, line) {
                     answers.push(answer);
                     break;
                 }
                 eprintln!("(无法识别，请重试当前题)");
             }
         }
-        AskQuestionResult {
-            answers,
-            cancelled: false,
-        }
+        AskQuestionResult::answered(answers)
     }
 }
 
@@ -104,7 +94,7 @@ fn auto_pick_answer_for_test(question: &Question) -> Option<Answer> {
     let picked = question
         .options
         .iter()
-        .find(|opt| opt.recommended)
+        .find(|option| option.recommended)
         .or_else(|| question.options.first())?;
     Some(Answer {
         question_id: question.id.clone(),
@@ -115,39 +105,42 @@ fn auto_pick_answer_for_test(question: &Question) -> Option<Answer> {
     })
 }
 
-async fn parse_custom_answer(question: &Question, line: &str) -> Option<Answer> {
+async fn parse_custom_answer(
+    question: &Question,
+    line: &str,
+    termination: &AskQuestionTermination,
+) -> Result<Option<Answer>, AskQuestionResult> {
     let mut chars = line.chars();
-    let first = chars.next()?;
+    let Some(first) = chars.next() else {
+        return Ok(None);
+    };
     if !first.eq_ignore_ascii_case(&'c') {
-        return None;
+        return Ok(None);
     }
     let mut text = chars.as_str().trim().to_string();
     if text.is_empty() {
         eprint!("自定义内容（1-500 字符）> ");
-        text = match read_one_line_blocking().await {
-            Ok(t) => t.trim().to_string(),
-            Err(_) => return None,
-        };
+        text = read_one_line(termination).await?.trim().to_string();
     }
     if text.is_empty() || text.len() > 500 {
         eprintln!("(无效自定义文本，请重试当前题)");
-        return None;
+        return Ok(None);
     }
-    Some(Answer {
+    Ok(Some(Answer {
         question_id: question.id.clone(),
         option_ids: vec![CUSTOM_OPTION_ID.into()],
         custom_text: Some(text),
         skipped: false,
         picked_recommended: false,
-    })
+    }))
 }
 
 fn parse_single_choice_answer(question: &Question, line: &str) -> Option<Answer> {
-    let n = line.parse::<usize>().ok()?;
-    if !(1..=question.options.len()).contains(&n) {
+    let number = line.parse::<usize>().ok()?;
+    if !(1..=question.options.len()).contains(&number) {
         return None;
     }
-    let picked: &QuestionOption = &question.options[n - 1];
+    let picked: &QuestionOption = &question.options[number - 1];
     Some(Answer {
         question_id: question.id.clone(),
         option_ids: vec![picked.id.clone()],
@@ -157,19 +150,120 @@ fn parse_single_choice_answer(question: &Question, line: &str) -> Option<Answer>
     })
 }
 
-async fn read_one_line_blocking() -> std::io::Result<String> {
-    tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        let n =
-            std::io::BufRead::read_line(&mut std::io::BufReader::new(std::io::stdin()), &mut line)?;
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "stdin closed",
-            ));
+async fn read_one_line(termination: &AskQuestionTermination) -> Result<String, AskQuestionResult> {
+    let termination = termination.clone();
+    tokio::task::spawn_blocking(move || read_one_line_owned(&termination))
+        .await
+        .unwrap_or_else(|_| {
+            Err(AskQuestionResult::terminal(
+                AskQuestionOutcome::HostDisconnected,
+            ))
+        })
+}
+
+#[cfg(unix)]
+fn read_one_line_owned(termination: &AskQuestionTermination) -> Result<String, AskQuestionResult> {
+    read_one_line_from_fd_owned(libc::STDIN_FILENO, termination)
+}
+
+#[cfg(unix)]
+fn read_one_line_from_fd_owned(
+    fd: std::os::fd::RawFd,
+    termination: &AskQuestionTermination,
+) -> Result<String, AskQuestionResult> {
+    static STDIN_OWNER: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _owner = STDIN_OWNER
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    #[cfg(unix)]
+    {
+        let mut bytes = Vec::new();
+        loop {
+            if let Some(result) = termination.result() {
+                return Err(result);
+            }
+            let mut descriptor = libc::pollfd {
+                fd,
+                events: libc::POLLIN | libc::POLLHUP,
+                revents: 0,
+            };
+            // SAFETY: descriptor points to one initialized pollfd for the whole call.
+            let ready = unsafe { libc::poll(&mut descriptor, 1, 50) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(AskQuestionResult::terminal(
+                    AskQuestionOutcome::HostDisconnected,
+                ));
+            }
+            if ready == 0 {
+                continue;
+            }
+            let mut byte = 0u8;
+            // SAFETY: byte is writable and stdin is a process-owned file descriptor.
+            let count = unsafe { libc::read(fd, (&mut byte as *mut u8).cast::<libc::c_void>(), 1) };
+            if count <= 0 {
+                return Err(AskQuestionResult::terminal(
+                    AskQuestionOutcome::HostDisconnected,
+                ));
+            }
+            bytes.push(byte);
+            if byte == b'\n' {
+                return String::from_utf8(bytes).map_err(|_| {
+                    AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected)
+                });
+            }
         }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut line = String::new();
+        let read =
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(std::io::stdin()), &mut line)
+                .map_err(|_| AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected))?;
+        if read == 0 {
+            Err(AskQuestionResult::terminal(
+                AskQuestionOutcome::HostDisconnected,
+            ))
+        } else {
+            Ok(line)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn read_one_line_owned(termination: &AskQuestionTermination) -> Result<String, AskQuestionResult> {
+    if let Some(result) = termination.result() {
+        return Err(result);
+    }
+    let mut line = String::new();
+    let read =
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(std::io::stdin()), &mut line)
+            .map_err(|_| AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected))?;
+    if read == 0 {
+        Err(AskQuestionResult::terminal(
+            AskQuestionOutcome::HostDisconnected,
+        ))
+    } else {
         Ok(line)
-    })
-    .await
-    .unwrap_or_else(|_| Ok(String::new()))
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) async fn read_one_line_from_fd_for_test(
+    fd: std::os::fd::RawFd,
+    termination: AskQuestionTermination,
+) -> Result<String, AskQuestionResult> {
+    tokio::task::spawn_blocking(move || read_one_line_from_fd_owned(fd, &termination))
+        .await
+        .unwrap_or_else(|_| {
+            Err(AskQuestionResult::terminal(
+                AskQuestionOutcome::HostDisconnected,
+            ))
+        })
 }

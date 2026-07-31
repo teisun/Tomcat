@@ -76,6 +76,7 @@ export type ControlRequestHandlerResult =
 
 export type ControlRequestHandler = (
   frame: ControlRequestFrame,
+  context: { generation: number; signal: AbortSignal },
 ) =>
   | Promise<ControlRequestHandlerResult | void>
   | ControlRequestHandlerResult
@@ -119,6 +120,8 @@ export class TomcatMessenger {
   private readonly pendingResponses = new Map<string, PendingResponse>();
   private readonly stderrListeners = new Set<(chunk: string) => void>();
   private child?: ChildProcessWithoutNullStreams;
+  private childAbort?: AbortController;
+  private childGeneration = 0;
   private disposed = false;
   private stderrText = "";
   private stdoutBuffer = "";
@@ -158,15 +161,37 @@ export class TomcatMessenger {
     );
 
     this.child = child;
+    const abortController = new AbortController();
+    const generation = ++this.childGeneration;
+    this.childAbort = abortController;
     this.stderrText = "";
     this.stdoutBuffer = "";
 
     child.stdout.on("data", (chunk: Buffer) => {
-      this.handleStdoutChunk(chunk);
+      if (this.child === child && this.childGeneration === generation) {
+        this.handleStdoutChunk(chunk);
+      }
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      this.handleStderrChunk(chunk);
+      if (this.child === child && this.childGeneration === generation) {
+        this.handleStderrChunk(chunk);
+      }
     });
+    child.stdin.on("error", (error) => this.handleChildExit(child, {
+      code: child.exitCode,
+      error,
+      signal: child.signalCode,
+    }));
+    child.stdout.on("error", (error) => this.handleChildExit(child, {
+      code: child.exitCode,
+      error,
+      signal: child.signalCode,
+    }));
+    child.stderr.on("error", (error) => this.handleChildExit(child, {
+      code: child.exitCode,
+      error,
+      signal: child.signalCode,
+    }));
     child.on("error", (error) => {
       this.handleChildExit(child, {
         code: child.exitCode,
@@ -441,11 +466,12 @@ export class TomcatMessenger {
     handler: (
       request: AskQuestionWireRequest,
       frame: ControlRequestFrame,
+      context: { generation: number; signal: AbortSignal },
     ) => Promise<AskQuestionResult | AskQuestionWireResponse> | AskQuestionResult | AskQuestionWireResponse,
   ): DisposableLike {
-    return this.registerControlRequestHandler("ask_question", async (frame) => {
+    return this.registerControlRequestHandler("ask_question", async (frame, context) => {
       const request = parseAskQuestionRequest(frame.payload);
-      const response = await handler(request, frame);
+      const response = await handler(request, frame, context);
       return {
         kind: "response",
         payload: normalizeAskQuestionResponse(request.requestId, response),
@@ -533,6 +559,8 @@ export class TomcatMessenger {
     this.rejectPending(new Error(reason));
 
     const child = this.child;
+    this.childAbort?.abort(reason);
+    this.childAbort = undefined;
     this.child = undefined;
     this.stdoutBuffer = "";
     this.stderrText = "";
@@ -655,7 +683,12 @@ export class TomcatMessenger {
 
       const handler = this.controlHandlers.get(frame.subtype);
       if (handler) {
-        void this.runControlHandler(handler, frame);
+        void this.runControlHandler(
+          handler,
+          frame,
+          this.childGeneration,
+          this.childAbort?.signal,
+        );
       }
       return;
     }
@@ -674,9 +707,13 @@ export class TomcatMessenger {
   private async runControlHandler(
     handler: ControlRequestHandler,
     frame: ControlRequestFrame,
+    generation: number,
+    signal?: AbortSignal,
   ): Promise<void> {
+    if (!signal) return;
     try {
-      const result = await handler(frame);
+      const result = await handler(frame, { generation, signal });
+      if (signal.aborted || generation !== this.childGeneration || !this.child) return;
       if (!result) {
         return;
       }
@@ -696,6 +733,7 @@ export class TomcatMessenger {
         result.payload,
       );
     } catch (error) {
+      if (signal.aborted || generation !== this.childGeneration || !this.child) return;
       this.emitFrameError(toError(error));
       this.sendControlCancel(frame.requestId, frame.sessionId, null);
     }
@@ -709,14 +747,16 @@ export class TomcatMessenger {
       return;
     }
 
-    this.child = undefined;
-    this.stdoutBuffer = "";
-
     const error =
       event.error ??
       new Error(
         `tomcat serve exited (code=${String(event.code)}, signal=${String(event.signal)})`,
       );
+
+    this.childAbort?.abort(error);
+    this.childAbort = undefined;
+    this.child = undefined;
+    this.stdoutBuffer = "";
 
     this.rejectPending(error);
 

@@ -300,6 +300,105 @@ describe("ComposerDraftStore lifecycle", () => {
   });
 });
 
+describe("ComposerDraftStore fork install", () => {
+  it("installs a deep copy into a cold empty target and rejects same-process replay", async () => {
+    const store = newStore(0);
+    const source = {
+      attachments: [attachment()],
+      segments: [{ text: "draft", type: "text" as const }],
+      text: "draft",
+    };
+
+    const installed = await store.installIfEmpty("sid_target", source);
+    source.attachments[0]!.filename = "mutated.png";
+    source.segments[0] = { text: "mutated", type: "text" };
+
+    expect(installed.attachments[0]?.filename).toBe("shot.png");
+    expect(store.peek("sid_target").segments[0]).toEqual({ text: "draft", type: "text" });
+    expect(__testing.readFile(draftPath("sid_target"))).toContain('"text":"draft"');
+    await expect(store.installIfEmpty("sid_target", installed)).rejects.toThrow("draft conflict");
+  });
+
+  it("checks cold disk state and rejects non-empty or corrupt targets", async () => {
+    __testing.registerFile(
+      draftPath("sid_existing"),
+      JSON.stringify({ attachments: [], schemaVersion: 2, segments: [], text: "existing" }),
+    );
+    __testing.registerFile(draftPath("sid_corrupt"), "not json");
+    const store = newStore(0);
+    const candidate = { attachments: [], segments: [], text: "candidate" };
+
+    await expect(store.installIfEmpty("sid_existing", candidate)).rejects.toThrow("not empty on disk");
+    await expect(store.installIfEmpty("sid_corrupt", candidate)).rejects.toThrow("invalid persisted data");
+    expect(__testing.readFile(draftPath("sid_existing"))).toContain("existing");
+    expect(__testing.readFile(draftPath("sid_corrupt"))).toBe("not json");
+  });
+
+  it("propagates transaction writes and restores memory after I/O failure", async () => {
+    const store = newStore(0);
+    const rename = vi.spyOn(vscode.workspace.fs, "rename").mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(
+      store.installIfEmpty("sid_io_failure", { attachments: [], segments: [], text: "candidate" }),
+    ).rejects.toThrow("disk full");
+    expect(store.peek("sid_io_failure")).toEqual(EMPTY_DRAFT);
+    expect(__testing.readFile(draftPath("sid_io_failure"))).toBeUndefined();
+    expect(rename).toHaveBeenCalled();
+  });
+
+  it("strictly removes a partially installed target and surfaces cleanup I/O failures", async () => {
+    const store = newStore(0);
+    await store.installIfEmpty("sid_partial", {
+      attachments: [attachment()],
+      segments: [],
+      text: "target",
+    });
+    await store.discardStrict("sid_partial");
+    expect(store.peek("sid_partial")).toEqual(EMPTY_DRAFT);
+    expect(__testing.readFile(draftPath("sid_partial"))).toBeUndefined();
+    await expect(store.discardStrict("sid_partial")).resolves.toBeUndefined();
+
+    await store.installIfEmpty("sid_cleanup_error", {
+      attachments: [],
+      segments: [],
+      text: "target",
+    });
+    vi.spyOn(vscode.workspace.fs, "delete").mockRejectedValueOnce(new Error("permission denied"));
+    await expect(store.discardStrict("sid_cleanup_error")).rejects.toThrow("permission denied");
+    expect(store.peek("sid_cleanup_error").text).toBe("target");
+  });
+
+  it("reloads a committed target draft from a fresh store", async () => {
+    const first = newStore(0);
+    await first.installIfEmpty("sid_reload", {
+      attachments: [attachment({ providerSha: "b".repeat(64) })],
+      segments: [{ kind: "file", label: "main.rs", path: "/repo/main.rs", type: "reference" }],
+      text: "reload me",
+    });
+
+    const reloaded = await newStore(0).hydrate("sid_reload");
+    expect(reloaded.text).toBe("reload me");
+    expect(reloaded.attachments[0]).toMatchObject({
+      blobSha: "a".repeat(64),
+      providerSha: "b".repeat(64),
+    });
+    expect(reloaded.segments[0]).toMatchObject({ path: "/repo/main.rs", type: "reference" });
+  });
+
+  it("durably replaces the source snapshot and propagates failures", async () => {
+    const store = newStore(0);
+    await store.replaceAndFlush(SESSION, { attachments: [], segments: [], text: "source" });
+    expect(__testing.readFile(draftPath())).toContain('"text":"source"');
+
+    vi.spyOn(vscode.workspace.fs, "rename").mockRejectedValueOnce(new Error("readonly"));
+    await expect(
+      store.replaceAndFlush(SESSION, { attachments: [], segments: [], text: "new" }),
+    ).rejects.toThrow("readonly");
+    expect(store.peek(SESSION).text).toBe("source");
+    expect(__testing.readFile(draftPath())).toContain('"text":"source"');
+  });
+});
+
 describe("isDraftEmpty", () => {
   it("treats an attachment-only draft as non-empty", () => {
     expect(isDraftEmpty(EMPTY_DRAFT)).toBe(true);

@@ -159,7 +159,7 @@ async fn run_install_refreshes_current_session_inventory() {
                 skipped: false,
                 picked_recommended: true,
             }],
-            cancelled: false,
+            outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
         }]));
     let ctx = build_ctx(work.path(), panel);
 
@@ -201,7 +201,7 @@ async fn run_install_cancelled_has_no_side_effects() {
     let panel: Arc<dyn AskQuestionPanel> =
         Arc::new(MockAskQuestionPanel::new(vec![AskQuestionResult {
             answers: vec![],
-            cancelled: true,
+            outcome: crate::core::plan_runtime::AskQuestionOutcome::Skipped,
         }]));
     let ctx = build_ctx(work.path(), panel);
 

@@ -115,29 +115,6 @@ impl Default for PlanConfig {
     }
 }
 
-/// `[ask_question]` 子表：`ask_question` 工具运行时参数。
-///
-/// env 覆盖：
-/// - `TOMCAT_ASK_QUESTION_TIMEOUT_MS` → `timeout_ms`
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AskQuestionConfig {
-    /// 一次 ask_question 调用等待用户输入的墙钟超时（毫秒）。0 表示无超时。默认 300_000 ms = 5 min。
-    #[serde(default = "default_ask_question_timeout_ms")]
-    pub timeout_ms: u64,
-}
-
-fn default_ask_question_timeout_ms() -> u64 {
-    0
-}
-
-impl Default for AskQuestionConfig {
-    fn default() -> Self {
-        Self {
-            timeout_ms: default_ask_question_timeout_ms(),
-        }
-    }
-}
-
 /// `[todos]` 子表：session-local todos 持久化与生命周期参数（GAP-N12 / G3）。
 ///
 /// env 覆盖：

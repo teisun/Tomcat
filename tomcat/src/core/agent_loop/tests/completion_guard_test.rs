@@ -174,7 +174,11 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
     let plan_runtime = PlanRuntime::new("sess-guard");
     plan_runtime.set_executing_for_test(plan_id.clone());
     let findings = vec![
-        Finding::new("concern".into(), "logic".into(), "missing null check".into()),
+        Finding::new(
+            "concern".into(),
+            "logic".into(),
+            "missing null check".into(),
+        ),
         Finding::new("nit".into(), "tests".into(), "no regression test".into()),
     ];
     plan_runtime.set_unresolved_findings(&plan_id, findings.clone());
@@ -283,7 +287,7 @@ async fn guard_never_fires_for_non_root_subagents() {
         SubagentType::Verifier,
         SubagentType::Explorer,
     ] {
-            let mut agent = build_agent(Some(Arc::clone(&plan_runtime)), subagent_type);
+        let mut agent = build_agent(Some(Arc::clone(&plan_runtime)), subagent_type);
         let mut messages = vec![ChatMessage::user("start building")];
         assert_eq!(
             finalize(&mut agent, &mut messages).await,
@@ -349,7 +353,13 @@ async fn guard_cap_survives_tool_rounds_between_text_turns() {
         subagent_type: SubagentType::User,
         ..Default::default()
     };
-    let mut agent = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, CancellationToken::new());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        CancellationToken::new(),
+    );
     agent.set_context_state(Some(empty_context_state()));
 
     let outcome = agent.run(vec![ChatMessage::user("do work")]).await;

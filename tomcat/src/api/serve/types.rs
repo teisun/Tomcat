@@ -137,6 +137,8 @@ pub enum SetPlanModeAction {
 pub struct NewSessionParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub detached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ServeSessionMode>,
 }
@@ -357,6 +359,14 @@ pub enum ServeCommand {
         #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
+    /// 回滚一个尚未进入 live registry 的 detached 会话。幂等；绝不激活目标。
+    #[serde(rename_all = "camelCase")]
+    DiscardDetachedSession {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
     #[serde(rename_all = "camelCase")]
     ListSessions {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -409,6 +419,15 @@ pub enum ServeCommand {
         session_id: Option<String>,
         attachment: IngestAttachmentInput,
     },
+    /// 为 detached 目标会话批量保留现有 blob/provider rendition 租约，不携带字节。
+    #[serde(rename_all = "camelCase")]
+    RetainAttachmentLeases {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        params: RetainAttachmentLeasesParams,
+    },
     /// 补交一张历史图的缩略图（见 [`CacheThumbnailInput`]）。
     #[serde(rename_all = "camelCase")]
     CacheAttachmentThumbnail {
@@ -418,6 +437,30 @@ pub enum ServeCommand {
         session_id: Option<String>,
         thumbnail: CacheThumbnailInput,
     },
+}
+
+/// `retain_attachment_leases` 的单个附件引用。只有内容哈希会过 wire；原始字节仍只允许
+/// `ingest_attachment` 携带。`provider_sha` 省略时 provider 与原始 blob 共用同一份字节。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainAttachmentLeaseRef {
+    pub blob_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_sha: Option<String>,
+}
+
+/// `retain_attachment_leases` 的入参。后端会把所有 blob/provider SHA 合并去重后原子保留。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainAttachmentLeasesParams {
+    pub attachments: Vec<RetainAttachmentLeaseRef>,
+}
+
+/// `retain_attachment_leases` 的响应。按字典序返回实际保留的去重 SHA 集合。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainAttachmentLeasesResponse {
+    pub retained_shas: Vec<String>,
 }
 
 /// `ingest_attachment` 的入参。
@@ -502,9 +545,11 @@ impl ServeCommand {
             | Self::SwitchSession { id, .. }
             | Self::GetMessages { id, .. }
             | Self::CloseSession { id, .. }
+            | Self::DiscardDetachedSession { id, .. }
             | Self::ListSessions { id, .. }
             | Self::Interrupt { id, .. }
             | Self::IngestAttachment { id, .. }
+            | Self::RetainAttachmentLeases { id, .. }
             | Self::CacheAttachmentThumbnail { id, .. } => id.as_deref(),
             Self::ControlRequest { .. }
             | Self::ControlResponse { .. }
@@ -531,7 +576,9 @@ impl ServeCommand {
             | Self::ControlRequest { session_id, .. }
             | Self::ControlResponse { session_id, .. }
             | Self::ControlCancel { session_id, .. } => session_id.as_deref(),
-            Self::SwitchSession { session_id, .. } => Some(session_id.as_str()),
+            Self::SwitchSession { session_id, .. }
+            | Self::RetainAttachmentLeases { session_id, .. }
+            | Self::DiscardDetachedSession { session_id, .. } => Some(session_id.as_str()),
             Self::NewSession { .. }
             | Self::ListModels { .. }
             | Self::UpsertModel { .. }
@@ -578,9 +625,11 @@ impl ServeCommand {
             Self::SwitchSession { .. } => "switch_session",
             Self::GetMessages { .. } => "get_messages",
             Self::CloseSession { .. } => "close_session",
+            Self::DiscardDetachedSession { .. } => "discard_detached_session",
             Self::ListSessions { .. } => "list_sessions",
             Self::Interrupt { .. } => "interrupt",
             Self::IngestAttachment { .. } => "ingest_attachment",
+            Self::RetainAttachmentLeases { .. } => "retain_attachment_leases",
             Self::CacheAttachmentThumbnail { .. } => "cache_attachment_thumbnail",
             Self::ControlRequest { .. } => "control_request",
             Self::ControlResponse { .. } => "control_response",
@@ -767,10 +816,7 @@ pub enum ServePlanEvent {
         plan_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         rounds: Option<u32>,
-        #[serde(
-            rename = "unresolvedFindings",
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(rename = "unresolvedFindings", skip_serializing_if = "Option::is_none")]
         unresolved_findings: Option<Vec<String>>,
     },
     #[serde(rename = "plan.complete")]

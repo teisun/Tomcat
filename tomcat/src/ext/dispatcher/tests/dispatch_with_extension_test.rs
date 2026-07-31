@@ -20,10 +20,10 @@ use super::super::HostApiDispatcher;
 use super::mocks::{MockLlm, MockPrimitive, MockToolRegistry};
 use crate::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use crate::core::{
-    AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse,
-    ChatResponseChoice, DefaultPrimitiveExecutor, DirEntry, EditFileResult, EditOperation,
-    LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall,
-    SessionManager, StreamEvent, WriteFileResult,
+    AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
+    DefaultPrimitiveExecutor, DirEntry, EditFileResult, EditOperation, LlmProvider, LlmResolver,
+    LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent,
+    WriteFileResult,
 };
 use crate::ext::host_binding::HostRequest;
 use crate::infra::DefaultEventBus;

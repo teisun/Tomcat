@@ -498,6 +498,8 @@ interface ComposerProps {
   supportedReasoningLevels?: string[] | undefined;
   thinkingLevelValue: string;
   onAttachFiles?(files: PreparedAttachment[]): void;
+  /** Called synchronously when paste preparation starts so App can bind it to the source session. */
+  onPrepareAttachments?(work: Promise<PreparedAttachment[]>): void;
   onPickContext(): void;
   onDraftChange(draft: ComposerDraft): void;
   onModeChange(value: "chat" | "plan"): void;
@@ -524,6 +526,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   modeValue,
   modelValue,
   onAttachFiles,
+  onPrepareAttachments,
   onContextSearchClose,
   onContextSearchOpen,
   onContextSearchQueryChange,
@@ -558,10 +561,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const latestAttachmentHandlersRef = useRef({
     modelCapabilities,
     onAttachFiles,
+    onPrepareAttachments,
   });
   latestAttachmentHandlersRef.current = {
     modelCapabilities,
     onAttachFiles,
+    onPrepareAttachments,
   };
   const latestContextSearchHandlersRef = useRef({
     onClose: onContextSearchClose,
@@ -688,7 +693,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           // the only process in the system with a decoder that can resize during decode,
           // so a 4000x3000 paste is turned into a 192px thumbnail without ever
           // allocating the 48MB full-size bitmap.
-          Promise.all(
+          const preparation = Promise.all(
             attachmentFiles.map(async (file) =>
               prepareAttachment({
                 bytes: await file.arrayBuffer(),
@@ -697,11 +702,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 sourcePath: extractFileSourcePath(file),
               }),
             ),
-          )
-            .then((files) => {
+          );
+          if (latestAttachmentHandlersRef.current.onPrepareAttachments) {
+            // Registration happens synchronously, before any File.arrayBuffer() resolves,
+            // so a New Session click can establish a correct click-time cutoff.
+            latestAttachmentHandlersRef.current.onPrepareAttachments(preparation);
+          } else {
+            preparation.then((files) => {
               latestAttachmentHandlersRef.current.onAttachFiles?.(files);
-            })
-            .catch(() => {
+            }).catch(() => undefined);
+          }
+          preparation.catch(() => {
               // Fallback: paste as text if attachment processing fails
               const text = event.clipboardData?.getData("text/plain");
               if (text) {

@@ -15,8 +15,8 @@ use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
 };
 use crate::core::llm::{
-    Capabilities, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextRefKind, FileSource,
-    ImageSource, LlmProvider, MessageKind, ModelEntryInput, StreamEvent,
+    Capabilities, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextRefKind,
+    FileSource, ImageSource, LlmProvider, MessageKind, ModelEntryInput, StreamEvent,
 };
 use crate::{
     init_context_state, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
@@ -140,7 +140,10 @@ fn latest_user_request_parts(request: &ChatRequest) -> &[ChatMessageContentPart]
         .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
         .expect("user message");
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
-        panic!("expected multimodal user parts, got {:?}", user_message.content);
+        panic!(
+            "expected multimodal user parts, got {:?}",
+            user_message.content
+        );
     };
     parts
 }
@@ -564,6 +567,144 @@ async fn serve_command_routes_by_session_id() {
         &first_slot.ctx.agent_registry,
         &second_slot.ctx.agent_registry
     ));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn detached_new_session_does_not_change_live_or_durable_current() {
+    let _api_key = install_test_api_key();
+    let (state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let active_before = state.registry.active_session_id().unwrap();
+    let durable_before = slot
+        .ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap();
+    let disk_before = slot.ctx.session_runtime.session.list_session_ids().unwrap();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::NewSession {
+            id: Some("detached-1".to_string()),
+            params: NewSessionParams {
+                detached: true,
+                ..NewSessionParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(state.registry.len(), 1, "detached session is disk-only");
+    assert_eq!(state.registry.active_session_id(), Some(active_before));
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .current_session_id()
+            .unwrap(),
+        durable_before,
+    );
+    let disk_after = slot.ctx.session_runtime.session.list_session_ids().unwrap();
+    assert_eq!(disk_after.len(), disk_before.len() + 1);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn detached_target_retain_and_discard_preserves_source_and_reclaims_target_leases() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let source_id = slot.session_id.clone();
+    let active_before = state.registry.active_session_id();
+    let current_before = slot
+        .ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap();
+    let store = slot.ctx.session_runtime.session.attachment_store();
+    let blob_sha = store.put(b"draft original").unwrap();
+    let provider_sha = store.put(b"draft provider rendition").unwrap();
+    store.mark_pending(&source_id, &blob_sha).unwrap();
+    store.mark_pending(&source_id, &provider_sha).unwrap();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::NewSession {
+            id: Some("detached-create".to_string()),
+            params: NewSessionParams {
+                detached: true,
+                ..NewSessionParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let create_response = wait_for_line(&buffer, |line| line["id"] == "detached-create")
+        .await
+        .into_iter()
+        .find(|line| line["id"] == "detached-create")
+        .expect("detached response");
+    let target_id = create_response["sessionId"].as_str().unwrap().to_string();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RetainAttachmentLeases {
+            id: Some("retain-target".to_string()),
+            session_id: target_id.clone(),
+            params: RetainAttachmentLeasesParams {
+                attachments: vec![RetainAttachmentLeaseRef {
+                    blob_sha: blob_sha.clone(),
+                    provider_sha: Some(provider_sha.clone()),
+                }],
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let retained = store.list_pending(&target_id).unwrap();
+    assert_eq!(retained.len(), 2, "blob + provider rendition both retained");
+    assert_eq!(state.registry.active_session_id(), active_before);
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .current_session_id()
+            .unwrap(),
+        current_before
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::DiscardDetachedSession {
+            id: Some("discard-target".to_string()),
+            session_id: target_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(slot
+        .ctx
+        .session_runtime
+        .session
+        .get_session_by_id(&target_id)
+        .unwrap()
+        .is_none());
+    assert!(store.list_pending(&target_id).unwrap().is_empty());
+    assert_eq!(state.registry.active_session_id(), active_before);
+    assert_eq!(store.list_pending(&source_id).unwrap().len(), 2);
+    assert!(store.exists(&blob_sha) && store.exists(&provider_sha));
+
+    handle_command(
+        state,
+        ServeCommand::DiscardDetachedSession {
+            id: Some("discard-target-again".to_string()),
+            session_id: target_id,
+        },
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1352,7 +1493,11 @@ async fn serve_prompt_retries_stream_terminal_refusal_without_rendering_llm_erro
     assert_eq!(count_event(&lines, "auto_retry_start"), 1);
     assert_eq!(count_event(&lines, "llm_error"), 0);
     let recorded = requests.0.lock().clone();
-    assert_eq!(recorded.len(), 2, "transient refusal should be retried once");
+    assert_eq!(
+        recorded.len(),
+        2,
+        "transient refusal should be retried once"
+    );
     assert!(
         recorded.iter().all(request_has_input_file),
         "the raw retry path must keep input_file unchanged on both attempts",
@@ -1364,7 +1509,10 @@ async fn serve_prompt_retries_stream_terminal_refusal_without_rendering_llm_erro
             .transcript_path(&slot.session_id),
     )
     .expect("read transcript");
-    assert!(transcript.contains("retry ok"), "assistant success should reach transcript");
+    assert!(
+        transcript.contains("retry ok"),
+        "assistant success should reach transcript"
+    );
 }
 
 #[tokio::test]
@@ -1373,14 +1521,13 @@ async fn serve_prompt_degrades_after_second_refusal_and_succeeds() {
     let _api_key = install_test_api_key();
     let refusal_message =
         "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
-    let (state, buffer, _temp, slot, requests) = build_initialized_state_with_recorded_streams(
-        vec![
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![
             unsupported_file_input_stream(refusal_message),
             unsupported_file_input_stream(refusal_message),
             ok_text_stream("degraded retry ok"),
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     prompt_with_pdf_attachment(&state, &slot, "retry-degrade-ok", "summarize file").await;
 
@@ -1447,21 +1594,23 @@ async fn serve_prompt_exhausted_stream_terminal_refusal_surfaces_one_final_error
     let _api_key = install_test_api_key();
     let refusal_message =
         "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
-    let (state, buffer, _temp, slot, requests) = build_initialized_state_with_recorded_streams(
-        vec![
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![
             unsupported_file_input_stream(refusal_message),
             unsupported_file_input_stream(refusal_message),
             unsupported_file_input_stream(refusal_message),
             unsupported_file_input_stream(refusal_message),
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     prompt_with_pdf_attachment(&state, &slot, "retry-exhausted", "summarize file").await;
 
     let lines = wait_for_line(&buffer, |line| {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-            && line.get("error").and_then(serde_json::Value::as_str).is_some()
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
     })
     .await;
 
@@ -1470,7 +1619,10 @@ async fn serve_prompt_exhausted_stream_terminal_refusal_surfaces_one_final_error
         .iter()
         .filter(|line| {
             line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-                && line.get("error").and_then(serde_json::Value::as_str).is_some()
+                && line
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
         })
         .count();
     assert_eq!(final_errors, 1, "terminal refusal should render once");
@@ -1505,7 +1657,11 @@ async fn serve_prompt_content_filter_stream_refusal_does_not_retry() {
     .await;
 
     assert_eq!(count_event(&lines, "auto_retry_start"), 0);
-    assert_eq!(requests.0.lock().len(), 1, "content_filter must remain fatal");
+    assert_eq!(
+        requests.0.lock().len(),
+        1,
+        "content_filter must remain fatal"
+    );
 }
 
 #[tokio::test]
@@ -1644,9 +1800,7 @@ fn build_user_message_preserves_segment_order_and_appends_attachments() {
         ..ServeMessageParams::default()
     };
 
-    let message =
-        build_message_for_test("fallback text", &params)
-            .expect("build message");
+    let message = build_message_for_test("fallback text", &params).expect("build message");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
         other => panic!("expected multipart content, got {other:?}"),
@@ -1695,8 +1849,7 @@ fn build_user_message_accepts_reference_only_segments() {
         ..ServeMessageParams::default()
     };
 
-    let message = build_message_for_test("", &params)
-        .expect("build message");
+    let message = build_message_for_test("", &params).expect("build message");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
         other => panic!("expected multipart content, got {other:?}"),
@@ -2020,6 +2173,107 @@ async fn serve_get_messages_returns_cursor_metadata_and_continuous_pages() {
             .len(),
         4
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_get_messages_keeps_assistant_and_tool_result_atomic_by_tool_call_id() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let seed_id = append_history_message(&slot, "user", "seed");
+    let assistant_id = slot
+        .ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "ask-call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "ask_question",
+                        "arguments": "{\"questions\":[{\"id\":\"q1\"}]}"
+                    }
+                }]
+            }),
+        )
+        .expect("append assistant ask_question call");
+    let tool_id = slot
+        .ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "ask-call-1",
+                "content": "{\"answers\":[],\"cancelled\":true,\"outcome\":\"skipped\"}"
+            }),
+        )
+        .expect("append ask_question result");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-atomic-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                limit: Some(1),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-atomic-1")
+    })
+    .await;
+    let first = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-atomic-1"))
+        .expect("atomic first page");
+    assert_eq!(
+        payload_message_ids(first),
+        vec![assistant_id.clone(), tool_id]
+    );
+    let messages = first["payload"]["messages"].as_array().expect("messages");
+    assert_eq!(messages[0]["message"]["tool_calls"][0]["id"], "ask-call-1");
+    assert_eq!(messages[1]["message"]["tool_call_id"], "ask-call-1");
+    let next_cursor = first["payload"]["nextCursor"]
+        .as_str()
+        .expect("cursor before atomic companion")
+        .to_string();
+    assert_eq!(decode_cursor(&next_cursor)["boundaryId"], assistant_id);
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-atomic-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                cursor: Some(next_cursor),
+                limit: Some(1),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-atomic-2")
+    })
+    .await;
+    let second = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-atomic-2"))
+        .expect("atomic second page");
+    assert_eq!(payload_message_ids(second), vec![seed_id]);
+    assert_eq!(second["payload"]["hasMore"], false);
 }
 
 #[tokio::test]

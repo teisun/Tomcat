@@ -14,8 +14,8 @@ use base64::Engine as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
-use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, StreamEvent};
 use crate::core::llm::multimodal::UNSUPPORTED_FILE_INPUT_PLACEHOLDER;
+use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, StreamEvent};
 use crate::core::session::manager::MessageAppendSink;
 use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::event_bus::EventBus;
@@ -108,7 +108,13 @@ async fn run_returns_text_when_llm_returns_text_only() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "Hello world");
@@ -135,7 +141,13 @@ async fn run_retries_on_429_then_succeeds() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "OK");
@@ -182,7 +194,13 @@ async fn run_respects_configured_max_attempts() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
     assert!(
         matches!(outcome, AgentRunOutcome::Failed(_)),
@@ -232,7 +250,13 @@ async fn run_honors_larger_configured_attempt_budget() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
     let result = match outcome {
         AgentRunOutcome::Completed(result) => result,
@@ -268,7 +292,10 @@ async fn run_retries_unsupported_file_once_then_degrades_before_next_attempt() {
         event_bus.on(
             wire::WIRE_LLM_NOTICE,
             Box::new(move |ctx: EventContext| {
-                if let Some(message) = ctx.payload.get("message").and_then(serde_json::Value::as_str)
+                if let Some(message) = ctx
+                    .payload
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
                 {
                     degrade_notices.lock().unwrap().push(message.to_string());
                 }
@@ -283,7 +310,13 @@ async fn run_retries_unsupported_file_once_then_degrades_before_next_attempt() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let result = loop_.run(vec![pdf_user_message()]).await.unwrap();
 
     assert_eq!(result.final_text, "DEGRADED_OK");
@@ -298,7 +331,11 @@ async fn run_retries_unsupported_file_once_then_degrades_before_next_attempt() {
     );
 
     let recorded = requests.0.lock().unwrap().clone();
-    assert_eq!(recorded.len(), 3, "expected original + raw retry + degraded retry");
+    assert_eq!(
+        recorded.len(),
+        3,
+        "expected original + raw retry + degraded retry"
+    );
     for raw_request in &recorded[..2] {
         let user_message = raw_request
             .messages
@@ -307,10 +344,15 @@ async fn run_retries_unsupported_file_once_then_degrades_before_next_attempt() {
             .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
             .expect("user message");
         let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
-            panic!("expected multimodal user parts, got {:?}", user_message.content);
+            panic!(
+                "expected multimodal user parts, got {:?}",
+                user_message.content
+            );
         };
         assert!(
-            parts.iter().any(|part| matches!(part, ChatMessageContentPart::InputFile { .. })),
+            parts
+                .iter()
+                .any(|part| matches!(part, ChatMessageContentPart::InputFile { .. })),
             "the first two attempts must keep the original input_file: {parts:?}"
         );
     }
@@ -327,7 +369,9 @@ async fn run_retries_unsupported_file_once_then_degrades_before_next_attempt() {
         );
     };
     assert!(
-        parts.iter().all(|part| !matches!(part, ChatMessageContentPart::InputFile { .. })),
+        parts
+            .iter()
+            .all(|part| !matches!(part, ChatMessageContentPart::InputFile { .. })),
         "degraded retry must strip input_file parts: {parts:?}"
     );
     assert!(
@@ -371,7 +415,13 @@ async fn run_unsupported_file_exhausts_full_retry_budget_before_failing() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let outcome = loop_.run(vec![pdf_user_message()]).await;
 
     assert!(
@@ -401,7 +451,13 @@ async fn run_retry_sleep_is_interruptible() {
     };
     let abort = CancellationToken::new();
     let cancel = abort.clone();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let task = tokio::spawn(async move { loop_.run(vec![ChatMessage::user("hi")]).await });
     tokio::task::yield_now().await;
     cancel.cancel();
@@ -433,16 +489,28 @@ async fn run_persists_auto_retry_events_to_transcript_sink() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
     assert!(matches!(outcome, AgentRunOutcome::Completed(_)));
 
     let entries = sink.custom_entries.lock().unwrap().clone();
     assert_eq!(entries.len(), 2, "expected retry start + end entries");
-    assert_eq!(entries[0]["event"].as_str(), Some(wire::WIRE_AUTO_RETRY_START));
+    assert_eq!(
+        entries[0]["event"].as_str(),
+        Some(wire::WIRE_AUTO_RETRY_START)
+    );
     assert_eq!(entries[0]["attempt"].as_u64(), Some(2));
-    assert_eq!(entries[1]["event"].as_str(), Some(wire::WIRE_AUTO_RETRY_END));
+    assert_eq!(
+        entries[1]["event"].as_str(),
+        Some(wire::WIRE_AUTO_RETRY_END)
+    );
     assert_eq!(entries[1]["success"].as_bool(), Some(true));
 }
 
@@ -476,7 +544,13 @@ async fn run_tool_loop_calls_tool_then_returns_text() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("read /tmp/x")];
     let result = loop_.run(messages).await.unwrap();
     assert!(result.final_text.contains("done"));
@@ -522,7 +596,13 @@ async fn run_tool_loop_emits_display_on_tool_execution_end() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("write demo file")];
     let _ = loop_.run(messages).await.unwrap();
 
@@ -553,7 +633,13 @@ async fn run_empty_messages_does_not_crash() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages: Vec<ChatMessage> = vec![];
     let result = loop_.run(messages).await;
     assert!(result.is_ok());
@@ -608,7 +694,13 @@ async fn run_emits_tool_call_streaming_before_tool_execution_start_for_write() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("write demo file")];
     let _ = loop_.run(messages).await.unwrap();
 

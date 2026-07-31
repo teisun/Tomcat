@@ -54,9 +54,7 @@ pub fn llm_stream_terminal_error(
     summary: impl Into<String>,
     code: Option<String>,
 ) -> AppError {
-    AppError::LlmDetailed(Box::new(LlmError::stream_terminal(
-        provider, summary, code,
-    )))
+    AppError::LlmDetailed(Box::new(LlmError::stream_terminal(provider, summary, code)))
 }
 
 pub fn llm_http_status_error(

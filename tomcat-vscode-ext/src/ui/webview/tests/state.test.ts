@@ -2098,6 +2098,107 @@ describe("custom history replay", () => {
     );
   });
 
+  it("uses a legacy ask_question custom entry only when the standard tool result is missing", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const questions = [{
+      id: "q1",
+      options: [{ id: "yes", label: "Yes", recommended: true }],
+      prompt: "Proceed?",
+    }];
+
+    store.hydrateHistory("s1", {
+      messages: [{
+        event: "ask_question.result",
+        id: "legacy-ask-1",
+        questions,
+        result: { answers: [], cancelled: true, outcome: "skipped" },
+        tool_call_id: "ask-call-1",
+        type: "custom",
+      }],
+      sessionId: "s1",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "tool"),
+    ).toEqual([
+      expect.objectContaining({
+        args: { questions },
+        id: "legacy-ask-1",
+        toolCallId: "ask-call-1",
+        toolName: "ask_question",
+      }),
+    ]);
+  });
+
+  it("prefers the standard assistant/tool pair over a legacy ask_question custom entry", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const questions = [{
+      id: "q1",
+      options: [{ id: "yes", label: "Yes", recommended: true }],
+      prompt: "Proceed?",
+    }];
+    const standardResult = JSON.stringify({
+      answers: [{
+        optionIds: ["yes"],
+        pickedRecommended: true,
+        questionId: "q1",
+      }],
+      cancelled: false,
+      outcome: "answered",
+    });
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-ask-1",
+          message: {
+            content: "",
+            role: "assistant",
+            tool_calls: [{
+              function: {
+                arguments: JSON.stringify({ questions }),
+                name: "ask_question",
+              },
+              id: "ask-call-1",
+              type: "function",
+            }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-ask-1",
+          message: {
+            content: standardResult,
+            role: "tool",
+            tool_call_id: "ask-call-1",
+          },
+          type: "message",
+        },
+        {
+          event: "ask_question.result",
+          id: "legacy-ask-1",
+          questions,
+          result: { answers: [], cancelled: true, outcome: "skipped" },
+          tool_call_id: "ask-call-1",
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const tools = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "tool" && item.toolCallId === "ask-call-1",
+    );
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({
+      id: "tool-ask-1",
+      summary: standardResult,
+      toolName: "ask_question",
+    });
+  });
+
   it("drops leading orphan tool entries until the assistant head arrives", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");

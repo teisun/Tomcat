@@ -20,6 +20,7 @@ function makeState(overrides: Partial<PlanPreviewStateSnapshot> = {}): PlanPrevi
     path: "/home/u/.tomcat/plans/demo.plan.md",
     planId: "plan-1",
     raw: "---\nname: X\n---\n# Plan Heading",
+    sessionModel: "gpt-5.6",
     state: "planning",
     title: "TITLE_SHOULD_NOT_RENDER",
     todos: [
@@ -110,6 +111,41 @@ describe("PlanPreviewApp", () => {
     expect(count.compareDocumentPosition(divider as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect((divider as Node).compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getAllByTestId("plan-todo-item")).toHaveLength(3);
+  });
+
+  it("exposes one labelled main region and associates the todo heading with its list", () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(makeState());
+
+    const main = screen.getByRole("main", { name: "Plan preview" });
+    const heading = screen.getByRole("heading", { level: 2, name: "3 To-dos" });
+    const list = screen.getByRole("list", { name: "3 To-dos" });
+
+    expect(main.contains(heading)).toBe(true);
+    expect(main.contains(list)).toBe(true);
+    expect(list.getAttribute("aria-labelledby")).toBe(heading.id);
+  });
+
+  it("keeps only rendered body and todo copy in the native Find Widget search surface", () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(
+      makeState({
+        bodyMarkdown: "# BODY_FIND_TOKEN",
+        overview: "HIDDEN_OVERVIEW_FIND_TOKEN",
+        raw: "---\nsecret: HIDDEN_FRONTMATTER_FIND_TOKEN\n---\n# BODY_FIND_TOKEN",
+        title: "HIDDEN_TITLE_FIND_TOKEN",
+        todos: [{ content: "TODO_FIND_TOKEN", id: "find", status: "pending" }],
+      }),
+    );
+
+    const visibleText = screen.getByRole("main", { name: "Plan preview" }).textContent ?? "";
+    expect(visibleText).toContain("BODY_FIND_TOKEN");
+    expect(visibleText).toContain("TODO_FIND_TOKEN");
+    expect(visibleText).not.toContain("HIDDEN_OVERVIEW_FIND_TOKEN");
+    expect(visibleText).not.toContain("HIDDEN_FRONTMATTER_FIND_TOKEN");
+    expect(visibleText).not.toContain("HIDDEN_TITLE_FIND_TOKEN");
   });
 
   it("does not render the frontmatter title or overview in the preview", () => {

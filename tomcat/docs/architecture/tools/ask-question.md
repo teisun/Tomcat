@@ -194,8 +194,8 @@
 
 #### 4.2.5 AQ-E：abort 与取消语义
 
-- **交付**：父 `abort_signal` 置位 → UI 关闭 → 返回 `{ answers: [], cancelled: true }`；**不**抛 `ToolError`。
-- **配置**：`TOMCAT_ASK_QUESTION_TIMEOUT_MS`（默认 0）仅测试覆写。
+- **交付**：类型化终止信号只允许显式中断产生 `interrupted`、不可恢复输入/宿主关闭产生 `host_disconnected`；整单跳过是用户动作 `skipped`，都**不**抛 `ToolError`。
+- **等待**：不存在墙钟超时。`ask_question.timeout_ms`、`TOMCAT_ASK_QUESTION_TIMEOUT_MS` 与嵌套 env 仅作为已删除配置被检测、警告并忽略。
 
 **说人话**：Ctrl+C 或点跳过 = cancelled，不是工具挂了。
 
@@ -363,9 +363,9 @@ LLM ──tool_call("ask_question", { questions: [...] })──▶ tool_exec
 
 ## 9. 配置与环境变量
 
-| 名称 | 默认 | 语义 | 说人话 |
-|------|------|------|--------|
-| `TOMCAT_ASK_QUESTION_TIMEOUT_MS` | `0`（无超时） | 等待用户答复的超时；0 表示不超时（仅在受控测试环境下覆写） | 默认一直等；测试可设超时。 |
+`ask_question` 没有 deadline，也没有可配置 timeout。旧的
+`[ask_question] timeout_ms`、`TOMCAT_ASK_QUESTION_TIMEOUT_MS` 与
+`TOMCAT__ASK_QUESTION__TIMEOUT_MS` 仅触发 removed-and-ignored 迁移提示，绝不改变等待。
 
 ---
 
@@ -381,7 +381,8 @@ LLM ──tool_call("ask_question", { questions: [...] })──▶ tool_exec
 | 入参里出现 `option.id == "__custom__"` | tool error，usage `__custom__ 是 UI 保留槽位，模型不能显式提交` | 保留 id 留给 UI。 |
 | UI 返回 `option_ids` 含 `__custom__` 但 `custom_text` 缺失 / 为空 / > 500 字符 | tool error（UI 端在提交前已校验，此处兜底） | 自定义答案必须带合法文本。 |
 | UI 返回 `option_ids` 不含 `__custom__` 但携带 `custom_text` | tool error | 没选自定义就别带文本。 |
-| 用户 abort | 返回 `{ answers: [], cancelled: true }`，**不**作为 error | 用户取消不算失败。 |
+| 用户中断 | 返回 `outcome: interrupted`，**不**作为 error | 中断不是用户跳过。 |
+| 输入或宿主不可恢复关闭 | 返回 `outcome: host_disconnected` | 断线不能伪装成用户操作。 |
 | transcript 写失败 | warning；工具仍正常返回 | 落盘失败不挡返回答案。 |
 
 ---

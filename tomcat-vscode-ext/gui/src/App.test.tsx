@@ -2,7 +2,11 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import type { HostToWebviewFrame, VsCodeApiLike } from "./types";
+import type {
+  HostToWebviewFrame,
+  VsCodeApiLike,
+  WebviewStateSnapshot,
+} from "./types";
 
 vi.mock("./attachments/imagePipeline", () => ({
   prepareAttachment: vi.fn(
@@ -16,14 +20,23 @@ vi.mock("./attachments/imagePipeline", () => ({
   ),
 }));
 
-function mount() {
+function mount(initialState?: unknown) {
   const postMessage = vi.fn();
+  let persistedState = initialState;
   const vscodeApi: VsCodeApiLike = {
+    getState: vi.fn(() => persistedState),
     postMessage,
-    setState: vi.fn(),
+    setState: vi.fn((state) => {
+      persistedState = state;
+    }),
   };
-  render(<App vscodeApi={vscodeApi} />);
-  return { postMessage, vscodeApi };
+  const view = render(<App vscodeApi={vscodeApi} />);
+  return {
+    getPersistedState: () => persistedState,
+    postMessage,
+    unmount: view.unmount,
+    vscodeApi,
+  };
 }
 
 async function emitState(frame: HostToWebviewFrame) {
@@ -69,6 +82,66 @@ async function emitReadySessionState(sessionId = "s1") {
     },
     messageId: `state-ready-${sessionId}`,
   });
+}
+
+function approvalDraftSnapshot(activeSessionId: "s1" | "s2"): WebviewStateSnapshot {
+  const session = (sessionId: "s1" | "s2", timeline: WebviewStateSnapshot["sessionViews"][string]["timeline"]) => ({
+    busy: false,
+    checkpoints: [],
+    composerDraft: { segments: [], text: "" },
+    contextRatio: null,
+    hasMoreHistory: false,
+    historyLoading: false,
+    model: "gpt-5.4",
+    ownedByThisFrontend: true,
+    pendingAttachments: [],
+    planFile: null,
+    planId: null,
+    planState: "chat" as const,
+    planTodos: [],
+    sessionId,
+    sessionTodos: [],
+    thinkingLevel: "high",
+    timeline,
+  });
+  return {
+    activeSessionId,
+    availableModelCapabilities: {},
+    availableModelReasoningLevels: {},
+    availableModels: ["gpt-5.4"],
+    mediaRoots: [],
+    modelAdminSupported: false,
+    ready: true,
+    sessions: ["s1", "s2"].map((sessionId) => ({
+      busy: false,
+      isCurrent: sessionId === activeSessionId,
+      ownedByThisFrontend: true,
+      sessionId,
+      title: sessionId,
+      updatedAt: 1,
+    })),
+    sessionViews: {
+      s1: session("s1", [{
+        id: "approval-draft-1",
+        request: {
+          questions: [{
+            id: "q-draft",
+            options: [
+              { id: "yes", label: "Yes", recommended: true },
+              { id: "no", label: "No" },
+            ],
+            prompt: "Keep this answer draft?",
+          }],
+          requestId: "request-draft-1",
+          responseEvent: "response-draft-1",
+        },
+        resolved: false,
+        sessionId: "s1",
+        type: "approval",
+      }]),
+      s2: session("s2", []),
+    },
+  };
 }
 
 async function emitCheckpointSessionState(
@@ -1575,6 +1648,14 @@ describe("Tomcat webview App", () => {
       messageId: "state-batched-approval",
     });
 
+    const pendingPanel = screen.getByTestId("pending-question-panel");
+    const stream = screen.getByTestId("stream-container");
+    const composer = screen.getByTestId("composer");
+    expect(stream.contains(pendingPanel)).toBe(false);
+    expect(
+      pendingPanel.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+
     const continueButton = screen.getByTestId("approval-continue");
     expect((continueButton as HTMLButtonElement).disabled).toBe(true);
 
@@ -1585,6 +1666,13 @@ describe("Tomcat webview App", () => {
     expect((continueButton as HTMLButtonElement).disabled).toBe(false);
 
     fireEvent.click(continueButton);
+    fireEvent.click(continueButton);
+
+    const answerMessages = postMessage.mock.calls.filter(
+      ([message]) => message.type === "answerQuestion" && message.data?.requestId === "r2",
+    );
+    expect(answerMessages).toHaveLength(1);
+    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
 
     expect(
       postMessage.mock.calls.some(
@@ -1607,6 +1695,67 @@ describe("Tomcat webview App", () => {
             ]),
       ),
     ).toBe(true);
+  });
+
+  it("keeps an answer draft across session switches and a webview DOM reload", async () => {
+    const first = mount();
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "approval-draft-s1",
+    });
+
+    expect(screen.getByTestId("question-announcement").textContent).toBe(
+      "Question waiting in s1.",
+    );
+    const announcementNode = screen.getByTestId("question-announcement");
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "approval-draft-s1-replay",
+    });
+    expect(screen.getByTestId("question-announcement")).toBe(announcementNode);
+
+    const option = screen.getByTestId("approval-option-q-draft-yes");
+    fireEvent.click(option);
+    expect(option.getAttribute("aria-checked")).toBe("true");
+
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s2"),
+      messageId: "approval-draft-s2",
+    });
+    expect(screen.queryByTestId("approval-option-q-draft-yes")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("session-select"));
+    const badge = screen.getByTestId("session-pending-badge");
+    expect(badge.textContent).toBe("1");
+    expect(badge.closest("button")?.getAttribute("aria-label")).toContain("1 pending question");
+
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "approval-draft-s1-return",
+    });
+    expect(screen.getByTestId("approval-option-q-draft-yes").getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    await act(async () => {
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    });
+    expect(document.activeElement).toBe(screen.getByTestId("approval-option-q-draft-yes"));
+
+    const persisted = first.getPersistedState();
+    first.unmount();
+    mount(persisted);
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "approval-draft-after-reload",
+    });
+    expect(screen.getByTestId("approval-option-q-draft-yes").getAttribute("aria-checked")).toBe(
+      "true",
+    );
   });
 
   it("submits the prompt on Enter without Shift", async () => {
@@ -1662,6 +1811,70 @@ describe("Tomcat webview App", () => {
           message.data?.text === "submit via enter",
       ),
     ).toBe(true);
+  });
+
+  it("captures a source draft once, locks session controls, and routes only the matching result", async () => {
+    const { postMessage } = mount();
+    await emitReadySessionState("s1");
+    const textbox = screen.getByTestId("composer-input");
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: (type: string) => (type === "text/plain" ? "fork this text" : ""),
+      },
+    });
+    postMessage.mockClear();
+
+    const create = screen.getByTestId("new-session-button");
+    fireEvent.click(create);
+    fireEvent.click(create);
+    expect(postMessage.mock.calls.filter(([message]) => message.type === "newSession")).toHaveLength(1);
+    expect((create as HTMLButtonElement).disabled).toBe(true);
+    expect(create.getAttribute("aria-busy")).toBe("true");
+    expect((screen.getByTestId("session-select") as HTMLButtonElement).disabled).toBe(true);
+
+    await emitState({
+      channel: "event",
+      content: {
+        operationId: "fork-op-1",
+        sourceSessionId: "s1",
+        type: "captureDraftForFork",
+      },
+      messageId: "capture-fork-op-1",
+    });
+    const fork = postMessage.mock.calls.find(([message]) => message.type === "forkSession")?.[0];
+    expect(fork?.data).toMatchObject({
+      operationId: "fork-op-1",
+      sourceSessionId: "s1",
+      text: "fork this text",
+    });
+
+    await emitState({
+      channel: "event",
+      content: {
+        operationId: "stale-op",
+        sourceSessionId: "s1",
+        success: false,
+        error: "stale failure",
+        type: "draftForkResult",
+      },
+      messageId: "stale-result",
+    });
+    expect((create as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText("stale failure")).toBeNull();
+
+    await emitState({
+      channel: "event",
+      content: {
+        operationId: "fork-op-1",
+        sourceSessionId: "s1",
+        success: false,
+        error: "target write failed",
+        type: "draftForkResult",
+      },
+      messageId: "fork-result-1",
+    });
+    expect((create as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("alert").textContent).toContain("target write failed");
   });
 
   it("renders the top bar without legacy title or refresh button", async () => {

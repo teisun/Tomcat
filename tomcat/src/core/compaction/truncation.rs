@@ -162,7 +162,10 @@ pub struct PlaceholderOutcome {
 
 /// Layer 1：从 compactable zone（排除最近 `config.keep_recent_turns` 个 turns）中，
 /// 将长度 **大于** `ContextConfig::layer0_placeholder_threshold_chars`（默认 10_000）的 tool result 替换为占位符。
-pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig) -> PlaceholderOutcome {
+pub fn compact_tool_results(
+    state: &mut ContextState,
+    config: &ContextConfig,
+) -> PlaceholderOutcome {
     let threshold = config.layer0_placeholder_threshold_chars;
     let protected_turns = config.keep_recent_turns;
 

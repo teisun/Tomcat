@@ -65,7 +65,13 @@ async fn context_metrics_update_emitted_before_turn_end() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: 100,
@@ -138,7 +144,13 @@ async fn context_metrics_update_payload_contains_valid_values() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: 2000,
@@ -233,7 +245,13 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: 100,
@@ -305,7 +323,13 @@ async fn context_metrics_update_skipped_when_no_context_state() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
     let captured = emitted.lock().unwrap();
@@ -347,7 +371,13 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: 200,

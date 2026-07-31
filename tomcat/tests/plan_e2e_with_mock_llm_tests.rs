@@ -54,14 +54,12 @@ use tomcat::core::{
 use tomcat::{
     AllowAllConfirmation, AppConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
     ContextConfig, DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, LlmProvider,
-    LlmResolver, LlmScene, ResolvedCall,
-    NoopStore, PrimitiveExecutor, PrimitiveOperation, ReadResult, SearchFilesArgs,
-    SearchFilesOutput, SessionHeader, StreamEvent, TracingAuditRecorder, TranscriptEntry,
-    WriteFileResult,
+    LlmResolver, LlmScene, NoopStore, PrimitiveExecutor, PrimitiveOperation, ReadResult,
+    ResolvedCall, SearchFilesArgs, SearchFilesOutput, SessionHeader, StreamEvent,
+    TracingAuditRecorder, TranscriptEntry, WriteFileResult,
 };
 
 // ─── 共享 fixture 与 spy ───────────────────────────────────────────────────
-
 
 struct FixedResolver {
     provider: Arc<dyn LlmProvider>,
@@ -98,7 +96,6 @@ impl LlmResolver for FixedResolver {
         ))
     }
 }
-
 
 /// CapturePanel 把所有 panel snapshot 推入 Vec，便于测试断言"plan.panel × N"。
 #[derive(Default)]
@@ -169,6 +166,7 @@ impl CodeReviewerDispatcher for QueueCodeReviewer {
         _plan_id: &str,
         _plan_text: &str,
         _open_findings: &[tomcat::core::plan_runtime::review::Finding],
+        _dispatch: &tomcat::core::plan_runtime::CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         self.call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1126,7 +1124,7 @@ summary: verifier child completed
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
             read_file_state: Arc::new(ReadFileState::default()),
-                        web_fetch_runtime,
+            web_fetch_runtime,
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
@@ -1304,7 +1302,7 @@ summary: verifier observed long fake cargo to completion
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
             read_file_state: Arc::new(ReadFileState::default()),
-                        web_fetch_runtime,
+            web_fetch_runtime,
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
@@ -1407,7 +1405,7 @@ applied_changes: false
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
             read_file_state: Arc::new(ReadFileState::default()),
-                        agent_workspace_dir: workspace.path().to_path_buf(),
+            agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
             bash_config: AppConfig::default().tools.bash.clone(),
@@ -1435,7 +1433,7 @@ applied_changes: false
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
             read_file_state: Arc::new(ReadFileState::default()),
-                        agent_workspace_dir: workspace.path().to_path_buf(),
+            agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
             bash_config: AppConfig::default().tools.bash,
@@ -1454,7 +1452,16 @@ applied_changes: false
         .dispatch(plan_id, "## Goal\nship reviewer\n", true)
         .await;
     let code_summary = code_dispatcher
-        .dispatch(plan_id, "## Goal\nship reviewer\n", &[])
+        .dispatch(
+            plan_id,
+            "## Goal\nship reviewer\n",
+            &[],
+            &tomcat::core::plan_runtime::CodeReviewDispatchInfo {
+                round: 1,
+                review_attempt_id: "mock-review-attempt".into(),
+                tool_call_id: "mock-tool-call".into(),
+            },
+        )
         .await;
 
     assert_eq!(code_summary.verdict.as_deref(), Some("pass"));

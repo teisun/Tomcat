@@ -35,9 +35,9 @@ impl PlanState {
         match self {
             PlanState::Chat => AgentMode::Chat,
             PlanState::Planning => AgentMode::Plan,
-            PlanState::Executing { .. } | PlanState::Pending { .. } | PlanState::Completed { .. } => {
-                AgentMode::Exec
-            }
+            PlanState::Executing { .. }
+            | PlanState::Pending { .. }
+            | PlanState::Completed { .. } => AgentMode::Exec,
         }
     }
 

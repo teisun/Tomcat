@@ -6,6 +6,7 @@ import {
   type PlanPreviewDomSnapshot,
   type PlanPreviewIntent,
   type PlanPreviewStateSnapshot,
+  type PlanTodoStatus,
   type PlanToolbarStyle,
   type VsCodeApiLike,
 } from "../../../src/shared/planPreviewProtocol";
@@ -145,6 +146,16 @@ function restoreScrollPosition(container: HTMLElement, restore: ScrollRestoreSta
   container.scrollTop = Math.max(0, absoluteTop - restore.anchorOffset);
 }
 
+const PLAN_PREVIEW_WEBVIEW_INSTANCE_ID = `plan-webview-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+function computedFontSize(element: Element | null): number | null {
+  if (!element) {
+    return null;
+  }
+  const value = Number.parseFloat(element.ownerDocument.defaultView?.getComputedStyle(element).fontSize ?? "");
+  return Number.isFinite(value) ? value : null;
+}
+
 /** Read the rendered DOM for E2E assertions (test-only). */
 function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDomSnapshot {
   const strip = document.querySelector('[data-testid="plan-action-strip"]');
@@ -155,7 +166,12 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   const items = document.querySelectorAll('[data-testid="plan-todo-item"]');
   const icons = document.querySelectorAll(".tc-plan-todo__icon");
   const body = document.querySelector('[data-testid="plan-markdown-body"]');
-  const content = document.querySelector('[data-testid="plan-content"]');
+  const code = body?.querySelector("code") ?? null;
+  const content = document.querySelector<HTMLElement>('[data-testid="plan-content"]');
+  const mermaidText = document.querySelector(
+    '[data-testid="plan-mermaid"] svg text, [data-testid="plan-mermaid"] svg foreignObject span, [data-testid="plan-mermaid"] .nodeLabel',
+  );
+  const todoContent = document.querySelector(".tc-plan-todo__content");
   const inlinePathCount = document.querySelectorAll(".tc-inline-path").length;
   const options = select
     ? Array.from(select.options)
@@ -165,7 +181,7 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   const todoIconSizes = Array.from(icons).map((icon) =>
     Math.round(icon.getBoundingClientRect().width),
   );
-  const todoStatuses = Array.from(items).flatMap((item) => {
+  const todoStatuses: PlanTodoStatus[] = Array.from(items).flatMap<PlanTodoStatus>((item) => {
     const status = item.getAttribute("data-status");
     return status === "cancelled" ||
         status === "completed" ||
@@ -186,13 +202,17 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   const stripInsetLeft = strip ? Math.round(strip.getBoundingClientRect().left) : null;
   const topVisibleSourceLine = sourceLineOf(content ? findFirstVisibleSourceBlock(content) : null);
   return {
+    baseFontSizePx: computedFontSize(document.body),
+    bodyFontSizePx: computedFontSize(body),
     bodyHasContent: Boolean(body && (body.textContent ?? "").trim().length > 0),
     bodyInsetLeft: body ? Math.round(body.getBoundingClientRect().left) : null,
     buildModelOptions: options,
     buildModelValue: select ? select.value : "",
+    codeFontSizePx: computedFontSize(code),
     contentScrollTop: content ? Math.round(content.scrollTop) : null,
     hasActionStrip: Boolean(strip),
     inlinePathCount,
+    mermaidFontSizePx: computedFontSize(mermaidText),
     mermaidSvgCount,
     selectionButtonVisible: Boolean(
       document.querySelector('[data-testid="plan-selection-add"]'),
@@ -200,11 +220,14 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
     stripInsetLeft,
     stripOutsideContent,
     todoCountText: countEl ? countEl.textContent : null,
+    todoFontSizePx: computedFontSize(todoContent),
     todoIconSizes,
     todoItemCount: items.length,
     todoStatuses,
+    themeClassName: document.body.className,
     topVisibleSourceLine,
     toolbarStyle,
+    webviewInstanceId: PLAN_PREVIEW_WEBVIEW_INSTANCE_ID,
   };
 }
 
@@ -262,7 +285,7 @@ export function PlanPreviewApp({
 }) {
   const [state, setState] = useState<PlanPreviewStateSnapshot | null>(null);
   const stateRef = useRef<PlanPreviewStateSnapshot | null>(state);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
   const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
   stateRef.current = state;
 
@@ -354,19 +377,28 @@ export function PlanPreviewApp({
           sessionModel={state.sessionModel}
         />
       ) : null}
-      <div className="tc-plan-preview__content" data-testid="plan-content" ref={contentRef}>
+      <main
+        aria-label="Plan preview"
+        className="tc-plan-preview__content"
+        data-testid="plan-content"
+        ref={contentRef}
+      >
         <MarkdownBody
           markdown={state.bodyMarkdown}
           onOpenFile={(path, line) => send(vscodeApi, { data: { line, path }, type: "openFile" })}
           onOpenLink={(href) => send(vscodeApi, { data: { href }, type: "openLink" })}
           sourceLineMap={state.bodyLineMap}
         />
-        <div className="tc-plan-preview__todos-count" data-testid="plan-todos-count">
+        <h2
+          className="tc-plan-preview__todos-count"
+          data-testid="plan-todos-count"
+          id="plan-todos-heading"
+        >
           {todoCountLabel(state.todos.length)}
-        </div>
+        </h2>
         <hr className="tc-plan-preview__divider" />
-        <TodoList todos={state.todos} />
-      </div>
+        <TodoList labelledBy="plan-todos-heading" todos={state.todos} />
+      </main>
       <PlanSelectionActionButton onAdd={sendSelection} />
     </div>
   );

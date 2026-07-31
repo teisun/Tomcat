@@ -220,7 +220,12 @@ fn scoped_session_manager(state: &ServeState) -> Option<SessionManager> {
 /// 之前写好才不会引发重载 —— 所以它必须来自 `initialize`，不能等到某个会话的
 /// `get_state`：那时 webview 早就渲染完了，再改资源根就是一次可见的白屏。
 pub(crate) fn attachment_root(state: &ServeState) -> Option<PathBuf> {
-    Some(scoped_session_manager(state)?.attachment_store().root().to_path_buf())
+    Some(
+        scoped_session_manager(state)?
+            .attachment_store()
+            .root()
+            .to_path_buf(),
+    )
 }
 
 pub(crate) fn normalize_session_mode(
@@ -231,6 +236,25 @@ pub(crate) fn normalize_session_mode(
         Some(mode) => Ok(mode.into_core_mode()),
         None => default_mode(cfg),
     }
+}
+
+pub(crate) fn create_detached_session(
+    state: &ServeState,
+    params: NewSessionParams,
+) -> Result<crate::SessionEntry, AppError> {
+    let mode = normalize_session_mode(&state.cfg, params.mode)?;
+    let cwd_path = params
+        .cwd
+        .as_deref()
+        .map(crate::normalize_path)
+        .transpose()?
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let sessions_dir = resolve_sessions_dir(&state.cfg)?;
+    std::fs::create_dir_all(&sessions_dir).map_err(AppError::Io)?;
+    let session_key = session_key_for_agent(&state.cfg.agent.id, mode, &cwd_path);
+    let session_manager = SessionManager::new_scoped(sessions_dir, session_key.clone());
+    session_manager
+        .create_detached_session(&session_key, Some(cwd_path.to_string_lossy().to_string()))
 }
 
 pub(crate) async fn create_session_slot(

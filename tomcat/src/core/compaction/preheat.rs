@@ -704,7 +704,10 @@ pub async fn generate_summary(
         text = machine_block::override_progress_section(&text, &plan);
     }
 
-    let blocks = machine_block::render(control, &machine_block::collect_verbatim_user_messages(snapshot));
+    let blocks = machine_block::render(
+        control,
+        &machine_block::collect_verbatim_user_messages(snapshot),
+    );
     Ok(machine_block::prepend(&blocks, &text))
 }
 

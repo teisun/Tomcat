@@ -388,6 +388,25 @@ impl SessionManager {
         session_key: &str,
         cwd: Option<String>,
     ) -> Result<SessionEntry, AppError> {
+        self.create_session_with_activation(session_key, cwd, true)
+    }
+
+    /// 创建可列出但不激活的会话。既不修改 `sessions.json.current`，也不修改进程内 pin。
+    /// 供 host 在草稿与附件租约全部 durable 之前准备目标会话。
+    pub fn create_detached_session(
+        &self,
+        session_key: &str,
+        cwd: Option<String>,
+    ) -> Result<SessionEntry, AppError> {
+        self.create_session_with_activation(session_key, cwd, false)
+    }
+
+    fn create_session_with_activation(
+        &self,
+        session_key: &str,
+        cwd: Option<String>,
+        activate: bool,
+    ) -> Result<SessionEntry, AppError> {
         let now = Utc::now().timestamp_millis();
         let session_id = format!("{}_{}", now, uuid_for_session());
         let path = self.transcript_path(&session_id);
@@ -416,11 +435,17 @@ impl SessionManager {
             last_checkpoint_id: None,
             title: None,
         };
-        self.with_store_mut(|store| {
+        let store_result = self.with_store_mut(|store| {
             store.sessions.insert(session_id.clone(), entry.clone());
-            store.current.insert(session_key.to_string(), session_id);
+            if activate {
+                store.current.insert(session_key.to_string(), session_id);
+            }
             Ok(())
-        })?;
+        });
+        if let Err(error) = store_result {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
         Ok(entry)
     }
 

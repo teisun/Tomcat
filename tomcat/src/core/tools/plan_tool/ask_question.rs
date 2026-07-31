@@ -12,43 +12,34 @@
 //! - **选中 `__custom__`** → 必带 `custom_text`（非空、≤ 500）；
 //!   未选中 `__custom__` → 不得携带 `custom_text`（防止 LLM 误用）。
 
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
 use crate::core::plan_runtime::{
-    panels::{AskQuestionPanel, AskQuestionResult, Question, CUSTOM_OPTION_ID},
+    panels::{
+        AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
+        AskQuestionTermination, Question, CUSTOM_OPTION_ID,
+    },
     state::PlanState,
     PlanRuntime,
 };
 
 use super::ToolError;
 
-/// `ask_question` 执行入口。`panel` 通常来自 `ChatContext.ask_question_panel`；
-/// `cancel_signal` 来自 chat_loop 当前回合的 `CancellationToken` adapter。
-///
-/// N13：等待用户回答的墙钟超时取自（优先级从高到低）：
-/// 1. 环境变量 `TOMCAT_ASK_QUESTION_TIMEOUT_MS`（解析失败/0 视为不超时）；
-/// 2. `[ask_question].timeout_ms`（由 caller 通过 [`execute_with_timeout`] 传入）；
-/// 3. 默认 300_000 ms（5 分钟）。
-///
-/// 超时后返回 `cancelled: true` 而非 `Err`——与 Ctrl-C 路径同口径。
+/// `ask_question` execution entry. It has deliberately no deadline: only a user response,
+/// explicit turn interruption, or an unrecoverable host-channel closure may settle the wait.
 pub async fn execute(
     runtime: &PlanRuntime,
     panel: &dyn AskQuestionPanel,
     raw_args: &serde_json::Value,
-    cancel_signal: Arc<AtomicBool>,
+    termination: AskQuestionTermination,
 ) -> Result<serde_json::Value, ToolError> {
-    execute_with_timeout(runtime, panel, raw_args, cancel_signal, None).await
+    execute_for_tool(runtime, panel, raw_args, termination, None).await
 }
 
-/// 与 [`execute`] 同语义，但显式接受 caller 提供的超时（毫秒）。`config_timeout_ms == Some(0)`
-/// 或环境变量 `TOMCAT_ASK_QUESTION_TIMEOUT_MS=0` 表示无超时。
-pub async fn execute_with_timeout(
+pub async fn execute_for_tool(
     runtime: &PlanRuntime,
     panel: &dyn AskQuestionPanel,
     raw_args: &serde_json::Value,
-    cancel_signal: Arc<AtomicBool>,
-    config_timeout_ms: Option<u64>,
+    termination: AskQuestionTermination,
+    tool_call_id: Option<&str>,
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
     // B11：CHAT / Planning / Pending / Completed 都可见；EXEC 隐藏（防止 agent loop 阻塞）。
@@ -59,46 +50,27 @@ pub async fn execute_with_timeout(
         });
     }
     let questions = parse_and_validate_questions(raw_args)?;
-    let timeout_ms = resolve_timeout_ms(config_timeout_ms);
-    let ask_fut = panel.ask(questions.clone(), cancel_signal);
-    let result = if let Some(ms) = timeout_ms {
-        match tokio::time::timeout(std::time::Duration::from_millis(ms), ask_fut).await {
-            Ok(r) => r,
-            Err(_) => AskQuestionResult {
-                cancelled: true,
-                answers: vec![],
+    let result = panel
+        .ask_with_identity(
+            AskQuestionIdentity {
+                session_id: runtime.current_session_id(),
+                tool_call_id: tool_call_id.map(str::to_owned),
             },
-        }
-    } else {
-        ask_fut.await
-    };
-    if result.cancelled {
-        let payload = serde_json::json!({
-            "cancelled": true,
-            "answers": [],
-        });
-        write_ask_question_transcript(runtime, &questions, &payload);
-        return Ok(payload);
+            questions.clone(),
+            termination,
+        )
+        .await;
+    if matches!(result.outcome, AskQuestionOutcome::Answered) {
+        validate_answers(&questions, &result)?;
+    } else if !result.answers.is_empty() {
+        return Err(ToolError::Internal(format!(
+            "terminal ask_question outcome {:?} must not carry answers",
+            result.outcome
+        )));
     }
-    validate_answers(&questions, &result)?;
     let payload = answer_to_json(&result);
     write_ask_question_transcript(runtime, &questions, &payload);
     Ok(payload)
-}
-
-/// 解析超时（毫秒）：env > config > 默认 300_000。`Some(0)` / env `0` → `None`（不超时）。
-fn resolve_timeout_ms(config_timeout_ms: Option<u64>) -> Option<u64> {
-    if let Ok(s) = std::env::var("TOMCAT_ASK_QUESTION_TIMEOUT_MS") {
-        if let Ok(n) = s.trim().parse::<u64>() {
-            return if n == 0 { None } else { Some(n) };
-        }
-    }
-    let cfg = config_timeout_ms.unwrap_or(300_000);
-    if cfg == 0 {
-        None
-    } else {
-        Some(cfg)
-    }
 }
 
 fn parse_and_validate_questions(raw: &serde_json::Value) -> Result<Vec<Question>, ToolError> {
@@ -256,7 +228,8 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
 
 fn answer_to_json(result: &AskQuestionResult) -> serde_json::Value {
     serde_json::json!({
-        "cancelled": result.cancelled,
+        "outcome": result.outcome,
+        "cancelled": result.legacy_cancelled(),
         "answers": result
             .answers
             .iter()

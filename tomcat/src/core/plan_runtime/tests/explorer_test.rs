@@ -80,7 +80,10 @@ fn prompt_is_self_contained_and_names_the_task() {
     };
     let prompt = build_explorer_prompt(&task, Some(std::path::Path::new("/repo")));
     assert!(prompt.contains("webview-paste"), "{prompt}");
-    assert!(prompt.contains("Where is the paste event handled?"), "{prompt}");
+    assert!(
+        prompt.contains("Where is the paste event handled?"),
+        "{prompt}"
+    );
     assert!(prompt.contains("/repo"), "{prompt}");
 }
 

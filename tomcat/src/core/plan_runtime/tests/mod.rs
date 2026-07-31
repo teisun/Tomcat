@@ -8,9 +8,9 @@ mod ops_test;
 mod prod_reviewer_test;
 mod refresh_signals_test;
 mod review_test;
-mod subagent_provider_binding_test;
 mod runtime_state_test;
 mod safety_test;
+mod subagent_provider_binding_test;
 mod todo_runtime_test;
 mod verify_test;
 

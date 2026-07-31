@@ -337,8 +337,7 @@ impl AgentLoop {
                             .as_deref()
                             .is_some_and(is_unsupported_multimodal_text);
                     if unsupported_multimodal_hit {
-                        unsupported_multimodal_hits =
-                            unsupported_multimodal_hits.saturating_add(1);
+                        unsupported_multimodal_hits = unsupported_multimodal_hits.saturating_add(1);
                         let attempts_left_after_this =
                             self.config.max_attempts.saturating_sub(attempt);
                         if unsupported_multimodal_hits >= 2 && attempts_left_after_this >= 1 {

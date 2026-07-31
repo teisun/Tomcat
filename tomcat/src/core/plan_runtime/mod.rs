@@ -67,8 +67,9 @@ use crate::core::session::manager::{AgentMode, ResumeControlState};
 
 pub use code_reviewer::CodeReviewSummary;
 pub use panels::{
-    Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, NoopTodosPanel, Question,
-    QuestionOption, RefreshNotifier, TodosPanel, TodosPanelSnapshot, CUSTOM_OPTION_ID,
+    Answer, AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
+    AskQuestionTermination, AskQuestionTerminationReason, MockAskQuestionPanel, NoopTodosPanel,
+    Question, QuestionOption, RefreshNotifier, TodosPanel, TodosPanelSnapshot, CUSTOM_OPTION_ID,
 };
 pub use plan_reviewer::{PlanReviewSummary, REVIEWER_ALLOW_REVIEW_EDIT};
 pub use review::Finding;
@@ -192,9 +193,6 @@ pub struct PlanRuntime {
     /// 显式注入别的 `AskQuestionPanel`。未注入时 `ask_question` 工具返回
     /// `cancelled: true` 兜底（避免 panic / 卡死）。
     ask_question_panel: Mutex<Option<Arc<dyn AskQuestionPanel>>>,
-    /// `[ask_question].timeout_ms`：ask_question 等待用户回答的墙钟超时（毫秒）。
-    /// `0` 表示无超时；生产由 `ChatContext::from_config` 写入；默认 0（按工具内置默认 300_000 处理）。
-    ask_question_timeout_ms: std::sync::atomic::AtomicU64,
     /// 当前 active todos scratchpad 的逻辑 id（不再参与磁盘文件命名）。
     /// `todos.new_todos=true` 时通过 [`Self::rotate_active_todos_id`] 切换，便于 tool result
     /// / panel 在内存层感知“新白板”。
@@ -276,7 +274,6 @@ impl PlanRuntime {
             unresolved_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
             session_model: parking_lot::Mutex::new(None),
             ask_question_panel: Mutex::new(None),
-            ask_question_timeout_ms: std::sync::atomic::AtomicU64::new(0),
             active_todos_id: Mutex::new(None),
             refresh_notifier: Arc::new(RefreshNotifier::new()),
             checkpoint_store: Mutex::new(None),
@@ -403,24 +400,8 @@ impl PlanRuntime {
         format!("td_{}_{now_ms}", self.session_key)
     }
 
-    /// 读取 `[ask_question].timeout_ms`（N13 / B1 tool_exec 分发 `ask_question` 时使用）。
-    /// 返回 `None` 表示「未配置」（工具按内置默认 300_000ms 处理）；`Some(0)` 表示无超时。
-    pub fn ask_question_timeout_ms(&self) -> Option<u64> {
-        let v = self
-            .ask_question_timeout_ms
-            .load(std::sync::atomic::Ordering::Acquire);
-        if v == u64::MAX {
-            None
-        } else {
-            Some(v)
-        }
-    }
-
-    /// 由 `ChatContext::from_config` 在装配阶段写入。`None` → 内置默认；`Some(0)` → 无超时。
-    pub fn set_ask_question_timeout_ms(&self, timeout_ms: Option<u64>) {
-        let v = timeout_ms.unwrap_or(u64::MAX);
-        self.ask_question_timeout_ms
-            .store(v, std::sync::atomic::Ordering::Release);
+    pub fn current_session_id(&self) -> Option<String> {
+        self.current_session_id.lock().clone()
     }
 
     /// 本 runtime 绑定的 session_key（只读）。

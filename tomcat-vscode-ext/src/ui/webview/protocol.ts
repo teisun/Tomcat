@@ -14,6 +14,11 @@ import type {
   AttachmentResultItem,
 } from "../../shared/attachmentProtocol";
 import { isSupportedAttachmentMime } from "../../shared/attachmentProtocol";
+import {
+  parseDraftForkCapture,
+  type DraftForkCapture,
+  type DraftForkResult,
+} from "../../shared/draftForkProtocol";
 import type {
   PreviewClose,
   PreviewReady,
@@ -424,6 +429,21 @@ export type HostEventFrameContent =
   | {
       type: "attachFilesResult";
       items: AttachmentResultItem[];
+      operationId?: string;
+      sessionId?: string;
+    }
+  | {
+      error?: string;
+      operationId: string;
+      sessionId: string;
+      success: boolean;
+      type: "composerWorkResult";
+    }
+  | (DraftForkResult & { type: "draftForkResult" })
+  | {
+      operationId: string;
+      sourceSessionId: string;
+      type: "captureDraftForFork";
     }
   | {
       type: "attachmentFeedback";
@@ -431,6 +451,12 @@ export type HostEventFrameContent =
         message: string;
         hasErrors: boolean;
       };
+    }
+  | {
+      accepted: boolean;
+      requestId: string;
+      sessionId: string;
+      type: "answerQuestionResult";
     }
   | PreviewReady
   | PreviewSelect
@@ -497,6 +523,7 @@ export type WebviewIntent =
       data: {
         requestId: string;
         result: AskQuestionResult;
+        sessionId: string;
       };
     }
   | {
@@ -533,6 +560,11 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "forkSession";
+      data: DraftForkCapture;
+    }
+  | {
+      messageId: string;
       type: "prompt" | "steer";
       data: {
         segments?: WebviewMessageSegment[];
@@ -545,6 +577,7 @@ export type WebviewIntent =
       messageId: string;
       type: "pickContext";
       data?: {
+        operationId?: string;
         sessionId?: string | null;
       };
     }
@@ -606,6 +639,7 @@ export type WebviewIntent =
        */
       type: "attachFiles";
       data: {
+        operationId?: string;
         sessionId: string;
         files: AttachmentCandidate[];
       };
@@ -693,6 +727,7 @@ export type WebviewIntent =
       messageId: string;
       type: "resolveDrop";
       data: {
+        operationId?: string;
         sessionId?: string | null;
         uris: string[];
       };
@@ -749,6 +784,8 @@ export type WebviewIntent =
       type: "__test.dom_snapshot";
       data: {
         activeSessionId: string | null;
+        answerCardCount: number;
+        answerOutcomes: string[];
         approvalCount: number;
         composerControlMetrics: Record<
           string,
@@ -854,7 +891,13 @@ function isAskQuestionResultShape(value: unknown): value is AskQuestionResult {
   return (
     isRecord(value) &&
     Array.isArray(value.answers) &&
-    typeof value.cancelled === "boolean"
+    typeof value.cancelled === "boolean" &&
+    (value.outcome === undefined ||
+      value.outcome === "answered" ||
+      value.outcome === "skipped" ||
+      value.outcome === "interrupted" ||
+      value.outcome === "host_disconnected" ||
+      value.outcome === "cancelled_unknown")
   );
 }
 
@@ -999,6 +1042,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "newSession":
       return value.data === undefined || isRecord(value.data);
+    case "forkSession":
+      return parseDraftForkCapture(value.data) !== null;
     case "retryUserMessage":
     case "resyncSessionView":
       return (
@@ -1032,6 +1077,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "resolveDrop":
       return (
         isRecord(value.data) &&
+        (value.data.operationId === undefined || isString(value.data.operationId)) &&
         Array.isArray(value.data.uris) &&
         value.data.uris.every(isString)
       );
@@ -1053,6 +1099,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "attachFiles":
       return (
         isRecord(value.data) &&
+        (value.data.operationId === undefined || isString(value.data.operationId)) &&
         isString(value.data.sessionId) &&
         Array.isArray(value.data.files) &&
         (value.data.files as unknown[]).every(
@@ -1102,6 +1149,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       return (
         isRecord(value.data) &&
         isString(value.data.requestId) &&
+        isString(value.data.sessionId) &&
         isAskQuestionResultShape(value.data.result)
       );
     case "__test.dom_snapshot":
@@ -1112,6 +1160,9 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         Array.isArray(value.data.sessionGroupHeaders) &&
         Array.isArray(value.data.sessionMoreButtons) &&
         Array.isArray(value.data.toolTitles) &&
+        typeof value.data.answerCardCount === "number" &&
+        Array.isArray(value.data.answerOutcomes) &&
+        value.data.answerOutcomes.every((outcome) => typeof outcome === "string") &&
         typeof value.data.approvalCount === "number" &&
         typeof value.data.html === "string" &&
         typeof value.data.jumpToLatestVisible === "boolean" &&

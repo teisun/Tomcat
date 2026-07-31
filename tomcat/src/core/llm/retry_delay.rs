@@ -85,8 +85,8 @@ mod tests {
         compute_provider_retry_delay_ms, is_provider_retry_cancelled, sleep_provider_retry_delay,
         with_provider_retry_cancel, PROVIDER_RETRY_BASE_DELAY_MS, PROVIDER_RETRY_CAP_MS,
     };
-    use tokio_util::sync::CancellationToken;
     use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn provider_retry_delay_uses_jitter_window() {
@@ -147,7 +147,10 @@ mod tests {
         let wait = tokio::spawn(async { sleep_provider_retry_delay(Duration::from_secs(4)).await });
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(3)).await;
-        assert!(!wait.is_finished(), "unscoped sleep should still be waiting");
+        assert!(
+            !wait.is_finished(),
+            "unscoped sleep should still be waiting"
+        );
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(wait.await.expect("join").is_ok());
     }

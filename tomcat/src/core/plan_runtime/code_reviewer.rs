@@ -232,10 +232,9 @@ impl CodeReviewSummary {
 pub async fn collect_git_diff_context(workspace_root: &std::path::Path) -> (String, Vec<String>) {
     use std::collections::BTreeSet;
 
-    let diff_stat =
-        run_git_capture(workspace_root, &["diff", "--stat", "--no-ext-diff", "HEAD"])
-            .await
-            .unwrap_or_default();
+    let diff_stat = run_git_capture(workspace_root, &["diff", "--stat", "--no-ext-diff", "HEAD"])
+        .await
+        .unwrap_or_default();
 
     let mut changed_files = BTreeSet::new();
     for line in run_git_lines(

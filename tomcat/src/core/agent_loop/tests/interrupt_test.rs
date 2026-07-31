@@ -18,8 +18,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
-use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
 use crate::core::llm::retry_delay::sleep_provider_retry_delay;
+use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
 use crate::core::session::find_dangling_tail_tool_call_ids;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;

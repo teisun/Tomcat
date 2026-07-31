@@ -1,6 +1,3 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
 use crate::api::chat::panels::{Question, QuestionOption};
 use crate::api::chat::ChatContext;
 use crate::core::package::{PackageManager, PackageResourceKind, PackageVisibility};
@@ -215,10 +212,10 @@ async fn choose_target(ctx: &ChatContext) -> Option<InstallTarget> {
                     },
                 ],
             }],
-            Arc::new(AtomicBool::new(false)),
+            crate::core::plan_runtime::AskQuestionTermination::default(),
         )
         .await;
-    if result.cancelled {
+    if result.legacy_cancelled() {
         return None;
     }
     let answer = result.answers.into_iter().find(|answer| !answer.skipped)?;

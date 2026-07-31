@@ -10,6 +10,11 @@ type Manifest = {
       properties?: Record<string, unknown>;
     };
     commands?: Array<Record<string, unknown>>;
+    customEditors?: Array<{
+      priority?: string;
+      selector?: Array<{ filenamePattern?: string }>;
+      viewType?: string;
+    }>;
     keybindings?: Array<Record<string, unknown>>;
     menus?: Record<string, Array<Record<string, unknown>>>;
     views?: Record<string, Array<Record<string, unknown>>>;
@@ -75,6 +80,23 @@ describe("extension manifest contract", () => {
           type: "webview",
         }),
       ]),
+    );
+  });
+
+  it("contributes .plan.md files to the default Plan preview editor", async () => {
+    const manifest = await readManifest();
+    const editor = manifest.contributes?.customEditors?.find(
+      (candidate) => candidate.viewType === "tomcat.planPreview",
+    );
+
+    expect(editor).toEqual(
+      expect.objectContaining({
+        priority: "default",
+        selector: expect.arrayContaining([
+          expect.objectContaining({ filenamePattern: "*.plan.md" }),
+        ]),
+        viewType: "tomcat.planPreview",
+      }),
     );
   });
 

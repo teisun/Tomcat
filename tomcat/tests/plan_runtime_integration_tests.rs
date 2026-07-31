@@ -9,7 +9,6 @@
 //! - **不**真正连 LLM provider；reviewer 用 mock dispatcher、ask_question 用 mock panel。
 #![allow(clippy::await_holding_lock)]
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,8 +17,8 @@ use tomcat::core::plan_runtime::file_store::{
     TodoItem, TodoStatus,
 };
 use tomcat::core::plan_runtime::panels::{
-    Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, Question, QuestionOption,
-    CUSTOM_OPTION_ID,
+    Answer, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination,
+    MockAskQuestionPanel, Question, QuestionOption, CUSTOM_OPTION_ID,
 };
 use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
@@ -119,6 +118,7 @@ impl CodeReviewerDispatcher for AcceptCodeReviewer {
         _plan_id: &str,
         _plan_text: &str,
         _open_findings: &[tomcat::core::plan_runtime::review::Finding],
+        _dispatch: &tomcat::core::plan_runtime::CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         CodeReviewSummary {
             aborted: false,
@@ -389,7 +389,7 @@ async fn ask_question_returns_recommended_then_custom_text() {
                 picked_recommended: false,
             },
         ],
-        cancelled: false,
+        outcome: AskQuestionOutcome::Answered,
     }]);
 
     let args = serde_json::json!({
@@ -412,7 +412,7 @@ async fn ask_question_returns_recommended_then_custom_text() {
     });
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
-        ask_question::execute(&rt, &panel, &args, Arc::new(AtomicBool::new(false))),
+        ask_question::execute(&rt, &panel, &args, AskQuestionTermination::default()),
     )
     .await
     .expect("ask_question 超时")
@@ -428,8 +428,8 @@ async fn ask_question_returns_recommended_then_custom_text() {
 }
 
 #[tokio::test]
-async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
-    // D8 防御：用户 Ctrl+C 中断 ask_question 必须立即返回 cancelled，不可 hang
+async fn ask_question_user_ctrl_c_during_wait_returns_interrupted_not_err() {
+    // D8 防御：用户 Ctrl+C 中断 ask_question 必须立即返回 interrupted，不可 hang
     let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-cancel");
@@ -437,7 +437,7 @@ async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
 
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
         answers: vec![],
-        cancelled: false,
+        outcome: AskQuestionOutcome::Answered,
     }])
     .with_delay(Duration::from_secs(10));
     let args = serde_json::json!({
@@ -449,20 +449,21 @@ async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
             ]
         }]
     });
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_clone = Arc::clone(&cancel);
+    let termination = AskQuestionTermination::default();
+    let termination_clone = termination.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        cancel_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+        termination_clone.interrupt();
     });
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
-        ask_question::execute(&rt, &panel, &args, cancel),
+        ask_question::execute(&rt, &panel, &args, termination),
     )
     .await
     .expect("ask_question cancel 超时（D8 失效）")
     .unwrap();
     assert_eq!(out["cancelled"], true);
+    assert_eq!(out["outcome"], "interrupted");
     cleanup_home(&home);
 }
 

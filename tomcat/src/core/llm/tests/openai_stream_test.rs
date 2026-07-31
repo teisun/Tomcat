@@ -691,8 +691,7 @@ async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
     use tokio_stream::StreamExt;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
-    let source = IntervalStream::new(interval)
-        .map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
+    let source = IntervalStream::new(interval).map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
     let event_stream = SseEventStream::new(
         source,
         ProviderCompatProfile::chat_completions("gpt-5"),
@@ -712,7 +711,11 @@ async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
         Err(err) => {
             let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
             assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
-            assert!(msg.contains("stream_timeout_sec=1s"), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains("stream_timeout_sec=1s"),
+                "unexpected msg: {}",
+                msg
+            );
         }
         other => panic!("expected timeout AppError, got {:?}", other),
     }

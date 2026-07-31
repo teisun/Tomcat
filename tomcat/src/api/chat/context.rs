@@ -557,7 +557,6 @@ impl ChatContext {
         let ask_question_panel: Arc<dyn panels::AskQuestionPanel> = overrides
             .ask_question_panel
             .unwrap_or_else(|| Arc::new(panels::CliAskQuestionPanel));
-        plan_runtime.set_ask_question_timeout_ms(Some(config.ask_question.timeout_ms));
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
         plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);

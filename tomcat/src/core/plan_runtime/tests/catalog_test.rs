@@ -73,7 +73,10 @@ fn todos_stays_available_outside_exec() {
         },
     ] {
         let n = names(&visible_tools_for_mode(&mode));
-        assert!(n.contains("todos"), "{mode:?} must expose todos, got: {n:?}");
+        assert!(
+            n.contains("todos"),
+            "{mode:?} must expose todos, got: {n:?}"
+        );
     }
 }
 

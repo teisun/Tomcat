@@ -167,7 +167,13 @@ async fn search_files_content_mode_defaults_to_three_context_lines() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().canonicalize().unwrap();
     let body: String = (1..=11)
-        .map(|i| if i == 6 { "needle\n".to_string() } else { format!("line {i}\n") })
+        .map(|i| {
+            if i == 6 {
+                "needle\n".to_string()
+            } else {
+                format!("line {i}\n")
+            }
+        })
         .collect();
     std::fs::write(root.join("a.txt"), body).unwrap();
     let primitive = make_executor(&root);

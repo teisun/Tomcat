@@ -1,6 +1,11 @@
 import { isRecord, parseTodos } from "../shared/todos";
 import type { TomcatMessenger } from "./TomcatMessenger";
-import type { GetMessagesParams, ListSessionsScope, ResponseFrame } from "./wire";
+import type {
+  GetMessagesParams,
+  ListSessionsScope,
+  ResponseFrame,
+  RetainAttachmentLeaseRef,
+} from "./wire";
 
 export interface SessionSummary {
   busy: boolean;
@@ -80,6 +85,12 @@ export interface RestoreCheckpointPayload {
   warnings: string[];
 }
 
+function requireSuccessfulResponse(response: ResponseFrame, action: string): void {
+  if (!response.success) {
+    throw new Error(response.error ?? `Tomcat ${action} failed`);
+  }
+}
+
 function requireSessionId(response: ResponseFrame): string {
   if (typeof response.sessionId === "string") {
     return response.sessionId;
@@ -154,7 +165,46 @@ export class SessionRouter {
       },
       type: "new_session",
     });
+    requireSuccessfulResponse(response, "new_session");
     return requireSessionId(response);
+  }
+
+  async createDetachedSession(cwd = this.getDefaultCwd()): Promise<string> {
+    const response = await this.messenger.request({
+      params: {
+        cwd,
+        detached: true,
+      },
+      type: "new_session",
+    });
+    requireSuccessfulResponse(response, "detached new_session");
+    return requireSessionId(response);
+  }
+
+  async retainAttachmentLeases(
+    sessionId: string,
+    attachments: RetainAttachmentLeaseRef[],
+  ): Promise<string[]> {
+    const response = await this.messenger.request({
+      params: { attachments },
+      sessionId,
+      type: "retain_attachment_leases",
+    });
+    requireSuccessfulResponse(response, "retain_attachment_leases");
+    const retained = isRecord(response.payload) ? response.payload.retainedShas : null;
+    if (!Array.isArray(retained) || !retained.every((sha): sha is string => typeof sha === "string")) {
+      throw new Error("Tomcat retain_attachment_leases response was invalid");
+    }
+    return retained;
+  }
+
+  async discardDetachedSession(sessionId: string): Promise<boolean> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "discard_detached_session",
+    });
+    requireSuccessfulResponse(response, "discard_detached_session");
+    return isRecord(response.payload) ? response.payload.discarded === true : false;
   }
 
   async switchSession(sessionId: string): Promise<string> {
@@ -162,6 +212,7 @@ export class SessionRouter {
       sessionId,
       type: "switch_session",
     });
+    requireSuccessfulResponse(response, "switch_session");
     return requireSessionId(response);
   }
 

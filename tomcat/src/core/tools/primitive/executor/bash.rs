@@ -116,20 +116,14 @@ pub(super) async fn execute_bash_impl(
         Some(args) => format!("{} {}", command, args.join(" ")),
     };
     let cwd = resolve_cwd(executor, cwd, &audit_cmd, plugin_id).await?;
-    let (bash_scope, bash_grant) = match preflight(
-        executor,
-        &audit_cmd,
-        cwd.resolved_path(),
-        plugin_id,
-    )
-    .await
-    {
-        Ok(scope_grant) => scope_grant,
-        Err(error) => {
-            record_bash_failure(executor, &audit_cmd, plugin_id, &error);
-            return Err(error);
-        }
-    };
+    let (bash_scope, bash_grant) =
+        match preflight(executor, &audit_cmd, cwd.resolved_path(), plugin_id).await {
+            Ok(scope_grant) => scope_grant,
+            Err(error) => {
+                record_bash_failure(executor, &audit_cmd, plugin_id, &error);
+                return Err(error);
+            }
+        };
 
     let persist_dir = executor
         .bash_persist_dir

@@ -1023,7 +1023,7 @@ EXEC 中：
 | `[plan] auto_milestone_threshold` | 正整数，默认 `5` | LLM 未传 milestones 时，todos 数 ≥ 阈值自动插入 `m-default` | 计划长了就自动分段。 |
 | `[reviewer] max_rounds` | 正整数，默认 `1` | reviewer 单 plan 累计派发上限 | reviewer 不能无限挑刺。 |
 | `[reviewer] default_allow_edit` | `true/false`，默认 `false` | runtime 是否允许 reviewer 直接 `edit` 计划正文（frontmatter raw 仍拒绝） | 审稿员能不能直接修正文。 |
-| `[ask_question] timeout_ms` / `TOMCAT_ASK_QUESTION_TIMEOUT_MS` | 默认 `300000`（5 分钟），`0` = 不超时 | `ask_question` 等待 UI 返回的硬超时 | 别让模型死等用户。 |
+| `[ask_question] timeout_ms` / `TOMCAT_ASK_QUESTION_TIMEOUT_MS` | **已删除；旧值仅触发迁移提示并被忽略** | 不再创建 deadline；问题等待回答/整单跳过、中断或不可恢复断开 | 没有替代 timeout 配置。 |
 | `[todos] auto_new_todos_on_replace_after_terminal` | `true/false`，默认 `true` | 全 completed/cancelled 后再 `replace_todos` 自动开新 TodoFile | 旧账翻篇。 |
 | `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS` | 默认 2000ms | 计划文件 advisory lock 等待上限 | 等锁最多 2 秒。 |
 | `TOMCAT_PLANNER_REMINDER_OVERRIDE_PATH` / `TOMCAT_EXECUTOR_REMINDER_OVERRIDE_PATH` | 可选路径 | 覆写默认 PLAN/EXEC `<system_reminder>` | 自带 prompt 写运维。 |

@@ -8,16 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures_util::{StreamExt, future};
-use parking_lot::{Mutex, RwLock};
-use tokio_stream::wrappers::IntervalStream;
 use super::super::explorer::ExplorerTask;
 use super::super::file_store::{
-    plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+    plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
+    TodoStatus,
 };
 use super::super::prod_reviewer::{
-    ProdCodeReviewerDispatcher, ProdExplorerDispatcher, ProdPlanReviewerDispatcher, ProdReviewerDeps,
+    ProdCodeReviewerDispatcher, ProdExplorerDispatcher, ProdPlanReviewerDispatcher,
+    ProdReviewerDeps,
 };
 use super::super::verify::{ProdVerifierDeps, ProdVerifierDispatcher};
 use super::super::{
@@ -25,8 +23,6 @@ use super::super::{
     VerifierDispatcher,
 };
 use crate::core::agent_registry::{AgentRegistry, RegistrationGuard};
-use crate::core::tools::primitive::HashlineSegment;
-use crate::core::tools::primitive::PrimitiveOperation;
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene, ResolvedCall,
     StreamEvent,
@@ -34,11 +30,13 @@ use crate::core::llm::{
 use crate::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use crate::core::skill::SkillSet;
 use crate::core::tools::pipeline::read_state::ReadFileState;
+use crate::core::tools::primitive::HashlineSegment;
 use crate::core::tools::primitive::PrimitiveExecutor;
+use crate::core::tools::primitive::PrimitiveOperation;
 use crate::core::tools::web_fetch::WebFetchRuntime;
 use crate::core::NoopStore;
 use crate::infra::config::{AppConfig, ContextConfig, LlmFilesConfig};
-use crate::infra::error::{LlmErrorStage, llm_error, llm_http_status_error, AppError};
+use crate::infra::error::{llm_error, llm_http_status_error, AppError, LlmErrorStage};
 use crate::infra::event_bus::DefaultEventBus;
 use crate::infra::TracingAuditRecorder;
 use crate::AllowAllConfirmation;
@@ -46,6 +44,10 @@ use crate::{
     BashResult, DirEntry, EditFileResult, EditOperation, ReadResult, SearchFilesArgs,
     SearchFilesOutput, WriteFileResult,
 };
+use async_trait::async_trait;
+use futures_util::{future, StreamExt};
+use parking_lot::{Mutex, RwLock};
+use tokio_stream::wrappers::IntervalStream;
 
 fn home_lock() -> &'static crate::test_support::TestLock {
     crate::test_support::home_env_lock()
@@ -204,14 +206,10 @@ impl LlmProvider for RecordingProvider {
             return Err(AppError::Llm("no streams left".into()));
         }
         let stream = match guard.remove(0) {
-            RecordingStreamPlan::Immediate(events) => {
-                Box::new(tokio_stream::iter(events))
-                    as Box<
-                        dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>>
-                            + Send
-                            + Unpin,
-                    >
-            }
+            RecordingStreamPlan::Immediate(events) => Box::new(tokio_stream::iter(events))
+                as Box<
+                    dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin,
+                >,
             RecordingStreamPlan::KeepaliveOnlyIdle {
                 interval_ms,
                 timeout_sec,
@@ -305,7 +303,9 @@ impl LlmResolver for FakeResolver {
             .get(&catalog_id)
             .cloned()
             .unwrap_or_else(|| catalog_id.clone());
-        Ok(ResolvedCall::from_parts_unchecked(provider, catalog_id, wire))
+        Ok(ResolvedCall::from_parts_unchecked(
+            provider, catalog_id, wire,
+        ))
     }
 }
 
@@ -514,8 +514,11 @@ fn verifier_deps(fx: &BindingFixture) -> ProdVerifierDeps {
         llm_files_config: LlmFilesConfig::default(),
         sessions_dir: fx.agent_trail_dir.join("sessions"),
         web_fetch_runtime: Arc::new(
-            WebFetchRuntime::new(&AppConfig::default(), fx.agent_trail_dir.join("tool-results"))
-                .unwrap(),
+            WebFetchRuntime::new(
+                &AppConfig::default(),
+                fx.agent_trail_dir.join("tool-results"),
+            )
+            .unwrap(),
         ),
         agent_workspace_dir: fx.workspace.path().to_path_buf(),
         skill_set: Arc::new(RwLock::new(SkillSet::default())),
@@ -535,8 +538,7 @@ fn assert_main_resolve_used_session_model(log: &ResolveLog) {
     let calls = log.0.lock().clone();
     assert!(
         calls.iter().any(|(scene, override_)| {
-            *scene == LlmScene::Main
-                && override_.as_deref() == Some("fcodex/gpt-5.6-sol")
+            *scene == LlmScene::Main && override_.as_deref() == Some("fcodex/gpt-5.6-sol")
         }),
         "expected Main resolve with session model, got {calls:?}"
     );
@@ -553,10 +555,8 @@ changes_summary: none
 applied_changes: false
 </review>"#,
     );
-    let (deepseek, deepseek_requests) = RecordingProvider::success(
-        "deepseek",
-        "should not be called",
-    );
+    let (deepseek, deepseek_requests) =
+        RecordingProvider::success("deepseek", "should not be called");
     let fx = build_fixture(
         fcodex,
         deepseek,
@@ -564,8 +564,7 @@ applied_changes: false
         deepseek_requests.clone(),
         false,
     );
-    let dispatcher =
-        ProdPlanReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
+    let dispatcher = ProdPlanReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
     let summary = dispatcher
         .dispatch("binding_plan", "## Goal\nbinding\n", true)
         .await;
@@ -684,14 +683,9 @@ summary: verify ok
         streams: Mutex::new(Vec::new()),
     });
     let _ = (fcodex_plan, fcodex_code, fcodex_explorer, fcodex_verifier);
-    let fx = build_fixture(
-        fcodex,
-        deepseek,
-        fcodex_requests,
-        deepseek_requests,
-        false,
-    );
-    let parent_session = crate::core::session::SessionManager::new(fx.agent_trail_dir.join("sessions"));
+    let fx = build_fixture(fcodex, deepseek, fcodex_requests, deepseek_requests, false);
+    let parent_session =
+        crate::core::session::SessionManager::new(fx.agent_trail_dir.join("sessions"));
     parent_session
         .create_session("agent:main:main", None)
         .expect("create parent session");
@@ -762,24 +756,31 @@ summary: verify ok
         .iter()
         .find(|v| v["event"] == "plan.review.started")
         .expect("missing plan.review.started");
-    assert_eq!(plan_started["child_session_id"], plan_summary.child_session_id);
-    assert!(
-        plan_started["transcript_path"]
-            .as_str()
-            .unwrap_or_default()
-            .ends_with(".jsonl")
+    assert_eq!(
+        plan_started["child_session_id"],
+        plan_summary.child_session_id
     );
+    assert!(plan_started["transcript_path"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with(".jsonl"));
     let code_started = events
         .iter()
         .find(|v| v["event"] == "plan.code_review.started")
         .expect("missing plan.code_review.started");
-    assert_eq!(code_started["child_session_id"], code_summary.child_session_id);
+    assert_eq!(
+        code_started["child_session_id"],
+        code_summary.child_session_id
+    );
     assert_eq!(code_started["review_attempt_id"], "binding_plan:1");
     let explorer_started = events
         .iter()
         .find(|v| v["event"] == "plan.explorer.started")
         .expect("missing plan.explorer.started");
-    assert_eq!(explorer_started["child_session_id"], explorer_report.child_session_id);
+    assert_eq!(
+        explorer_started["child_session_id"],
+        explorer_report.child_session_id
+    );
     assert_eq!(explorer_started["task_id"], "e1");
     let transcript = std::fs::read_to_string(&parent_transcript).expect("read parent transcript");
     assert!(
@@ -806,8 +807,7 @@ async fn resolve_failure_aborts_with_model_unresolved_and_keeps_plan_file() {
     let plan_path = plan_path_for_id("binding_plan").unwrap();
     assert!(plan_path.exists());
 
-    let dispatcher =
-        ProdPlanReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
+    let dispatcher = ProdPlanReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
     let summary = dispatcher
         .dispatch("binding_plan", "## Goal\nbinding\n", true)
         .await;
@@ -815,7 +815,9 @@ async fn resolve_failure_aborts_with_model_unresolved_and_keeps_plan_file() {
     assert!(summary.aborted);
     assert_eq!(summary.reviewer_stop_reason, "model_unresolved");
     assert!(
-        summary.summary.contains("模型 `fcodex/gpt-5.6-sol` 解析失败"),
+        summary
+            .summary
+            .contains("模型 `fcodex/gpt-5.6-sol` 解析失败"),
         "summary={}",
         summary.summary
     );
@@ -830,8 +832,7 @@ async fn first_llm_fatal_uses_no_transcript_hint_and_llm_error_stop_reason() {
     let (deepseek, deepseek_requests) = RecordingProvider::success("deepseek", "unused");
     let fx = build_fixture(fcodex, deepseek, fcodex_requests, deepseek_requests, false);
 
-    let dispatcher =
-        ProdPlanReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
+    let dispatcher = ProdPlanReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
     let summary = dispatcher
         .dispatch("binding_plan", "## Goal\nbinding\n", true)
         .await;
@@ -847,10 +848,17 @@ async fn first_llm_fatal_uses_no_transcript_hint_and_llm_error_stop_reason() {
         .agent_trail_dir
         .join("subagent-sessions")
         .join(format!("{}.jsonl", summary.child_session_id));
-    assert!(path.exists(), "eager transcript should exist even with zero messages");
+    assert!(
+        path.exists(),
+        "eager transcript should exist even with zero messages"
+    );
     let raw = std::fs::read_to_string(&path).expect("read eager transcript");
     let lines: Vec<_> = raw.lines().collect();
-    assert_eq!(lines.len(), 2, "zero-message transcript should contain header + meta");
+    assert_eq!(
+        lines.len(),
+        2,
+        "zero-message transcript should contain header + meta"
+    );
     assert!(
         raw.contains("\"event\":\"subagent.transcript.meta\""),
         "raw={raw}"
@@ -865,8 +873,7 @@ async fn prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout() {
     let (deepseek, deepseek_requests) = RecordingProvider::success("deepseek", "unused");
     let fx = build_fixture(fcodex, deepseek, fcodex_requests, deepseek_requests, false);
 
-    let dispatcher =
-        ProdCodeReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
+    let dispatcher = ProdCodeReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
     let summary = dispatcher
         .dispatch(
             "binding_plan",

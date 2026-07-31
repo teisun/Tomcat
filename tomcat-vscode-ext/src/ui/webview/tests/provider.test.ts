@@ -1783,3 +1783,119 @@ describe("plan preview auto-open after review", () => {
     provider.dispose();
   });
 });
+
+describe("draft fork provider transaction", () => {
+  function makeDraftForkProvider(failAt?: "create" | "retain" | "install" | "switch") {
+    const order: string[] = [];
+    const router = {
+      createDetachedSession: vi.fn(async () => {
+        order.push("create");
+        if (failAt === "create") throw new Error("create failed");
+        return "target-1";
+      }),
+      discardDetachedSession: vi.fn(async () => {
+        order.push("discard-session");
+        return true;
+      }),
+      retainAttachmentLeases: vi.fn(async (_sessionId: string, attachments: unknown[]) => {
+        order.push("retain");
+        if (failAt === "retain") throw new Error("retain failed");
+        return attachments;
+      }),
+      switchSession: vi.fn(async () => {
+        order.push("switch");
+        if (failAt === "switch") throw new Error("switch failed");
+        return "target-1";
+      }),
+    };
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ sessionId: "source-1" } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: router as never,
+    });
+    const draft = {
+      attachments: [{
+        blobSha: "a".repeat(64),
+        bytes: 4,
+        filename: "image.png",
+        id: "attachment-1",
+        kind: "image" as const,
+        mimeType: "image/png",
+        providerSha: "b".repeat(64),
+      }],
+      segments: [{ text: "draft", type: "text" as const }],
+      text: "draft",
+    };
+    const internals = provider as unknown as {
+      adoptCommittedDraftFork(sessionId: string): Promise<void>;
+      draftStore: {
+        discardStrict(sessionId: string): Promise<void>;
+        installIfEmpty(sessionId: string, draft: unknown): Promise<unknown>;
+        peek(sessionId: string): typeof draft;
+        replaceAndFlush(sessionId: string, draft: unknown): Promise<typeof draft>;
+      };
+      executeDraftFork(operation: Record<string, unknown>, capture: Record<string, unknown>): Promise<string>;
+    };
+    internals.draftStore = {
+      discardStrict: async () => { order.push("discard-draft"); },
+      installIfEmpty: async (_sessionId, value) => {
+        order.push("install");
+        if (failAt === "install") throw new Error("install failed");
+        return value;
+      },
+      peek: () => draft,
+      replaceAndFlush: async (_sessionId, value) => {
+        order.push("persist");
+        return value as typeof draft;
+      },
+    };
+    internals.adoptCommittedDraftFork = async () => { order.push("select"); };
+    const execute = () => internals.executeDraftFork(
+      {
+        cwd: null,
+        operationId: "operation-1",
+        sourceSessionId: "source-1",
+      },
+      {
+        cwd: null,
+        operationId: "operation-1",
+        segments: draft.segments,
+        sourceSessionId: "source-1",
+        text: draft.text,
+      },
+    );
+    return { execute, order, provider, router };
+  }
+
+  it("commits in the durable order and retains blob/provider hashes without bytes", async () => {
+    const { execute, order, provider, router } = makeDraftForkProvider();
+    await expect(execute()).resolves.toBe("target-1");
+    expect(order).toEqual(["persist", "create", "retain", "install", "switch", "select"]);
+    expect(router.retainAttachmentLeases).toHaveBeenCalledWith("target-1", [{
+      blobSha: "a".repeat(64),
+      providerSha: "b".repeat(64),
+    }]);
+    expect(router.discardDetachedSession).not.toHaveBeenCalled();
+    provider.dispose();
+  });
+
+  it.each(["create", "retain", "install", "switch"] as const)(
+    "compensates the detached target when %s fails before commit",
+    async (phase) => {
+      const { execute, order, provider, router } = makeDraftForkProvider(phase);
+      await expect(execute()).rejects.toThrow(`${phase} failed`);
+      if (phase === "create") {
+        expect(router.discardDetachedSession).not.toHaveBeenCalled();
+        expect(order).toEqual(["persist", "create"]);
+      } else {
+        expect(order.slice(-2)).toEqual(["discard-draft", "discard-session"]);
+        expect(router.discardDetachedSession).toHaveBeenCalledWith("target-1");
+      }
+      expect(order).not.toContain("select");
+      provider.dispose();
+    },
+  );
+});

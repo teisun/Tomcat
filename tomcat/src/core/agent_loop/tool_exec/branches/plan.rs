@@ -46,20 +46,19 @@ pub(in super::super) async fn dispatch_plan_tool(
                     "ask_question 不可用：PlanRuntime 未配置 AskQuestionPanel",
                 );
             };
-            let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let watcher_flag = cancel_flag.clone();
+            let termination = crate::core::plan_runtime::AskQuestionTermination::default();
+            let watcher_termination = termination.clone();
             let cancel_clone = ctx.cancel.clone();
             let bridge = tokio::spawn(async move {
                 cancel_clone.cancelled().await;
-                watcher_flag.store(true, std::sync::atomic::Ordering::Release);
+                watcher_termination.interrupt();
             });
-            let timeout_ms = rt.ask_question_timeout_ms();
-            let res = plan_tools::ask_question::execute_with_timeout(
+            let res = plan_tools::ask_question::execute_for_tool(
                 rt,
                 panel.as_ref(),
                 args,
-                cancel_flag,
-                timeout_ms,
+                termination,
+                Some(ctx.tool_call_id),
             )
             .await;
             bridge.abort();

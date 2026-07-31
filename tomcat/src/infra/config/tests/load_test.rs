@@ -8,8 +8,40 @@
 //!   防止 example 与代码失去同步。
 
 use super::super::*;
+use crate::infra::config::load::removed_ask_question_timeout_sources;
 use serial_test::serial;
 use std::io::Write;
+
+#[test]
+#[serial(env_lock)]
+fn removed_ask_question_timeout_sources_are_reported_but_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[ask_question]\ntimeout_ms = 1\n[log]\nlevel = \"info\"\n",
+    )
+    .unwrap();
+    unsafe {
+        std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "1");
+        std::env::set_var("TOMCAT__ASK_QUESTION__TIMEOUT_MS", "1");
+    }
+    let sources = removed_ask_question_timeout_sources(Some(&path));
+    let cfg = load_config(Some(&path)).expect("removed timeout keys must not reject config");
+    unsafe {
+        std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
+        std::env::remove_var("TOMCAT__ASK_QUESTION__TIMEOUT_MS");
+    }
+    assert_eq!(
+        sources,
+        vec![
+            "ask_question.timeout_ms",
+            "TOMCAT_ASK_QUESTION_TIMEOUT_MS",
+            "TOMCAT__ASK_QUESTION__TIMEOUT_MS",
+        ]
+    );
+    assert_eq!(cfg.log.level, "info");
+}
 
 #[test]
 fn load_config_none_path_returns_default_or_env() {

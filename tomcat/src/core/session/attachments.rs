@@ -235,6 +235,78 @@ impl AttachmentBlobStore {
         self.mark_pending(session_id, sha)
     }
 
+    fn acquire_pending_marker(&self, session_id: &str, sha: &str) -> Result<bool, AppError> {
+        let dir = self.session_pending_dir(validate_session_id(session_id)?);
+        std::fs::create_dir_all(&dir).map_err(AppError::Io)?;
+        let path = dir.join(validate_sha_value(sha)?);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if path.is_file() {
+                    Ok(false)
+                } else {
+                    Err(AppError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("attachment lease marker is not a file: {}", path.display()),
+                    )))
+                }
+            }
+            Err(error) => Err(AppError::Io(error)),
+        }
+    }
+
+    /// 批量为目标会话保留已有 blob 的租约。先验证全部 SHA 与 blob，再写 marker；
+    /// 部分写失败时只回滚本次原子新建的 marker，已有 marker 保持不变。
+    pub fn retain_pending_batch(
+        &self,
+        session_id: &str,
+        shas: impl IntoIterator<Item = String>,
+    ) -> Result<Vec<String>, AppError> {
+        self.retain_pending_batch_inner(session_id, shas, |_, _| Ok(()))
+    }
+
+    fn retain_pending_batch_inner<F>(
+        &self,
+        session_id: &str,
+        shas: impl IntoIterator<Item = String>,
+        mut before_acquire: F,
+    ) -> Result<Vec<String>, AppError>
+    where
+        F: FnMut(usize, &str) -> Result<(), AppError>,
+    {
+        let session_id = validate_session_id(session_id)?;
+        let shas = shas.into_iter().collect::<std::collections::BTreeSet<_>>();
+        for sha in &shas {
+            validate_sha(sha)?;
+            if self.get(sha)?.is_none() {
+                return Err(AppError::Config(format!(
+                    "cannot retain missing attachment blob {sha}"
+                )));
+            }
+        }
+
+        let mut created: Vec<String> = Vec::new();
+        for (index, sha) in shas.iter().enumerate() {
+            let acquired = before_acquire(index, sha)
+                .and_then(|()| self.acquire_pending_marker(session_id, sha));
+            match acquired {
+                Ok(true) => created.push(sha.clone()),
+                Ok(false) => {}
+                Err(error) => {
+                    for created_sha in &created {
+                        let _ = self.promote(session_id, created_sha);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(shas.into_iter().collect())
+    }
+
     /// 发送成功：释放租约，字节留在 `blobs/` 里由 transcript 引用。
     ///
     /// 这就是「零拷贝提升」的全部内容 —— 不读、不写、不复制任何字节。
@@ -438,8 +510,16 @@ impl AttachmentBlobStore {
 ///
 /// 这既是格式校验也是**路径安全断言** —— 合法的 sha 里不可能出现 `/` 或 `..`，
 /// 所以拼路径这件事不需要信任调用方。
+fn validate_sha_value(sha: &str) -> Result<&str, AppError> {
+    validate_sha(sha)?;
+    Ok(sha)
+}
+
 fn validate_sha(sha: &str) -> Result<(), AppError> {
-    if sha.len() == SHA256_HEX_LEN && sha.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    if sha.len() == SHA256_HEX_LEN
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
         return Ok(());
     }
@@ -567,9 +647,7 @@ fn matches_image_magic(bytes: &[u8], mime_type: &str) -> bool {
         "image/png" => bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
         "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
         "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-        "image/webp" => {
-            bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
-        }
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
         // SVG 是文本，没有二进制魔术字节；确认它是 UTF-8 且含有 svg 根元素即可。
         // 内容安全不在这里做 —— SVG 只会被 Chromium 以 <img> 加载，
         // 那条路在规范层面处于 secure static mode，强制不执行脚本、不加载外部资源。

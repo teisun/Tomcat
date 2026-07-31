@@ -39,6 +39,10 @@ import {
 import {
   validateAttachmentCandidate,
 } from "../../shared/attachmentProtocol";
+import {
+  parseDraftForkCapture,
+  type DraftForkCapture,
+} from "../../shared/draftForkProtocol";
 import type { PreviewSection } from "../../shared/imagePreviewProtocol";
 import {
   createHostFrameMessageId,
@@ -63,6 +67,7 @@ import {
 import { resolveWebviewEntryAssets } from "../guiAssets";
 import { parsePlanDocument } from "../planPreview/planDocument";
 import { ContextSearchService } from "./contextSearch";
+import { HostDraftCoordinator } from "./hostDraftCoordinator";
 import { buildFileReference } from "./contextReferences";
 import { TomcatSessionPool } from "./sessionPool";
 import {
@@ -94,7 +99,8 @@ const ATTACHMENT_ROOT_MEMENTO_KEY = "tomcat.attachmentRoot";
 type PendingQuestion = {
   request: AskQuestionWireRequest;
   resolve(response: AskQuestionWireResponse): void;
-  sessionId?: string | null;
+  sessionId: string;
+  settled: boolean;
 };
 
 type DomSnapshot = Extract<
@@ -392,6 +398,16 @@ export async function readPlanMetadata(
   }
 }
 
+interface PendingDraftForkOperation {
+  captureAccepted: boolean;
+  cwd: string | null;
+  operationId: string;
+  promise: Promise<string>;
+  reject(error: Error): void;
+  resolve(sessionId: string): void;
+  sourceSessionId: string;
+}
+
 function formatBridgeError(action: string, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("Timed out waiting for response")) {
@@ -417,6 +433,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    * bytes, once, at paste time. See `shared/composerDraft.ts` for why.
    */
   private readonly draftStore: ComposerDraftStore;
+  private readonly draftCoordinator = new HostDraftCoordinator();
+  private readonly pendingDraftForks = new Map<string, PendingDraftForkOperation>();
+  private readonly pendingDraftForkBySource = new Map<string, PendingDraftForkOperation>();
   /**
    * Filesystem root of the backend's attachment store, reported by the handshake.
    *
@@ -430,6 +449,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private attachmentRootPrimed?: Promise<void>;
   private imagePreviewSessionId: string | null = null;
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
+  private readonly finalizedQuestionResults = new Map<
+    string,
+    { request: AskQuestionWireRequest; response: AskQuestionWireResponse; sessionId: string }
+  >();
   private readonly planMetadataCache = new Map<string, PlanMetadataCacheEntry>();
   private readonly sessionsAwaitingErrorHistoryRefresh = new Set<string>();
   private readonly readyWaiters = new Set<{
@@ -495,6 +518,65 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         : new vscode.Disposable(() => undefined);
   }
 
+  async beginNewSession(cwd?: string | null): Promise<string> {
+    await this.ensureInitialized();
+    const sourceSessionId =
+      this.view?.visible === true && this.isReady
+        ? this.peekState().activeSessionId
+        : null;
+    if (!sourceSessionId) {
+      const sessionId = await this.sessionPool.createSession(cwd ?? this.deps.getDefaultCwd());
+      await this.selectSession(sessionId);
+      return sessionId;
+    }
+
+    const existing = this.pendingDraftForkBySource.get(sourceSessionId);
+    if (existing) return existing.promise;
+
+    const operationId = randomUUID();
+    let resolve!: (sessionId: string) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<string>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const operation: PendingDraftForkOperation = {
+      captureAccepted: false,
+      cwd: cwd ?? null,
+      operationId,
+      promise,
+      reject,
+      resolve,
+      sourceSessionId,
+    };
+    this.pendingDraftForks.set(operationId, operation);
+    this.pendingDraftForkBySource.set(sourceSessionId, operation);
+    try {
+      await this.requestDraftForkCapture(operation);
+    } catch (error) {
+      this.removePendingDraftFork(operation);
+      operation.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    return promise;
+  }
+
+  private async requestDraftForkCapture(operation: PendingDraftForkOperation): Promise<void> {
+    await this.postEvent({
+      operationId: operation.operationId,
+      sourceSessionId: operation.sourceSessionId,
+      type: "captureDraftForFork",
+    });
+  }
+
+  private removePendingDraftFork(operation: PendingDraftForkOperation): void {
+    if (this.pendingDraftForks.get(operation.operationId) === operation) {
+      this.pendingDraftForks.delete(operation.operationId);
+    }
+    if (this.pendingDraftForkBySource.get(operation.sourceSessionId) === operation) {
+      this.pendingDraftForkBySource.delete(operation.sourceSessionId);
+    }
+  }
+
   dispose(): void {
     this.contextSearchTokenSource?.cancel();
     this.contextSearchTokenSource?.dispose();
@@ -504,6 +586,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.eventSubscription.dispose();
     this.workspaceFolderSubscription.dispose();
     this.stateBroadcaster.dispose();
+    this.finalizePendingQuestions("host_disconnected");
     this.domSnapshots.rejectAll(new Error("Tomcat webview disposed"));
     for (const waiter of [...this.readyWaiters]) {
       clearTimeout(waiter.timeout);
@@ -618,31 +701,72 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   async askUser(
     request: AskQuestionWireRequest,
     sessionId?: string | null,
+    signal?: AbortSignal,
   ): Promise<AskQuestionWireResponse> {
+    const ownerSessionId = sessionId ?? request.sessionId ?? this.peekState().activeSessionId;
+    if (!ownerSessionId) {
+      return {
+        requestId: request.requestId,
+        result: { answers: [], cancelled: true, outcome: "host_disconnected" },
+      };
+    }
+    let pending!: PendingQuestion;
     const responsePromise = new Promise<AskQuestionWireResponse>((resolve) => {
-      this.pendingQuestions.set(request.requestId, { request, resolve, sessionId });
+      pending = { request, resolve, sessionId: ownerSessionId, settled: false };
+      this.pendingQuestions.set(`${ownerSessionId}\0${request.requestId}`, pending);
+    }).then((response) => {
+      this.finalizedQuestionResults.set(`${ownerSessionId}\0${request.requestId}`, {
+        request,
+        response,
+        sessionId: ownerSessionId,
+      });
+      this.stateStore.resolveApproval(request.requestId, response.result);
+      return response;
     }).finally(() => {
-      this.pendingQuestions.delete(request.requestId);
-      this.stateStore.resolveApproval(request.requestId);
+      this.pendingQuestions.delete(`${ownerSessionId}\0${request.requestId}`);
       void this.postState();
     });
+    const abort = () => this.finalizePendingQuestion(pending, "host_disconnected");
+    signal?.addEventListener("abort", abort, { once: true });
 
     this.stateStore.applyEvent({
       payload: request,
       requestId: request.requestId,
-      sessionId,
+      sessionId: ownerSessionId,
       subtype: "ask_question",
       type: "control_request",
     });
     await this.postEvent({
       payload: request,
       requestId: request.requestId,
-      sessionId,
+      sessionId: ownerSessionId,
       subtype: "ask_question",
       type: "control_request",
     });
     await this.postState();
-    return responsePromise;
+    try {
+      return await responsePromise;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  finalizePendingQuestions(outcome: "host_disconnected" | "interrupted"): void {
+    for (const pending of this.pendingQuestions.values()) {
+      this.finalizePendingQuestion(pending, outcome);
+    }
+  }
+
+  private finalizePendingQuestion(
+    pending: PendingQuestion,
+    outcome: "host_disconnected" | "interrupted",
+  ): void {
+    if (pending.settled) return;
+    pending.settled = true;
+    pending.resolve({
+      requestId: pending.request.requestId,
+      result: { answers: [], cancelled: true, outcome },
+    });
   }
 
   currentState() {
@@ -1048,6 +1172,38 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           this.readyWaiters.delete(waiter);
         }
         await this.bootstrap();
+        // History/session refresh may rebuild a timeline while the host-local question is still live.
+        // Re-project pending controls after every DOM-ready handshake; the pending map, not the
+        // disposable webview DOM, owns their live lifecycle.
+        for (const pending of this.pendingQuestions.values()) {
+          if (pending.settled) continue;
+          this.stateStore.applyEvent({
+            payload: pending.request,
+            requestId: pending.request.requestId,
+            sessionId: pending.sessionId,
+            subtype: "ask_question",
+            type: "control_request",
+          });
+        }
+        for (const finalized of this.finalizedQuestionResults.values()) {
+          this.stateStore.applyEvent({
+            payload: finalized.request,
+            requestId: finalized.request.requestId,
+            sessionId: finalized.sessionId,
+            subtype: "ask_question",
+            type: "control_request",
+          });
+          this.stateStore.resolveApproval(
+            finalized.request.requestId,
+            finalized.response.result,
+          );
+        }
+        await this.postState();
+        for (const operation of this.pendingDraftForks.values()) {
+          if (!operation.captureAccepted) {
+            await this.requestDraftForkCapture(operation);
+          }
+        }
         return;
       case "listSessions":
         await this.refreshSessions();
@@ -1063,11 +1219,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.loadOlderHistory(intent.data.sessionId);
         return;
       case "newSession": {
-        await this.ensureInitialized();
-        const sessionId = await this.sessionPool.createSession(
-          intent.data?.cwd ?? this.deps.getDefaultCwd(),
-        );
-        await this.selectSession(sessionId);
+        await this.beginNewSession(intent.data?.cwd ?? null);
+        return;
+      }
+      case "forkSession": {
+        await this.handleDraftForkCapture(intent.data);
         return;
       }
       case "switchSession":
@@ -1133,23 +1289,30 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       }
       case "resolveDrop": {
-        await this.ensureInitialized();
-        const sessionId = await this.ensureWebviewSessionWithoutHistory(
-          intent.data.sessionId ?? null,
-        );
-        if (!sessionId) {
-          await this.postState();
-          return;
-        }
-        const uris: vscode.Uri[] = [];
-        for (const rawUri of intent.data.uris) {
-          try {
-            uris.push(vscode.Uri.parse(rawUri));
-          } catch {
-            // Ignore malformed drop payload entries; the editor keeps the rest.
+        let sessionId = intent.data.sessionId ?? this.peekState().activeSessionId ?? "unknown";
+        try {
+          await this.ensureInitialized();
+          const resolvedSessionId = await this.ensureWebviewSessionWithoutHistory(
+            intent.data.sessionId ?? null,
+          );
+          if (!resolvedSessionId) {
+            throw new Error("No session is available for dropped context");
           }
+          sessionId = resolvedSessionId;
+          const uris: vscode.Uri[] = [];
+          for (const rawUri of intent.data.uris) {
+            try {
+              uris.push(vscode.Uri.parse(rawUri));
+            } catch {
+              // Ignore malformed drop payload entries; the editor keeps the rest.
+            }
+          }
+          await this.draftCoordinator.run(sessionId, () => this.ingestPickedUris(sessionId, uris));
+          await this.postComposerWorkResult(intent.data.operationId, sessionId);
+        } catch (error) {
+          await this.postComposerWorkResult(intent.data.operationId, sessionId, error);
+          if (!intent.data.operationId) throw error;
         }
-        await this.ingestPickedUris(sessionId, uris);
         return;
       }
       case "searchContext":
@@ -1159,21 +1322,29 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await vscode.window.showWarningMessage(intent.data.message);
         return;
       case "pickContext": {
-        await this.ensureInitialized();
-        const sessionId = await this.ensureWebviewSession(intent.data?.sessionId ?? null);
-        if (!sessionId) {
-          await this.postState();
-          return;
+        let sessionId = intent.data?.sessionId ?? this.peekState().activeSessionId ?? "unknown";
+        try {
+          await this.ensureInitialized();
+          const resolvedSessionId = await this.ensureWebviewSession(intent.data?.sessionId ?? null);
+          if (!resolvedSessionId) {
+            throw new Error("No session is available for picked context");
+          }
+          sessionId = resolvedSessionId;
+          const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
+          if (picks?.length) {
+            await this.draftCoordinator.run(sessionId, () => this.ingestPickedUris(sessionId, picks));
+          }
+          await this.postComposerWorkResult(intent.data?.operationId, sessionId);
+        } catch (error) {
+          await this.postComposerWorkResult(intent.data?.operationId, sessionId, error);
+          if (!intent.data?.operationId) throw error;
         }
-        const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
-        if (!picks?.length) {
-          return;
-        }
-        await this.ingestPickedUris(sessionId, picks);
         return;
       }
       case "cacheAttachmentThumbnail": {
-        await this.storeGeneratedThumbnail(intent.data);
+        await this.draftCoordinator.run(intent.data.sessionId, () =>
+          this.storeGeneratedThumbnail(intent.data),
+        );
         return;
       }
       case "syncComposerDraft": {
@@ -1190,18 +1361,24 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           // echoing the whole snapshot back at it every 250ms of typing is pure cost. The
           // snapshot only needs pushing when the host changes something the webview does
           // not already know about.
-          await this.saveDraftContent(sessionId, text, segments);
+          await this.draftCoordinator.run(sessionId, () =>
+            this.saveDraftContent(sessionId, text, segments),
+          );
         } catch (error) {
           console.warn("Tomcat failed to save the Composer draft", error);
         }
         return;
       }
       case "attachFiles": {
-        const { sessionId, files } = intent.data;
-        if (!sessionId || files.length === 0) return;
+        const { sessionId, files, operationId } = intent.data;
+        if (!sessionId || files.length === 0) {
+          await this.postComposerWorkResult(operationId, sessionId || "unknown");
+          return;
+        }
 
-        const uploads: AttachmentUpload[] = [];
-        const errors: string[] = [];
+        try {
+          const uploads: AttachmentUpload[] = [];
+          const errors: string[] = [];
         for (const file of files) {
           // Validate before the bytes go any further. The backend validates again — this
           // pass exists so the user hears about an oversized paste immediately.
@@ -1230,16 +1407,25 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           );
         }
 
-        const accepted = await this.ingestUploads(sessionId, uploads, errors);
-        await this.postEvent({
-          items: accepted.map((reference) => ({
-            filename: reference.filename,
-            id: reference.id,
-            mimeType: reference.mimeType,
-          })),
-          type: "attachFilesResult",
-        });
-        await this.reportAttachmentOutcome(accepted, errors);
+          const accepted = await this.draftCoordinator.run(sessionId, () =>
+            this.ingestUploads(sessionId, uploads, errors),
+          );
+          await this.postEvent({
+            items: accepted.map((reference) => ({
+              filename: reference.filename,
+              id: reference.id,
+              mimeType: reference.mimeType,
+            })),
+            operationId,
+            sessionId,
+            type: "attachFilesResult",
+          });
+          await this.reportAttachmentOutcome(accepted, errors);
+          await this.postComposerWorkResult(operationId, sessionId);
+        } catch (error) {
+          await this.postComposerWorkResult(operationId, sessionId, error);
+          if (!operationId) throw error;
+        }
         return;
       }
       case "removeDraftAttachment": {
@@ -1247,7 +1433,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (!sessionId || !attachmentId) {
           return;
         }
-        await this.removeDraftAttachment(sessionId, attachmentId);
+        await this.draftCoordinator.run(sessionId, () =>
+          this.removeDraftAttachment(sessionId, attachmentId),
+        );
         await this.postState();
         return;
       }
@@ -1265,7 +1453,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (!sessionId) {
           return;
         }
-        await this.removeDraftAttachment(sessionId, intent.data.attachmentId);
+        await this.draftCoordinator.run(sessionId, () =>
+          this.removeDraftAttachment(sessionId, intent.data.attachmentId),
+        );
         await this.postState();
         return;
       }
@@ -1498,8 +1688,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         return;
       case "answerQuestion": {
-        const pending = this.pendingQuestions.get(intent.data.requestId);
-        if (!pending) {
+        const pending = this.pendingQuestions.get(
+          `${intent.data.sessionId}\0${intent.data.requestId}`,
+        );
+        if (!pending || pending.settled) {
           const sessionId =
             this.lookupApprovalSessionId(intent.data.requestId)
             ?? this.peekState().activeSessionId;
@@ -1511,8 +1703,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             );
             await this.postState();
           }
+          await this.postEvent({
+            accepted: false,
+            requestId: intent.data.requestId,
+            sessionId: intent.data.sessionId,
+            type: "answerQuestionResult",
+          });
           return;
         }
+        pending.settled = true;
         pending.resolve(
           normalizeAskQuestionResponse(intent.data.requestId, intent.data.result),
         );
@@ -1690,6 +1889,23 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.stateStore.setActiveSession(target);
     await this.sessionPool.switchTo(target);
     return target;
+  }
+
+  private async postComposerWorkResult(
+    operationId: string | undefined,
+    sessionId: string,
+    error?: unknown,
+  ): Promise<void> {
+    if (!operationId) return;
+    await this.postEvent({
+      ...(error === undefined
+        ? {}
+        : { error: error instanceof Error ? error.message : String(error) }),
+      operationId,
+      sessionId,
+      success: error === undefined,
+      type: "composerWorkResult",
+    });
   }
 
   private async postEvent(content: HostEventFrameContent): Promise<void> {
@@ -2042,11 +2258,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     );
   }
 
-  private async refreshSessions(): Promise<void> {
+  private async refreshSessions(options: { post?: boolean } = {}): Promise<void> {
     await this.ensureInitialized();
     const sessions = await this.sessionPool.refresh();
     this.stateStore.syncSessionList(sessions);
-    await this.postState();
+    if (options.post ?? true) {
+      await this.postState();
+    }
   }
 
   private async refreshSessionState(
@@ -2637,14 +2855,123 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 </html>`;
   }
 
+  private async handleDraftForkCapture(value: DraftForkCapture): Promise<void> {
+    const capture = parseDraftForkCapture(value);
+    if (!capture) return;
+    const operation = this.pendingDraftForks.get(capture.operationId);
+    if (
+      !operation
+      || operation.captureAccepted
+      || operation.sourceSessionId !== capture.sourceSessionId
+    ) {
+      return;
+    }
+    operation.captureAccepted = true;
+
+    try {
+      const targetSessionId = await this.executeDraftFork(operation, capture);
+      this.removePendingDraftFork(operation);
+      await this.postEvent({
+        operationId: operation.operationId,
+        sourceSessionId: operation.sourceSessionId,
+        success: true,
+        targetSessionId,
+        type: "draftForkResult",
+      }).catch(() => undefined);
+      operation.resolve(targetSessionId);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      this.removePendingDraftFork(operation);
+      await this.postEvent({
+        error: formatBridgeError("create a session from this draft", normalized),
+        operationId: operation.operationId,
+        sourceSessionId: operation.sourceSessionId,
+        success: false,
+        type: "draftForkResult",
+      }).catch(() => undefined);
+      operation.reject(normalized);
+    }
+  }
+
+  private async executeDraftFork(
+    operation: PendingDraftForkOperation,
+    capture: DraftForkCapture,
+  ): Promise<string> {
+    return this.draftCoordinator.run(operation.sourceSessionId, async () => {
+      const current = this.draftStore.peek(operation.sourceSessionId);
+      const sourceDraft = await this.draftStore.replaceAndFlush(operation.sourceSessionId, {
+        attachments: current.attachments,
+        segments: capture.segments,
+        text: capture.text,
+      });
+      let targetSessionId: string | null = null;
+      let committed = false;
+      try {
+        targetSessionId = await this.deps.sessionRouter.createDetachedSession(
+          operation.cwd ?? capture.cwd ?? this.deps.getDefaultCwd(),
+        );
+        const leaseRefs = [...new Map(
+          sourceDraft.attachments.map((attachment) => [
+            `${attachment.blobSha}\0${attachment.providerSha ?? ""}`,
+            {
+              blobSha: attachment.blobSha,
+              providerSha: attachment.providerSha ?? null,
+            },
+          ]),
+        ).values()];
+        await this.deps.sessionRouter.retainAttachmentLeases(targetSessionId, leaseRefs);
+        await this.draftStore.installIfEmpty(targetSessionId, sourceDraft);
+        await this.sessionPool.switchTo(targetSessionId);
+        committed = true;
+        await this.adoptCommittedDraftFork(targetSessionId);
+        return targetSessionId;
+      } catch (error) {
+        if (!committed && targetSessionId) {
+          const compensationErrors: string[] = [];
+          await this.draftStore.discardStrict(targetSessionId).catch((cleanupError) => {
+            compensationErrors.push(
+              `draft cleanup: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+            );
+          });
+          await this.deps.sessionRouter.discardDetachedSession(targetSessionId).catch((cleanupError) => {
+            compensationErrors.push(
+              `session cleanup: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+            );
+          });
+          if (compensationErrors.length > 0) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`${message}; compensation failed (${compensationErrors.join("; ")})`);
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async adoptCommittedDraftFork(sessionId: string): Promise<void> {
+    const refresh = async (label: string, action: () => Promise<void>): Promise<void> => {
+      try {
+        await action();
+      } catch (error) {
+        console.warn(`Tomcat committed draft fork but could not refresh ${label}`, error);
+      }
+    };
+    await refresh("session state", () => this.refreshSessionState(sessionId, { trustBusy: true }));
+    await refresh("session history", () => this.refreshSessionHistory(sessionId));
+    await refresh("checkpoints", () => this.refreshCheckpoints(sessionId));
+    await refresh("session list", () => this.refreshSessions({ post: false }));
+    this.stateStore.setActiveSession(sessionId);
+    await this.hydrateDraft(sessionId);
+    await this.postState().catch(() => undefined);
+  }
+
   private async selectSession(sessionId: string): Promise<void> {
     await this.ensureInitialized();
-    this.stateStore.setActiveSession(sessionId);
     await this.sessionPool.switchTo(sessionId);
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
     await this.refreshCheckpoints(sessionId);
-    await this.refreshSessions();
+    await this.refreshSessions({ post: false });
     this.stateStore.setActiveSession(sessionId);
 
     // Hydrate composer draft from Rust backend (pending images/text/segments)
@@ -2659,7 +2986,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
     await this.refreshCheckpoints(sessionId);
-    await this.refreshSessions();
+    await this.refreshSessions({ post: false });
     this.stateStore.setActiveSession(sessionId);
     // Hydrate draft for this session
     await this.hydrateDraft(sessionId);

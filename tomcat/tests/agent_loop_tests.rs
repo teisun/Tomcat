@@ -475,8 +475,7 @@ impl FixedResolver {
             reasoning: lower.starts_with("gpt-5."),
             web_search: false,
         };
-        let mut call =
-            ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
         call.api = "openai-responses".to_string();
         call.provider = "openai".to_string();
         call.base_url = Some("https://api.openai.com".to_string());
@@ -889,6 +888,168 @@ async fn test_run_chat_turn_drains_background_followup_within_same_turn(
         "transcript 中 synthetic follow-up 应位于 foreground tool_result 之后；tool_pos={tool_pos}, follow_up_pos={follow_up_pos}"
     );
 
+    Ok(())
+}
+
+/// Deterministic checkpoint regression: interrupt a blocking task_output through the EventBus,
+/// then reuse the exact same ChatContext for the next user turn. No OS signal or wall-clock
+/// sleep participates in the interrupt barrier.
+#[tokio::test]
+async fn test_same_chat_context_recovers_after_task_output_interrupt_without_signal(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tomcat::core::agent_loop::CompletionRoute;
+    use tomcat::core::tools::primitive::BashTaskStatus;
+
+    common::setup_logging();
+    const ENV_KEY: &str = "TOMCAT_CHECKPOINT_CONTEXT_RECOVERY_KEY";
+    let (dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    let registry = ctx.session_runtime.bash_task_registry.clone();
+    let ticket = registry
+        .spawn("sleep 60".to_string(), None, Some(dir.path().to_path_buf()))
+        .await?;
+    let task_id = ticket.task_id.clone();
+
+    let wait_args = serde_json::json!({
+        "task_id": task_id,
+        "since": 0,
+        "block": true,
+        "wait_ms": 30_000,
+    })
+    .to_string();
+    let stop_args = serde_json::json!({ "task_id": ticket.task_id }).to_string();
+    let llm = Arc::new(RecordingMockLlm::new(vec![
+        tool_call_stream("call_wait", "task_output", &wait_args),
+        tool_call_stream("call_stop", "task_stop", &stop_args),
+        text_stream("RECOVERED_CONTEXT_E2E"),
+    ]));
+    let requests = llm.requests.clone();
+    install_fixed_resolver(&mut ctx, llm, "gpt-5.4");
+
+    let first_cancel = CancellationToken::new();
+    let cancel_from_update = first_cancel.clone();
+    ctx.global_services.event_bus.on(
+        wire::WIRE_TOOL_EXECUTION_UPDATE,
+        Box::new(move |event: EventContext| {
+            if event
+                .payload
+                .get("toolName")
+                .and_then(|value| value.as_str())
+                == Some("task_output")
+            {
+                cancel_from_update.cancel();
+            }
+            Ok(())
+        }),
+    );
+
+    let system_text = "checkpoint deterministic integration";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )?;
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_chat_turn(
+            &ctx,
+            "wait for the background task",
+            system_text,
+            &mut state,
+            first_cancel,
+        ),
+    )
+    .await
+    .map_err(|_| "first checkpoint turn timed out")??;
+    assert!(first.is_interrupted(), "first turn must end as Interrupted");
+    assert!(
+        !ctx.session_runtime
+            .completion_routes
+            .lock()
+            .contains_key(&ticket.task_id),
+        "cancelled task_output must release ToolWillDeliver route",
+    );
+    assert!(matches!(
+        registry.get_info(&ticket.task_id).map(|info| info.status),
+        Some(BashTaskStatus::Running | BashTaskStatus::DrainingOutput)
+    ));
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_chat_turn(
+            &ctx,
+            "continue after interrupt",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .map_err(|_| "second checkpoint turn timed out")??;
+    let recovered = match second {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("same ChatContext followup should complete, actual={other:?}"),
+    };
+    assert!(recovered.final_text.contains("RECOVERED_CONTEXT_E2E"));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        registry.wait_for_finish(&ticket.task_id),
+    )
+    .await
+    .map_err(|_| "stopped background task was not reaped")??;
+    assert!(matches!(
+        registry.get_info(&ticket.task_id).map(|info| info.status),
+        Some(BashTaskStatus::Stopped)
+    ));
+    assert_ne!(
+        ctx.session_runtime
+            .completion_routes
+            .lock()
+            .get(&ticket.task_id),
+        Some(&CompletionRoute::ToolWillDeliver),
+        "no stale completion claim may survive the second turn",
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "wait, stop, then recovered text requests"
+    );
+    assert!(requests[1].messages.iter().any(|message| {
+        message
+            .text_content()
+            .is_some_and(|text| text == "continue after interrupt")
+    }));
+    assert!(
+        requests[1].messages.iter().any(|message| {
+            message.role == tomcat::core::llm::ChatMessageRole::Tool
+                && message
+                    .text_content()
+                    .is_some_and(|text| text.contains("已被取消") || text == "[interrupted]")
+        }),
+        "second request must hydrate the interrupted task_output tool round"
+    );
+    drop(requests);
+
+    let transcript = fs::read_to_string(
+        ctx.session_runtime
+            .session
+            .current_transcript_path()?
+            .ok_or("transcript path should exist")?,
+    )?;
+    let interrupted_round = transcript
+        .find("call_wait")
+        .expect("task_output tool round");
+    let followup = transcript
+        .find("continue after interrupt")
+        .expect("second user turn");
+    let stopped = transcript.find("call_stop").expect("task_stop tool round");
+    let recovered = transcript
+        .find("RECOVERED_CONTEXT_E2E")
+        .expect("recovered assistant text");
+    assert!(interrupted_round < followup && followup < stopped && stopped < recovered);
+
+    unsafe { std::env::remove_var(ENV_KEY) };
     Ok(())
 }
 

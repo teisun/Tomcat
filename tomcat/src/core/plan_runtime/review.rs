@@ -39,7 +39,10 @@ impl Finding {
 /// 稳定 finding id：`f-` + area/note 的 FNV-1a 短哈希。
 pub fn finding_id(area: &str, note: &str) -> String {
     let seed = format!("{}\n{}", area.trim(), note.trim());
-    format!("f-{}", &crate::core::session::fnv1a_hex(seed.as_bytes())[..8])
+    format!(
+        "f-{}",
+        &crate::core::session::fnv1a_hex(seed.as_bytes())[..8]
+    )
 }
 
 /// `<review>` 块的中性解析结果。

@@ -73,7 +73,15 @@ export interface ModelView {
 }
 export interface NewSessionParams {
   cwd?: null | string;
+  detached?: boolean;
   mode?: ServeSessionMode | null;
+}
+export interface RetainAttachmentLeaseRef {
+  blobSha: string;
+  providerSha?: null | string;
+}
+export interface RetainAttachmentLeasesParams {
+  attachments: RetainAttachmentLeaseRef[];
 }
 export interface ServeAttachment {
   blobSha?: null | string;
@@ -354,6 +362,9 @@ export interface ResponseFrame {
   success: boolean;
   type: string;
 }
+export interface RetainAttachmentLeasesResponse {
+  retainedShas: string[];
+}
 export type ServeCommand = {
   action: SetPlanModeAction;
   id?: null | string;
@@ -398,6 +409,11 @@ export type ServeCommand = {
   type: "remove_model";
 } | {
   id?: null | string;
+  params: RetainAttachmentLeasesParams;
+  sessionId: string;
+  type: "retain_attachment_leases";
+} | {
+  id?: null | string;
   params?: GetMessagesParams;
   sessionId?: null | string;
   type: "get_messages";
@@ -427,6 +443,10 @@ export type ServeCommand = {
   id?: null | string;
   scope?: ListSessionsScope | null;
   type: "list_sessions";
+} | {
+  id?: null | string;
+  sessionId: string;
+  type: "discard_detached_session";
 } | {
   id?: null | string;
   sessionId: string;

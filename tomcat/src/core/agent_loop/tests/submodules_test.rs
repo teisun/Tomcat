@@ -24,12 +24,12 @@ use crate::core::agent_loop::error_classifier::{
 use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
 use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, ModelCatalog};
+use crate::core::session::manager::ContextState;
 use crate::core::skill::{Skill, SkillSet, SkillSource};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::tools::web_fetch::{types::WebFetchOutput, WebFetchFormat, WebFetchRuntime};
 use crate::core::tools::web_search::types::{Hit, Stats, WebSearchArgs, WebSearchOutput};
 use crate::core::tools::web_search::WebSearchRuntime;
-use crate::core::session::manager::ContextState;
 use crate::infra::error::{llm_http_status_error, llm_stream_terminal_error, AppError};
 use crate::infra::{wire, DefaultEventBus, EventBus};
 use crate::AppConfig;
@@ -305,7 +305,10 @@ async fn handle_unsupported_multimodal_retry_degrades_input_file_and_keeps_trans
     );
 
     let after = std::fs::read(&transcript_path).expect("read after");
-    assert_eq!(before, after, "降级只改 in-memory messages，不应回写 transcript");
+    assert_eq!(
+        before, after,
+        "降级只改 in-memory messages，不应回写 transcript"
+    );
 }
 
 #[tokio::test]
@@ -344,10 +347,7 @@ async fn handle_unsupported_multimodal_retry_skips_when_not_matched() {
         serde_json::to_string(&messages).expect("serialize after"),
         "未命中时消息不应被改写"
     );
-    assert!(
-        observed.lock().unwrap().is_empty(),
-        "未命中时不应发 notice"
-    );
+    assert!(observed.lock().unwrap().is_empty(), "未命中时不应发 notice");
 }
 
 /// unknown 工具名：execute_tool 返回 `is_error == true`，content 含 unknown 提示。

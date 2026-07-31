@@ -70,7 +70,13 @@ async fn run_tool_loop_keeps_session_id_consistent_between_payload_and_context()
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(test_binding(llm, "gpt-4"), primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let result = loop_
         .run(vec![ChatMessage::user("write demo file")])
         .await

@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard;
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::{test_binding, MockPrimitiveExecutor, RecordedChatCall, RecordingChatLlmProvider};
+use super::mocks::{
+    test_binding, MockPrimitiveExecutor, RecordedChatCall, RecordingChatLlmProvider,
+};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessage, LlmProvider, MessageKind};
 use crate::core::session::manager::ContextState;

@@ -184,8 +184,22 @@ async fn ingest_attachment_deduplicates_identical_bytes() {
         build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
     let bytes = png_bytes();
 
-    let first = ingest(&state, &buffer, &slot, "dedup-1", image_input(&bytes, "image/png")).await;
-    let second = ingest(&state, &buffer, &slot, "dedup-2", image_input(&bytes, "image/png")).await;
+    let first = ingest(
+        &state,
+        &buffer,
+        &slot,
+        "dedup-1",
+        image_input(&bytes, "image/png"),
+    )
+    .await;
+    let second = ingest(
+        &state,
+        &buffer,
+        &slot,
+        "dedup-2",
+        image_input(&bytes, "image/png"),
+    )
+    .await;
 
     assert_eq!(first["payload"]["blobSha"], second["payload"]["blobSha"]);
     let blobs = std::fs::read_dir(
@@ -208,9 +222,22 @@ async fn ingest_file_deduplicates_identical_bytes() {
         build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
     let bytes = pdf_bytes();
 
-    let first = ingest(&state, &buffer, &slot, "dedup-file-1", file_input(&bytes, "application/pdf")).await;
-    let second =
-        ingest(&state, &buffer, &slot, "dedup-file-2", file_input(&bytes, "application/pdf")).await;
+    let first = ingest(
+        &state,
+        &buffer,
+        &slot,
+        "dedup-file-1",
+        file_input(&bytes, "application/pdf"),
+    )
+    .await;
+    let second = ingest(
+        &state,
+        &buffer,
+        &slot,
+        "dedup-file-2",
+        file_input(&bytes, "application/pdf"),
+    )
+    .await;
 
     assert_eq!(first["payload"]["blobSha"], second["payload"]["blobSha"]);
     let blobs = std::fs::read_dir(
@@ -281,7 +308,10 @@ async fn ingest_attachment_rejects_mislabelled_bytes() {
 
     assert_eq!(response["success"].as_bool(), Some(false));
     assert!(
-        response["error"].as_str().unwrap_or_default().contains("magic byte"),
+        response["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("magic byte"),
         "实际错误：{}",
         response["error"]
     );
@@ -297,7 +327,14 @@ async fn ingest_then_prompt_reaches_transcript_and_provider_without_rewriting_by
         build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
 
     let bytes = png_bytes();
-    let ingested = ingest(&state, &buffer, &slot, "chain-ingest", image_input(&bytes, "image/png")).await;
+    let ingested = ingest(
+        &state,
+        &buffer,
+        &slot,
+        "chain-ingest",
+        image_input(&bytes, "image/png"),
+    )
+    .await;
     let blob_sha = ingested["payload"]["blobSha"].as_str().unwrap().to_string();
 
     // 零拷贝断言的取样点：发送前记下 blob 文件的身份。
@@ -358,7 +395,11 @@ async fn ingest_then_prompt_reaches_transcript_and_provider_without_rewriting_by
         })
         .expect("input_image part");
     assert_eq!(image.mime_type, "image/png");
-    assert_eq!(image.data, b64(&bytes), "provider 收到的字节必须与 ingest 时一致");
+    assert_eq!(
+        image.data,
+        b64(&bytes),
+        "provider 收到的字节必须与 ingest 时一致"
+    );
     drop(captured);
 
     // (2) transcript 里也有同一份字节
@@ -421,7 +462,10 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
     )
     .await;
     let blob_sha = ingested["payload"]["blobSha"].as_str().unwrap().to_string();
-    let provider_sha = ingested["payload"]["providerSha"].as_str().unwrap().to_string();
+    let provider_sha = ingested["payload"]["providerSha"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     handle_command(
         Arc::clone(&state),
@@ -640,7 +684,14 @@ async fn seed_session_with_one_image(
     slot: &Arc<SessionSlot>,
     bytes: &[u8],
 ) {
-    let ingested = ingest(state, buffer, slot, "seed-ingest", image_input(bytes, "image/png")).await;
+    let ingested = ingest(
+        state,
+        buffer,
+        slot,
+        "seed-ingest",
+        image_input(bytes, "image/png"),
+    )
+    .await;
     let blob_sha = ingested["payload"]["blobSha"].as_str().unwrap().to_string();
     handle_command(
         Arc::clone(state),
@@ -676,7 +727,14 @@ async fn seed_session_with_one_file(
     slot: &Arc<SessionSlot>,
     bytes: &[u8],
 ) {
-    let ingested = ingest(state, buffer, slot, "seed-file-ingest", file_input(bytes, "application/pdf")).await;
+    let ingested = ingest(
+        state,
+        buffer,
+        slot,
+        "seed-file-ingest",
+        file_input(bytes, "application/pdf"),
+    )
+    .await;
     let blob_sha = ingested["payload"]["blobSha"].as_str().unwrap().to_string();
     handle_command(
         Arc::clone(state),
@@ -746,8 +804,8 @@ async fn get_messages_defaults_to_inline_for_cli_compatibility() {
     let bytes = png_bytes();
     seed_session_with_one_image(&state, &buffer, &slot, &bytes).await;
 
-    let payload = get_messages_payload(&state, &buffer, &slot, "gm-inline", AttachmentMode::Inline)
-        .await;
+    let payload =
+        get_messages_payload(&state, &buffer, &slot, "gm-inline", AttachmentMode::Inline).await;
     let serialized = serde_json::to_string(&payload).unwrap();
 
     assert!(
@@ -815,15 +873,23 @@ async fn get_messages_reference_mode_returns_pdf_hashes_instead_of_bytes() {
             .transcript_path(&slot.session_id),
     )
     .unwrap();
-    assert!(transcript.contains(&b64(&bytes)), "transcript 必须保留用户发出的 PDF 原始字节");
+    assert!(
+        transcript.contains(&b64(&bytes)),
+        "transcript 必须保留用户发出的 PDF 原始字节"
+    );
     assert!(
         transcript.contains("application/pdf"),
         "transcript 必须保留 PDF MIME，后续拉历史才能正确渲染"
     );
 
-    let payload =
-        get_messages_payload(&state, &buffer, &slot, "gm-pdf-ref", AttachmentMode::Reference)
-            .await;
+    let payload = get_messages_payload(
+        &state,
+        &buffer,
+        &slot,
+        "gm-pdf-ref",
+        AttachmentMode::Reference,
+    )
+    .await;
     let serialized = serde_json::to_string(&payload).unwrap();
 
     assert!(
@@ -878,8 +944,14 @@ async fn reference_mode_rebuilds_from_transcript_after_the_cache_is_wiped() {
         }
     }
 
-    let payload =
-        get_messages_payload(&state, &buffer, &slot, "gm-rebuild", AttachmentMode::Reference).await;
+    let payload = get_messages_payload(
+        &state,
+        &buffer,
+        &slot,
+        "gm-rebuild",
+        AttachmentMode::Reference,
+    )
+    .await;
     let serialized = serde_json::to_string(&payload).unwrap();
     let sha = serialized
         .split("\"blobSha\":\"")
@@ -906,9 +978,14 @@ async fn cache_attachment_thumbnail_stores_and_is_reported_by_reference_mode() {
     let bytes = png_bytes();
     seed_session_with_one_image(&state, &buffer, &slot, &bytes).await;
 
-    let payload =
-        get_messages_payload(&state, &buffer, &slot, "thumb-before", AttachmentMode::Reference)
-            .await;
+    let payload = get_messages_payload(
+        &state,
+        &buffer,
+        &slot,
+        "thumb-before",
+        AttachmentMode::Reference,
+    )
+    .await;
     let serialized = serde_json::to_string(&payload).unwrap();
     assert!(serialized.contains("\"hasThumb\":false"), "起初没有缩略图");
     let sha = serialized
@@ -944,8 +1021,14 @@ async fn cache_attachment_thumbnail_stores_and_is_reported_by_reference_mode() {
         Some(true)
     );
 
-    let after =
-        get_messages_payload(&state, &buffer, &slot, "thumb-after", AttachmentMode::Reference).await;
+    let after = get_messages_payload(
+        &state,
+        &buffer,
+        &slot,
+        "thumb-after",
+        AttachmentMode::Reference,
+    )
+    .await;
     assert!(
         serde_json::to_string(&after)
             .unwrap()
@@ -1025,11 +1108,7 @@ async fn initialize_reports_the_attachment_root_for_local_resource_roots() {
     let root = payload["attachmentRoot"].as_str().expect("attachmentRoot");
     assert_eq!(
         std::path::Path::new(root),
-        slot.ctx
-            .session_runtime
-            .session
-            .attachment_store()
-            .root()
+        slot.ctx.session_runtime.session.attachment_store().root()
     );
 }
 
@@ -1060,10 +1139,7 @@ async fn deleting_a_session_releases_its_attachment_bytes() {
         .delete_session(&slot.session_id)
         .expect("delete session");
 
-    assert!(
-        !store.exists(&blob_sha),
-        "会话删除后其未发送字节应一并回收"
-    );
+    assert!(!store.exists(&blob_sha), "会话删除后其未发送字节应一并回收");
     assert!(store.list_pending(&slot.session_id).unwrap().is_empty());
 }
 
@@ -1156,6 +1232,12 @@ fn ingest_attachment_response_is_part_of_the_generated_schema() {
     assert!(dts.contains("blobSha: string;"));
     assert!(dts.contains("hasThumb: boolean;"));
     assert!(dts.contains("providerSha?: null | string;"));
+    assert!(dts.contains("export interface RetainAttachmentLeaseRef {"));
+    assert!(dts.contains("attachments: RetainAttachmentLeaseRef[];"));
+    assert!(dts.contains("export interface RetainAttachmentLeasesResponse {"));
+    assert!(dts.contains("retainedShas: string[];"));
+    assert!(dts.contains("type: \"retain_attachment_leases\";"));
+    assert!(dts.contains("detached?: boolean;"));
     assert!(dts.contains("export interface IngestAttachmentInput {"));
     // 引用式附件：ServeAttachment 上只有哈希，没有字节。
     assert!(dts.contains("export interface ServeAttachment {"));
@@ -1199,7 +1281,14 @@ fn collect_field_names(
                 }
                 // `oneOf` / `anyOf` / `allOf` / `items` / `additionalProperties` 等结构分支
                 // 也要跟进去，否则包在枚举或数组里的字段会漏掉。
-                for key in ["oneOf", "anyOf", "allOf", "items", "additionalProperties", "not"] {
+                for key in [
+                    "oneOf",
+                    "anyOf",
+                    "allOf",
+                    "items",
+                    "additionalProperties",
+                    "not",
+                ] {
                     if let Some(child) = object.get(key) {
                         walk(child, definitions, visited, fields);
                     }
