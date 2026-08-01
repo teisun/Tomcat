@@ -104,6 +104,64 @@
         }
       },
       {
+        "description": "在不追加用户消息的前提下，基于当前 transcript 继续请求模型。",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "resume"
+            ]
+          }
+        }
+      },
+      {
+        "description": "复制指定失败输入为新的活 user message，然后重新开一轮。",
+        "type": "object",
+        "required": [
+          "messageId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "retry"
+            ]
+          }
+        }
+      },
+      {
         "type": "object",
         "required": [
           "type"
@@ -191,6 +249,33 @@
             "type": "string",
             "enum": [
               "restore_checkpoint"
+            ]
+          }
+        }
+      },
+      {
+        "description": "主动压缩当前会话上下文，保留摘要以继续会话。",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "compact"
             ]
           }
         }
@@ -424,7 +509,9 @@
             ]
           },
           "params": {
-            "default": {},
+            "default": {
+              "detached": false
+            },
             "allOf": [
               {
                 "$ref": "#/definitions/NewSessionParams"
@@ -521,6 +608,31 @@
             "type": "string",
             "enum": [
               "close_session"
+            ]
+          }
+        }
+      },
+      {
+        "description": "回滚一个尚未进入 live registry 的 detached 会话。幂等；绝不激活目标。",
+        "type": "object",
+        "required": [
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "discard_detached_session"
             ]
           }
         }
@@ -687,6 +799,35 @@
             "type": "string",
             "enum": [
               "ingest_attachment"
+            ]
+          }
+        }
+      },
+      {
+        "description": "为 detached 目标会话批量保留现有 blob/provider rendition 租约，不携带字节。",
+        "type": "object",
+        "required": [
+          "params",
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "$ref": "#/definitions/RetainAttachmentLeasesParams"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "retain_attachment_leases"
             ]
           }
         }
@@ -958,6 +1099,10 @@
               "null"
             ]
           },
+          "detached": {
+            "default": false,
+            "type": "boolean"
+          },
           "mode": {
             "anyOf": [
               {
@@ -967,6 +1112,39 @@
                 "type": "null"
               }
             ]
+          }
+        }
+      },
+      "RetainAttachmentLeaseRef": {
+        "description": "`retain_attachment_leases` 的单个附件引用。只有内容哈希会过 wire；原始字节仍只允许 `ingest_attachment` 携带。`provider_sha` 省略时 provider 与原始 blob 共用同一份字节。",
+        "type": "object",
+        "required": [
+          "blobSha"
+        ],
+        "properties": {
+          "blobSha": {
+            "type": "string"
+          },
+          "providerSha": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "RetainAttachmentLeasesParams": {
+        "description": "`retain_attachment_leases` 的入参。后端会把所有 blob/provider SHA 合并去重后原子保留。",
+        "type": "object",
+        "required": [
+          "attachments"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/RetainAttachmentLeaseRef"
+            }
           }
         }
       },
@@ -2873,6 +3051,44 @@
               "type"
             ],
             "properties": {
+              "childSessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transcriptPath": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.review.started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
               "aborted": {
                 "type": [
                   "boolean",
@@ -2944,6 +3160,12 @@
                 ]
               },
               "toolCallId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transcriptPath": {
                 "type": [
                   "string",
                   "null"
@@ -3046,6 +3268,44 @@
                 "type": [
                   "string",
                   "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "childSessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "taskId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transcriptPath": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.explorer.started"
                 ]
               }
             }
@@ -5180,6 +5440,23 @@
           "string",
           "null"
         ]
+      }
+    }
+  },
+  "retain_attachment_leases_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "RetainAttachmentLeasesResponse",
+    "description": "`retain_attachment_leases` 的响应。按字典序返回实际保留的去重 SHA 集合。",
+    "type": "object",
+    "required": [
+      "retainedShas"
+    ],
+    "properties": {
+      "retainedShas": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     }
   }

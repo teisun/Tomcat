@@ -1,8 +1,8 @@
 use super::super::*;
-use crate::SessionEntry;
 use crate::api::chat::run_loop::cleanup_plugin_sessions_on_session_end;
 use crate::api::chat::run_loop::compose_planned_turn_messages;
 use crate::core::session::manager::init_context_state;
+use crate::SessionEntry;
 use crate::{
     AgentRunOutcome, AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
     CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
@@ -1405,21 +1405,15 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
         error_entry.summary,
         "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
     );
-    assert!(
-        error_entry
-            .detail
-            .contains("Node information: PS-CZX-01wky52")
-    );
-    assert!(
-        error_entry
-            .detail
-            .contains("URL: https://aigateway.sunmi.com/v1/responses")
-    );
-    assert!(
-        error_entry
-            .detail
-            .contains("Request-Id: 6a59715c_PS-CZX-01wky52_16724-27663")
-    );
+    assert!(error_entry
+        .detail
+        .contains("Node information: PS-CZX-01wky52"));
+    assert!(error_entry
+        .detail
+        .contains("URL: https://aigateway.sunmi.com/v1/responses"));
+    assert!(error_entry
+        .detail
+        .contains("Request-Id: 6a59715c_PS-CZX-01wky52_16724-27663"));
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };

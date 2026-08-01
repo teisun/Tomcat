@@ -57,7 +57,9 @@ pub(crate) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
                         log_path = log_path,
                         cmd = command.replace('"', "\\\""),
                     );
-                    queue.lock().push(crate::core::llm::ChatMessage::user(text));
+                    let mut signal = crate::core::llm::ChatMessage::user(text);
+                    signal.kind = crate::core::llm::MessageKind::Signal;
+                    queue.lock().push(signal);
                     eprintln!(
                         "\n[bg] task {} finished (exit={}); queued for next turn.",
                         task_id, exit_code

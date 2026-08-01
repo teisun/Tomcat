@@ -13,26 +13,26 @@ use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::AppError;
 use crate::api::chat::commands::{
-    RestoreCoreReport, checkpoint_kind_label, compact_session, restore_core,
+    checkpoint_kind_label, compact_session, restore_core, RestoreCoreReport,
 };
 use crate::core::llm::{
+    list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind, ContextReference,
-    ProviderKeyInput, ThinkingLevel, list_model_views, list_provider_keys, remove_user_model,
-    set_provider_key, upsert_user_model,
+    ProviderKeyInput, ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::attachments::{
-    AttachmentBlobStore, REBUILDABLE_MAX_BYTES, safe_filename, validate_file_bytes,
-    validate_image_bytes,
+    safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore,
+    REBUILDABLE_MAX_BYTES,
 };
 use crate::core::session::manager::init_context_state;
 use crate::core::session::transcript::{
-    TranscriptEntry, TranscriptPage, entry_id, find_entry_line_offset, read_entries_tail_before,
-    read_entry_at_offset,
+    entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset,
+    TranscriptEntry, TranscriptPage,
 };
 use crate::infra::events::{AgentEvent, WireEvent};
+use crate::AppError;
 use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
 
 use super::control;
@@ -44,7 +44,7 @@ use super::types::{
     SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse,
 };
 use super::{
-    ServeState, cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn,
+    cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
 };
 
 pub(crate) enum TurnAck {
@@ -328,6 +328,50 @@ pub(crate) async fn handle_command(
             }
             start_turn(state, slot, id, Some(input_message), TurnAck::Accepted).await?;
         }
+        ServeCommand::Retry {
+            id,
+            session_id,
+            message_id,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            if slot.is_busy() {
+                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+                return Ok(());
+            }
+            match slot
+                .ctx
+                .session_runtime
+                .session
+                .copy_user_message_forward(&message_id)
+            {
+                Ok(_) => {}
+                Err(error) if is_config_error(&error, "retry_target_stale") => {
+                    send_error(
+                        &state,
+                        id,
+                        Some(slot.session_id.clone()),
+                        "retry_target_stale",
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+            // copy-forward changed the durable source of truth. Hydrate instead of building a
+            // parallel in-memory copy so the next request is exactly the transcript we wrote.
+            if let Err(error) = rehydrate_slot_context_state(&slot) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    format!("retry persisted but failed to refresh runtime context: {error}"),
+                )?;
+                return Ok(());
+            }
+            start_turn(state, slot, id, None, TurnAck::Accepted).await?;
+        }
         ServeCommand::Resume { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id).await? else {
                 return Ok(());
@@ -336,14 +380,15 @@ pub(crate) async fn handle_command(
                 send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
                 return Ok(());
             }
-            if slot
-                .ctx
-                .session_runtime
-                .session
-                .revive_trailing_failed_user_messages()?
-                > 0
-            {
-                rehydrate_slot_context_state(&slot)?;
+            let entries = slot.ctx.session_runtime.session.get_entries(256)?;
+            if !crate::core::session::has_complete_tail_tool_results(&entries) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    "nothing_to_resume",
+                )?;
+                return Ok(());
             }
             start_turn(state, slot, id, None, TurnAck::Accepted).await?;
         }

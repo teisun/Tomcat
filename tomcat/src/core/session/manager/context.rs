@@ -5,27 +5,27 @@ use std::time::Instant;
 
 use chrono::{NaiveDate, Utc};
 
-use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
+use crate::core::llm::{ChatMessage, MessageKind};
 use crate::core::session::resume_index::{
-    ResumeAnchor, ResumeIndex, ResumeIndexIoStats, ResumeIndexSource, load_or_rebuild_resume_index,
-    rebuild_resume_index,
+    load_or_rebuild_resume_index, rebuild_resume_index, ResumeAnchor, ResumeIndex,
+    ResumeIndexIoStats, ResumeIndexSource,
 };
 use crate::core::session::transcript::{
-    BranchSummaryEntry, TranscriptEntry, TranscriptReadStats, read_entries_tail_with_stats,
+    read_entries_tail_with_stats, BranchSummaryEntry, TranscriptEntry, TranscriptReadStats,
 };
 use crate::core::session::{
     append_message_chain::collect_recent_chat_messages_from_tail, find_dangling_tail_tool_calls,
 };
-use crate::infra::config::{ContextConfig, ResumeHydrationMode, compute_context_budget_chars};
+use crate::infra::config::{compute_context_budget_chars, ContextConfig, ResumeHydrationMode};
 use crate::infra::error::AppError;
 
-use super::session_impl::SessionManager;
 use super::session_impl::generate_entry_id;
+use super::session_impl::SessionManager;
 use crate::core::compaction::preheat::Preheat;
 
 use super::types::{
-    CompactionResult, ContextState, PlanEventRef, PlanModeTransition, ResumeControlState,
-    SessionContextObservation, estimate_msg_chars,
+    estimate_msg_chars, CompactionResult, ContextState, PlanEventRef, PlanModeTransition,
+    ResumeControlState, SessionContextObservation,
 };
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
@@ -315,6 +315,10 @@ fn entry_timestamp(entry: &TranscriptEntry) -> &str {
 pub(super) fn is_user_message(entry: &TranscriptEntry) -> bool {
     if let TranscriptEntry::Message(me) = entry {
         me.message.get("role").and_then(|r| r.as_str()) == Some("user")
+            && !MessageKind::from_persisted(
+                me.message.get("kind").and_then(serde_json::Value::as_str),
+            )
+            .is_non_turn_start()
     } else {
         false
     }
@@ -487,11 +491,7 @@ fn chat_message_from_entry(
         warn_if_legacy_tool_name(arr);
     }
 
-    // Detect compaction summary injected as user message (via older paths)
-    // These are plain user messages from transcript — no special marking needed here.
-    // The CompactionSummary kind is only set for BranchSummary entries below.
     msg.msg_id = me.id.clone().or_else(|| Some(generate_entry_id()));
-    msg.kind = MessageKind::Normal;
     msg.timestamp = Some(me.timestamp.clone());
     Some(msg)
 }
@@ -606,8 +606,7 @@ fn heal_dangling_tail_tool_call(
 
 /// Returns true if the message is a "turn start" — i.e., starts a new logical turn.
 fn is_turn_start(m: &ChatMessage) -> bool {
-    (m.role == ChatMessageRole::User && m.kind != MessageKind::Steering)
-        || m.kind == MessageKind::CompactionSummary
+    m.starts_logical_turn()
 }
 
 /// Phase 3: 按天筛选 messages + 不足 min_turns 向前补齐。

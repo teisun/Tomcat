@@ -1,6 +1,5 @@
 //! Layer 3: 强制删除最旧 turn（仅 API Context Overflow 后触发）。
 
-use crate::core::llm::{ChatMessageRole, MessageKind};
 use crate::core::session::manager::{estimate_msg_chars, ContextState};
 
 /// Layer 3：强制删除最旧 turn 直到 ratio < 0.50。返回 `(删轮数, 删除字符数之和)`。
@@ -15,16 +14,14 @@ pub fn force_drop_oldest_to_target(state: &mut ContextState) -> (usize, usize) {
 
     while state.usage_ratio() >= 0.50 && !state.messages.is_empty() {
         // Find the end of the oldest turn: everything from the start up to (but not including)
-        // the next turn-start boundary. A turn starts at a user/compaction message.
+        // the next turn-start boundary. MessageKind retains the historical distinction
+        // between normal input, steering, and completion nudges across restarts.
         let turn_end = state
             .messages
             .iter()
             .enumerate()
             .skip(1) // first message marks the start of the oldest turn
-            .find(|(_, m)| {
-                (m.role == ChatMessageRole::User && m.kind != MessageKind::Steering)
-                    || m.kind == MessageKind::CompactionSummary
-            })
+            .find(|(_, m)| m.starts_logical_turn())
             .map(|(i, _)| i)
             .unwrap_or(state.messages.len());
 

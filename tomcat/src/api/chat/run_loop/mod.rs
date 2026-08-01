@@ -8,19 +8,19 @@ use tracing::{info, warn};
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
 use crate::core::llm::resolver::validate_capabilities;
-use crate::core::llm::{ChatMessage, LlmScene, degrade_unsupported_multimodal};
+use crate::core::llm::{degrade_unsupported_multimodal, ChatMessage, LlmScene};
 use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
 };
-use crate::infra::ScopedEventEmitter;
 use crate::infra::error::AppError;
 use crate::infra::events::AgentEvent;
+use crate::infra::ScopedEventEmitter;
 use crate::{AgentLoop, AgentLoopConfig, CheckpointKind};
 
 use crate::core::plan_runtime;
 
 use super::super::render::MarkdownRenderer;
-use super::commands::{ChatCommandOutcome, dispatch_chat_command, parse_chat_command};
+use super::commands::{dispatch_chat_command, parse_chat_command, ChatCommandOutcome};
 use super::context::ChatContext;
 use super::prompt::{agent_prompt_for_mode, user_prompt_for_mode_with_model};
 use super::{cli_turn_renderer, events, preflight};

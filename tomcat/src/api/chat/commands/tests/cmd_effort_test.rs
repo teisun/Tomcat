@@ -1,9 +1,9 @@
 //! `/effort` 命令解析与持久化的焦小测。
 
 use super::super::cmd_effort::{apply_level, parse_effort_level};
-use super::super::{ChatCommand, help_text, parse_chat_command};
-use crate::ModelThinkingStore;
+use super::super::{help_text, parse_chat_command, ChatCommand};
 use crate::core::llm::ThinkingLevel;
+use crate::ModelThinkingStore;
 
 #[test]
 fn effort_levels_parse_correctly() {

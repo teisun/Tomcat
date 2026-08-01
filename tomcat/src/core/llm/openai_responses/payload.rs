@@ -13,12 +13,11 @@
 //! 拆分前所有翻译函数与 [`super::OpenAiResponsesProvider`] 同居一文件（1056 行），
 //! 拆出后 wire 翻译与 HTTP 客户端 / 流式解析解耦，单文件落 L-1。
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::core::llm::replay_policy::{
-    ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow, apply_text_downgrade,
-    plan_scoped,
+    plan_scoped, ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
 };
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatResponse,
@@ -247,11 +246,10 @@ pub(super) fn build_responses_input(
             }
         }
         let explicit_keep = matches!(action, ReplayAction::KeepOpaque);
-        let msg = match action.clone() {
+        let msg = match action {
             ReplayAction::KeepOpaque | ReplayAction::StripOpaque => {
                 original.without_completion_metadata()
             }
-            ReplayAction::ConvertToText(text) => apply_text_downgrade(original, &text),
         };
         // System / Assistant / Tool 角色出现非 text part 时 warn 一次并丢弃非文本部分
         // （仅 User 角色透传多模态 part；见 §3.3 角色规则）。
@@ -433,7 +431,11 @@ fn extract_text(content: &Option<ChatMessageContent>) -> Option<String> {
                 })
                 .collect::<Vec<_>>()
                 .join("");
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         }
         None => None,
     }

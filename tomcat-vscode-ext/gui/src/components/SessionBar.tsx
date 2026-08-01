@@ -126,17 +126,6 @@ export function SessionBar({
         </span>
       </button>
       <button
-        aria-label="Compact conversation context"
-        className="tc-icon-button tc-topbar__compact"
-        data-testid="compact-context-button"
-        disabled={!canCompact || creating}
-        onClick={onCompact}
-        title="Compact context"
-        type="button"
-      >
-        ⊙
-      </button>
-      <button
         aria-busy={creating}
         aria-label={creating ? "Creating new session" : "Create new session"}
         className="tc-icon-button tc-topbar__new"
@@ -146,6 +135,17 @@ export function SessionBar({
         type="button"
       >
         {creating ? "…" : "+"}
+      </button>
+      <button
+        aria-label="Compact conversation context"
+        className="tc-icon-button tc-topbar__compact"
+        data-testid="compact-context-button"
+        disabled={!canCompact || creating}
+        onClick={onCompact}
+        title="Compact context"
+        type="button"
+      >
+        <span aria-hidden="true" className="codicon codicon-file-zip" />
       </button>
       {open ? (
         <div className="tc-session-dropdown" data-testid="session-dropdown" role="listbox">

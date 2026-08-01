@@ -438,4 +438,15 @@ export class SessionRouter {
       throw new Error(response.error ?? "Tomcat resume failed");
     }
   }
+
+  async retry(sessionId: string, messageId: string): Promise<void> {
+    const response = await this.messenger.request({
+      messageId,
+      sessionId,
+      type: "retry",
+    } as never);
+    if (!response.success) {
+      throw new Error(response.error ?? "Tomcat retry failed");
+    }
+  }
 }

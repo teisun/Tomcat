@@ -2,11 +2,11 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::super::cmd_skill::{SkillCommand, run};
+use super::super::cmd_skill::{run, SkillCommand};
 use super::super::parse::ChatCommandOutcome;
-use crate::AppConfig;
 use crate::api::chat::ChatContext;
 use crate::infra::error::AppError;
+use crate::AppConfig;
 use serial_test::serial;
 
 struct EnvGuard {

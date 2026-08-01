@@ -4,9 +4,9 @@ use std::sync::OnceLock;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 
-use crate::api::chat::panels::CliAskQuestionPanel;
 #[cfg(unix)]
 use crate::api::chat::panels::cli_ask_question_panel::read_one_line_from_fd_for_test;
+use crate::api::chat::panels::CliAskQuestionPanel;
 use crate::core::plan_runtime::panels::{
     AskQuestionOutcome, AskQuestionPanel, AskQuestionTermination, Question, QuestionOption,
 };

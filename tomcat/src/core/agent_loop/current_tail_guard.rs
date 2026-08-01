@@ -527,10 +527,7 @@ fn find_protected_turn_start(messages: &[ChatMessage], keep_recent_turns: usize)
     let turn_starts: Vec<usize> = messages
         .iter()
         .enumerate()
-        .filter(|(_, msg)| {
-            (msg.role == ChatMessageRole::User && msg.kind != MessageKind::Steering)
-                || msg.kind == MessageKind::CompactionSummary
-        })
+        .filter(|(_, msg)| msg.starts_logical_turn())
         .map(|(idx, _)| idx)
         .collect();
     if turn_starts.len() <= keep_recent_turns {

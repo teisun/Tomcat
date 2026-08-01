@@ -1,6 +1,6 @@
 use super::{
-    CWD_PROMPT_CHOICES, CwdLazyPrompt, CwdPromptChoice, extract_target_from_preview, parse_choice,
-    target_in_cwd, unrecognized_choice_message,
+    extract_target_from_preview, parse_choice, target_in_cwd, unrecognized_choice_message,
+    CwdLazyPrompt, CwdPromptChoice, CWD_PROMPT_CHOICES,
 };
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::tools::contract::confirmation::{
@@ -8,8 +8,8 @@ use crate::core::tools::contract::confirmation::{
 };
 use crate::core::tools::primitive::PrimitiveOperation;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // ── parse_choice ──
 

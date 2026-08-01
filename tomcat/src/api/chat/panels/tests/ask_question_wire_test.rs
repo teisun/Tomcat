@@ -4,9 +4,9 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use super::super::{
-    Answer, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination,
-    AskQuestionWireRequest, AskQuestionWireResponse, EventBusAskQuestionPanel, Question,
-    QuestionOption, ask_question_request_event_name, ask_question_response_event_name,
+    ask_question_request_event_name, ask_question_response_event_name, Answer, AskQuestionOutcome,
+    AskQuestionPanel, AskQuestionResult, AskQuestionTermination, AskQuestionWireRequest,
+    AskQuestionWireResponse, EventBusAskQuestionPanel, Question, QuestionOption,
 };
 use crate::infra::{DefaultEventBus, EventBus, EventContext};
 

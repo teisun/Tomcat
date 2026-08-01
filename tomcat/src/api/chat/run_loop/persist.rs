@@ -6,10 +6,10 @@ use chrono::Utc;
 use tracing::warn;
 
 use crate::api::chat::context::ChatContext;
-use crate::core::CheckpointError;
 use crate::core::llm::ChatMessage;
+use crate::core::CheckpointError;
 use crate::infra::error::AppError;
-use crate::{CheckpointKind, CheckpointRecordRequest, compound_turn_id};
+use crate::{compound_turn_id, CheckpointKind, CheckpointRecordRequest};
 
 pub(super) fn append_turn_message_if_needed(
     sink: &Arc<dyn crate::core::session::manager::MessageAppendSink>,

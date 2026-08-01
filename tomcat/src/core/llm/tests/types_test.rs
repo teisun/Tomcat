@@ -9,7 +9,7 @@
 
 use super::super::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ContextRefKind, ContextReference, ContinuityMetadata, FileSource, ImageSource,
+    ContextRefKind, ContextReference, ContinuityMetadata, FileSource, ImageSource, MessageKind,
     ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource,
     TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
@@ -27,6 +27,24 @@ fn chat_message_constructors() {
 
     let s = ChatMessage::system("you are helpful");
     assert!(matches!(s.role, ChatMessageRole::System));
+}
+
+#[test]
+fn chat_message_kind_persists_non_normal_values_and_defaults_legacy_rows() {
+    let normal = serde_json::to_value(ChatMessage::user("normal")).unwrap();
+    assert!(
+        normal.get("kind").is_none(),
+        "Normal remains omitted for backwards-compatible transcript rows"
+    );
+    let legacy: ChatMessage = serde_json::from_value(normal).unwrap();
+    assert_eq!(legacy.kind, MessageKind::Normal);
+
+    let mut signal = ChatMessage::user("background complete");
+    signal.kind = MessageKind::Signal;
+    let persisted = serde_json::to_value(&signal).unwrap();
+    assert_eq!(persisted["kind"], "signal");
+    let restored: ChatMessage = serde_json::from_value(persisted).unwrap();
+    assert_eq!(restored.kind, MessageKind::Signal);
 }
 
 #[test]

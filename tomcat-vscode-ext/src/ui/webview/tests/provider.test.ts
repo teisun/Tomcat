@@ -423,14 +423,17 @@ describe("model catalog parsing", () => {
 });
 
 describe("error-turn recovery", () => {
-  function createRecoveryProvider(resume: ReturnType<typeof vi.fn>) {
+  function createRecoveryProvider(
+    retry: ReturnType<typeof vi.fn>,
+    resume: ReturnType<typeof vi.fn>,
+  ) {
     return new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
       initialize: async () => ({ sessionId: "s1" } as never),
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
-      sessionRouter: { resume } as never,
+      sessionRouter: { retry, resume } as never,
     });
   }
 
@@ -460,9 +463,10 @@ describe("error-turn recovery", () => {
     vi.spyOn(host, "postState").mockResolvedValue(undefined);
   }
 
-  it("retries a failed prompt through durable resume without a second user bubble", async () => {
+  it("copies a failed prompt forward through the durable Retry command", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
     const resume = vi.fn().mockResolvedValue(undefined);
-    const provider = createRecoveryProvider(resume);
+    const provider = createRecoveryProvider(retry, resume);
     seedRetryableError(provider);
     const host = provider as any;
     const sendUserMessage = vi.spyOn(host, "sendUserMessage");
@@ -473,7 +477,8 @@ describe("error-turn recovery", () => {
       type: "recoverErrorTurn",
     });
 
-    expect(resume).toHaveBeenCalledWith("s1");
+    expect(retry).toHaveBeenCalledWith("s1", "user-1");
+    expect(resume).not.toHaveBeenCalled();
     expect(sendUserMessage).not.toHaveBeenCalled();
     const users = host.currentState().sessionViews.s1.timeline.filter(
       (item: { kind?: string; type: string }) => item.type === "message" && item.kind === "user",
@@ -481,16 +486,22 @@ describe("error-turn recovery", () => {
     expect(users).toHaveLength(1);
     expect(users[0]).toMatchObject({ id: "user-1", text: "keep this exact prompt" });
     expect(
-      host.currentState().sessionViews.s1.timeline.some(
+      host.currentState().sessionViews.s1.timeline.find(
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
-    ).toBe(false);
+    ).toMatchObject({ kind: "error" });
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).not.toHaveProperty("recoveryAction");
     provider.dispose();
   });
 
-  it("restores the same card when resume request itself is rejected", async () => {
+  it("restores the same card when Retry is rejected", async () => {
+    const retry = vi.fn().mockRejectedValue(new Error("retry_target_stale"));
     const resume = vi.fn().mockRejectedValue(new Error("bridge unavailable"));
-    const provider = createRecoveryProvider(resume);
+    const provider = createRecoveryProvider(retry, resume);
     seedRetryableError(provider);
     const host = provider as any;
 
@@ -505,6 +516,50 @@ describe("error-turn recovery", () => {
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
     ).toMatchObject({ recoveryAction: "retry" });
+    provider.dispose();
+  });
+
+  it("keeps Resume on the no-input recovery route", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const resume = vi.fn().mockResolvedValue(undefined);
+    const provider = createRecoveryProvider(retry, resume);
+    const host = provider as any;
+    host.stateStore.setActiveSession("s1");
+    host.stateStore.hydrateHistory("s1", {
+      messages: [
+        { id: "user-1", message: { content: "inspect", role: "user" }, type: "message" },
+        {
+          id: "assistant-1",
+          message: {
+            content: null,
+            role: "assistant",
+            tool_calls: [{ id: "read-1", name: "read" }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-1",
+          message: { content: "contents", role: "tool", tool_call_id: "read-1" },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ sessionId: "s1" });
+    vi.spyOn(host, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(host, "refreshSessionState").mockResolvedValue(undefined);
+    vi.spyOn(host, "refreshSessions").mockResolvedValue(undefined);
+    vi.spyOn(host, "postState").mockResolvedValue(undefined);
+
+    await host.handleIntent({
+      data: { action: "resume", errorId: "error-1", sessionId: "s1" },
+      messageId: "resume-error-1",
+      type: "recoverErrorTurn",
+    });
+
+    expect(resume).toHaveBeenCalledWith("s1");
+    expect(retry).not.toHaveBeenCalled();
     provider.dispose();
   });
 });

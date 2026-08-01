@@ -396,6 +396,11 @@ export type ServeCommand = {
   type: "set_thinking_level";
 } | {
   id?: null | string;
+  messageId: string;
+  sessionId?: null | string;
+  type: "retry";
+} | {
+  id?: null | string;
   model: ModelEntryInput;
   type: "upsert_model";
 } | {

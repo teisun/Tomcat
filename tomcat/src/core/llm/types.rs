@@ -543,15 +543,47 @@ fn decode_b64_len(data: &str) -> Result<usize, base64::DecodeError> {
 }
 
 /// Internal semantic tag for messages that share the same LLM wire role.
-/// `#[serde(skip)]` — never serialized; defaults to `Normal` on deserialization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// The `kind` field is transcript metadata, not a provider-wire role. Persisting it makes
+/// restart hydration reproduce the same semantic message chain that the model saw in memory.
+/// Legacy transcript rows omit it and deserialize as [`MessageKind::Normal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MessageKind {
     #[default]
     Normal,
     /// Steering instruction injected mid-turn; LLM sees `role: user`.
     Steering,
+    /// Completion guard instruction; preserves the old `Steering` turn-boundary semantics.
+    Nudge,
+    /// Background task completion signal; preserves the old normal-user turn-boundary semantics.
+    Signal,
     /// Compaction summary replacing older messages; LLM sees `role: user`.
     CompactionSummary,
+}
+
+impl MessageKind {
+    pub const fn is_normal(&self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    pub fn from_persisted(value: Option<&str>) -> Self {
+        match value {
+            Some("steering") => Self::Steering,
+            Some("nudge") => Self::Nudge,
+            Some("signal") => Self::Signal,
+            Some("compaction_summary") => Self::CompactionSummary,
+            _ => Self::Normal,
+        }
+    }
+
+    pub const fn is_non_turn_start(self) -> bool {
+        matches!(self, Self::Steering | Self::Nudge)
+    }
+
+    pub const fn is_replay_input(self) -> bool {
+        matches!(self, Self::Normal | Self::Signal)
+    }
 }
 
 /// Assistant turn 中 opaque continuity blob 的格式标签。
@@ -613,7 +645,7 @@ pub struct ContinuityMetadata {
 /// 单条对话消息（与 OpenAI API 兼容，wire 格式为 snake_case）。
 ///
 /// `finish_reason/error_message/error_code` 会随 transcript assistant message 一起持久化；
-/// `msg_id/kind/timestamp` 仍是纯本地 bookkeeping，不出进程边界。
+/// `msg_id/timestamp` 仍是纯本地 bookkeeping；`kind` 是持久化 transcript 元数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatMessage {
@@ -658,8 +690,8 @@ pub struct ChatMessage {
     /// Transcript `MessageEntry.id` — set during hydration or after `append_message`.
     #[serde(skip)]
     pub msg_id: Option<String>,
-    /// Semantic tag distinguishing steering / compaction-summary from normal messages.
-    #[serde(skip)]
+    /// Semantic tag distinguishing user input, steering, system nudge, and signal messages.
+    #[serde(default, skip_serializing_if = "MessageKind::is_normal")]
     pub kind: MessageKind,
     /// ISO-8601 timestamp from the transcript, used for day-based filtering.
     #[serde(skip)]
@@ -667,6 +699,15 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    /// Whether this message begins a logical turn for compaction/window calculations.
+    ///
+    /// This preserves the pre-persistence behavior: steering and completion nudges do not
+    /// start turns; normal user input, background signals, and branch summaries do.
+    pub const fn starts_logical_turn(&self) -> bool {
+        matches!(self.kind, MessageKind::CompactionSummary)
+            || (matches!(self.role, ChatMessageRole::User) && !self.kind.is_non_turn_start())
+    }
+
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: ChatMessageRole::User,

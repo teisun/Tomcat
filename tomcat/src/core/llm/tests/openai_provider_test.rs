@@ -15,12 +15,13 @@ use crate::core::llm::multimodal::{
 use crate::core::llm::tests::mocks::load_dotenv;
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextReference,
+    MessageKind, ReasoningContinuation, ReasoningFormat,
 };
 use crate::core::llm::{
-    Capabilities, Credential, ModelEntry, ThinkingLevel, thinking_policy::resolve_request_fields,
+    thinking_policy::resolve_request_fields, Capabilities, Credential, ModelEntry, ThinkingLevel,
 };
+use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::LlmConfig;
-use crate::infra::error::{AppError, llm_http_status_error};
 
 fn deepseek_entry(api_key_env: &str) -> ModelEntry {
     ModelEntry {
@@ -375,6 +376,48 @@ fn transport_messages_uses_string_content_for_text_only_normalized_history() {
     let wire = transport_messages(normalized.as_ref(), "deepseek-v4-pro", false, None);
     assert!(wire[0]["content"].is_string());
     assert_eq!(wire[0]["content"].as_str(), Some(expected.as_str()));
+}
+
+#[test]
+fn transport_messages_strips_incompatible_reasoning_without_changing_visible_assistant_text() {
+    let assistant = ChatMessage::assistant("visible answer").with_reasoning_state(
+        Some("Determining JSON schema item count".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content": "private"}),
+            fallback_text: Some("Determining JSON schema item count".to_string()),
+            provider_refs: None,
+        }),
+        None,
+    );
+    let wire = transport_messages(&[ChatMessage::user("q"), assistant], "gpt-5.4", true, None);
+
+    assert_eq!(wire[1]["content"], "visible answer");
+    assert!(
+        !wire[1]
+            .to_string()
+            .contains("Determining JSON schema item count"),
+        "opaque continuity must not become user-visible assistant content"
+    );
+    assert!(
+        !wire[1].to_string().contains("[reasoning continuity]"),
+        "the removed text-downgrade marker must never reach provider wire"
+    );
+}
+
+#[test]
+fn transport_messages_never_sends_transcript_message_kind_to_provider() {
+    let mut signal = ChatMessage::user("background complete");
+    signal.kind = MessageKind::Signal;
+    let wire = transport_messages(&[signal], "gpt-5.4", false, None);
+
+    assert!(
+        wire[0].get("kind").is_none(),
+        "kind is transcript metadata, not an OpenAI-compatible wire field"
+    );
 }
 
 #[test]

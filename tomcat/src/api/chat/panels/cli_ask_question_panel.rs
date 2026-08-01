@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::core::plan_runtime::panels::{
     Answer, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination,
-    CUSTOM_OPTION_ID, Question, QuestionOption,
+    Question, QuestionOption, CUSTOM_OPTION_ID,
 };
 
 const ASK_QUESTION_TEST_AUTO_PICK_ENV: &str = "TOMCAT_ASK_QUESTION_TEST_AUTO_PICK";

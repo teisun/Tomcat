@@ -1,14 +1,14 @@
 use std::ffi::OsString;
 
-use super::super::cmd_plan::{PlanCommand, parse_args, run};
+use super::super::cmd_plan::{parse_args, run, PlanCommand};
 use super::super::parse::{ChatCommand, ChatCommandOutcome};
-use crate::AppConfig;
 use crate::api::chat::ChatContext;
-use crate::core::plan_runtime::PlanState;
 use crate::core::plan_runtime::file_store::{
-    self, DEFAULT_LOCK_TIMEOUT_MS, PLAN_FILE_SCHEMA_VERSION, PlanFile, PlanFileFrontmatter,
-    PlanFileState, TodoItem, TodoStatus,
+    self, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+    DEFAULT_LOCK_TIMEOUT_MS, PLAN_FILE_SCHEMA_VERSION,
 };
+use crate::core::plan_runtime::PlanState;
+use crate::AppConfig;
 use serial_test::serial;
 
 struct EnvGuard {

@@ -437,6 +437,17 @@ function displayDeliveryError(error: string): string {
   return error;
 }
 
+function displayRecoveryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("retry_target_stale")) {
+    return "这张错误卡已经过期，无法重试。请刷新会话后重新输入。";
+  }
+  if (message.includes("nothing_to_resume")) {
+    return "没有完整的工具结果可继续。请重新输入你的请求。";
+  }
+  return formatBridgeError("recover this turn", error);
+}
+
 function retryAttachmentRef(attachment: WebviewAttachmentView): DraftAttachmentRef {
   return {
     blobSha: attachment.blobSha,
@@ -1043,7 +1054,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private lookupErrorRecovery(
     sessionId: string,
     errorId: string,
-  ): { action: "resume" | "retry" } | null {
+  ): { action: "resume" | "retry"; targetUserMessageId?: string } | null {
     const timeline = this.peekState().sessionViews[sessionId]?.timeline ?? [];
     const errorIndex = timeline.findIndex(
       (item) => item.type === "message" && item.kind === "error" && item.id === errorId,
@@ -1055,7 +1066,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!error?.recoveryAction) {
       return null;
     }
-    return { action: error.recoveryAction };
+    return {
+      action: error.recoveryAction,
+      targetUserMessageId: error.recoveryTargetUserMessageId,
+    };
   }
 
   private async sendUserMessage(
@@ -1396,17 +1410,29 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (!recovery || recovery.action !== intent.data.action) {
           return;
         }
-        // Retry and Resume share the same durable path: the core revives the failed
-        // tail prompt, rebuilds its context, then starts a no-input turn. Reconstructing
-        // a fresh webview prompt here used to duplicate bubbles and could lose attachments.
+        if (
+          recovery.action === "retry" &&
+          (!recovery.targetUserMessageId || !recovery.targetUserMessageId.trim())
+        ) {
+          return;
+        }
         this.stateStore.dismissErrorRecovery(sessionId, intent.data.errorId);
         try {
-          await this.deps.sessionRouter.resume(sessionId);
+          if (recovery.action === "retry") {
+            await this.deps.sessionRouter.retry(sessionId, recovery.targetUserMessageId!);
+          } else {
+            await this.deps.sessionRouter.resume(sessionId);
+          }
           await this.refreshSessionState(sessionId, { trustBusy: true });
+          // Retry appends a second durable user row, while Resume may append the assistant
+          // continuation. Neither action has a live message event that can reconstruct the
+          // full failed chapter, so refresh the transcript before rendering again.
+          await this.refreshSessionHistory(sessionId);
           await this.refreshSessions();
           await this.postState();
         } catch (error) {
           this.stateStore.restoreDismissedErrorRecovery(sessionId, intent.data.errorId);
+          await vscode.window.showWarningMessage(displayRecoveryError(error));
           await this.postState();
         }
         return;

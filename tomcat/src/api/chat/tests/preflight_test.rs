@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::infra::AppConfig;
-use crate::infra::{DefaultEventBus, EventBus, EventContext, ScopedEventEmitter, wire};
+use crate::infra::{wire, DefaultEventBus, EventBus, EventContext, ScopedEventEmitter};
 use serde_json::json;
 
 use super::{
@@ -37,7 +37,7 @@ fn trim_for_event_limits_long_messages() {
 #[cfg(unix)]
 #[test]
 fn nohup_shell_quotes_log_path_with_spaces() {
-    use super::{InstallPlan, build_nohup_shell_command};
+    use super::{build_nohup_shell_command, InstallPlan};
 
     let plan = InstallPlan {
         program: "brew",
@@ -61,7 +61,7 @@ fn nohup_shell_quotes_log_path_with_spaces() {
 #[cfg(unix)]
 #[test]
 fn nohup_shell_non_brew_has_no_homebrew_env_prefix() {
-    use super::{InstallPlan, build_nohup_shell_command};
+    use super::{build_nohup_shell_command, InstallPlan};
 
     let plan = InstallPlan {
         program: "apt-get",
@@ -78,7 +78,7 @@ fn nohup_shell_non_brew_has_no_homebrew_env_prefix() {
 #[cfg(unix)]
 #[test]
 fn detached_marker_paths_are_distinct_per_preflight_kind() {
-    use super::{DETACHED_LOG_MARKER_NAME, GIT_DETACHED_LOG_MARKER_NAME, detached_log_marker_path};
+    use super::{detached_log_marker_path, DETACHED_LOG_MARKER_NAME, GIT_DETACHED_LOG_MARKER_NAME};
 
     let search_marker = detached_log_marker_path(DETACHED_LOG_MARKER_NAME).unwrap();
     let git_marker = detached_log_marker_path(GIT_DETACHED_LOG_MARKER_NAME).unwrap();

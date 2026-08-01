@@ -44,6 +44,7 @@ fn parse_command_line_accepts_all_known_command_types() {
         r#"{"type":"steer","id":"u2","text":"focus"}"#,
         r#"{"type":"follow_up","id":"u3","text":"continue"}"#,
         r#"{"type":"resume","id":"u3b","sessionId":"s1"}"#,
+        r#"{"type":"retry","id":"u3c","sessionId":"s1","messageId":"m1"}"#,
         r#"{"type":"get_state","id":"u4","sessionId":"s1"}"#,
         r#"{"type":"set_plan_mode","id":"u5","sessionId":"s1","action":"enter"}"#,
         r#"{"type":"set_model","id":"u6","sessionId":"s1","model":"gpt-5.4"}"#,

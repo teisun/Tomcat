@@ -254,6 +254,16 @@ pub enum ServeCommand {
         #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
+    /// 复制指定失败输入为新的活 user message，然后重新开一轮。
+    #[serde(rename_all = "camelCase")]
+    Retry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "messageId")]
+        message_id: String,
+    },
     #[serde(rename_all = "camelCase")]
     GetState {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -547,6 +557,7 @@ impl ServeCommand {
             | Self::Steer { id, .. }
             | Self::FollowUp { id, .. }
             | Self::Resume { id, .. }
+            | Self::Retry { id, .. }
             | Self::GetState { id, .. }
             | Self::ListCheckpoints { id, .. }
             | Self::RestoreCheckpoint { id, .. }
@@ -581,6 +592,7 @@ impl ServeCommand {
             | Self::Steer { session_id, .. }
             | Self::FollowUp { session_id, .. }
             | Self::Resume { session_id, .. }
+            | Self::Retry { session_id, .. }
             | Self::GetState { session_id, .. }
             | Self::ListCheckpoints { session_id, .. }
             | Self::RestoreCheckpoint { session_id, .. }
@@ -631,6 +643,7 @@ impl ServeCommand {
             Self::Steer { .. } => "steer",
             Self::FollowUp { .. } => "follow_up",
             Self::Resume { .. } => "resume",
+            Self::Retry { .. } => "retry",
             Self::GetState { .. } => "get_state",
             Self::ListCheckpoints { .. } => "list_checkpoints",
             Self::RestoreCheckpoint { .. } => "restore_checkpoint",

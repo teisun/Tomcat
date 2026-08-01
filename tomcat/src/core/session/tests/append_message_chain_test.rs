@@ -48,6 +48,15 @@ fn mk_tool(tc_id: &str) -> Value {
     serde_json::json!({ "role": "tool", "tool_call_id": tc_id, "content": "ok" })
 }
 
+fn transcript_message(id: &str, message: Value) -> TranscriptEntry {
+    TranscriptEntry::Message(MessageEntry {
+        id: Some(id.to_string()),
+        parent_id: None,
+        timestamp: "t".to_string(),
+        message,
+    })
+}
+
 #[test]
 fn validate_empty_then_user() {
     assert!(validate_append_message(&mk_user("hi"), &[]).is_ok());
@@ -187,6 +196,44 @@ fn outbound_guard_detects_unpaired_tool_calls_but_accepts_paired_or_pending_resu
             ),
         ]),
         "a terminal result also closes the provider protocol"
+    );
+}
+
+#[test]
+fn resume_tail_predicate_requires_a_complete_active_tool_round() {
+    let complete = vec![
+        transcript_message("user", mk_user("inspect it")),
+        transcript_message("assistant", mk_assistant_tc(&["call-1", "call-2"])),
+        transcript_message("tool-1", mk_tool("call-1")),
+        transcript_message("tool-2", mk_tool("call-2")),
+    ];
+    assert!(
+        has_complete_tail_tool_results(&complete),
+        "every declared call has a tail result in declaration order"
+    );
+
+    let incomplete = complete[..3].to_vec();
+    assert!(
+        !has_complete_tail_tool_results(&incomplete),
+        "a missing result must not enter the no-input Resume path"
+    );
+}
+
+#[test]
+fn resume_tail_predicate_rejects_old_tool_results_hidden_by_a_failed_user() {
+    let mut failed_user = mk_user("retry the last request");
+    failed_user["superseded"] = serde_json::json!(true);
+    failed_user["turn_failed"] = serde_json::json!(true);
+    let entries = vec![
+        transcript_message("old-user", mk_user("read the file")),
+        transcript_message("old-assistant", mk_assistant_tc(&["old-call"])),
+        transcript_message("old-tool", mk_tool("old-call")),
+        transcript_message("failed-user", failed_user),
+    ];
+
+    assert!(
+        !has_complete_tail_tool_results(&entries),
+        "the raw tail is the failed user, not the older tool result that active projection exposes"
     );
 }
 

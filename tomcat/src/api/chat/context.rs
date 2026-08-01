@@ -17,22 +17,22 @@ use crate::ext::{
 use crate::infra::config::ThinkingDisplay;
 use crate::infra::error::AppError;
 use crate::infra::http_client::{
-    OutboundClientErrorKind, OutboundClientOptions, build_outbound_client,
-    clamp_timeout_within_budget, default_connect_timeout_for, has_proxy_env,
+    build_outbound_client, clamp_timeout_within_budget, default_connect_timeout_for, has_proxy_env,
+    OutboundClientErrorKind, OutboundClientOptions,
 };
 use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, ModelThinkingStore,
-    PrimitiveExecutor, SessionEntry, SessionManager, SessionMode, ThinkingLevel, Tool,
-    ToolExecutor, ToolRegistry, resolve_agent_definition_dir, resolve_agent_trail_dir,
-    resolve_model_thinking_path, resolve_plugins_dir, resolve_sessions_dir,
-    resolve_workspace_roots_paths, session_key_for_agent,
+    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_model_thinking_path,
+    resolve_plugins_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
+    session_key_for_agent, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider,
+    ModelThinkingStore, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode,
+    ThinkingLevel, Tool, ToolExecutor, ToolRegistry,
 };
 
-use crate::core::llm::LlmScene;
 use crate::core::llm::thinking_policy::clamp_reasoning_level;
+use crate::core::llm::LlmScene;
 use crate::core::plan_runtime;
 
 use super::session_runtime::{GlobalServices, ScopeContainer, ScopeServices, SessionRuntime};
@@ -194,8 +194,8 @@ fn checkpoint_store_for(
     store
 }
 
-fn scope_runtime_cache()
--> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
+fn scope_runtime_cache(
+) -> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
     static CACHE: OnceLock<
         RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>>,
     > = OnceLock::new();
@@ -1517,7 +1517,7 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::{ChatContext, resolve_bash_production_policy};
+    use super::{resolve_bash_production_policy, ChatContext};
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
     use crate::core::plan_runtime::prod_reviewer::resolve_subagent_runtime;
     use crate::{AppConfig, ThinkingLevel};

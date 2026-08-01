@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
@@ -18,19 +18,19 @@ use tracing::warn;
 
 use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::replay_policy::{
-    CaptureMode, ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
-    apply_text_downgrade, plan_scoped, replay_requirement_for_profile,
+    plan_scoped, replay_requirement_for_profile, CaptureMode, ProviderCompatProfile, ReplayAction,
+    ReplayDowngradeReport, ReplayWindow,
 };
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::AppError;
 use crate::infra::error::{
-    LlmErrorStage, is_retryable_llm_error, llm_connect_or_network, llm_error,
-    llm_error_with_source, llm_http_status_error, llm_http_status_error_with_stage,
-    llm_stream_interrupted_error,
+    is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
+    llm_http_status_error, llm_http_status_error_with_stage, llm_stream_interrupted_error,
+    LlmErrorStage,
 };
 
 use super::super::auth::Credential;
-use super::super::catalog::{ModelEntry, infer_default_base_url};
+use super::super::catalog::{infer_default_base_url, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
 use super::super::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::core::llm::files_api::{FilesApiAdapter, ImageRefSlot};
@@ -42,8 +42,8 @@ use crate::core::llm::types::{
     ReasoningFormat, StreamEvent, ThinkingSource, TokenUsage,
 };
 use crate::core::llm::{
-    Capabilities, FilesApiProviderContext, build_openai_compatible_files_adapter,
-    degrade_unsupported_multimodal,
+    build_openai_compatible_files_adapter, degrade_unsupported_multimodal, Capabilities,
+    FilesApiProviderContext,
 };
 
 const PROVIDER_NAME: &str = "openai";
@@ -318,6 +318,10 @@ fn transport_message_value(
     let content = message.content.clone();
     let role = message.role.clone();
     let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
+    if let Value::Object(ref mut object) = value {
+        // `kind` belongs to the transcript ledger, not the OpenAI-compatible wire schema.
+        object.remove("kind");
+    }
     if let Some(content) = content {
         let content_value = match content {
             ChatMessageContent::Text(text) => Value::String(text),
@@ -399,9 +403,6 @@ fn transport_messages(
                     }
                     transport
                 }
-            }
-            ReplayAction::ConvertToText(text) => {
-                transport_message_value(apply_text_downgrade(original, &text), files_adapter)
             }
             ReplayAction::StripOpaque => {
                 transport_message_value(original.without_completion_metadata(), files_adapter)

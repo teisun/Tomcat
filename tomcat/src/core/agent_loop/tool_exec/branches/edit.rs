@@ -1,7 +1,7 @@
 use super::super::args::{has_real_edits, parse_edit_args, parse_edit_ops};
 use super::super::edit_sim::simulate_apply_edits;
 use super::super::guard::{check_mutation_stamp, refresh_read_stamp};
-use super::super::{AGENT_PLUGIN_ID, ToolDisplay, ToolExecCtx};
+use super::super::{ToolDisplay, ToolExecCtx, AGENT_PLUGIN_ID};
 use crate::core::tools::primitive::EditOperation;
 use crate::infra::events::{ToolDisplayFileEntry, ToolDisplayFileStatus};
 

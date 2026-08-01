@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::llm::ChatMessage;
+use crate::core::llm::{ChatMessage, MessageKind};
 use crate::core::plan_runtime::file_store::{PlanFile, PlanFileFrontmatter, PlanFileState};
 use crate::core::session::AgentMode;
 

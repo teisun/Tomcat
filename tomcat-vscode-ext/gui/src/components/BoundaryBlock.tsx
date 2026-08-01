@@ -3,9 +3,11 @@ import { memo } from "react";
 import type { WebviewBoundaryBlock } from "../types";
 
 function BoundaryBlockComponent({ item }: { item: WebviewBoundaryBlock }) {
-  const title = item.coveredCount
-    ? `Earlier history summary (${item.coveredCount} entries)`
-    : "Earlier history summary";
+  const title = item.title ?? (
+    item.coveredCount
+      ? `Earlier history summary (${item.coveredCount} entries)`
+      : "Earlier history summary"
+  );
 
   return (
     <details className="tc-boundary" data-testid="boundary-block">

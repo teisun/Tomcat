@@ -176,11 +176,11 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         if let Some(instruction) = should_apply_completion_guard(agent) {
             agent.completion_guard_injections += 1;
             let mut nudge = ChatMessage::user(&instruction);
-            nudge.kind = MessageKind::Steering;
+            nudge.kind = MessageKind::Nudge;
             if let Some(ref mut ctx_state) = agent.context_state {
                 ctx_state.on_message_appended(instruction.len());
             }
-            messages.push(nudge);
+            agent.push_message(messages, nudge)?;
             return Ok(TurnOutcome::Continue);
         }
     }

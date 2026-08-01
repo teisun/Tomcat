@@ -32,8 +32,8 @@
 //! 见父目录 `tests/cli_turn_renderer_test.rs`：以 `Sink` 替换 stdout/stderr，覆盖
 //! folded vs expanded、tool start/end、kind 切换换行等。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -44,7 +44,7 @@ use crate::core::llm::ThinkingSource;
 use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
 use crate::infra::event_bus::{EventContext, EventListenerId};
 use crate::infra::events::ToolDisplay;
-use crate::infra::{EventBus, wire};
+use crate::infra::{wire, EventBus};
 
 fn format_countdown_ms(ms: u64) -> String {
     let total_secs = ms.saturating_add(999) / 1000;

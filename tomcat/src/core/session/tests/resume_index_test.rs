@@ -1,12 +1,12 @@
 use super::super::manager::{AgentMode, PlanEventKind, SessionManager};
 use super::super::resume_index::{
-    ResumeIndexSource, load_or_rebuild_resume_index, rebuild_resume_index, resume_index_path,
-    take_last_inline_rebuild_stats_for_tests,
+    load_or_rebuild_resume_index, rebuild_resume_index, resume_index_path,
+    take_last_inline_rebuild_stats_for_tests, ResumeIndexSource,
 };
 use super::super::transcript::{
-    BranchSummaryEntry, MessageTextRewrite, SessionHeader, TranscriptEntry, append_line,
-    insert_entry_after_message_id, mark_message_entries_after_anchor_superseded,
+    append_line, insert_entry_after_message_id, mark_message_entries_after_anchor_superseded,
     rewrite_message_text_entries_by_id, set_branch_summary_entry_is_boundary_true, write_header,
+    BranchSummaryEntry, MessageTextRewrite, SessionHeader, TranscriptEntry,
 };
 
 fn setup_mgr() -> (tempfile::TempDir, SessionManager) {

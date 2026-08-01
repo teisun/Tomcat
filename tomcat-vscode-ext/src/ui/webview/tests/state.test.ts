@@ -2930,7 +2930,7 @@ describe("local user message delivery state", () => {
 });
 
 describe("checkpoint history replay", () => {
-  it("hides an error that a later user turn has already replaced", () => {
+  it("keeps an error as history after a later user turn has started", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
@@ -2985,10 +2985,13 @@ describe("checkpoint history replay", () => {
       session.timeline.map((item) =>
         item.type === "message" ? item.id : item.type,
       ),
-    ).toEqual(["user-1", "assistant-1", "user-failed", "user-2"]);
+    ).toEqual(["user-1", "assistant-1", "user-failed", "error-1", "user-2"]);
     expect(
-      session.timeline.some((item) => item.type === "message" && item.id === "error-1"),
-    ).toBe(false);
+      session.timeline.find((item) => item.type === "message" && item.id === "error-1"),
+    ).toMatchObject({ kind: "error" });
+    expect(
+      session.timeline.find((item) => item.type === "message" && item.id === "error-1"),
+    ).not.toHaveProperty("recoveryAction");
   });
 
   it("marks a failed turn with fully paired tool results as resumable", () => {
@@ -3058,9 +3061,58 @@ describe("checkpoint history replay", () => {
     const errors = store.snapshot().sessionViews.s1.timeline.filter(
       (item) => item.type === "message" && item.kind === "error",
     );
-    expect(errors).toEqual([
-      expect.objectContaining({ id: "error-3", recoveryAction: "retry" }),
-    ]);
+    expect(errors).toHaveLength(3);
+    expect(errors[0]).toMatchObject({ id: "error-1", kind: "error" });
+    expect(errors[0]).not.toHaveProperty("recoveryAction");
+    expect(errors[1]).toMatchObject({ id: "error-2", kind: "error" });
+    expect(errors[1]).not.toHaveProperty("recoveryAction");
+    expect(errors[2]).toMatchObject({
+      id: "error-3",
+      recoveryAction: "retry",
+      recoveryTargetUserMessageId: "user-3",
+    });
+  });
+
+  it("scans healed tool results written after an error and offers Resume", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: { content: "inspect", role: "user" },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: null,
+            role: "assistant",
+            tool_calls: [{ id: "read-1", name: "read" }],
+          },
+          type: "message",
+        },
+        { detail: "crashed", id: "error-1", summary: "crashed", type: "error" },
+        {
+          id: "tool-healed-1",
+          message: {
+            content: "[unknown after restart: read-1]",
+            role: "tool",
+            tool_call_id: "read-1",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const error = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      );
+    expect(error).toMatchObject({ kind: "error", recoveryAction: "resume" });
+    expect(error).not.toHaveProperty("recoveryTargetUserMessageId");
   });
 
   it("shows a current error without a recovery button while the session is busy", () => {
@@ -3093,7 +3145,7 @@ describe("checkpoint history replay", () => {
     expect(error).not.toHaveProperty("recoveryAction");
   });
 
-  it("removes the active error immediately when recovery starts and restores it on rejection", () => {
+  it("keeps a recovered error as history and restores its action on rejection", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.hydrateHistory("s1", {
@@ -3110,10 +3162,15 @@ describe("checkpoint history replay", () => {
 
     store.dismissErrorRecovery("s1", "error-1");
     expect(
-      store.snapshot().sessionViews.s1.timeline.some(
+      store.snapshot().sessionViews.s1.timeline.find(
         (item) => item.type === "message" && item.id === "error-1",
       ),
-    ).toBe(false);
+    ).toMatchObject({ kind: "error" });
+    expect(
+      store.snapshot().sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).not.toHaveProperty("recoveryAction");
 
     store.restoreDismissedErrorRecovery("s1", "error-1");
     expect(
@@ -3830,6 +3887,54 @@ describe("openFile intent protocol", () => {
     expect(
       tool?.type === "tool" ? tool.backgroundExitCode : undefined,
     ).toBeUndefined();
+  });
+});
+
+describe("persisted system note history", () => {
+  it("renders nudge and background signals as folded system notes but keeps steering as a user bubble", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "steering-1",
+          message: { content: "请用中文", kind: "steering", role: "user" },
+          type: "message",
+        },
+        {
+          id: "nudge-1",
+          message: { content: "Continue the active plan.", kind: "nudge", role: "user" },
+          type: "message",
+        },
+        {
+          id: "signal-1",
+          message: {
+            content: "Background task build-1 finished successfully.",
+            kind: "signal",
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(timeline).toEqual([
+      expect.objectContaining({ id: "steering-1", kind: "user", type: "message" }),
+      expect.objectContaining({
+        id: "nudge-1",
+        summary: "Continue the active plan.",
+        title: "计划未收口，已要求继续",
+        type: "boundary",
+      }),
+      expect.objectContaining({
+        id: "signal-1",
+        summary: "Background task build-1 finished successfully.",
+        title: "后台任务已结束",
+        type: "boundary",
+      }),
+    ]);
   });
 });
 

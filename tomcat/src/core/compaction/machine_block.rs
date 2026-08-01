@@ -16,7 +16,7 @@
 //! `## Progress` 处在中间地带：有 active plan 时它的真理在计划文件里，
 //! 由 [`override_progress_section`] 用计划文件内容覆盖模型的说法。
 
-use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
+use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::core::plan_runtime::file_store::{PlanFile, TodoItem, TodoStatus};
 use crate::core::plan_runtime::ControlSnapshot;
 
@@ -36,12 +36,12 @@ const PROGRESS_HEADING: &str = "## Progress";
 
 /// 从消息列表里逐字取出最近的真实用户消息。
 ///
-/// 排除 steering 注入与压缩摘要——它们的 `role` 也是 user，但不是用户说的话。
+/// 排除 steering/nudge 注入与压缩摘要——它们的 `role` 也是 user，但不是用户说的话。
 pub fn collect_verbatim_user_messages(messages: &[ChatMessage]) -> Vec<String> {
     let mut picked: Vec<String> = messages
         .iter()
         .rev()
-        .filter(|msg| msg.role == ChatMessageRole::User && msg.kind == MessageKind::Normal)
+        .filter(|msg| msg.role == ChatMessageRole::User && msg.kind.is_replay_input())
         .filter_map(|msg| msg.text_content())
         .filter(|text| !text.trim().is_empty())
         .map(|text| text.to_string())

@@ -17,14 +17,14 @@ pub(crate) use cmd_ckpt::checkpoint_kind_label;
 pub(crate) use cmd_compact::compact_session;
 pub use cmd_install::{InstallCommand, InstallTarget};
 pub use cmd_plan::PlanCommand;
-pub(crate) use cmd_restore::{RestoreCoreReport, restore_core};
+pub(crate) use cmd_restore::{restore_core, RestoreCoreReport};
 
 #[cfg(test)]
 mod tests;
 
 pub use cmd_path::render_path_menu;
-pub use parse::{ChatCommand, ModelCommand, SkillCommand, parse_chat_command};
-pub(super) use parse::{ChatCommandOutcome, dispatch_chat_command};
+pub(super) use parse::{dispatch_chat_command, ChatCommandOutcome};
+pub use parse::{parse_chat_command, ChatCommand, ModelCommand, SkillCommand};
 
 /// Public façade returning the local-command help banner shown by `/help`.
 ///

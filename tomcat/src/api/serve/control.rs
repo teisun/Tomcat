@@ -39,6 +39,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "steer",
                             "follow_up",
                             "resume",
+                            "retry",
                             "get_state",
                             "compact",
                             "set_plan_mode",

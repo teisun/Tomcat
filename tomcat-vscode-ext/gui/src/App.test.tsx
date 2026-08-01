@@ -1979,10 +1979,12 @@ describe("Tomcat webview App", () => {
     expect(topbar.firstElementChild).toBe(
       screen.getByTestId("connection-chip"),
     );
-    expect(topbar.lastElementChild).toBe(
-      screen.getByTestId("new-session-button"),
-    );
-    fireEvent.click(screen.getByTestId("compact-context-button"));
+    const newSession = screen.getByTestId("new-session-button");
+    const compact = screen.getByTestId("compact-context-button");
+    expect(newSession.nextElementSibling).toBe(compact);
+    expect(topbar.lastElementChild).toBe(compact);
+    expect(compact.querySelector(".codicon-file-zip")).not.toBeNull();
+    fireEvent.click(compact);
     expect(
       postMessage.mock.calls.some(
         ([message]) => message.type === "compact" && message.data?.sessionId === "s1",

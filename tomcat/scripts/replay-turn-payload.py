@@ -175,14 +175,6 @@ def select_turn(
     return idx, messages[idx]
 
 
-def continuity_fallback_text(message: dict[str, Any]) -> str | None:
-    continuation = message.get("reasoning_continuation") or {}
-    text = continuation.get("fallback_text") or message.get("thinking_text")
-    if isinstance(text, str) and text.strip():
-        return text
-    return None
-
-
 def same_profile(
     continuation: dict[str, Any], *, target_profile_id: str, target_model: str
 ) -> bool:
@@ -208,20 +200,7 @@ def replay_window_contains(messages: list[dict[str, Any]], idx: int) -> bool:
     for pos, item in enumerate(messages):
         if item["role"] == "user" and item.get("kind", "normal") == "normal":
             current_turn_start = pos + 1
-    last_assistant_idx = None
-    for pos, item in enumerate(messages):
-        if item["role"] == "assistant":
-            last_assistant_idx = pos
-    return idx >= current_turn_start or idx == last_assistant_idx
-
-
-def apply_text_downgrade(message: dict[str, Any], current_text: str) -> str:
-    continuity_text = continuity_fallback_text(message)
-    if not continuity_text:
-        return current_text
-    if current_text.strip():
-        return f"{current_text}\n\n[reasoning continuity]\n{continuity_text}"
-    return continuity_text
+    return idx >= current_turn_start
 
 
 def extract_visible_text(content: Any) -> str:
@@ -354,8 +333,6 @@ def build_request_body(
                 target_model=model,
             ):
                 keep_opaque = True
-            else:
-                visible_text = apply_text_downgrade(message, visible_text)
 
         if role == "system":
             if not first_seen and instructions is None:

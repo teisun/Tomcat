@@ -11,6 +11,180 @@
 use super::super::*;
 use super::mocks::temp_sessions_dir;
 
+fn new_copy_forward_manager() -> (tempfile::TempDir, SessionManager) {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions_dir = temp.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let manager = SessionManager::new(sessions_dir);
+    let key = manager.current_session_key().to_string();
+    manager.create_session(&key, None).unwrap();
+    (temp, manager)
+}
+
+fn append_failed_turn_error(manager: &SessionManager) {
+    manager
+        .append_error_entry(crate::core::session::transcript::ErrorEntry {
+            id: Some("error-1".to_string()),
+            parent_id: None,
+            timestamp: "2026-08-01T00:00:00.000Z".to_string(),
+            phase: None,
+            provider: None,
+            model: None,
+            api_family: None,
+            status_code: Some(429),
+            request_id: None,
+            failure_kind: None,
+            failure_domain: None,
+            summary: "retry exhausted".to_string(),
+            detail: "retry exhausted".to_string(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn copy_forward_preserves_failed_message_and_appends_a_live_copy_after_annotations() {
+    let (_temp, manager) = new_copy_forward_manager();
+    let original_id = manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "retry this exact payload"}],
+            "kind": "signal",
+            "attachments": [{"mime": "image/png", "data": "abc"}],
+        }))
+        .unwrap();
+    assert_eq!(manager.mark_trailing_user_messages_superseded().unwrap(), 1);
+    for attempt in 2..=4 {
+        manager
+            .append_custom_entry(serde_json::json!({
+                "event": "auto_retry_start",
+                "attempt": attempt,
+            }))
+            .unwrap();
+    }
+    manager
+        .append_custom_entry(serde_json::json!({
+            "event": "auto_retry_end",
+            "attempt": 4,
+        }))
+        .unwrap();
+    append_failed_turn_error(&manager);
+
+    let copied_id = manager.copy_user_message_forward(&original_id).unwrap();
+    assert_ne!(copied_id, original_id);
+
+    let entries = manager.get_entries(16).unwrap();
+    assert_eq!(
+        entries.len(),
+        7,
+        "three retry-start diagnostics, retry-end, and error are retained between old and new rows"
+    );
+    let messages = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message) => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].id.as_deref(), Some(original_id.as_str()));
+    assert_eq!(messages[1].id.as_deref(), Some(copied_id.as_str()));
+    assert_eq!(messages[0].message["superseded"], true);
+    assert_eq!(messages[0].message["turn_failed"], true);
+    assert!(messages[1].message.get("superseded").is_none());
+    assert!(messages[1].message.get("turn_failed").is_none());
+
+    let mut expected_copy = messages[0].message.clone();
+    expected_copy.as_object_mut().unwrap().remove("superseded");
+    expected_copy.as_object_mut().unwrap().remove("turn_failed");
+    assert_eq!(
+        messages[1].message, expected_copy,
+        "copy-forward must preserve every archived message field other than failure markers"
+    );
+}
+
+#[test]
+fn copy_forward_accepts_an_unstamped_user_anchor() {
+    let (_temp, manager) = new_copy_forward_manager();
+    let original_id = manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "completion guard failed after this prompt",
+        }))
+        .unwrap();
+    append_failed_turn_error(&manager);
+
+    let copied_id = manager.copy_user_message_forward(&original_id).unwrap();
+    let messages = manager
+        .get_entries(8)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message) => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].id.as_deref(), Some(original_id.as_str()));
+    assert_eq!(messages[1].id.as_deref(), Some(copied_id.as_str()));
+    assert!(
+        messages[0].message.get("turn_failed").is_none(),
+        "copy-forward must not depend on a best-effort failure marker"
+    );
+}
+
+#[test]
+fn copy_forward_rejects_stale_anchor_without_mutating_the_transcript() {
+    let (_temp, manager) = new_copy_forward_manager();
+    let original_id = manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "old request",
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "newer live request",
+        }))
+        .unwrap();
+    let transcript = manager.current_transcript_path().unwrap().unwrap();
+    let before = std::fs::read(&transcript).unwrap();
+
+    let error = manager.copy_user_message_forward(&original_id).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::AppError::Config(message) if message == "retry_target_stale"
+    ));
+    assert_eq!(std::fs::read(transcript).unwrap(), before);
+}
+
+#[test]
+fn copy_forward_rejects_a_second_click_after_the_first_copy() {
+    let (_temp, manager) = new_copy_forward_manager();
+    let original_id = manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "retry once",
+        }))
+        .unwrap();
+    manager.mark_trailing_user_messages_superseded().unwrap();
+    append_failed_turn_error(&manager);
+
+    manager.copy_user_message_forward(&original_id).unwrap();
+    let error = manager.copy_user_message_forward(&original_id).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::AppError::Config(message) if message == "retry_target_stale"
+    ));
+    let message_count = manager
+        .get_entries(8)
+        .unwrap()
+        .iter()
+        .filter(|entry| matches!(entry, TranscriptEntry::Message(_)))
+        .count();
+    assert_eq!(message_count, 2, "double-click must append only one copy");
+}
+
 #[test]
 fn append_thinking_level_change_succeeds() {
     let dir = temp_sessions_dir();
@@ -244,7 +418,7 @@ fn concurrent_question_answers_keep_only_first_terminal_result() {
 
 #[test]
 fn failed_tool_result_replacement_validation_keeps_transcript_byte_identical() {
-    use crate::core::session::transcript::{ErrorEntry, MessageEntry, append_entry};
+    use crate::core::session::transcript::{append_entry, ErrorEntry, MessageEntry};
 
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

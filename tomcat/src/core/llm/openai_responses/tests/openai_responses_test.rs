@@ -21,11 +21,11 @@ use crate::core::llm::types::{
     ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, StreamEvent, ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
-use crate::infra::LlmConfig;
 use crate::infra::error::{
-    AppError, LlmErrorStage, LlmFailureKind, classify_llm_failure, llm_http_status,
-    llm_http_status_error, llm_stage, llm_summary,
+    classify_llm_failure, llm_http_status, llm_http_status_error, llm_stage, llm_summary, AppError,
+    LlmErrorStage, LlmFailureKind,
 };
+use crate::infra::LlmConfig;
 
 use bytes::Bytes;
 use serde_json::json;
@@ -1091,8 +1091,8 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
 }
 
 #[test]
-fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_uses_previous_response_id()
- {
+fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_uses_previous_response_id(
+) {
     let cfg = LlmConfig {
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         openai_responses: crate::infra::config::OpenAiResponsesConfig {
@@ -1238,11 +1238,10 @@ fn responses_build_request_body_skips_previous_response_id_across_routed_relays(
     };
     let body = target_provider.build_request_body(&req, true);
     assert!(body.get("previous_response_id").is_none());
+    assert_eq!(body["input"][1]["content"][0]["text"], "prior answer");
     assert!(
-        body["input"][1]["content"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("[reasoning continuity]")),
-        "cross-relay replay should downgrade to visible continuity text instead of reusing response_id"
+        !body.to_string().contains("[reasoning continuity]"),
+        "cross-relay replay must drop opaque continuity rather than turn it into dialogue text"
     );
 }
 
@@ -1988,8 +1987,8 @@ async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
 
 #[tokio::test(start_paused = true)]
 async fn responses_keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
-    use tokio_stream::StreamExt;
     use tokio_stream::wrappers::IntervalStream;
+    use tokio_stream::StreamExt;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
     let source = IntervalStream::new(interval).map(|_| {
@@ -2219,16 +2218,14 @@ async fn responses_chat_stream_after_first_delta_body_read_error_is_not_retried(
     let body = responses_sse_body(&[
         r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"Hello"}"#,
     ]);
-    let server = MockHttpServer::start(vec![
-        ScriptedHttpResponse {
-            status: 200,
-            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
-            body,
-            delay_ms: 0,
-            declared_content_length: None,
-        }
-        .with_declared_content_length(256),
-    ])
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body,
+        delay_ms: 0,
+        declared_content_length: None,
+    }
+    .with_declared_content_length(256)])
     .await;
     let provider = responses_stream_test_provider(server.base_url.clone(), None, 2);
     let mut stream = provider

@@ -10,7 +10,7 @@ use rustyline::ExternalPrinter;
 
 use crate::api::chat::preflight;
 use crate::infra::event_bus::{EventContext, EventListenerId};
-use crate::infra::{EventBus, wire};
+use crate::infra::{wire, EventBus};
 
 pub(crate) struct ChatSessionStderrListenerIds {
     metrics: EventListenerId,

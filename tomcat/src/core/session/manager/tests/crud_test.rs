@@ -63,11 +63,10 @@ fn detached_session_is_listable_without_changing_durable_or_pinned_current() {
         durable_before,
     );
     assert_eq!(mgr.current_session_id().unwrap(), pinned_before);
-    assert!(
-        mgr.list_session_ids()
-            .unwrap()
-            .contains(&detached.session_id)
-    );
+    assert!(mgr
+        .list_session_ids()
+        .unwrap()
+        .contains(&detached.session_id));
     assert!(mgr.transcript_path(&detached.session_id).exists());
     let _ = std::fs::remove_dir_all(&dir);
 }

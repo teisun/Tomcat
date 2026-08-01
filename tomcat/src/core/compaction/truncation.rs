@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::core::llm::{ChatMessageContent, ChatMessageRole, MessageKind};
+use crate::core::llm::{ChatMessageContent, ChatMessageRole};
 use crate::core::session::manager::ContextState;
 use crate::infra::config::ContextConfig;
 
@@ -120,10 +120,7 @@ pub fn layer0_persist_large_results(
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, m)| {
-            (m.role == ChatMessageRole::User && m.kind != MessageKind::Steering)
-                || m.kind == MessageKind::CompactionSummary
-        })
+        .find(|(_, m)| m.starts_logical_turn())
         .map(|(i, _)| i)
         .unwrap_or(state.messages.len());
 
@@ -217,10 +214,7 @@ fn find_protected_turn_start(messages: &[crate::core::llm::ChatMessage], m: usiz
     let turn_starts: Vec<usize> = messages
         .iter()
         .enumerate()
-        .filter(|(_, msg)| {
-            (msg.role == ChatMessageRole::User && msg.kind != MessageKind::Steering)
-                || msg.kind == MessageKind::CompactionSummary
-        })
+        .filter(|(_, msg)| msg.starts_logical_turn())
         .map(|(i, _)| i)
         .collect();
 

@@ -75,6 +75,7 @@ type AppendMessageOptions = {
   label?: string | null;
   preferredId?: string | null;
   recoveryAction?: ErrorRecoveryAction;
+  recoveryTargetUserMessageId?: string;
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
   submitKind?: UserSubmitKind;
@@ -354,11 +355,27 @@ function filterSupersededHistoryEntries(
 
 type ErrorRecoveryAction = "resume" | "retry";
 
+type ErrorRecovery = {
+  action: ErrorRecoveryAction;
+  targetUserMessageId?: string;
+};
+
 function messageRole(entry: unknown): string | null {
   return isRecord(entry) && entry.type === "message" && isRecord(entry.message) &&
     typeof entry.message.role === "string"
     ? entry.message.role
     : null;
+}
+
+function systemNoteTitle(message: Record<string, unknown>): string | null {
+  switch (message.kind) {
+    case "nudge":
+      return "计划未收口，已要求继续";
+    case "signal":
+      return "后台任务已结束";
+    default:
+      return null;
+  }
 }
 
 function toolCallIds(entry: unknown): string[] {
@@ -402,24 +419,12 @@ function isCurrentErrorEntry(entries: unknown[], errorIndex: number): boolean {
   return true;
 }
 
-function filterHandledErrorEntries(
-  entries: unknown[],
-  dismissedErrorIds: ReadonlySet<string>,
-): unknown[] {
-  return entries.filter((entry, index) => {
-    const errorId = historyEntryId(entry);
-    if (!errorId || !isRecord(entry) || entry.type !== "error") {
-      return true;
-    }
-    return !dismissedErrorIds.has(errorId) && isCurrentErrorEntry(entries, index);
-  });
-}
-
 function buildErrorRecoveryActions(
   entries: unknown[],
   sessionBusy: boolean,
-): Map<string, ErrorRecoveryAction> {
-  const actions = new Map<string, ErrorRecoveryAction>();
+  dismissedErrorIds: ReadonlySet<string>,
+): Map<string, ErrorRecovery> {
+  const actions = new Map<string, ErrorRecovery>();
   if (sessionBusy) {
     return actions;
   }
@@ -430,6 +435,7 @@ function buildErrorRecoveryActions(
       !errorId ||
       !isRecord(error) ||
       error.type !== "error" ||
+      dismissedErrorIds.has(errorId) ||
       !isCurrentErrorEntry(entries, errorIndex)
     ) {
       continue;
@@ -441,19 +447,26 @@ function buildErrorRecoveryActions(
     if (userIndex < 0) {
       continue;
     }
+    const targetUserMessageId = historyEntryId(entries[userIndex]);
     const calls = new Set<string>();
     const results = new Set<string>();
-    for (let index = userIndex + 1; index < errorIndex; index += 1) {
+    // Hydration may repair a dangling tool call by appending its synthetic result after the
+    // error anchor. Scan through the current history tail so that repaired Shape C becomes
+    // a truthful Resume instead of an unrecoverable dead end.
+    for (let index = userIndex + 1; index < entries.length; index += 1) {
       for (const callId of toolCallIds(entries[index])) calls.add(callId);
       if (messageRole(entries[index]) === "tool") {
         const resultId = toolResultId(entries[index]);
         if (resultId) results.add(resultId);
       }
     }
-    if (calls.size === 0) {
-      actions.set(errorId, "retry");
-    } else if ([...calls].every((callId) => results.has(callId))) {
-      actions.set(errorId, "resume");
+    if (calls.size === 0 && targetUserMessageId) {
+      actions.set(errorId, { action: "retry", targetUserMessageId });
+    } else if (calls.size > 0 && [...calls].every((callId) => results.has(callId))) {
+      actions.set(errorId, {
+        action: "resume",
+        targetUserMessageId: targetUserMessageId ?? undefined,
+      });
     }
   }
   return actions;
@@ -461,7 +474,7 @@ function buildErrorRecoveryActions(
 
 function currentTurnRecoveryAction(
   session: WebviewSessionSnapshot,
-): ErrorRecoveryAction | undefined {
+): ErrorRecovery | undefined {
   let userIndex = -1;
   for (let index = session.timeline.length - 1; index >= 0; index -= 1) {
     const item = session.timeline[index];
@@ -478,9 +491,17 @@ function currentTurnRecoveryAction(
     (item): item is WebviewToolCard => item.type === "tool",
   );
   if (tools.length === 0) {
-    return "retry";
+    return {
+      action: "retry",
+      targetUserMessageId: session.timeline[userIndex]?.id,
+    };
   }
-  return tools.every((tool) => tool.status === "complete") ? "resume" : undefined;
+  return tools.every((tool) => tool.status === "complete")
+    ? {
+      action: "resume",
+      targetUserMessageId: session.timeline[userIndex]?.id,
+    }
+    : undefined;
 }
 
 function planEventMessageId(
@@ -1614,7 +1635,7 @@ function applyHistoryEntry(
   toolCallToAssistant: Map<string, string>,
   historyToolArgs: Map<string, Record<string, unknown>>,
   standardToolResultIds: Set<string>,
-  errorRecoveryActions: ReadonlyMap<string, ErrorRecoveryAction>,
+  errorRecoveryActions: ReadonlyMap<string, ErrorRecovery>,
 ): void {
   if (!isRecord(entry) || typeof entry.type !== "string") {
     return;
@@ -1642,6 +1663,7 @@ function applyHistoryEntry(
       typeof entry.id === "string"
         ? entry.id
         : `history-error-${session.timeline.length + 1}`;
+    const recovery = errorRecoveryActions.get(id);
     const summary =
       typeof entry.summary === "string" && entry.summary.length > 0
         ? entry.summary
@@ -1654,7 +1676,10 @@ function applyHistoryEntry(
       failureKind: typeof entry.failureKind === "string" ? entry.failureKind : null,
       id,
       kind: "error",
-      recoveryAction: errorRecoveryActions.get(id),
+      recoveryAction: recovery?.action,
+      ...(recovery?.action === "retry" && recovery.targetUserMessageId
+        ? { recoveryTargetUserMessageId: recovery.targetUserMessageId }
+        : {}),
       statusCode: typeof entry.statusCode === "number" ? entry.statusCode : null,
       text: summary,
       type: "message",
@@ -1671,6 +1696,16 @@ function applyHistoryEntry(
         ? entry.id
         : `history-message-${(text ?? role ?? "unknown").length}`;
     if (role === "user") {
+      const noteTitle = systemNoteTitle(entry.message);
+      if (noteTitle) {
+        session.timeline.push({
+          id,
+          summary: text ?? "",
+          title: noteTitle,
+          type: "boundary",
+        } satisfies WebviewBoundaryBlock);
+        return;
+      }
       if (!text && !Array.isArray(entry.message.content)) {
         return;
       }
@@ -2169,6 +2204,9 @@ function pushMessage(
   }
   if (options.recoveryAction !== undefined) {
     next.recoveryAction = options.recoveryAction;
+  }
+  if (options.recoveryTargetUserMessageId !== undefined) {
+    next.recoveryTargetUserMessageId = options.recoveryTargetUserMessageId;
   }
   if (options.submitKind) {
     next.submitKind = options.submitKind;
@@ -2701,12 +2739,11 @@ export class WebviewStateStore {
   }
 
   dismissErrorRecovery(sessionId: string, errorId: string): void {
-    const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
     runtime.dismissedErrorIds.add(errorId);
-    session.timeline = session.timeline.filter(
-      (item) => item.type !== "message" || item.kind !== "error" || item.id !== errorId,
-    );
+    // The failure is part of the durable transcript and remains visible as history. Dismissal
+    // consumes only its one-shot recovery action, so a second click cannot start another Retry.
+    this.rebuildHistoryTimeline(sessionId);
   }
 
   restoreDismissedErrorRecovery(sessionId: string, errorId: string): void {
@@ -2886,16 +2923,23 @@ export class WebviewStateStore {
         return sessionRenderMutation(session.sessionId);
       case "agent_end":
         clearActiveAssistant(runtime);
+        {
+          const recovery = currentTurnRecoveryAction(session);
+          const recoveryOptions = {
+            recoveryAction: recovery?.action,
+            recoveryTargetUserMessageId: recovery?.targetUserMessageId,
+          };
         if (frame.error && frame.error !== "interrupted") {
-          pushMessage(session, "error", frame.error);
+          pushMessage(session, "error", frame.error, undefined, recoveryOptions);
         } else if (!frame.error && !runtime.turnHadAssistantText) {
           pushMessage(
             session,
             "error",
             "本轮没有产生可见回答。",
             undefined,
-            { recoveryAction: currentTurnRecoveryAction(session) },
+            recoveryOptions,
           );
+        }
         }
         return sessionRenderMutation(session.sessionId);
       case "agent_interrupted":
@@ -3251,16 +3295,17 @@ export class WebviewStateStore {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
     const renderableEntries = trimLeadingHistoryEntries(
-      filterHandledErrorEntries(
-        filterSupersededHistoryEntries(runtime.historyEntries, runtime.localUserMessageIds),
-        runtime.dismissedErrorIds,
-      ),
+      filterSupersededHistoryEntries(runtime.historyEntries, runtime.localUserMessageIds),
     );
     const historyToolNames = buildHistoryToolNameLookup(renderableEntries);
     const toolCallToAssistant = buildToolCallToAssistantMap(renderableEntries);
     const historyToolArgs = buildHistoryToolArgsLookup(renderableEntries);
     const standardToolResultIds = buildHistoryToolResultIds(renderableEntries);
-    const errorRecoveryActions = buildErrorRecoveryActions(renderableEntries, session.busy);
+    const errorRecoveryActions = buildErrorRecoveryActions(
+      renderableEntries,
+      session.busy,
+      runtime.dismissedErrorIds,
+    );
     const historySession = createEmptySession(sessionId);
     for (const entry of renderableEntries) {
       applyHistoryEntry(

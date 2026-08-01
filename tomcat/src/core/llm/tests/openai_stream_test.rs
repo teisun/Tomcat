@@ -15,11 +15,11 @@ use crate::core::llm::types::{
     ReplayRequirement, StreamEvent, ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
-use crate::infra::LlmConfig;
 use crate::infra::error::{
-    AppError, LlmErrorStage, LlmFailureKind, classify_llm_failure, llm_http_status, llm_stage,
-    llm_summary,
+    classify_llm_failure, llm_http_status, llm_stage, llm_summary, AppError, LlmErrorStage,
+    LlmFailureKind,
 };
+use crate::infra::LlmConfig;
 use bytes::Bytes;
 use std::time::Duration;
 
@@ -353,7 +353,7 @@ fn test_openai_request_body_serializes_deepseek_thinking_fields_together() {
 
 #[test]
 fn test_openai_provider_disabled_thinking_has_no_reasoning_fields_in_request() {
-    use crate::core::llm::thinking_policy::{ThinkingFormat, resolve_request_fields};
+    use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
     use crate::infra::config::ThinkingConfig;
     let cfg = ThinkingConfig {
         enabled: false,
@@ -369,7 +369,7 @@ fn test_openai_provider_disabled_thinking_has_no_reasoning_fields_in_request() {
 
 #[test]
 fn test_openai_provider_thinking_high_writes_reasoning_effort() {
-    use crate::core::llm::thinking_policy::{ThinkingFormat, resolve_request_fields};
+    use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
     use crate::infra::config::ThinkingConfig;
     let cfg = ThinkingConfig {
         enabled: true,
@@ -746,8 +746,8 @@ async fn idle_timeout_errors_when_no_bytes_arrive() {
 
 #[tokio::test(start_paused = true)]
 async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
-    use tokio_stream::StreamExt;
     use tokio_stream::wrappers::IntervalStream;
+    use tokio_stream::StreamExt;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
     let source = IntervalStream::new(interval).map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
@@ -1015,16 +1015,14 @@ async fn chat_stream_after_first_delta_body_read_error_is_not_retried() {
     use tokio_stream::StreamExt;
 
     let body = "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n".to_string();
-    let server = MockHttpServer::start(vec![
-        ScriptedHttpResponse {
-            status: 200,
-            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
-            body,
-            delay_ms: 0,
-            declared_content_length: None,
-        }
-        .with_declared_content_length(256),
-    ])
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body,
+        delay_ms: 0,
+        declared_content_length: None,
+    }
+    .with_declared_content_length(256)])
     .await;
     let provider = stream_test_provider(server.base_url.clone(), None, 2);
     let mut stream = provider

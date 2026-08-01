@@ -9,18 +9,18 @@ mod tests;
 mod types;
 
 pub use context::{
-    INTERRUPTED_TOOL_RESULT_TEXT, PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
-    build_context_from_state, init_context_state,
+    build_context_from_state, init_context_state, INTERRUPTED_TOOL_RESULT_TEXT,
+    PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
 };
-pub use session_impl::SessionManager;
 pub(crate) use session_impl::extract_user_text_from_content;
 #[allow(unused_imports)]
 pub use session_impl::generate_entry_id;
+pub use session_impl::SessionManager;
 pub use session_impl::{derive_title_from_user_message, is_rule_derived_title};
 pub use types::{
-    AgentMode, ApiUsage, CompactionResult, ContextLiveMetrics, ContextState, PlanEventKind,
-    PlanEventRef, PlanModeTransition, ResumeControlState, compound_turn_id, estimate_msg_chars,
-    estimated_tokens_from_chars,
+    compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, AgentMode, ApiUsage,
+    CompactionResult, ContextLiveMetrics, ContextState, PlanEventKind, PlanEventRef,
+    PlanModeTransition, ResumeControlState,
 };
 
 pub trait MessageAppendSink: Send + Sync {

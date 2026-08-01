@@ -1,7 +1,7 @@
 //! Tests for `commands::parse` — slash-command recognition contract.
 
 use super::super::{
-    ChatCommand, InstallCommand, InstallTarget, PlanCommand, SkillCommand, parse_chat_command,
+    parse_chat_command, ChatCommand, InstallCommand, InstallTarget, PlanCommand, SkillCommand,
 };
 
 fn assert_not_command(input: &str) {

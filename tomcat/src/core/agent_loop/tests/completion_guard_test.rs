@@ -1,7 +1,7 @@
 //! C1 completion guard：EXEC 下计划没收口时，模型不能靠一段文字结束回合。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +19,7 @@ use crate::core::plan_runtime::file_store::{
 };
 use crate::core::plan_runtime::review::Finding;
 use crate::core::plan_runtime::PlanRuntime;
-use crate::core::session::manager::ContextState;
+use crate::core::session::manager::{ContextState, MessageAppendSink};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::DefaultEventBus;
 
@@ -94,7 +94,41 @@ fn empty_context_state() -> ContextState {
     }
 }
 
+#[derive(Default)]
+struct RecordingMessageSink {
+    messages: Mutex<Vec<serde_json::Value>>,
+}
+
+impl MessageAppendSink for RecordingMessageSink {
+    fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
+        let mut messages = self.messages.lock().unwrap();
+        messages.push(message);
+        Ok(format!("persisted-{}", messages.len()))
+    }
+
+    fn append_message_with_id(
+        &self,
+        message: serde_json::Value,
+        id: &str,
+    ) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(message);
+        Ok(id.to_string())
+    }
+
+    fn append_custom_entry(&self, _extra: serde_json::Value) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
 fn build_agent(plan_runtime: Option<Arc<PlanRuntime>>, subagent_type: SubagentType) -> AgentLoop {
+    build_agent_with_sink(plan_runtime, subagent_type, None)
+}
+
+fn build_agent_with_sink(
+    plan_runtime: Option<Arc<PlanRuntime>>,
+    subagent_type: SubagentType,
+    message_append_sink: Option<Arc<dyn MessageAppendSink>>,
+) -> AgentLoop {
     let mut agent = AgentLoop::new(
         test_binding(Arc::new(MockLlmProvider::new(vec![])), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
@@ -103,6 +137,7 @@ fn build_agent(plan_runtime: Option<Arc<PlanRuntime>>, subagent_type: SubagentTy
             session_id: "sess-guard".to_string(),
             plan_runtime,
             subagent_type,
+            message_append_sink,
             ..Default::default()
         },
         CancellationToken::new(),
@@ -150,10 +185,47 @@ async fn guard_blocks_handback_while_todos_remain() {
 
     assert_eq!(outcome, TurnOutcome::Continue, "计划没收口不得结束回合");
     let injected = messages.last().unwrap();
-    assert_eq!(injected.kind, MessageKind::Steering);
+    assert_eq!(injected.kind, MessageKind::Nudge);
     let text = injected.text_content().unwrap_or("");
     assert!(text.contains("2 of 3 todos are not done"), "text={text}");
     assert!(text.contains("in_progress: t2"), "text={text}");
+
+    cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn guard_persists_nudge_with_its_distinct_kind() {
+    let _home = home_guard();
+    let plan_id = unique_plan_id("guard_persisted_nudge");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Pending)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.set_executing_for_test(plan_id);
+    let sink = Arc::new(RecordingMessageSink::default());
+    let sink_for_agent: Arc<dyn MessageAppendSink> = sink.clone();
+
+    let mut agent =
+        build_agent_with_sink(Some(plan_runtime), SubagentType::User, Some(sink_for_agent));
+    let mut messages = vec![ChatMessage::user("start building")];
+    assert_eq!(
+        finalize(&mut agent, &mut messages).await,
+        TurnOutcome::Continue
+    );
+
+    let persisted = sink.messages.lock().unwrap();
+    assert_eq!(persisted.len(), 2, "assistant reply and nudge both persist");
+    assert_eq!(persisted[1]["role"], "user");
+    assert_eq!(persisted[1]["kind"], "nudge");
+    assert_eq!(
+        messages
+            .last()
+            .and_then(|message| message.msg_id.as_deref()),
+        Some("persisted-2"),
+        "the in-memory nudge must use its transcript row id"
+    );
 
     cleanup_plan_file(&plan_path);
 }

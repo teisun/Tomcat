@@ -1,10 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-01 11:28 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-01 16:11 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P1]** release 构建 dead-code/unused-import 告警收口：仅测试使用的 `assert_active_tool_result_integrity`、`run_tool_calls`、`finalize_turn_after_text` 加 `#[cfg(test)]`，生产路径继续走 `*_with_usage`；`cargo check --lib` 无上述 4 条 warning。@2026-08-01
-- [✓] **[P0]** 会话卡死与失败恢复整改已落地：失败回合用 `revive_trailing_failed_user_messages` 撤掉尾部 user 的 `superseded/turn_failed`，error 卡 Retry/Resume 统一走 `ServeCommand::Resume`（无输入开轮、不复制用户气泡）；pending/`ask_question` 结果替换先内存校验再落盘，sidecar 盖章只刷 size/mtime，JSONL 改写改为流式原子写；`HostDraftCoordinator` 同会话重入直接抛错、draft-fork 投递可 await 并超时放行；单文件 `edit` 成功后刷新 ReadStamp；LLM 侧补 402 Billing、首帧前 parse→Transport、空回合/overflow 进度与 `/compact` ratio 断言；错误卡 UI 将诊断链接与全宽主按钮分离（Retry=refresh、Resume=debug-continue）。版本 CLI `0.1.22` / 扩展 `0.1.32`（`bundledCliVersion=0.1.22`）。验证：定向 Rust revive/resume/resume-index；扩展 `lint` + unit（含 MessageBubble）；`TOMCAT_E2E_SCREENSHOT=1` host E2E 含真实点击 Retry 与 Resume 卡截图；`gate:full`/安装 E2E 在旁路撤回后曾真绿。@2026-08-01
+- [✓] **[P0/P1]** Retry/Resume 失败恢复已按 append-only transcript 重新收口：删除 `revive_trailing_failed_user_messages`；Retry 改为核心层同一锁内「保留旧章 + 按 message id 复制一条新 user 行」，旧失败提问、auto-retry custom 行与 error 均可审计，新行使用新 id，重复点击与陈旧锚点返回 `retry_target_stale` 且不动 transcript。Resume 不复制 user，只在活尾巴是完整配对的 tool result（含 `[pending]` 自愈占位）时开轮，否则返回 `nothing_to_resume`；出站再硬性拒绝 assistant 尾巴。跨 provider 的 opaque reasoning 一律 StripOpaque，绝不再把 continuity 伪装成 assistant 正文。`MessageKind` 已落盘并在 hydration/replay/UI 中保持语义，Nudge/Signal 折叠成系统注记。错误卡携带 retry anchor，Retry/Resume 分流后主动刷新 transcript，失败章、error 卡和复制出的两条 user 气泡都保留为历史；压缩按钮移到新建按钮右侧并使用 `codicon-file-zip`。验证：copy-forward/Resume/replay/guard 定向 Rust 回归全绿；扩展 lint、unit（333 core + 460 GUI）、host flow（Retry 两章 + Resume 占位）全绿；`npm run gate:full`（含安装 E2E）全绿。完整 `cargo test --lib` 为 2454 passed / 13 个既有无关红测。@2026-08-01
 - [✓] **[P0]** Planner/Executor 仅在 `dispatch_agent` description 条件满足时派发 Explorer；catalog 明确简单任务、已知位置、一两批直接工具、自审及 Reviewer 已覆盖时禁用，并锁定首次合并问题、仅新阻塞点可二次派发；同步 prompt/catalog 回归和生成文档。@2026-07-29
 - [✓] **[P0]** Planner todo 改为“非简单任务按 milestone 精确拆解、简单单面修改使用 flat linear todo”；每个问题固定为“背景与证据 → 根因 → 解决方案（Key decisions）→ 验证”，要求不了解代码上下文的读者也能看懂，并删除一处重复第一性原理文案。@2026-07-29
 - [✓] **[P0]** Plan Preview selection 去重修复：列表项获得精确源行，selection identity 始终纳入文本快照 hash；不同条目可连续加入、完全相同引用仍去重，wire 协议不变；补齐 blockquote 内列表项递归行号映射与 2s 连续稳定性 host E2E 断言。@2026-07-29
@@ -48,7 +48,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
-- 失败恢复：`ServeCommand::Resume` 在 `start_turn` 前调用 `revive_trailing_failed_user_messages`；webview `recoverErrorTurn` 只发 `resume`，不再反查文本/附件重建 prompt；error 卡仅当前未覆盖失败可操作，成功/新提示后乐观隐藏。
+- 失败恢复：新增 `ServeCommand::Retry { message_id }`，核心层以「盖章保留 + 复制前进」创建新 user 行；`Resume` 仅接受完整 tool-result 活尾巴。webview 错误卡保存 retry anchor，按 Retry/Resume 分流并在成功后刷新 transcript；历史 error 卡保留，但只给当前未处理失败展示恢复动作。
 - transcript：公开 `PENDING_TOOL_RESULT_TEXT` / `INTERRUPTED_TOOL_RESULT_TEXT` / `UNKNOWN_RESTART_TOOL_RESULT_TEXT`；扩展侧 `toolResultPlaceholders.ts` 契约对齐；`replace_tool_result_by_tool_call_id` 允许无旧 result 时追加（悬空 ask_question）；非结构性盖章走 `refresh_resume_index_after_nonstructural_rewrite`。
 - 新增 CLI `/compact`（`cmd_compact`）与 serve compact ratio 字段断言；手动 compact 与自动 overflow 路径分工写入 `context-management.md`。
 - 发布版本：CLI `0.1.22`、扩展 `0.1.32`、`bundledCliVersion=0.1.22`；fake-serve E2E 夹具 `serverVersion` 同步。
@@ -84,7 +84,7 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| `cargo test --lib` 仍有 serve 附件/能力相关失败 | 串行复现约 8–9 例（多模态/content_filter/degrade 请求计数等），表现为能力校验前拦截、录制 provider 未收到请求；与本轮 resume/撤章/错误卡整改无直接交集 | 单独排查 serve 附件与模型能力夹具，不阻塞本轮恢复语义合入 |
+| `cargo test --lib` 仍有 13 个既有红测 | 9 个 serve 附件/能力夹具（多模态/content_filter/degrade 请求计数等）在能力校验前拦截、录制 provider 未收到请求；另有 2 个 chat/runtime 与 2 个 ext dispatcher 断言失败。Retry/Resume、replay、guard 的定向回归均通过 | 单独排查附件夹具、chat cleanup/runtime 和 ext dispatcher；不阻塞本轮恢复语义合入 |
 | 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但真实 `dispatch_agent > 0` 路径仍待授权验证 | 获得明确授权后，在隔离夹具中补跑一次并检查首次是否合并全部独立问题 |
 | `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；与本轮恢复整改无关 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |

@@ -11,7 +11,7 @@ use crate::core::llm::{
     ResolvedCall,
 };
 use crate::core::session::TranscriptEntry;
-use crate::{AppConfig, AppError, init_context_state};
+use crate::{init_context_state, AppConfig, AppError};
 
 /// `/compact` should use the non-streaming compaction scene; a streamed main-turn request here
 /// would mean the CLI command escaped its intended path.

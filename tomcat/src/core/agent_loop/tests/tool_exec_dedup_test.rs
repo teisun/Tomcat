@@ -15,15 +15,15 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::core::AllowAllConfirmation;
-use crate::core::agent_loop::ToolCallInfo;
 use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
+use crate::core::agent_loop::ToolCallInfo;
 use crate::core::llm::openai_files::{
     CacheEntry, FilePurpose, OpenAiFilesClient, OpenAiFilesRuntime,
 };
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
-use crate::core::tools::pipeline::read_state::{FILE_UNCHANGED_STUB, ReadFileState};
+use crate::core::tools::pipeline::read_state::{ReadFileState, FILE_UNCHANGED_STUB};
 use crate::core::tools::primitive::{DefaultPrimitiveExecutor, PrimitiveExecutor};
+use crate::core::AllowAllConfirmation;
 use crate::infra::{PrimitiveConfig, TracingAuditRecorder};
 use sha2::{Digest, Sha256};
 

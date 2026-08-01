@@ -250,7 +250,7 @@ fn latest_openai_response_id_for_profile(
                 .and_then(|continuation| continuation.provider_refs.as_ref())
                 .and_then(|refs| refs.openai_response_id.clone())
                 .filter(|id| !id.is_empty()),
-            ReplayAction::ConvertToText(_) | ReplayAction::StripOpaque => None,
+            ReplayAction::StripOpaque => None,
         })
 }
 

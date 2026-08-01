@@ -2,8 +2,8 @@ use super::*;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
@@ -20,9 +20,9 @@ use crate::core::llm::{
     MessageKind, ModelEntryInput, StreamEvent,
 };
 use crate::{
-    CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
-    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
-    init_context_state,
+    init_context_state, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
+    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
+    RestoreOptions,
 };
 
 // ── 附件测试脚手架 ────────────────────────────────────────────────────
@@ -735,14 +735,13 @@ async fn detached_target_retain_and_discard_preserves_source_and_reclaims_target
     )
     .await
     .unwrap();
-    assert!(
-        slot.ctx
-            .session_runtime
-            .session
-            .get_session_by_id(&target_id)
-            .unwrap()
-            .is_none()
-    );
+    assert!(slot
+        .ctx
+        .session_runtime
+        .session
+        .get_session_by_id(&target_id)
+        .unwrap()
+        .is_none());
     assert!(store.list_pending(&target_id).unwrap().is_empty());
     assert_eq!(state.registry.active_session_id(), active_before);
     assert_eq!(store.list_pending(&source_id).unwrap().len(), 2);
@@ -1022,17 +1021,10 @@ async fn serve_prompt_drives_agent_run() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_resume_reasks_dangling_ask_question_and_continues_turn() {
+async fn serve_resume_rejects_a_dangling_ask_question_before_hydration_repairs_it() {
     let _api_key = install_test_api_key();
-    let stream = vec![
-        Ok(StreamEvent::ContentDelta {
-            delta: "继续执行".to_string(),
-        }),
-        Ok(StreamEvent::FinishReason {
-            reason: "stop".to_string(),
-        }),
-    ];
-    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_streams(vec![ok_text_stream("must not run")]).await;
     slot.ctx
         .session_runtime
         .session
@@ -1061,89 +1053,17 @@ async fn serve_resume_reasks_dangling_ask_question_and_continues_turn() {
     .unwrap();
 
     let lines = wait_for_line(&buffer, |line| {
-        line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
-            && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+        line.get("id").and_then(serde_json::Value::as_str) == Some("resume-dangling-ask")
     })
     .await;
-    let request = lines
+    let response = lines
         .iter()
         .find(|line| {
-            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
-                && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+            line.get("id").and_then(serde_json::Value::as_str) == Some("resume-dangling-ask")
         })
-        .expect("resume should request ask_question from the host");
-    let request_id = request["requestId"]
-        .as_str()
-        .expect("control request id")
-        .to_string();
-    assert_eq!(
-        request["payload"]["toolCallId"].as_str(),
-        Some("restart-ask-1"),
-        "resume must preserve the durable tool_call_id"
-    );
-
-    handle_command(
-        Arc::clone(&state),
-        ServeCommand::ControlResponse {
-            request_id,
-            session_id: Some(slot.session_id.clone()),
-            payload: serde_json::json!({
-                "requestId": request["payload"]["requestId"],
-                "result": {
-                    "outcome": "answered",
-                    "cancelled": false,
-                    "answers": [{
-                        "questionId": "q1",
-                        "optionIds": ["yes"],
-                        "pickedRecommended": true
-                    }]
-                }
-            }),
-        },
-    )
-    .await
-    .unwrap();
-
-    let lines = wait_for_line(&buffer, |line| {
-        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-    })
-    .await;
-    assert!(
-        lines.iter().any(|line| {
-            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-                && line.get("error").is_none_or(serde_json::Value::is_null)
-        }),
-        "answering the resumed question should continue and finish the agent turn: {lines:?}"
-    );
-
-    let results = session_message_entries(&slot)
-        .into_iter()
-        .filter(|message| {
-            message
-                .message
-                .get("role")
-                .and_then(serde_json::Value::as_str)
-                == Some("tool")
-                && message
-                    .message
-                    .get("tool_call_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("restart-ask-1")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        results.len(),
-        1,
-        "resume must persist one real result, not append a synthetic companion"
-    );
-    let result: serde_json::Value = serde_json::from_str(
-        results[0].message["content"]
-            .as_str()
-            .expect("tool result content"),
-    )
-    .expect("ask_question result JSON");
-    assert_eq!(result["outcome"], "answered");
-    assert_eq!(result["answers"][0]["option_ids"][0], "yes");
+        .expect("structured Resume rejection");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(response["error"].as_str(), Some("nothing_to_resume"));
 }
 
 #[tokio::test]
@@ -2328,12 +2248,10 @@ async fn serve_prompt_without_attachments_falls_back_to_user_text() {
         &user_message.content,
         Some(ChatMessageContent::Text(text)) if text == "plain text"
     ));
-    assert!(
-        user_message
-            .msg_id
-            .as_deref()
-            .is_some_and(|message_id| !message_id.is_empty())
-    );
+    assert!(user_message
+        .msg_id
+        .as_deref()
+        .is_some_and(|message_id| !message_id.is_empty()));
 }
 
 #[test]
@@ -2509,12 +2427,10 @@ async fn serve_prompt_blank_user_message_id_falls_back_to_generated_entry_id() {
 
     let entry = latest_user_entry(&slot);
     assert_ne!(entry.id.as_deref(), Some("   "));
-    assert!(
-        entry
-            .id
-            .as_deref()
-            .is_some_and(|message_id| !message_id.trim().is_empty())
-    );
+    assert!(entry
+        .id
+        .as_deref()
+        .is_some_and(|message_id| !message_id.trim().is_empty()));
 }
 
 #[tokio::test]
@@ -3409,9 +3325,8 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_resume_revives_failed_prompt_without_duplicating_the_model_input() {
+async fn serve_retry_copies_failed_prompt_forward_without_duplicating_model_input() {
     let _api_key = install_test_api_key();
-    let failed_stream = vec![Err(crate::AppError::Llm("temporary 403".to_string()))];
     let recovered_stream = vec![
         Ok(StreamEvent::ContentDelta {
             delta: "recovered".to_string(),
@@ -3421,7 +3336,30 @@ async fn serve_resume_revives_failed_prompt_without_duplicating_the_model_input(
         }),
     ];
     let (state, buffer, _temp, slot, requests) =
-        build_initialized_state_with_recorded_streams(vec![failed_stream, recovered_stream]).await;
+        build_initialized_state_with_recorded_streams(vec![
+            vec![Err(crate::llm_http_status_error(
+                "mock",
+                503,
+                "temporary upstream outage",
+            ))],
+            vec![Err(crate::llm_http_status_error(
+                "mock",
+                503,
+                "temporary upstream outage",
+            ))],
+            vec![Err(crate::llm_http_status_error(
+                "mock",
+                503,
+                "temporary upstream outage",
+            ))],
+            vec![Err(crate::llm_http_status_error(
+                "mock",
+                503,
+                "temporary upstream outage",
+            ))],
+            recovered_stream,
+        ])
+        .await;
 
     handle_command(
         Arc::clone(&state),
@@ -3439,15 +3377,46 @@ async fn serve_resume_revives_failed_prompt_without_duplicating_the_model_input(
             && line
                 .get("error")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|message| message.contains("temporary 403"))
+                .is_some_and(|message| message.contains("temporary upstream outage"))
     })
     .await;
 
+    let failed_user_id = session_message_entries(&slot)
+        .into_iter()
+        .find(|entry| {
+            entry
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("user")
+                && entry
+                    .message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("retry this exact prompt")
+        })
+        .and_then(|entry| entry.id)
+        .expect("failed user row has a durable transcript id");
+    let transcript_before_retry = std::fs::read_to_string(
+        slot.ctx
+            .session_runtime
+            .session
+            .transcript_path(&slot.session_id),
+    )
+    .expect("read auto-retry transcript");
+    assert!(
+        transcript_before_retry
+            .matches("\"event\":\"auto_retry_start\"")
+            .count()
+            >= 1,
+        "the exhausted automatic-retry path must retain its custom diagnostics"
+    );
     handle_command(
         Arc::clone(&state),
-        ServeCommand::Resume {
+        ServeCommand::Retry {
             id: Some("resume-failed-prompt".to_string()),
             session_id: Some(slot.session_id.clone()),
+            message_id: failed_user_id.clone(),
         },
     )
     .await
@@ -3461,10 +3430,10 @@ async fn serve_resume_revives_failed_prompt_without_duplicating_the_model_input(
     let recorded = requests.0.lock().clone();
     assert_eq!(
         recorded.len(),
-        2,
-        "one failed request and one resumed request"
+        5,
+        "four automatic attempts and one copy-forward retry request"
     );
-    let resumed_prompt_occurrences = recorded[1]
+    let resumed_prompt_occurrences = recorded[4]
         .messages
         .iter()
         .filter_map(|message| message.text_content())
@@ -3472,7 +3441,80 @@ async fn serve_resume_revives_failed_prompt_without_duplicating_the_model_input(
         .count();
     assert_eq!(
         resumed_prompt_occurrences, 1,
-        "Resume must reuse the single persisted user message instead of appending it again"
+        "Retry must activate exactly one copied user message in the provider request"
+    );
+    let rows = session_message_entries(&slot);
+    assert_eq!(
+        rows.iter()
+            .filter(|entry| {
+                entry
+                    .message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("retry this exact prompt")
+            })
+            .count(),
+        2,
+        "the archived failed row and its new live copy are both auditable"
+    );
+    let archived = rows
+        .iter()
+        .find(|entry| entry.id.as_deref() == Some(failed_user_id.as_str()))
+        .expect("original failed row remains in transcript");
+    assert_eq!(archived.message["superseded"], true);
+    assert_eq!(archived.message["turn_failed"], true);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_rejects_without_a_complete_tool_result_tail() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("must not run")]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({"role": "user", "content": "retry me"}),
+        )
+        .expect("seed incomplete non-tool tail");
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    let before = std::fs::read(&transcript).expect("read transcript before rejected Resume");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-no-tool-tail".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("resume-no-tool-tail")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("resume-no-tool-tail")
+        })
+        .expect("structured Resume rejection");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(response["error"].as_str(), Some("nothing_to_resume"));
+    assert!(
+        requests.0.lock().is_empty(),
+        "failed validation must not start an LLM request"
+    );
+    assert_eq!(
+        std::fs::read(transcript).expect("read transcript after rejected Resume"),
+        before,
+        "failed validation must not mutate the transcript"
     );
 }
 
@@ -4388,13 +4430,11 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
         .expect("provider key entry");
     assert_eq!(provider_key["keyPresent"].as_bool(), Some(true));
     assert_eq!(provider_key["provider"].as_str(), Some(""));
-    assert!(
-        key_list["payload"]["keys"]
-            .as_array()
-            .expect("provider keys array")
-            .iter()
-            .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY"))
-    );
+    assert!(key_list["payload"]["keys"]
+        .as_array()
+        .expect("provider keys array")
+        .iter()
+        .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY")));
     assert!(
         !key_list.to_string().contains("relay-secret")
             && !key_list.to_string().contains("external-secret"),
@@ -4453,13 +4493,11 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
                 == Some("list-provider-keys-after-delete")
         })
         .expect("list_provider_keys after external delete");
-    assert!(
-        !after_delete["payload"]["keys"]
-            .as_array()
-            .expect("provider keys after delete")
-            .iter()
-            .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY"))
-    );
+    assert!(!after_delete["payload"]["keys"]
+        .as_array()
+        .expect("provider keys after delete")
+        .iter()
+        .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY")));
 
     handle_command(
         Arc::clone(&state),
@@ -4725,8 +4763,8 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
 #[serial(env_lock)]
 async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_to_chat() {
     use crate::core::plan_runtime::file_store::{
-        PLAN_FILE_SCHEMA_VERSION, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
-        TodoStatus, read_plan, write_plan,
+        read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+        PLAN_FILE_SCHEMA_VERSION,
     };
 
     let _api_key = install_test_api_key();
@@ -4900,8 +4938,8 @@ async fn serve_get_state_contains_plan_and_session_todos() {
 #[serial(env_lock)]
 async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     use crate::core::plan_runtime::file_store::{
-        PLAN_FILE_SCHEMA_VERSION, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
-        TodoStatus, write_plan,
+        write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+        PLAN_FILE_SCHEMA_VERSION,
     };
 
     let _api_key = install_test_api_key();

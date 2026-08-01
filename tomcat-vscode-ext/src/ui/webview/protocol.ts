@@ -83,6 +83,8 @@ export interface WebviewMessageBlock {
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
   recoveryAction?: "resume" | "retry";
+  /** Durable transcript id of the user message Retry must copy forward. */
+  recoveryTargetUserMessageId?: string;
   statusCode?: number | null;
   segments?: WebviewMessageSegment[];
   submitKind?: "prompt" | "steer";
@@ -102,6 +104,8 @@ export interface WebviewBoundaryBlock {
   coveredCount?: number | null;
   id: string;
   summary?: string | null;
+  /** Optional title for non-compaction system notes. */
+  title?: string | null;
   type: "boundary";
 }
 

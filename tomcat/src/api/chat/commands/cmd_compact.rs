@@ -1,11 +1,11 @@
 //! `/compact`：用户主动触发一次持久化上下文压缩。
 
-use crate::AppError;
 use crate::api::chat::ChatContext;
 use crate::core::compaction::compact_tool_results;
 use crate::core::compaction::preheat::generate_summary;
 use crate::core::llm::LlmScene;
 use crate::core::session::manager::init_context_state;
+use crate::AppError;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 

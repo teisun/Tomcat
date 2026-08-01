@@ -8,13 +8,13 @@ use crate::api::chat::ChatContext;
 use crate::core::compaction::preheat::Preheat;
 use crate::core::session::manager::init_context_state;
 use crate::core::session::{
-    ErrorEntry, ResumableAskQuestionResult, TranscriptEntry,
     classify_resumable_ask_question_result, collect_recent_chat_messages_from_tail,
-    find_dangling_tail_tool_calls, is_tool_call_pending,
+    find_dangling_tail_tool_calls, is_tool_call_pending, ErrorEntry, ResumableAskQuestionResult,
+    TranscriptEntry,
 };
 use crate::infra::error::{
-    AppError, LlmFailureKind, classify_llm_failure, llm_http_status, llm_source_chain, llm_stage,
-    llm_summary,
+    classify_llm_failure, llm_http_status, llm_source_chain, llm_stage, llm_summary, AppError,
+    LlmFailureKind,
 };
 
 const MAX_ERROR_DETAIL_CHARS: usize = 8 * 1024;

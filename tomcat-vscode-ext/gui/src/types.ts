@@ -95,6 +95,7 @@ export interface WebviewBoundaryBlock {
   coveredCount?: number | null;
   id: string;
   summary?: string | null;
+  title?: string | null;
   type: "boundary";
 }
 

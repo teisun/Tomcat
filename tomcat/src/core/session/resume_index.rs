@@ -7,11 +7,12 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::core::llm::MessageKind;
 use crate::core::session::manager::{
     AgentMode, PlanEventKind, PlanEventRef, PlanModeTransition, ResumeControlState,
 };
 use crate::core::session::transcript::{
-    TranscriptEntry, TranscriptReadStats, read_entries_tail_with_stats,
+    read_entries_tail_with_stats, TranscriptEntry, TranscriptReadStats,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
@@ -294,6 +295,10 @@ fn is_user_turn_start(entry: &TranscriptEntry) -> bool {
     match entry {
         TranscriptEntry::Message(me) => {
             me.message.get("role").and_then(|v| v.as_str()) == Some("user")
+                && !MessageKind::from_persisted(
+                    me.message.get("kind").and_then(serde_json::Value::as_str),
+                )
+                .is_non_turn_start()
         }
         _ => false,
     }

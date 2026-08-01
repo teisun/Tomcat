@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::{AppConfig, SessionMode, api::chat::ChatContext};
+use crate::{api::chat::ChatContext, AppConfig, SessionMode};
 
 struct EnvGuard {
     key: &'static str,

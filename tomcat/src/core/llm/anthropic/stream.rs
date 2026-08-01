@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -8,7 +8,7 @@ use tokio_stream::Stream;
 use crate::core::llm::replay_policy::ProviderCompatProfile;
 use crate::core::llm::types::{StreamEvent, ThinkingSource, TokenUsage};
 use crate::infra::error::{
-    AppError, LlmErrorStage, llm_error_with_source, llm_stream_interrupted_error,
+    llm_error_with_source, llm_stream_interrupted_error, AppError, LlmErrorStage,
 };
 
 use super::wire::final_stream_events;
@@ -395,13 +395,13 @@ fn find_double_newline(buffer: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use tokio_stream::StreamExt;
     use tokio_stream::empty;
+    use tokio_stream::StreamExt;
 
     use super::AnthropicStream;
     use crate::core::llm::replay_policy::ProviderCompatProfile;
     use crate::core::llm::types::{ReasoningFormat, StreamEvent};
-    use crate::infra::error::{LlmFailureKind, classify_llm_failure};
+    use crate::infra::error::{classify_llm_failure, LlmFailureKind};
 
     #[test]
     fn parse_block_emits_thinking_and_terminal_events() {

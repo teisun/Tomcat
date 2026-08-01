@@ -45,8 +45,8 @@ pub use provider::LlmProvider;
 pub use registry::{build_provider, registered_provider_ids};
 #[allow(unused_imports)]
 pub use replay_policy::{
-    apply_text_downgrade, model_family, plan as plan_replay, CaptureMode, DowngradeMode,
-    ProviderCompatProfile, ReplayAcceptance, ReplayAction,
+    model_family, plan as plan_replay, CaptureMode, ProviderCompatProfile, ReplayAcceptance,
+    ReplayAction,
 };
 pub use resolver::{DefaultLlmResolver, LlmResolver, LlmScene, ResolvedCall};
 pub use thinking_policy::ThinkingLevel;

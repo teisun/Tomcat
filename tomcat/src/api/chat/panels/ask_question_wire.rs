@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -12,7 +12,7 @@ use crate::core::plan_runtime::panels::{
     AskQuestionTermination, Question, QuestionOption,
 };
 use crate::infra::event_bus::EventListenerId;
-use crate::infra::{EventBus, ScopedEventEmitter, wire};
+use crate::infra::{wire, EventBus, ScopedEventEmitter};
 
 const CANCEL_POLL_MS: Duration = Duration::from_millis(10);
 

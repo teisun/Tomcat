@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crate::AppConfig;
 use crate::api::chat::panels::{AskQuestionPanel, MockAskQuestionPanel};
 use crate::api::chat::{ChatContext, ChatContextOverrides};
+use crate::AppConfig;
 use serial_test::serial;
 
 #[test]

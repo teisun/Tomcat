@@ -73,7 +73,15 @@ export interface ModelView {
 }
 export interface NewSessionParams {
   cwd?: null | string;
+  detached?: boolean;
   mode?: ServeSessionMode | null;
+}
+export interface RetainAttachmentLeaseRef {
+  blobSha: string;
+  providerSha?: null | string;
+}
+export interface RetainAttachmentLeasesParams {
+  attachments: RetainAttachmentLeaseRef[];
 }
 export interface ServeAttachment {
   blobSha?: null | string;
@@ -145,7 +153,20 @@ export type ServePlanEvent = {
   round?: null | number;
   sessionId?: null | string;
   toolCallId?: null | string;
+  transcriptPath?: null | string;
   type: "plan.code_review.started";
+} | {
+  childSessionId?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  transcriptPath?: null | string;
+  type: "plan.review.started";
+} | {
+  childSessionId?: null | string;
+  sessionId?: null | string;
+  taskId?: null | string;
+  transcriptPath?: null | string;
+  type: "plan.explorer.started";
 } | {
   path?: null | string;
   planId?: null | string;
@@ -341,6 +362,9 @@ export interface ResponseFrame {
   success: boolean;
   type: string;
 }
+export interface RetainAttachmentLeasesResponse {
+  retainedShas: string[];
+}
 export type ServeCommand = {
   action: SetPlanModeAction;
   id?: null | string;
@@ -372,6 +396,11 @@ export type ServeCommand = {
   type: "set_thinking_level";
 } | {
   id?: null | string;
+  messageId: string;
+  sessionId?: null | string;
+  type: "retry";
+} | {
+  id?: null | string;
   model: ModelEntryInput;
   type: "upsert_model";
 } | {
@@ -383,6 +412,11 @@ export type ServeCommand = {
   id?: null | string;
   modelId: string;
   type: "remove_model";
+} | {
+  id?: null | string;
+  params: RetainAttachmentLeasesParams;
+  sessionId: string;
+  type: "retain_attachment_leases";
 } | {
   id?: null | string;
   params?: GetMessagesParams;
@@ -417,6 +451,10 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   sessionId: string;
+  type: "discard_detached_session";
+} | {
+  id?: null | string;
+  sessionId: string;
   type: "switch_session";
 } | {
   id?: null | string;
@@ -430,6 +468,10 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   sessionId?: null | string;
+  type: "compact";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
   type: "get_state";
 } | {
   id?: null | string;
@@ -439,6 +481,10 @@ export type ServeCommand = {
   id?: null | string;
   sessionId?: null | string;
   type: "list_checkpoints";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
+  type: "resume";
 } | {
   id?: null | string;
   type: "list_models";

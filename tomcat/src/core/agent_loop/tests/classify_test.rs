@@ -3,11 +3,11 @@
 //! 验证错误分类的四个等价类（429 retry / 401 fatal / 400+context_overflow
 //! retry / 400 generic fatal）是否落在正确的 LoopError 分支。
 
-use crate::core::agent_loop::LoopError;
 use crate::core::agent_loop::error_classifier::classify_error;
+use crate::core::agent_loop::LoopError;
 use crate::infra::error::{
-    LlmErrorStage, llm_error, llm_http_status_error, llm_stream_interrupted_error,
-    llm_stream_terminal_error,
+    llm_error, llm_http_status_error, llm_stream_interrupted_error, llm_stream_terminal_error,
+    LlmErrorStage,
 };
 
 #[test]

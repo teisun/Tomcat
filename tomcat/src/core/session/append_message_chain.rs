@@ -126,6 +126,61 @@ pub(crate) fn find_dangling_tail_tool_call_ids(recent: &[Value]) -> Option<Vec<S
         .map(|calls| calls.into_iter().map(|call| call.id).collect())
 }
 
+/// 当前 transcript 是否以一组完整、仍有效的 tool results 收尾。
+///
+/// `Resume` 是“模型已拿到工具结果、只差继续作答”的专用入口，因此不能只看投影后的
+/// 最后一条 active message：失败的 user 输入可能已被 supersede，而更早一轮恰好以 tool
+/// result 收尾。先要求原始 transcript 的最后一个 message 本身就是 active tool result，
+/// 再在统一的 active-message 投影中校验 owning assistant 的每个 call 都恰好有一个、
+/// 顺序匹配的 result。
+pub(crate) fn has_complete_tail_tool_results(entries: &[TranscriptEntry]) -> bool {
+    let Some(TranscriptEntry::Message(last_raw_message)) = entries
+        .iter()
+        .rev()
+        .find(|entry| matches!(entry, TranscriptEntry::Message(_)))
+    else {
+        return false;
+    };
+    if last_raw_message.message.get("role").and_then(Value::as_str) != Some("tool")
+        || last_raw_message
+            .message
+            .get("superseded")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return false;
+    }
+
+    let recent = collect_recent_chat_messages_from_tail(entries);
+    let mut trailing_results_rev = Vec::new();
+    for message in recent.iter().rev() {
+        match message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "tool" => trailing_results_rev.push(message),
+            "assistant" => {
+                let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+                    return false;
+                };
+                if tool_calls.is_empty() || tool_calls.len() != trailing_results_rev.len() {
+                    return false;
+                }
+                return tool_calls
+                    .iter()
+                    .zip(trailing_results_rev.iter().rev())
+                    .all(|(call, result)| {
+                        call.get("id").and_then(Value::as_str)
+                            == result.get("tool_call_id").and_then(Value::as_str)
+                    });
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// LLM 出站前的最终协议守卫：禁止把未配对的 tool call 发给 provider。
 ///
 /// 正常路径会在 hydrate 时先补终态或 `[pending]`，因此这里触发代表某条新入口绕过了

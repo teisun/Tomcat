@@ -3,8 +3,7 @@ use serde_json::{json, Value};
 use crate::core::llm::files_api::FilesApiAdapter;
 use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, plan_scoped, replay_requirement_for_profile, ProviderCompatProfile,
-    ReplayAction, ReplayWindow,
+    plan_scoped, replay_requirement_for_profile, ProviderCompatProfile, ReplayAction, ReplayWindow,
 };
 use crate::core::llm::thinking_policy::{resolve_anthropic_request, ThinkingFormat};
 use crate::core::llm::types::{
@@ -291,7 +290,6 @@ fn build_messages(
             ReplayAction::KeepOpaque | ReplayAction::StripOpaque => {
                 original.without_completion_metadata()
             }
-            ReplayAction::ConvertToText(text) => apply_text_downgrade(original, &text),
         };
         match msg.role {
             ChatMessageRole::System => {

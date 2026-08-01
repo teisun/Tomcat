@@ -26,7 +26,7 @@
 
 use tracing::info;
 
-use crate::core::llm::{ChatMessage, ChatRequest};
+use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest};
 use crate::infra::events::{AgentEvent, Message};
 
 use super::steering_injection::inject_follow_up_messages;
@@ -51,6 +51,15 @@ pub(super) async fn run_reasoning_loop(
             return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
                 "llm_request",
                 "refusing to send a transcript with unpaired tool calls; hydrate or resolve the pending tool result first",
+            )));
+        }
+        if !matches!(
+            messages.last().map(|message| &message.role),
+            Some(ChatMessageRole::User | ChatMessageRole::Tool)
+        ) {
+            return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
+                "llm_request",
+                "refusing to send a transcript whose tail is not a user input or completed tool result",
             )));
         }
 

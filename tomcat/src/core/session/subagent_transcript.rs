@@ -7,10 +7,10 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::core::agent_loop::SubagentType;
-use crate::core::session::manager::{MessageAppendSink, generate_entry_id};
+use crate::core::session::manager::{generate_entry_id, MessageAppendSink};
 use crate::core::session::transcript::{
-    CustomEntry, MessageEntry, SessionHeader, SyncLevel, TranscriptEntry, append_entry_with_sync,
-    write_header,
+    append_entry_with_sync, write_header, CustomEntry, MessageEntry, SessionHeader, SyncLevel,
+    TranscriptEntry,
 };
 use crate::infra::error::AppError;
 

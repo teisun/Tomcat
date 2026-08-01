@@ -64,6 +64,7 @@ type BuildProviderOptions = {
   listSessionsImpl?: () => Promise<Record<string, unknown>>;
   openModelSettings?: (route?: "models") => void;
   requestImpl?: (command: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  retryImpl?: (sessionId: string, messageId: string) => Promise<void>;
   resumeImpl?: (sessionId: string) => Promise<void>;
   restoreCheckpointImpl?: (
     sessionId: string,
@@ -301,6 +302,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
     params?: { cursor?: string | null; limit?: number };
     sessionId?: string;
   }> = [];
+  const retryCalls: Array<{ messageId: string; sessionId: string }> = [];
   const resumeCalls: string[] = [];
   const sessionRouter = {
     buildResultMetadata(sessionId: string) {
@@ -385,6 +387,10 @@ function buildProvider(options: BuildProviderOptions = {}) {
     async newSession() {
       return "session-1";
     },
+    async retry(sessionId: string, messageId: string) {
+      retryCalls.push({ messageId, sessionId });
+      await options.retryImpl?.(sessionId, messageId);
+    },
     async resume(sessionId: string) {
       resumeCalls.push(sessionId);
       await options.resumeImpl?.(sessionId);
@@ -452,7 +458,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
   });
 
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
-  return { historyCalls, messenger, provider, resumeCalls, sessionState };
+  return { historyCalls, messenger, provider, retryCalls, resumeCalls, sessionState };
 }
 
 /** sha256 of the "png-bytes" fixture, i.e. the name the backend gives it. */
@@ -1185,29 +1191,62 @@ describe("webview provider integration", () => {
     expect(retriedUserMessages[0]).not.toHaveProperty("retryable");
   });
 
-  it("recovers an error-card retry from the durable prompt without duplicating its image reference", async () => {
-    const { messenger, provider, resumeCalls } = buildProvider({
-      historyMessages: [
-        {
-          id: "user-1",
-          message: {
-            content: [
-              { text: "retry this image", type: "text" },
-              {
-                blobSha: PNG_SHA,
-                filename: "retry-image.png",
-                mimeType: "image/png",
-                type: "input_image",
-              },
-            ],
-            role: "user",
-            superseded: true,
-            turn_failed: true,
-          },
-          type: "message",
+  it("keeps both Retry chapters and the failure card after copy-forward recovery", async () => {
+    const historyMessages: unknown[] = [
+      {
+        id: "user-1",
+        message: {
+          content: [
+            { text: "retry this image", type: "text" },
+            {
+              blobSha: PNG_SHA,
+              filename: "retry-image.png",
+              mimeType: "image/png",
+              type: "input_image",
+            },
+          ],
+          role: "user",
+          superseded: true,
+          turn_failed: true,
         },
-        { detail: "network failed", id: "error-1", summary: "network failed", type: "error" },
-      ],
+        type: "message",
+      },
+      { event: "auto_retry_start", id: "retry-start-1", type: "custom" },
+      { event: "auto_retry_end", id: "retry-end-1", type: "custom" },
+      { detail: "network failed", id: "error-1", summary: "network failed", type: "error" },
+    ];
+    const { messenger, provider, retryCalls, resumeCalls } = buildProvider({
+      getMessagesImpl: async () => ({
+        hasMore: false,
+        messages: historyMessages,
+        nextCursor: null,
+        sessionId: "session-1",
+      }),
+      retryImpl: async () => {
+        historyMessages.push(
+          {
+            id: "user-2",
+            message: {
+              content: [
+                { text: "retry this image", type: "text" },
+                {
+                  blobSha: PNG_SHA,
+                  filename: "retry-image.png",
+                  mimeType: "image/png",
+                  type: "input_image",
+                },
+              ],
+              role: "user",
+            },
+            type: "message",
+          },
+          {
+            id: "assistant-2",
+            message: { content: "recovered answer", role: "assistant" },
+            type: "message",
+          },
+        );
+      },
     });
 
     await provider.dispatchTestIntent({ messageId: "ready-error-retry", type: "ready" });
@@ -1217,22 +1256,118 @@ describe("webview provider integration", () => {
       type: "recoverErrorTurn",
     });
 
-    expect(resumeCalls).toEqual(["session-1"]);
+    expect(retryCalls).toEqual([{ messageId: "user-1", sessionId: "session-1" }]);
+    expect(resumeCalls).toEqual([]);
     expect(messenger.requestCalls.filter((call) => call.type === "prompt")).toHaveLength(0);
     const users = provider.currentState().sessionViews["session-1"]?.timeline.filter(
       (item) => item.type === "message" && item.kind === "user" && item.text === "retry this image",
     ) ?? [];
-    expect(users).toEqual([
-      expect.objectContaining({
-        attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
-        id: "user-1",
-      }),
-    ]);
+    expect(users).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
+          id: "user-1",
+        }),
+        expect.objectContaining({
+          attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
+          id: "user-2",
+        }),
+      ]),
+    );
+    expect(users).toHaveLength(2);
     expect(
-      provider.currentState().sessionViews["session-1"]?.timeline.some(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
         (item) => item.type === "message" && item.id === "error-1",
       ),
-    ).toBe(false);
+    ).toMatchObject({ kind: "error" });
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).not.toHaveProperty("recoveryAction");
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "assistant-2",
+      ),
+    ).toMatchObject({ kind: "assistant", text: "recovered answer" });
+    provider.dispose();
+  });
+
+  it("offers Resume after hydration repairs a dangling tool call and continues", async () => {
+    const historyMessages: unknown[] = [
+      {
+        id: "user-1",
+        message: { content: "inspect the project", role: "user" },
+        type: "message",
+      },
+      {
+        id: "assistant-1",
+        message: {
+          content: null,
+          role: "assistant",
+          tool_calls: [
+            {
+              function: { arguments: "{}", name: "read_file" },
+              id: "read-1",
+              type: "function",
+            },
+          ],
+        },
+        type: "message",
+      },
+      { detail: "connection dropped", id: "error-1", summary: "connection dropped", type: "error" },
+      {
+        id: "tool-1",
+        message: { content: "[pending]", role: "tool", tool_call_id: "read-1" },
+        type: "message",
+      },
+    ];
+    const { provider, retryCalls, resumeCalls } = buildProvider({
+      getMessagesImpl: async () => ({
+        hasMore: false,
+        messages: historyMessages,
+        nextCursor: null,
+        sessionId: "session-1",
+      }),
+      resumeImpl: async () => {
+        historyMessages.push({
+          id: "assistant-2",
+          message: { content: "continued after the recovered tool result", role: "assistant" },
+          type: "message",
+        });
+      },
+    });
+
+    await provider.dispatchTestIntent({ messageId: "ready-error-resume", type: "ready" });
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ recoveryAction: "resume" });
+
+    await provider.dispatchTestIntent({
+      data: { action: "resume", errorId: "error-1", sessionId: "session-1" },
+      messageId: "recover-error-resume",
+      type: "recoverErrorTurn",
+    });
+
+    expect(resumeCalls).toEqual(["session-1"]);
+    expect(retryCalls).toEqual([]);
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ kind: "error" });
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).not.toHaveProperty("recoveryAction");
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "assistant-2",
+      ),
+    ).toMatchObject({ kind: "assistant", text: "continued after the recovered tool result" });
     provider.dispose();
   });
 

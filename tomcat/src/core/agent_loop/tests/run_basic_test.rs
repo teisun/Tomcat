@@ -18,13 +18,13 @@ use crate::core::llm::multimodal::UNSUPPORTED_FILE_INPUT_PLACEHOLDER;
 use crate::core::llm::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, MessageKind, StreamEvent,
 };
-use crate::core::session::manager::{ContextState, MessageAppendSink, estimate_msg_chars};
-use crate::infra::error::{AppError, llm_http_status_error};
+use crate::core::session::manager::{estimate_msg_chars, ContextState, MessageAppendSink};
+use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::event_bus::EventBus;
-use crate::infra::{DefaultEventBus, EventContext, wire};
+use crate::infra::{wire, DefaultEventBus, EventContext};
 
 use super::mocks::{
-    MockLlmProvider, MockPrimitiveExecutor, RecordingStreamLlmProvider, test_binding,
+    test_binding, MockLlmProvider, MockPrimitiveExecutor, RecordingStreamLlmProvider,
 };
 
 fn unsupported_file_stream() -> Vec<Result<StreamEvent, AppError>> {
@@ -142,6 +142,35 @@ async fn run_returns_text_when_llm_returns_text_only() {
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "Hello world");
+}
+
+#[tokio::test]
+async fn run_refuses_to_send_an_assistant_tailed_request() {
+    let llm = Arc::new(MockLlmProvider::new(vec![]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        AgentLoopConfig {
+            session_id: "assistant-tail".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_
+        .run(vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("partial"),
+        ])
+        .await;
+    assert!(matches!(
+        outcome,
+        AgentRunOutcome::Failed(error)
+            if error.to_string().contains("tail is not a user input or completed tool result")
+    ));
 }
 
 /// 重试：Mock LLM 先返回 429 再返回成功 -> 自动重试后得到文本。
@@ -841,9 +870,9 @@ async fn run_tool_loop_emits_display_on_tool_execution_end() {
     );
 }
 
-/// 边界：空消息列表不崩溃，run 仍可调用（LLM 可能返回错误或空回复）。
+/// 边界：空消息列表必须被出站不变量明确拒绝，而不是发送畸形请求。
 #[tokio::test]
-async fn run_empty_messages_does_not_crash() {
+async fn run_empty_messages_fails_before_calling_the_llm() {
     let stream1: Vec<Result<StreamEvent, AppError>> = vec![Ok(StreamEvent::FinishReason {
         reason: "stop".to_string(),
     })];
@@ -864,8 +893,11 @@ async fn run_empty_messages_does_not_crash() {
     );
     let messages: Vec<ChatMessage> = vec![];
     let result = loop_.run(messages).await;
-    assert!(result.is_ok());
-    assert!(result.unwrap().final_text.is_empty());
+    assert!(matches!(
+        result,
+        AgentRunOutcome::Failed(error)
+            if error.to_string().contains("tail is not a user input or completed tool result")
+    ));
 }
 
 #[tokio::test]

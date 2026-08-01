@@ -21,8 +21,8 @@ use crate::core::llm::{
     ReasoningFormat, ReplayRequirement,
 };
 use crate::core::session::resume_index::{
-    ResumeAnchor, ResumeDayAnchor, ResumeEntryKind, ResumeIndex, load_or_rebuild_resume_index,
-    resume_index_path,
+    load_or_rebuild_resume_index, resume_index_path, ResumeAnchor, ResumeDayAnchor,
+    ResumeEntryKind, ResumeIndex,
 };
 
 fn tool_call_json(id: &str) -> serde_json::Value {
@@ -1513,6 +1513,59 @@ fn init_context_state_does_not_heal_when_non_tool_role_interrupts_tail_tool_roun
             )
         }),
         "broken tail should not append synthetic interrupted tool results"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_restores_persisted_message_kinds_and_defaults_legacy_rows() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = SessionManager::new(dir.clone());
+    let key = manager.current_session_key().to_string();
+    manager.create_session(&key, None).unwrap();
+
+    manager
+        .append_message(serde_json::json!({"role": "user", "content": "legacy"}))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "interjection",
+            "kind": "steering",
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "keep working",
+            "kind": "nudge",
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "background complete",
+            "kind": "signal",
+        }))
+        .unwrap();
+
+    let state = init_context_state(&manager, &ContextConfig::default(), "sys").unwrap();
+    assert_eq!(
+        state
+            .messages
+            .iter()
+            .map(|message| message.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            MessageKind::Normal,
+            MessageKind::Steering,
+            MessageKind::Nudge,
+            MessageKind::Signal,
+        ],
+        "restart hydration must retain every persisted synthetic-message identity"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

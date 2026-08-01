@@ -10,8 +10,8 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use super::super::cmd_thinking::{ThinkingAction, apply_action};
-use super::super::{ChatCommand, help_text, parse_chat_command};
+use super::super::cmd_thinking::{apply_action, ThinkingAction};
+use super::super::{help_text, parse_chat_command, ChatCommand};
 use crate::infra::config::ThinkingDisplay;
 
 #[test]

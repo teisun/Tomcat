@@ -1,6 +1,7 @@
 //! SessionManager struct and its implementation.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,23 +14,22 @@ use crate::core::session::append_message_chain::{
 };
 use crate::core::session::resume_index::remove_resume_index;
 use crate::core::session::store::{
-    DEFAULT_SESSION_KEY, SessionEntry, SessionStore, load_store, save_store,
+    load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
 };
 use crate::core::session::transcript::{
-    BranchSummaryEntry, CustomEntry, ErrorEntry, LabelEntry, MessageEntry,
-    MessageSummaryTitleRewrite, ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel,
-    ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry, TranscriptPage, append_entry,
-    append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
+    append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
     mark_message_entries_after_anchor_superseded,
     mark_tool_result_entries_by_tool_call_id_superseded, mark_trailing_user_messages_superseded,
-    read_entries_tail, read_entries_tail_before, read_header, revive_trailing_failed_user_messages,
-    rewrite_message_summary_titles_by_id, write_header,
+    read_entries_tail, read_entries_tail_before, read_header, rewrite_message_summary_titles_by_id,
+    write_header, BranchSummaryEntry, CustomEntry, ErrorEntry, LabelEntry, MessageEntry,
+    MessageSummaryTitleRewrite, ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel,
+    ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry, TranscriptPage,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
 
-use super::MessageAppendSink;
 use super::types::ContextState;
+use super::MessageAppendSink;
 
 static APPEND_SEQ: AtomicU64 = AtomicU64::new(0);
 static SESSION_ID_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -816,38 +816,121 @@ impl SessionManager {
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
         self.with_transcript_lock(&path, || {
-            let settled_pending_questions =
-                if message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
-                    Self::resolve_pending_questions_before_user_append(&path)?
-                } else {
-                    0
-                };
-            let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
-            let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
-            if let Err(reason) = validate_append_message(&message, &recent_msgs) {
-                let err = AppError::invariant("append_message_chain", reason);
-                return if chain_violation_is_invariant {
-                    Err(err)
-                } else {
-                    Err(AppError::Config(err.to_string()))
-                };
-            }
-            let id = forced_id
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(generate_entry_id);
-            let now = iso_ts_now()?;
-            let sync = Self::message_sync_level(&message);
-            let message_for_title = message.clone();
-            let entry = TranscriptEntry::Message(MessageEntry {
-                id: Some(id.clone()),
-                parent_id: None,
-                timestamp: now,
+            self.append_message_while_locked(
+                &path,
                 message,
-            });
-            append_entry_with_sync(&path, &entry, sync)?;
-            let _ = self.ensure_title_from_message(&message_for_title);
-            Ok((id, settled_pending_questions))
+                chain_violation_is_invariant,
+                forced_id,
+            )
         })
+    }
+
+    /// 追加一条 message；调用方必须已经持有该 transcript 的锁。
+    ///
+    /// Retry 的 copy-forward 需要把“锚点仍有效”与追加新消息放在一个临界区内。
+    /// 因此不能再调用会二次获取同一把非重入 mutex 的公开 append 方法，而应复用这段
+    /// 锁内实现，保持普通输入与复制输入的 pending-question 结算、消息链校验和标题更新
+    /// 完全一致。
+    fn append_message_while_locked(
+        &self,
+        path: &Path,
+        message: serde_json::Value,
+        chain_violation_is_invariant: bool,
+        forced_id: Option<&str>,
+    ) -> Result<(String, usize), AppError> {
+        let settled_pending_questions =
+            if message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
+                Self::resolve_pending_questions_before_user_append(path)?
+            } else {
+                0
+            };
+        let recent = read_entries_tail(path, VALIDATE_TAIL_CAP).unwrap_or_default();
+        let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
+        if let Err(reason) = validate_append_message(&message, &recent_msgs) {
+            let err = AppError::invariant("append_message_chain", reason);
+            return if chain_violation_is_invariant {
+                Err(err)
+            } else {
+                Err(AppError::Config(err.to_string()))
+            };
+        }
+        let id = forced_id
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(generate_entry_id);
+        let now = iso_ts_now()?;
+        let sync = Self::message_sync_level(&message);
+        let message_for_title = message.clone();
+        let entry = TranscriptEntry::Message(MessageEntry {
+            id: Some(id.clone()),
+            parent_id: None,
+            timestamp: now,
+            message,
+        });
+        append_entry_with_sync(path, &entry, sync)?;
+        let _ = self.ensure_title_from_message(&message_for_title);
+        Ok((id, settled_pending_questions))
+    }
+
+    /// 在完整 transcript 中按 entry id 找到可复制的 user message。
+    ///
+    /// 锚点本身不要求带 `turn_failed` 或 `superseded`：盖章只是失败历史的展示/注水语义，
+    /// 不是 Retry 的控制流前提。唯一的时序前提是锚点之后没有更新的活 user 输入；一旦
+    /// copy-forward 成功，新行本身就让同一锚点的后续点击变成陈旧请求。
+    fn retryable_user_message_from_transcript(
+        path: &Path,
+        message_id: &str,
+    ) -> Result<Option<serde_json::Value>, AppError> {
+        let file = std::fs::File::open(path).map_err(AppError::Io)?;
+        let reader = BufReader::new(file);
+        let mut saw_anchor = false;
+        let mut source = None;
+
+        for (line_index, line) in reader.lines().enumerate() {
+            // JSONL 首行是 session header，不是 TranscriptEntry。
+            if line_index == 0 {
+                continue;
+            }
+            let line = line.map_err(AppError::Io)?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let entry = serde_json::from_str::<TranscriptEntry>(trimmed)?;
+            let TranscriptEntry::Message(message) = entry else {
+                continue;
+            };
+
+            if !saw_anchor && message.id.as_deref() == Some(message_id) {
+                if message
+                    .message
+                    .get("role")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("user")
+                {
+                    return Ok(None);
+                }
+                source = Some(message.message);
+                saw_anchor = true;
+                continue;
+            }
+
+            if saw_anchor
+                && message
+                    .message
+                    .get("role")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("user")
+                && message
+                    .message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                return Ok(None);
+            }
+        }
+
+        Ok(source)
     }
 
     /// 所有当前会话 user-message 入口共用的纵深防御。
@@ -964,6 +1047,39 @@ impl SessionManager {
     ) -> Result<(String, bool), AppError> {
         self.append_message_internal(message, true, None)
             .map(|(id, settled)| (id, settled > 0))
+    }
+
+    /// Retry 的 copy-forward：保留失败的旧 user message，追加一条内容相同的新 user message。
+    ///
+    /// 这不是“撤销失败章”。失败记录必须留在 transcript 中，供 UI 和诊断还原真实历史；
+    /// 新行才是下一轮的活输入。锚点查找、陈旧判定与追加同处一个 transcript 临界区，
+    /// 因此同一张错误卡的并发/重复点击至多追加一次。
+    ///
+    /// `retry_target_stale` 表示锚点不存在、不是 user，或其后已有更新的活 user 输入。
+    pub fn copy_user_message_forward(&self, message_id: &str) -> Result<String, AppError> {
+        self.append_in_flight.fetch_add(1, Ordering::SeqCst);
+        let _guard = AppendInFlightGuard {
+            counter: Arc::clone(&self.append_in_flight),
+        };
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        self.with_transcript_lock(&path, || {
+            let Some(mut message) =
+                Self::retryable_user_message_from_transcript(&path, message_id)?
+            else {
+                return Err(AppError::Config("retry_target_stale".to_string()));
+            };
+            let Some(message_object) = message.as_object_mut() else {
+                return Err(AppError::Config("retry_target_stale".to_string()));
+            };
+            // The copied row starts a new live turn. The old row remains untouched, including
+            // both markers, so historical rendering and post-mortem inspection stay truthful.
+            message_object.remove("superseded");
+            message_object.remove("turn_failed");
+            self.append_message_while_locked(&path, message, true, None)
+                .map(|(id, _)| id)
+        })
     }
 
     /// 追加 message（dispatcher/插件路径：校验失败返回 Err 而非 panic）。
@@ -1264,13 +1380,6 @@ impl SessionManager {
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
         self.with_transcript_lock(&path, || mark_trailing_user_messages_superseded(&path))
-    }
-
-    pub fn revive_trailing_failed_user_messages(&self) -> Result<usize, AppError> {
-        let path = self
-            .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        self.with_transcript_lock(&path, || revive_trailing_failed_user_messages(&path))
     }
 
     /// 将同一 `tool_call_id` 的旧结果标 superseded，并在同一临界区内追加新的 tool result。

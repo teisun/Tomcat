@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::core::agent_loop::SubagentType;
 use crate::core::session::subagent_transcript::{
-    JsonlFileAppendSink, open_subagent_transcript, subagent_transcript_path,
+    open_subagent_transcript, subagent_transcript_path, JsonlFileAppendSink,
 };
 use crate::core::session::{MessageAppendSink, SessionHeader, TranscriptEntry};
 
