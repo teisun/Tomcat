@@ -32,7 +32,7 @@ function outcomeLabel(outcome: AskQuestionOutcome): string {
     case "host_disconnected":
       return "Disconnected";
     case "cancelled_unknown":
-      return "Cancelled (legacy result)";
+      return "Cancelled";
   }
 }
 
@@ -92,7 +92,9 @@ export function AnswerCard({
     >
       <div className="tc-card__header">
         <h3>Answers</h3>
-        <span className="tc-chip" data-testid="answer-card-outcome">{summary}</span>
+        <span className="tc-answer-card__outcome" data-testid="answer-card-outcome">
+          {summary}
+        </span>
       </div>
       <div className="tc-answer-card__questions">
         {questions.map((question, questionIndex) => {
@@ -108,9 +110,11 @@ export function AnswerCard({
               <div className="tc-approval-question__prompt">
                 <span className="tc-approval-question__index">{questionIndex + 1}.</span>
                 <p>{question.prompt}</p>
-                <span className="tc-answer-card__status" data-testid={`answer-status-${question.id}`}>
-                  {status}
-                </span>
+                {outcome === "answered" ? (
+                  <span className="tc-answer-card__status" data-testid={`answer-status-${question.id}`}>
+                    {status}
+                  </span>
+                ) : null}
               </div>
               <div
                 aria-label={`${question.prompt}: ${status}`}

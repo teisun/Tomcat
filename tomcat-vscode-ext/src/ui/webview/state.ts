@@ -17,6 +17,10 @@ import {
   planEventState,
   type ParticipantPlanState,
 } from "../../shared/planState";
+import {
+  INTERRUPTED_TOOL_RESULT_TEXT,
+  PENDING_TOOL_RESULT_TEXT,
+} from "../../shared/toolResultPlaceholders";
 import type {
   HostEventFrameContent,
   WebviewApprovalCard,
@@ -54,8 +58,10 @@ type SessionRuntimeState = {
   hasMoreHistory: boolean;
   historyEntries: unknown[];
   historyLoading: boolean;
+  dismissedErrorIds: Set<string>;
   localUserMessageIds: Set<string>;
   oldestHistoryCursor: string | null;
+  turnHadAssistantText: boolean;
 };
 
 type UserSubmitKind = "prompt" | "steer";
@@ -63,10 +69,12 @@ type UserSubmitKind = "prompt" | "steer";
 type AppendMessageOptions = {
   detailText?: string | null;
   deliveryError?: string | null;
+  deliveryErrorDetail?: string | null;
   deliveryState?: "failed" | "pending";
   attachments?: NonNullable<WebviewMessageBlock["attachments"]>;
   label?: string | null;
   preferredId?: string | null;
+  recoveryAction?: ErrorRecoveryAction;
   retryable?: boolean;
   segments?: WebviewMessageSegment[];
   submitKind?: UserSubmitKind;
@@ -287,13 +295,42 @@ function isVisibleUserMessageEntry(entry: unknown): boolean {
   );
 }
 
-function filterSupersededHistoryEntries(entries: unknown[]): unknown[] {
+function isVisibleUserOrAssistantMessageEntry(entry: unknown): boolean {
+  return (
+    isRecord(entry) &&
+    entry.type === "message" &&
+    isRecord(entry.message) &&
+    (entry.message.role === "user" || entry.message.role === "assistant") &&
+    entry.message.superseded !== true
+  );
+}
+
+function historyEntryId(entry: unknown): string | null {
+  return isRecord(entry) && typeof entry.id === "string" ? entry.id : null;
+}
+
+function filterSupersededHistoryEntries(
+  entries: unknown[],
+  localUserMessageIds: ReadonlySet<string>,
+): unknown[] {
   const filtered: unknown[] = [];
   let inSupersededSpan = false;
   for (const entry of entries) {
     if (isSupersededMessageEntry(entry)) {
       if (isTurnFailedMessageEntry(entry)) {
-        filtered.push(entry);
+        // The optimistic failed bubble has the same forced `userMessageId`. It owns the
+        // retry controls, so showing this durable copy as well produces two identical
+        // user messages. Once the local bubble settles, this historical copy is visible
+        // again as the ordinary record of what the user sent.
+        if (!localUserMessageIds.has(historyEntryId(entry) ?? "")) {
+          filtered.push(entry);
+        }
+        continue;
+      }
+      // Resume replaces only a synthetic tool result (`[pending]`) under the same
+      // declaration. That is a point replacement, not a checkpoint-style span:
+      // hiding until the next user message would also hide the real appended result.
+      if (messageRole(entry) === "tool") {
         continue;
       }
       inSupersededSpan = true;
@@ -313,6 +350,137 @@ function filterSupersededHistoryEntries(entries: unknown[]): unknown[] {
     filtered.push(entry);
   }
   return filtered;
+}
+
+type ErrorRecoveryAction = "resume" | "retry";
+
+function messageRole(entry: unknown): string | null {
+  return isRecord(entry) && entry.type === "message" && isRecord(entry.message) &&
+    typeof entry.message.role === "string"
+    ? entry.message.role
+    : null;
+}
+
+function toolCallIds(entry: unknown): string[] {
+  if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) {
+    return [];
+  }
+  const calls = entry.message.tool_calls ?? entry.message.toolCalls;
+  if (!Array.isArray(calls)) {
+    return [];
+  }
+  return calls.flatMap((call) =>
+    isRecord(call) && typeof call.id === "string" && call.id.trim() ? [call.id] : [],
+  );
+}
+
+function toolResultId(entry: unknown): string | null {
+  if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) {
+    return null;
+  }
+  const value = entry.message.tool_call_id ?? entry.message.toolCallId;
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+/**
+ * Error entries have no direct turn id. The transcript's linear ordering is the durable
+ * relation: find the nearest user input, then inspect tool calls in that turn. No calls
+ * means replaying the prompt is safe (Retry); all calls paired with results means the
+ * transcript itself is ready for a no-input Resume. Incomplete calls are Batch 7's
+ * pending-tool recovery and deliberately receive no misleading button here.
+ */
+function isCurrentErrorEntry(entries: unknown[], errorIndex: number): boolean {
+  for (let index = errorIndex + 1; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (isRecord(entry) && entry.type === "error") {
+      return false;
+    }
+    if (isVisibleUserOrAssistantMessageEntry(entry)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function filterHandledErrorEntries(
+  entries: unknown[],
+  dismissedErrorIds: ReadonlySet<string>,
+): unknown[] {
+  return entries.filter((entry, index) => {
+    const errorId = historyEntryId(entry);
+    if (!errorId || !isRecord(entry) || entry.type !== "error") {
+      return true;
+    }
+    return !dismissedErrorIds.has(errorId) && isCurrentErrorEntry(entries, index);
+  });
+}
+
+function buildErrorRecoveryActions(
+  entries: unknown[],
+  sessionBusy: boolean,
+): Map<string, ErrorRecoveryAction> {
+  const actions = new Map<string, ErrorRecoveryAction>();
+  if (sessionBusy) {
+    return actions;
+  }
+  for (let errorIndex = 0; errorIndex < entries.length; errorIndex += 1) {
+    const error = entries[errorIndex];
+    const errorId = historyEntryId(error);
+    if (
+      !errorId ||
+      !isRecord(error) ||
+      error.type !== "error" ||
+      !isCurrentErrorEntry(entries, errorIndex)
+    ) {
+      continue;
+    }
+    let userIndex = errorIndex - 1;
+    while (userIndex >= 0 && messageRole(entries[userIndex]) !== "user") {
+      userIndex -= 1;
+    }
+    if (userIndex < 0) {
+      continue;
+    }
+    const calls = new Set<string>();
+    const results = new Set<string>();
+    for (let index = userIndex + 1; index < errorIndex; index += 1) {
+      for (const callId of toolCallIds(entries[index])) calls.add(callId);
+      if (messageRole(entries[index]) === "tool") {
+        const resultId = toolResultId(entries[index]);
+        if (resultId) results.add(resultId);
+      }
+    }
+    if (calls.size === 0) {
+      actions.set(errorId, "retry");
+    } else if ([...calls].every((callId) => results.has(callId))) {
+      actions.set(errorId, "resume");
+    }
+  }
+  return actions;
+}
+
+function currentTurnRecoveryAction(
+  session: WebviewSessionSnapshot,
+): ErrorRecoveryAction | undefined {
+  let userIndex = -1;
+  for (let index = session.timeline.length - 1; index >= 0; index -= 1) {
+    const item = session.timeline[index];
+    if (item.type === "message" && item.kind === "user") {
+      userIndex = index;
+      break;
+    }
+  }
+  if (userIndex < 0) {
+    return undefined;
+  }
+
+  const tools = session.timeline.slice(userIndex + 1).filter(
+    (item): item is WebviewToolCard => item.type === "tool",
+  );
+  if (tools.length === 0) {
+    return "retry";
+  }
+  return tools.every((tool) => tool.status === "complete") ? "resume" : undefined;
 }
 
 function planEventMessageId(
@@ -1446,6 +1614,7 @@ function applyHistoryEntry(
   toolCallToAssistant: Map<string, string>,
   historyToolArgs: Map<string, Record<string, unknown>>,
   standardToolResultIds: Set<string>,
+  errorRecoveryActions: ReadonlyMap<string, ErrorRecoveryAction>,
 ): void {
   if (!isRecord(entry) || typeof entry.type !== "string") {
     return;
@@ -1469,6 +1638,10 @@ function applyHistoryEntry(
   }
 
   if (entry.type === "error") {
+    const id =
+      typeof entry.id === "string"
+        ? entry.id
+        : `history-error-${session.timeline.length + 1}`;
     const summary =
       typeof entry.summary === "string" && entry.summary.length > 0
         ? entry.summary
@@ -1477,11 +1650,12 @@ function applyHistoryEntry(
           : "Unknown error";
     session.timeline.push({
       detailText: typeof entry.detail === "string" ? entry.detail : null,
-      id:
-        typeof entry.id === "string"
-          ? entry.id
-          : `history-error-${session.timeline.length + 1}`,
+      failureDomain: typeof entry.failureDomain === "string" ? entry.failureDomain : null,
+      failureKind: typeof entry.failureKind === "string" ? entry.failureKind : null,
+      id,
       kind: "error",
+      recoveryAction: errorRecoveryActions.get(id),
+      statusCode: typeof entry.statusCode === "number" ? entry.statusCode : null,
       text: summary,
       type: "message",
     } satisfies WebviewMessageBlock);
@@ -1549,6 +1723,16 @@ function applyHistoryEntry(
       const toolCallId = extractToolCallId(entry.message) ?? id;
       const args = historyToolArgs.get(toolCallId);
       const toolName = historyToolNames.get(toolCallId) ?? "tool";
+      if (isPendingAskQuestionResult(toolName, text)) {
+        const request = pendingApprovalRequest(session.sessionId, toolCallId, args);
+        if (request) {
+          upsertApproval(session, request, session.sessionId);
+        }
+        return;
+      }
+      if (toolName === "ask_question") {
+        resolveApprovalByToolCallId(session, toolCallId);
+      }
       const planReference = derivePlanReference(toolName, args, text);
       const planActivity = derivePlanActivity(toolName, text, args);
       const tool: WebviewToolCard = {
@@ -1611,8 +1795,10 @@ function createSessionRuntime(): SessionRuntimeState {
     hasMoreHistory: false,
     historyEntries: [],
     historyLoading: false,
+    dismissedErrorIds: new Set<string>(),
     localUserMessageIds: new Set<string>(),
     oldestHistoryCursor: null,
+    turnHadAssistantText: false,
   };
 }
 
@@ -1892,9 +2078,10 @@ function upsertApproval(
   request: AskQuestionWireRequest,
   sessionId?: string | null,
 ): WebviewApprovalCard {
+  const identity = approvalIdentity(request);
   const existing = session.timeline.find(
     (item): item is WebviewApprovalCard =>
-      item.type === "approval" && item.request.requestId === request.requestId,
+      item.type === "approval" && approvalIdentity(item.request) === identity,
   );
   if (existing) {
     existing.request = request;
@@ -1903,7 +2090,7 @@ function upsertApproval(
     return existing;
   }
   const created: WebviewApprovalCard = {
-    id: createTimelineId(session, "approval", request.requestId),
+    id: createTimelineId(session, "approval", identity),
     request,
     resolved: false,
     sessionId,
@@ -1911,6 +2098,40 @@ function upsertApproval(
   };
   session.timeline.push(created);
   return created;
+}
+
+/// `toolCallId` survives a restart whereas `requestId` belongs to one host connection.
+/// A historical placeholder and its re-armed control request therefore must address one card.
+function approvalIdentity(request: AskQuestionWireRequest): string {
+  return request.toolCallId?.trim() || `request:${request.requestId}`;
+}
+
+function pendingApprovalRequest(
+  sessionId: string,
+  toolCallId: string,
+  args: Record<string, unknown> | undefined,
+): AskQuestionWireRequest | null {
+  if (!Array.isArray(args?.questions)) {
+    return null;
+  }
+  return {
+    requestId: `pending:${toolCallId}`,
+    responseEvent: "",
+    sessionId,
+    toolCallId,
+    questions: args.questions as AskQuestionWireRequest["questions"],
+  };
+}
+
+function resolveApprovalByToolCallId(
+  session: WebviewSessionSnapshot,
+  toolCallId: string,
+): void {
+  for (const item of session.timeline) {
+    if (item.type === "approval" && item.request.toolCallId === toolCallId) {
+      item.resolved = true;
+    }
+  }
 }
 
 function pushMessage(
@@ -1945,6 +2166,9 @@ function pushMessage(
   }
   if (options.retryable !== undefined) {
     next.retryable = options.retryable;
+  }
+  if (options.recoveryAction !== undefined) {
+    next.recoveryAction = options.recoveryAction;
   }
   if (options.submitKind) {
     next.submitKind = options.submitKind;
@@ -2004,10 +2228,7 @@ function shouldRetainLiveTimelineItem(
   switch (item.type) {
     case "message":
       if (item.kind === "user") {
-        return (
-          runtime.localUserMessageIds.has(item.id) &&
-          (item.deliveryState === "pending" || item.deliveryState === "failed")
-        );
+        return runtime.localUserMessageIds.has(item.id);
       }
       return (
         item.kind === "assistant" &&
@@ -2056,7 +2277,22 @@ function messageExistsAtTail(
 }
 
 function toolResultWasInterrupted(result: unknown): boolean {
-  return typeof result === "string" && result.trim() === "[interrupted]";
+  return typeof result === "string" && result.trim() === INTERRUPTED_TOOL_RESULT_TEXT;
+}
+
+/**
+ * GUI-side pending-question predicate. `filterSupersededHistoryEntries` runs before
+ * `applyHistoryEntry`, so the result passed here is necessarily the latest active result.
+ */
+function isPendingAskQuestionResult(
+  toolName: string,
+  result: unknown,
+): boolean {
+  return (
+    toolName === "ask_question" &&
+    typeof result === "string" &&
+    result.trim() === PENDING_TOOL_RESULT_TEXT
+  );
 }
 
 function markRunningToolsInterrupted(session: WebviewSessionSnapshot): void {
@@ -2446,6 +2682,15 @@ export class WebviewStateStore {
   ): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
+    for (const item of session.timeline) {
+      if (item.type === "message" && item.kind === "error") {
+        runtime.dismissedErrorIds.add(item.id);
+      }
+    }
+    session.timeline = session.timeline.filter(
+      (item) => item.type !== "message" || item.kind !== "error",
+    );
+    this.demoteOtherFailedLocalUserMessages(sessionId, options.messageId);
     pushMessage(session, "user", text, options.messageId, {
       deliveryState: "pending",
       attachments: options.attachments,
@@ -2455,11 +2700,29 @@ export class WebviewStateStore {
     runtime.localUserMessageIds.add(options.messageId);
   }
 
+  dismissErrorRecovery(sessionId: string, errorId: string): void {
+    const session = this.ensureSession(sessionId);
+    const runtime = this.ensureRuntime(sessionId);
+    runtime.dismissedErrorIds.add(errorId);
+    session.timeline = session.timeline.filter(
+      (item) => item.type !== "message" || item.kind !== "error" || item.id !== errorId,
+    );
+  }
+
+  restoreDismissedErrorRecovery(sessionId: string, errorId: string): void {
+    const runtime = this.ensureRuntime(sessionId);
+    if (!runtime.dismissedErrorIds.delete(errorId)) {
+      return;
+    }
+    this.rebuildHistoryTimeline(sessionId);
+  }
+
   markLocalUserMessageFailed(
     sessionId: string,
     messageId: string,
     error: string,
     retryable: boolean,
+    detail?: string,
   ): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
@@ -2473,6 +2736,7 @@ export class WebviewStateStore {
       return;
     }
     message.deliveryError = error;
+    message.deliveryErrorDetail = detail ?? error;
     message.deliveryState = "failed";
     message.retryable = retryable;
     runtime.localUserMessageIds.add(messageId);
@@ -2491,6 +2755,7 @@ export class WebviewStateStore {
       return;
     }
     delete message.deliveryError;
+    delete message.deliveryErrorDetail;
     message.deliveryState = "pending";
     delete message.retryable;
     runtime.localUserMessageIds.add(messageId);
@@ -2499,6 +2764,7 @@ export class WebviewStateStore {
   markLocalUserMessageConfirmed(sessionId: string, messageId: string): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
+    this.demoteOtherFailedLocalUserMessages(sessionId, messageId);
     runtime.localUserMessageIds.delete(messageId);
     const message = session.timeline.find(
       (item): item is WebviewMessageBlock =>
@@ -2511,6 +2777,7 @@ export class WebviewStateStore {
     }
     delete message.deliveryState;
     delete message.deliveryError;
+    delete message.deliveryErrorDetail;
     delete message.retryable;
   }
 
@@ -2565,6 +2832,7 @@ export class WebviewStateStore {
     const runtime = this.ensureRuntime(session.sessionId);
     switch (frame.type) {
       case "turn_start":
+        runtime.turnHadAssistantText = false;
         clearStreaming(runtime);
         return NO_SESSION_RENDER_MUTATION;
       case "message_start": {
@@ -2620,6 +2888,14 @@ export class WebviewStateStore {
         clearActiveAssistant(runtime);
         if (frame.error && frame.error !== "interrupted") {
           pushMessage(session, "error", frame.error);
+        } else if (!frame.error && !runtime.turnHadAssistantText) {
+          pushMessage(
+            session,
+            "error",
+            "本轮没有产生可见回答。",
+            undefined,
+            { recoveryAction: currentTurnRecoveryAction(session) },
+          );
         }
         return sessionRenderMutation(session.sessionId);
       case "agent_interrupted":
@@ -2717,6 +2993,9 @@ export class WebviewStateStore {
           return NO_SESSION_RENDER_MUTATION;
         }
         if (delta.kind === "content_delta") {
+          if (delta.delta.trim().length > 0) {
+            runtime.turnHadAssistantText = true;
+          }
           runtime.activeAssistantId = assistantMessageId;
           const next = appendStreamingMessage(
             session,
@@ -2972,12 +3251,16 @@ export class WebviewStateStore {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
     const renderableEntries = trimLeadingHistoryEntries(
-      filterSupersededHistoryEntries(runtime.historyEntries),
+      filterHandledErrorEntries(
+        filterSupersededHistoryEntries(runtime.historyEntries, runtime.localUserMessageIds),
+        runtime.dismissedErrorIds,
+      ),
     );
     const historyToolNames = buildHistoryToolNameLookup(renderableEntries);
     const toolCallToAssistant = buildToolCallToAssistantMap(renderableEntries);
     const historyToolArgs = buildHistoryToolArgsLookup(renderableEntries);
     const standardToolResultIds = buildHistoryToolResultIds(renderableEntries);
+    const errorRecoveryActions = buildErrorRecoveryActions(renderableEntries, session.busy);
     const historySession = createEmptySession(sessionId);
     for (const entry of renderableEntries) {
       applyHistoryEntry(
@@ -2987,7 +3270,27 @@ export class WebviewStateStore {
         toolCallToAssistant,
         historyToolArgs,
         standardToolResultIds,
+        errorRecoveryActions,
       );
+    }
+    const completedAskQuestionToolCalls = new Set(
+      historySession.timeline.flatMap((item) =>
+        item.type === "tool" && item.toolName === "ask_question"
+          ? [item.toolCallId]
+          : [],
+      ),
+    );
+    // A second window can retain a live approval card while another window answers it.
+    // Once refreshed history contains the real result, close the old card by durable
+    // toolCallId (not the connection-scoped requestId) before retaining live items.
+    for (const item of session.timeline) {
+      if (
+        item.type === "approval" &&
+        item.request.toolCallId &&
+        completedAskQuestionToolCalls.has(item.request.toolCallId)
+      ) {
+        item.resolved = true;
+      }
     }
     const existingKeys = new Set(
       historySession.timeline.map((item) => timelineEntityKey(item)),
@@ -3052,6 +3355,29 @@ export class WebviewStateStore {
     session.hasMoreHistory = runtime.hasMoreHistory;
     session.historyLoading = runtime.historyLoading;
     this.resolveHistoryAttachmentUris(session);
+  }
+
+  /**
+   * A session has at most one actionable delivery failure. Older failures remain as
+   * ordinary user messages so they do not vanish from an in-memory busy rejection, but
+   * cannot hijack later retry actions or accumulate red cards.
+   */
+  private demoteOtherFailedLocalUserMessages(sessionId: string, exceptMessageId: string): void {
+    const session = this.ensureSession(sessionId);
+    for (const item of session.timeline) {
+      if (
+        item.type !== "message" ||
+        item.kind !== "user" ||
+        item.id === exceptMessageId ||
+        item.deliveryState !== "failed"
+      ) {
+        continue;
+      }
+      delete item.deliveryState;
+      delete item.deliveryError;
+      delete item.deliveryErrorDetail;
+      delete item.retryable;
+    }
   }
 
   /**

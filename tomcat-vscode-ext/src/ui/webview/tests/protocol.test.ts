@@ -68,6 +68,13 @@ describe("webview protocol helpers", () => {
         type: "pickContext",
       }),
     ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: { sessionId: "s1" },
+        messageId: "compact-1",
+        type: "compact",
+      }),
+    ).toBe(true);
 
     expect(
       isWebviewIntent({

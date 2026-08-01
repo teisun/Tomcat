@@ -1,7 +1,7 @@
 use super::super::args::{has_real_edits, parse_edit_args, parse_edit_ops};
 use super::super::edit_sim::simulate_apply_edits;
-use super::super::guard::check_mutation_stamp;
-use super::super::{ToolDisplay, ToolExecCtx, AGENT_PLUGIN_ID};
+use super::super::guard::{check_mutation_stamp, refresh_read_stamp};
+use super::super::{AGENT_PLUGIN_ID, ToolDisplay, ToolExecCtx};
 use crate::core::tools::primitive::EditOperation;
 use crate::infra::events::{ToolDisplayFileEntry, ToolDisplayFileStatus};
 
@@ -26,6 +26,9 @@ pub(in super::super) async fn handle_edit(
         .await
         .map(|r| {
             if r.applied {
+                if let Some(state) = ctx.read_file_state {
+                    refresh_read_stamp(state, path, ctx.tool_call_id);
+                }
                 *display_out = Some(ToolDisplay::File {
                     file: r.path.clone(),
                     added: r.added,
@@ -168,7 +171,9 @@ async fn edit_batch(
             .await
         {
             Ok(result) if result.applied => {
-                refresh_read_stamp(ctx, &file.path);
+                if let Some(state) = ctx.read_file_state {
+                    refresh_read_stamp(state, &file.path, ctx.tool_call_id);
+                }
                 entries.push(ToolDisplayFileEntry {
                     file: result.path,
                     added: result.added,
@@ -248,40 +253,6 @@ fn failed_entry(file: String, error: String) -> ToolDisplayFileEntry {
         status: Some(ToolDisplayFileStatus::Failed),
         note: Some(error),
     }
-}
-
-/// 落盘之后立刻用新内容刷新 ReadStamp，否则同一回合里对刚改过的文件再 edit 会被
-/// 「Stale：自上次 read 后已被修改」挡下 —— 而那次修改正是我们自己做的。
-fn refresh_read_stamp(ctx: &ToolExecCtx<'_>, path: &str) {
-    let Some(state) = ctx.read_file_state else {
-        return;
-    };
-    let Ok(resolved) = crate::infra::platform::normalize_path(path) else {
-        return;
-    };
-    let Ok(meta) = std::fs::metadata(&resolved) else {
-        return;
-    };
-    if meta.is_dir() {
-        return;
-    }
-    let content = std::fs::read(&resolved).unwrap_or_default();
-    state.put(
-        resolved,
-        crate::core::tools::pipeline::read_state::ReadStamp {
-            mtime_ms: crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta),
-            size: meta.len(),
-            content_hash: crate::core::tools::pipeline::read_state::hash_content(&content),
-            offset: None,
-            limit: None,
-            is_partial_view: false,
-            // 落盘后的正文模型并没有见过（它看到的是 diff），所以这条 stamp 只用来放行
-            // 后续的 edit，不能拿来短路 read —— 那会是「你已经读过了」的假话。
-            covered_lines: None,
-            reached_eof: false,
-            tool_call_id: Some(ctx.tool_call_id.to_string()),
-        },
-    );
 }
 
 fn precheck_file(ctx: &ToolExecCtx<'_>, path: &str) -> Result<(), String> {

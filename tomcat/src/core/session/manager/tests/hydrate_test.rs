@@ -21,8 +21,8 @@ use crate::core::llm::{
     ReasoningFormat, ReplayRequirement,
 };
 use crate::core::session::resume_index::{
-    load_or_rebuild_resume_index, resume_index_path, ResumeAnchor, ResumeDayAnchor,
-    ResumeEntryKind, ResumeIndex,
+    ResumeAnchor, ResumeDayAnchor, ResumeEntryKind, ResumeIndex, load_or_rebuild_resume_index,
+    resume_index_path,
 };
 
 fn tool_call_json(id: &str) -> serde_json::Value {
@@ -32,6 +32,17 @@ fn tool_call_json(id: &str) -> serde_json::Value {
         "function": {
             "name": "read",
             "arguments": "{}"
+        }
+    })
+}
+
+fn ask_question_tool_call_json(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "type": "function",
+        "function": {
+            "name": "ask_question",
+            "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
         }
     })
 }
@@ -1145,6 +1156,8 @@ fn init_context_state_skips_error_entries_and_failed_turn_tail() {
         api_family: Some("responses".to_string()),
         status_code: Some(403),
         request_id: Some("req_123".to_string()),
+        failure_kind: Some("authentication".to_string()),
+        failure_domain: Some("account".to_string()),
         summary: "API 错误 403 · gateway".to_string(),
         detail: "API 错误 403 原文".to_string(),
     })
@@ -1189,7 +1202,10 @@ fn init_context_state_heals_single_dangling_tool_call_and_appends_marker() {
         .find(|m| m.role == ChatMessageRole::Tool)
         .expect("hydrated messages should include synthetic tool result");
     assert_eq!(healed_tool.tool_call_id.as_deref(), Some("call_1"));
-    assert_eq!(healed_tool.text_content(), Some("[interrupted]"));
+    assert_eq!(
+        healed_tool.text_content(),
+        Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+    );
 
     let path = mgr.current_transcript_path().unwrap().unwrap();
     let entries = crate::core::session::transcript::read_entries_tail(&path, 16).unwrap();
@@ -1201,13 +1217,143 @@ fn init_context_state_heals_single_dangling_tool_call_and_appends_marker() {
                 TranscriptEntry::Message(me)
                     if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
                         && me.message.get("tool_call_id").and_then(|v| v.as_str()) == Some("call_1")
-                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+                        && me.message.get("content").and_then(|v| v.as_str())
+                            == Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
             )
         })
         .count();
     assert_eq!(
         interrupted_tools, 1,
         "should append exactly one synthetic tool result"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_heals_dangling_ask_question_with_pending_placeholder() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"需要你的选择",
+        "tool_calls":[ask_question_tool_call_json("ask_call_1")]
+    }))
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    let healed_tool = state
+        .messages
+        .iter()
+        .find(|message| message.role == ChatMessageRole::Tool)
+        .expect("hydrate should materialize a pending ask_question result");
+    assert_eq!(healed_tool.tool_call_id.as_deref(), Some("ask_call_1"));
+    assert_eq!(
+        healed_tool.text_content(),
+        Some(crate::core::session::manager::PENDING_TOOL_RESULT_TEXT)
+    );
+
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let entries = crate::core::session::transcript::read_entries_tail(&path, 8).unwrap();
+    assert!(
+        entries.iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Message(me)
+                    if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
+                        && me.message.get("tool_call_id").and_then(|v| v.as_str()) == Some("ask_call_1")
+                        && me.message.get("content").and_then(|v| v.as_str())
+                            == Some(crate::core::session::manager::PENDING_TOOL_RESULT_TEXT)
+            )
+        }),
+        "restart hydration must persist a [pending] tool result for ask_question"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_heals_mixed_tail_with_terminal_reads_and_pending_ask_question() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"mixed tool batch",
+        "tool_calls":[
+            tool_call_json("read_1"),
+            tool_call_json("read_2"),
+            tool_call_json("read_3"),
+            ask_question_tool_call_json("ask_1")
+        ]
+    }))
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    let tool_messages: Vec<_> = state
+        .messages
+        .iter()
+        .filter(|message| message.role == ChatMessageRole::Tool)
+        .collect();
+    assert_eq!(tool_messages.len(), 4);
+    assert_eq!(tool_messages[0].tool_call_id.as_deref(), Some("read_1"));
+    assert_eq!(
+        tool_messages[0].text_content(),
+        Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+    );
+    assert_eq!(tool_messages[3].tool_call_id.as_deref(), Some("ask_1"));
+    assert_eq!(
+        tool_messages[3].text_content(),
+        Some(crate::core::session::manager::PENDING_TOOL_RESULT_TEXT)
+    );
+
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let entries = crate::core::session::transcript::read_entries_tail(&path, 16).unwrap();
+    let tool_results: Vec<(String, String)> = entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(me)
+                if me.message.get("role").and_then(|value| value.as_str()) == Some("tool") =>
+            {
+                Some((
+                    me.message["tool_call_id"].as_str().unwrap().to_string(),
+                    me.message["content"].as_str().unwrap().to_string(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tool_results,
+        vec![
+            (
+                "read_1".to_string(),
+                crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT.to_string(),
+            ),
+            (
+                "read_2".to_string(),
+                crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT.to_string(),
+            ),
+            (
+                "read_3".to_string(),
+                crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT.to_string(),
+            ),
+            (
+                "ask_1".to_string(),
+                crate::core::session::manager::PENDING_TOOL_RESULT_TEXT.to_string(),
+            ),
+        ]
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1248,7 +1394,10 @@ fn init_context_state_heals_only_missing_last_tool_result() {
         .iter()
         .rfind(|m| m.role == ChatMessageRole::Tool)
         .expect("last tool should exist");
-    assert_eq!(last_tool.text_content(), Some("[interrupted]"));
+    assert_eq!(
+        last_tool.text_content(),
+        Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1280,10 +1429,11 @@ fn init_context_state_heals_all_missing_tail_tool_results() {
     assert_eq!(interrupted_tools[0].tool_call_id.as_deref(), Some("call_1"));
     assert_eq!(interrupted_tools[1].tool_call_id.as_deref(), Some("call_2"));
     assert!(
-        interrupted_tools
-            .iter()
-            .all(|m| m.text_content() == Some("[interrupted]")),
-        "all missing tail tool results should be healed with [interrupted]"
+        interrupted_tools.iter().all(|m| {
+            m.text_content()
+                == Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+        }),
+        "all missing tail tool results should be healed with the restart-unknown placeholder"
     );
 
     let path = mgr.current_transcript_path().unwrap().unwrap();
@@ -1295,7 +1445,8 @@ fn init_context_state_heals_all_missing_tail_tool_results() {
                 entry,
                 TranscriptEntry::Message(me)
                     if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
-                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+                        && me.message.get("content").and_then(|v| v.as_str())
+                            == Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
             )
         })
         .count();
@@ -1303,6 +1454,8 @@ fn init_context_state_heals_all_missing_tail_tool_results() {
         appended_interrupted, 2,
         "multi-missing case should append one synthetic tool result per missing tool"
     );
+    crate::core::session::assert_active_tool_result_integrity(&entries)
+        .expect("hydrate must close every tail tool call exactly once");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1341,10 +1494,10 @@ fn init_context_state_does_not_heal_when_non_tool_role_interrupts_tail_tool_roun
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
     assert!(
-        state
-            .messages
-            .iter()
-            .all(|m| m.text_content() != Some("[interrupted]")),
+        state.messages.iter().all(|m| {
+            m.text_content()
+                != Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+        }),
         "non-tool tail role should make hydrate refuse to guess"
     );
 
@@ -1355,7 +1508,8 @@ fn init_context_state_does_not_heal_when_non_tool_role_interrupts_tail_tool_roun
                 entry,
                 TranscriptEntry::Message(me)
                     if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
-                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+                        && me.message.get("content").and_then(|v| v.as_str())
+                            == Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
             )
         }),
         "broken tail should not append synthetic interrupted tool results"

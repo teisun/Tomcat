@@ -23,7 +23,7 @@ use tracing::{info, warn};
 use crate::core::llm::{
     retry_delay::{is_provider_retry_cancelled, with_provider_retry_cancel},
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    StreamEvent,
+    StreamEvent, TokenUsage,
 };
 use crate::infra::error::{llm_source_chain, llm_stage, llm_stream_terminal_error, llm_summary};
 use crate::infra::events::{AgentEvent, AssistantMessageEvent, Message};
@@ -183,6 +183,7 @@ pub(super) async fn run_chat_stream(
                     thinking_text: None,
                     reasoning_continuation: None,
                     continuity: None,
+                    usage: None,
                     aborted: true,
                 });
             }
@@ -198,6 +199,7 @@ pub(super) async fn run_chat_stream(
                         thinking_text: None,
                         reasoning_continuation: None,
                         continuity: None,
+                        usage: None,
                         aborted: true,
                     });
                 }
@@ -228,6 +230,7 @@ pub(super) async fn run_chat_stream(
     let mut thinking_text: Option<String> = None;
     let mut reasoning_continuation: Option<crate::core::llm::ReasoningContinuation> = None;
     let mut continuity: Option<crate::core::llm::ContinuityMetadata> = None;
+    let mut usage: Option<TokenUsage> = None;
     let mut pending_notice: Option<(String, String)> = None;
     let mut aborted_during_stream = false;
     let mut streaming_announced: Vec<bool> = Vec::new();
@@ -375,8 +378,17 @@ pub(super) async fn run_chat_stream(
             Ok(StreamEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
-                ..
+                total_tokens,
+                reasoning_tokens,
+                text_tokens,
             }) => {
+                usage = Some(TokenUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    reasoning_tokens,
+                    text_tokens,
+                });
                 if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.update_api_usage(prompt_tokens, completion_tokens);
                 }
@@ -475,6 +487,7 @@ pub(super) async fn run_chat_stream(
         thinking_text,
         reasoning_continuation,
         continuity,
+        usage,
         aborted: aborted_during_stream,
     })
 }

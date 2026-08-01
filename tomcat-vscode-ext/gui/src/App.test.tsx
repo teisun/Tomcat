@@ -1877,8 +1877,58 @@ describe("Tomcat webview App", () => {
     expect(screen.getByRole("alert").textContent).toContain("target write failed");
   });
 
+  it("unlocks the new-session control after an unfinished composer operation times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const { postMessage } = mount();
+      await emitReadySessionState("s1");
+      fireEvent.click(screen.getByTestId("attachment-add"));
+      const create = screen.getByTestId("new-session-button");
+      fireEvent.click(create);
+      await emitState({
+        channel: "event",
+        content: {
+          operationId: "fork-timeout-op",
+          sourceSessionId: "s1",
+          type: "captureDraftForFork",
+        },
+        messageId: "capture-fork-timeout",
+      });
+
+      expect(postMessage.mock.calls.some(([message]) => message.type === "forkSession")).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(
+        postMessage.mock.calls.some(
+          ([message]) =>
+            message.type === "forkSession" &&
+            message.data?.operationId === "fork-timeout-op",
+        ),
+      ).toBe(true);
+
+      await emitState({
+        channel: "event",
+        content: {
+          error: "fork failed after timeout",
+          operationId: "fork-timeout-op",
+          sourceSessionId: "s1",
+          success: false,
+          type: "draftForkResult",
+        },
+        messageId: "fork-timeout-result",
+      });
+      expect((create as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getByTestId("draft-fork-error").textContent).toContain(
+        "fork failed after timeout",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders the top bar without legacy title or refresh button", async () => {
-    mount();
+    const { postMessage } = mount();
 
     await emitState({
       channel: "state",
@@ -1932,6 +1982,12 @@ describe("Tomcat webview App", () => {
     expect(topbar.lastElementChild).toBe(
       screen.getByTestId("new-session-button"),
     );
+    fireEvent.click(screen.getByTestId("compact-context-button"));
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) => message.type === "compact" && message.data?.sessionId === "s1",
+      ),
+    ).toBe(true);
   });
 
   it("updates the thinking level select from session state", async () => {

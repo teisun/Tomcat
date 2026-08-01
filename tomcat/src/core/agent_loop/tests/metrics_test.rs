@@ -425,6 +425,8 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
             prompt_tokens: 120,
             completion_tokens: 20,
             total_tokens: Some(140),
+            reasoning_tokens: None,
+            text_tokens: None,
         }),
     ];
     let llm_first = Arc::new(MockLlmProvider::new(vec![first_stream]));
@@ -475,6 +477,8 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
             prompt_tokens: 140,
             completion_tokens: 24,
             total_tokens: Some(164),
+            reasoning_tokens: None,
+            text_tokens: None,
         }),
     ];
     let llm_second = Arc::new(MockLlmProvider::new(vec![second_stream]));

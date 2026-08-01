@@ -196,6 +196,7 @@ export interface TomcatExtensionApi {
     }>;
     clearObservedEvents(): void;
     clearObservedFileOpens(): void;
+    createFreshWebviewSession(cwd?: string | null): Promise<string>;
     dispatchImagePreviewDomAction(action: ImagePreviewDomAction): Promise<void>;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     focusWebview(): Promise<void>;
@@ -1288,6 +1289,7 @@ export async function activate(
       clearObservedFileOpens: () => {
         observedFileOpens.length = 0;
       },
+      createFreshWebviewSession: (cwd) => webviewProvider.createFreshSessionForTest(cwd),
       dispatchImagePreviewDomAction: async (action) => {
         const panel = ImagePreviewPanel.getCurrent();
         if (!panel?.isVisible) {

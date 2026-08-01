@@ -64,6 +64,7 @@ type BuildProviderOptions = {
   listSessionsImpl?: () => Promise<Record<string, unknown>>;
   openModelSettings?: (route?: "models") => void;
   requestImpl?: (command: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  resumeImpl?: (sessionId: string) => Promise<void>;
   restoreCheckpointImpl?: (
     sessionId: string,
     checkpointId: string,
@@ -300,6 +301,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
     params?: { cursor?: string | null; limit?: number };
     sessionId?: string;
   }> = [];
+  const resumeCalls: string[] = [];
   const sessionRouter = {
     buildResultMetadata(sessionId: string) {
       return { sessionId };
@@ -374,8 +376,18 @@ function buildProvider(options: BuildProviderOptions = {}) {
         ],
       };
     },
+    async retainAttachmentLeases(
+      _sessionId: string,
+      attachments: Array<{ blobSha: string }>,
+    ): Promise<string[]> {
+      return attachments.map((attachment) => attachment.blobSha);
+    },
     async newSession() {
       return "session-1";
+    },
+    async resume(sessionId: string) {
+      resumeCalls.push(sessionId);
+      await options.resumeImpl?.(sessionId);
     },
     async listCheckpoints(sessionId?: string) {
       if (options.listCheckpointsImpl) {
@@ -440,7 +452,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
   });
 
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
-  return { historyCalls, messenger, provider, sessionState };
+  return { historyCalls, messenger, provider, resumeCalls, sessionState };
 }
 
 /** sha256 of the "png-bytes" fixture, i.e. the name the backend gives it. */
@@ -573,46 +585,33 @@ describe("webview provider integration", () => {
       type: "ready",
     });
 
-    const postInsertReference = vi
-      .spyOn(provider, "postInsertReference")
-      .mockResolvedValue(undefined);
-
     await provider.dispatchTestIntent({
       messageId: "pick-context-1",
       type: "pickContext",
     });
 
-    expect(postInsertReference).toHaveBeenCalledTimes(3);
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      1,
-      "session-1",
+    expect(
+      provider.currentState().sessionViews["session-1"]?.composerDraft?.segments,
+    ).toEqual([
       {
         kind: "file",
         label: "app.ts",
         path: "src/app.ts",
         type: "reference",
       },
-    );
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      2,
-      "session-1",
       {
         kind: "file",
         label: "folder/",
         path: "src/folder/",
         type: "reference",
       },
-    );
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      3,
-      "session-1",
       {
         kind: "file",
         label: "log.txt",
         path: "/outside/log.txt",
         type: "reference",
       },
-    );
+    ]);
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
       expect.objectContaining({
         blobSha: PNG_SHA,
@@ -713,9 +712,6 @@ describe("webview provider integration", () => {
     const postEventSpy = vi
       .spyOn(provider as unknown as { postEvent(content: Record<string, unknown>): Promise<void> }, "postEvent")
       .mockResolvedValue(undefined);
-    const postInsertReference = vi
-      .spyOn(provider, "postInsertReference")
-      .mockResolvedValue(undefined);
 
     await provider.dispatchTestIntent({
       data: {
@@ -743,7 +739,11 @@ describe("webview provider integration", () => {
       type: "resolveDrop",
     });
 
-    const droppedReference = postInsertReference.mock.calls[0]?.[1];
+    const droppedReference = provider.currentState()
+      .sessionViews["session-1"]
+      ?.composerDraft
+      ?.segments
+      .find((segment) => segment.type === "reference");
     expect(searchReference).toEqual(droppedReference);
 
     const segments = [
@@ -776,7 +776,6 @@ describe("webview provider integration", () => {
     );
 
     postEventSpy.mockRestore();
-    postInsertReference.mockRestore();
     provider.dispose();
   });
 
@@ -791,10 +790,6 @@ describe("webview provider integration", () => {
       type: "ready",
     });
 
-    const postInsertReference = vi
-      .spyOn(provider, "postInsertReference")
-      .mockResolvedValue(undefined);
-
     await provider.dispatchTestIntent({
       data: {
         sessionId: "session-1",
@@ -808,27 +803,22 @@ describe("webview provider integration", () => {
       type: "resolveDrop",
     });
 
-    expect(postInsertReference).toHaveBeenCalledTimes(2);
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      1,
-      "session-1",
+    expect(
+      provider.currentState().sessionViews["session-1"]?.composerDraft?.segments,
+    ).toEqual([
       {
         kind: "file",
         label: "app.ts",
         path: "src/app.ts",
         type: "reference",
       },
-    );
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      2,
-      "session-1",
       {
         kind: "file",
         label: "folder/",
         path: "src/folder/",
         type: "reference",
       },
-    );
+    ]);
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
       expect.objectContaining({
         blobSha: PNG_SHA,
@@ -1111,10 +1101,16 @@ describe("webview provider integration", () => {
             };
       },
     });
+    __testing.registerFile("/workspace/retry-image.png", "png-bytes");
+    __testing.setOpenDialogHandler(() => [vscode.Uri.file("/workspace/retry-image.png")]);
 
     await provider.dispatchTestIntent({
       messageId: "ready-retry-user-message",
       type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      messageId: "pick-retry-attachment",
+      type: "pickContext",
     });
     await provider.dispatchTestIntent({
       data: {
@@ -1130,13 +1126,19 @@ describe("webview provider integration", () => {
       (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
     );
     expect(failedUserMessage).toMatchObject({
-      deliveryError: "busy",
+      deliveryError: "上一条请求仍在处理中。请等待完成，或先停止当前任务后再试。",
+      deliveryErrorDetail: "busy",
       deliveryState: "failed",
       retryable: true,
       submitKind: "prompt",
       text: "retry me",
       type: "message",
     });
+    expect(
+      (messenger.requestCalls.find((call) => call.type === "prompt")?.params as {
+        attachments?: Array<{ blobSha?: string }>;
+      }).attachments,
+    ).toEqual([expect.objectContaining({ blobSha: PNG_SHA })]);
     expect(
       failedSession?.timeline.some((item) => item.type === "message" && item.kind === "error"),
     ).toBe(false);
@@ -1163,6 +1165,9 @@ describe("webview provider integration", () => {
         retriedRequests[1]?.params as { userMessageId?: string } | undefined
       )?.userMessageId,
     ).toBe(firstUserMessageId);
+    expect(
+      (retriedRequests[1]?.params as { attachments?: Array<{ blobSha?: string }> }).attachments,
+    ).toEqual([expect.objectContaining({ blobSha: PNG_SHA })]);
     const retriedUserMessages =
       provider.currentState().sessionViews["session-1"]?.timeline.filter(
         (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
@@ -1178,6 +1183,57 @@ describe("webview provider integration", () => {
     expect(retriedUserMessages[0]).not.toHaveProperty("deliveryError");
     expect(retriedUserMessages[0]).not.toHaveProperty("deliveryState");
     expect(retriedUserMessages[0]).not.toHaveProperty("retryable");
+  });
+
+  it("recovers an error-card retry from the durable prompt without duplicating its image reference", async () => {
+    const { messenger, provider, resumeCalls } = buildProvider({
+      historyMessages: [
+        {
+          id: "user-1",
+          message: {
+            content: [
+              { text: "retry this image", type: "text" },
+              {
+                blobSha: PNG_SHA,
+                filename: "retry-image.png",
+                mimeType: "image/png",
+                type: "input_image",
+              },
+            ],
+            role: "user",
+            superseded: true,
+            turn_failed: true,
+          },
+          type: "message",
+        },
+        { detail: "network failed", id: "error-1", summary: "network failed", type: "error" },
+      ],
+    });
+
+    await provider.dispatchTestIntent({ messageId: "ready-error-retry", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { action: "retry", errorId: "error-1", sessionId: "session-1" },
+      messageId: "recover-error-retry",
+      type: "recoverErrorTurn",
+    });
+
+    expect(resumeCalls).toEqual(["session-1"]);
+    expect(messenger.requestCalls.filter((call) => call.type === "prompt")).toHaveLength(0);
+    const users = provider.currentState().sessionViews["session-1"]?.timeline.filter(
+      (item) => item.type === "message" && item.kind === "user" && item.text === "retry this image",
+    ) ?? [];
+    expect(users).toEqual([
+      expect.objectContaining({
+        attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
+        id: "user-1",
+      }),
+    ]);
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.some(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toBe(false);
+    provider.dispose();
   });
 
   it("clears sending immediately for queued steering messages", async () => {

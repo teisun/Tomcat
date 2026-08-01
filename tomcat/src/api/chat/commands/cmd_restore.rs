@@ -452,9 +452,7 @@ pub(crate) fn effective_restore_paths(
         },
         Ok(_) => RestorePathPlan {
             paths: Vec::new(),
-            warning: Some(
-                "无法自动收窄 restore 路径，将继续执行整树 restore。".to_string(),
-            ),
+            warning: Some("无法自动收窄 restore 路径，将继续执行整树 restore。".to_string()),
         },
         Err(err) => RestorePathPlan {
             paths: Vec::new(),

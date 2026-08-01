@@ -1,5 +1,5 @@
-use crate::api::chat::panels::{Question, QuestionOption};
 use crate::api::chat::ChatContext;
+use crate::api::chat::panels::{Question, QuestionOption};
 use crate::core::package::{PackageManager, PackageResourceKind, PackageVisibility};
 
 use super::parse::{ChatCommand, ChatCommandOutcome};

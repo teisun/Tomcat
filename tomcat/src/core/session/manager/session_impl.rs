@@ -8,31 +8,95 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 
 use crate::core::session::append_message_chain::{
-    collect_recent_chat_messages_from_tail, validate_append_message,
+    classify_resumable_ask_question_result, collect_recent_chat_messages_from_tail,
+    find_dangling_tail_tool_calls, pending_replay_safe_tail_tool_call_ids, validate_append_message,
 };
 use crate::core::session::resume_index::remove_resume_index;
 use crate::core::session::store::{
-    load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
+    DEFAULT_SESSION_KEY, SessionEntry, SessionStore, load_store, save_store,
 };
 use crate::core::session::transcript::{
-    append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
-    mark_message_entries_after_anchor_superseded, mark_trailing_user_messages_superseded,
-    read_entries_tail, read_entries_tail_before, read_header, rewrite_message_summary_titles_by_id,
-    write_header, BranchSummaryEntry, CustomEntry, ErrorEntry, LabelEntry, MessageEntry,
+    BranchSummaryEntry, CustomEntry, ErrorEntry, LabelEntry, MessageEntry,
     MessageSummaryTitleRewrite, ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel,
-    ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry, TranscriptPage,
+    ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry, TranscriptPage, append_entry,
+    append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
+    mark_message_entries_after_anchor_superseded,
+    mark_tool_result_entries_by_tool_call_id_superseded, mark_trailing_user_messages_superseded,
+    read_entries_tail, read_entries_tail_before, read_header, revive_trailing_failed_user_messages,
+    rewrite_message_summary_titles_by_id, write_header,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
 
-use super::types::ContextState;
 use super::MessageAppendSink;
+use super::types::ContextState;
 
 static APPEND_SEQ: AtomicU64 = AtomicU64::new(0);
 static SESSION_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 const VALIDATE_TAIL_CAP: usize = 64;
 const SESSIONS_FILE: &str = "sessions.json";
 const TITLE_MAX_CHARS: usize = 40;
+const PENDING_QUESTION_SKIPPED_RESULT: &str =
+    r#"{"outcome":"skipped","cancelled":true,"answers":[]}"#;
+
+/// 在内存中试算 tool result 落盘后的逻辑消息链。
+///
+/// 若已有 `[pending]` / 旧版 `host_disconnected` 占位结果，试算「旧结果失效、新结果追加」；
+/// 若是重启后刚发现的悬空 `ask_question`，则试算直接追加首个结果。两者都必须先校验，
+/// 不能把 transcript 当草稿纸：一旦校验失败，调用方必须保证磁盘仍是原样。`recent` 已由
+/// `collect_recent_chat_messages_from_tail` 过滤 superseded 行。
+fn validate_tool_result_replacement(
+    recent: &[serde_json::Value],
+    tool_call_id: &str,
+    replacement: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    let active_results = recent
+        .iter()
+        .filter(|message| {
+            message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                && message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(tool_call_id)
+        })
+        .collect::<Vec<_>>();
+    if active_results.is_empty() {
+        // Hydrate 尚未来得及补 `[pending]` 的旧 transcript 只有 tool call、没有 result。
+        // 此时真实用户答案就是它的第一个合法结果，不应被“替换”这个 API 名字误拒。
+        validate_append_message(replacement, recent)
+            .map_err(|reason| AppError::invariant("append_message_chain", reason))?;
+        let mut prospective = recent.to_vec();
+        prospective.push(replacement.clone());
+        return Ok(prospective);
+    }
+    if active_results.iter().any(|message| {
+        !message
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|content| classify_resumable_ask_question_result(content).is_some())
+    }) {
+        return Err(AppError::invariant(
+            "ask_question_resume",
+            format!("tool call '{tool_call_id}' already has a terminal result"),
+        ));
+    }
+
+    let mut prospective = recent
+        .iter()
+        .filter(|message| {
+            !(message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                && message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(tool_call_id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    validate_append_message(replacement, &prospective)
+        .map_err(|reason| AppError::invariant("append_message_chain", reason))?;
+    prospective.push(replacement.clone());
+    Ok(prospective)
+}
 
 /// 判断当前 title 是否仍为由首条 user 消息规则派生的占位。
 pub fn is_rule_derived_title(title: &str, user_text: &str) -> bool {
@@ -743,7 +807,7 @@ impl SessionManager {
         message: serde_json::Value,
         chain_violation_is_invariant: bool,
         forced_id: Option<&str>,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, usize), AppError> {
         self.append_in_flight.fetch_add(1, Ordering::SeqCst);
         let _guard = AppendInFlightGuard {
             counter: Arc::clone(&self.append_in_flight),
@@ -752,6 +816,12 @@ impl SessionManager {
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
         self.with_transcript_lock(&path, || {
+            let settled_pending_questions =
+                if message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
+                    Self::resolve_pending_questions_before_user_append(&path)?
+                } else {
+                    0
+                };
             let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
             let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
             if let Err(reason) = validate_append_message(&message, &recent_msgs) {
@@ -776,14 +846,94 @@ impl SessionManager {
             });
             append_entry_with_sync(&path, &entry, sync)?;
             let _ = self.ensure_title_from_message(&message_for_title);
-            Ok(id)
+            Ok((id, settled_pending_questions))
         })
+    }
+
+    /// 所有当前会话 user-message 入口共用的纵深防御。
+    ///
+    /// Hydrate 已让 transcript 结构合法；这里仅在用户明确输入新 prompt 时，把尾部仍开着
+    /// 的可续跑问题标为 skipped。执行于同一把 transcript 锁内，确保不会出现
+    /// 「新 user 已写入但旧问题仍 pending」的中间状态。
+    fn resolve_pending_questions_before_user_append(path: &Path) -> Result<usize, AppError> {
+        let recent_entries = read_entries_tail(path, VALIDATE_TAIL_CAP).unwrap_or_default();
+        let recent_messages = collect_recent_chat_messages_from_tail(&recent_entries);
+        let pending_ids = pending_replay_safe_tail_tool_call_ids(&recent_messages);
+        let dangling_ids = if pending_ids.is_empty() {
+            find_dangling_tail_tool_calls(&recent_messages)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|tool_call| {
+                    crate::core::tools::contract::catalog::is_replay_safe_tool(&tool_call.name)
+                })
+                .map(|tool_call| tool_call.id)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if pending_ids.is_empty() && dangling_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Validate the complete replacement sequence before its first disk mutation. A
+        // later validation failure must leave every existing `[pending]` result active.
+        let mut prospective = recent_messages;
+        let replacements = pending_ids
+            .iter()
+            .map(|tool_call_id| {
+                (
+                    tool_call_id,
+                    true,
+                    serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": PENDING_QUESTION_SKIPPED_RESULT,
+                    }),
+                )
+            })
+            .chain(dangling_ids.iter().map(|tool_call_id| {
+                (
+                    tool_call_id,
+                    false,
+                    serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": PENDING_QUESTION_SKIPPED_RESULT,
+                    }),
+                )
+            }))
+            .collect::<Vec<_>>();
+        for (tool_call_id, replaces_existing, message) in &replacements {
+            if *replaces_existing {
+                prospective =
+                    validate_tool_result_replacement(&prospective, tool_call_id, message)?;
+            } else {
+                validate_append_message(message, &prospective)
+                    .map_err(|reason| AppError::invariant("append_message_chain", reason))?;
+                prospective.push(message.clone());
+            }
+        }
+
+        for (tool_call_id, replaces_existing, message) in replacements {
+            if replaces_existing {
+                mark_tool_result_entries_by_tool_call_id_superseded(path, tool_call_id)?;
+            }
+            let entry = TranscriptEntry::Message(MessageEntry {
+                id: Some(generate_entry_id()),
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                message,
+            });
+            append_entry_with_sync(path, &entry, SyncLevel::SyncData)?;
+        }
+        Ok(pending_ids.len() + dangling_ids.len())
     }
 
     // 同一 transcript 文件通过 per-file mutex 串行化；不同 transcript 仍可并行追加。
     /// 追加 message 到当前会话的 transcript；返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
         self.append_message_internal(message, true, None)
+            .map(|(id, _)| id)
     }
 
     /// 以指定的 transcript `MessageEntry.id` 追加当前会话消息。
@@ -793,12 +943,34 @@ impl SessionManager {
         forced_id: &str,
     ) -> Result<String, AppError> {
         self.append_message_internal(message, true, Some(forced_id))
+            .map(|(id, _)| id)
+    }
+
+    /// 与 [`Self::append_message_with_id`] 相同，但额外告知调用方是否在同一把锁内结算了
+    /// 尾部 pending ask_question。serve 用它刷新内存 context，避免又在上层重复结算。
+    pub fn append_message_with_id_and_pending_resolution(
+        &self,
+        message: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<(String, bool), AppError> {
+        self.append_message_internal(message, true, Some(forced_id))
+            .map(|(id, settled)| (id, settled > 0))
+    }
+
+    /// 与 [`Self::append_message`] 相同，但额外告知调用方是否结算了尾部 pending question。
+    pub fn append_message_with_pending_resolution(
+        &self,
+        message: serde_json::Value,
+    ) -> Result<(String, bool), AppError> {
+        self.append_message_internal(message, true, None)
+            .map(|(id, settled)| (id, settled > 0))
     }
 
     /// 追加 message（dispatcher/插件路径：校验失败返回 Err 而非 panic）。
     /// 返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn try_append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
         self.append_message_internal(message, false, None)
+            .map(|(id, _)| id)
     }
 
     /// 追加 message 到指定 session 的 transcript（插件多实例路由）。
@@ -816,6 +988,9 @@ impl SessionManager {
         }
         let path = self.transcript_path(session_id);
         self.with_transcript_lock(&path, || {
+            if message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
+                Self::resolve_pending_questions_before_user_append(&path)?;
+            }
             let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
             let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
             if let Err(reason) = validate_append_message(&message, &recent_msgs) {
@@ -1008,6 +1183,41 @@ impl SessionManager {
         })
     }
 
+    /// 追加一个会替换此前上下文边界的手动压缩摘要。
+    ///
+    /// 与旧 `append_compaction_with_range` 不同，`is_boundary=true` 让下一次 hydrate
+    /// 丢弃被覆盖的消息前缀，只保留摘要和其后的新消息；这是 `/compact` 的持久化语义。
+    pub fn append_compaction_boundary(
+        &self,
+        summary: &str,
+        covered_start_id: Option<String>,
+        covered_end_id: Option<String>,
+        covered_count: usize,
+    ) -> Result<(), AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+                id: Some(generate_entry_id()),
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                summary: Some(summary.to_string()),
+                covered_start_id,
+                covered_end_id,
+                covered_count: Some(covered_count),
+                is_boundary: Some(true),
+                preheat_compaction_id: None,
+                estimated_covered_tokens_before: None,
+                estimated_summary_tokens: None,
+                estimated_tokens_saved: None,
+                error: None,
+                attempts: None,
+            });
+            append_entry(&path, &entry)
+        })
+    }
+
     /// 追加 session_info（如会话名称）。
     pub fn append_session_info(&self, name: &str) -> Result<(), AppError> {
         let path = self
@@ -1054,6 +1264,52 @@ impl SessionManager {
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
         self.with_transcript_lock(&path, || mark_trailing_user_messages_superseded(&path))
+    }
+
+    pub fn revive_trailing_failed_user_messages(&self) -> Result<usize, AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        self.with_transcript_lock(&path, || revive_trailing_failed_user_messages(&path))
+    }
+
+    /// 将同一 `tool_call_id` 的旧结果标 superseded，并在同一临界区内追加新的 tool result。
+    ///
+    /// 这是 ask_question 恢复路径的事实源收口：旧占位符（`[pending]` / legacy
+    /// `host_disconnected`）保留历史，但在 append 校验和后续 hydrate 看来已经失效。
+    pub fn replace_tool_result_by_tool_call_id(
+        &self,
+        tool_call_id: &str,
+        new_content: String,
+    ) -> Result<String, AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        self.with_transcript_lock(&path, || {
+            let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
+            let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
+            let message = serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": new_content,
+            });
+            let _prospective =
+                validate_tool_result_replacement(&recent_msgs, tool_call_id, &message)?;
+
+            // The candidate chain is valid. Only now is it safe to change the durable
+            // record: soft-delete the placeholder, then append the terminal result.
+            let _ = mark_tool_result_entries_by_tool_call_id_superseded(&path, tool_call_id)?;
+            let id = generate_entry_id();
+            let sync = Self::message_sync_level(&message);
+            let entry = TranscriptEntry::Message(MessageEntry {
+                id: Some(id.clone()),
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                message,
+            });
+            append_entry_with_sync(&path, &entry, sync)?;
+            Ok(id)
+        })
     }
 
     /// 获取当前会话 transcript 中最近 cap 条 entry。

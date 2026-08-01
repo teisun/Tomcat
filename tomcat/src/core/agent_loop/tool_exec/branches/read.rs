@@ -271,15 +271,18 @@ async fn read_one(
     if let (Ok(result), Some(state)) = (exec_result.as_ref(), ctx.read_file_state) {
         if let Ok(meta) = std::fs::metadata(&resolved) {
             if !meta.is_dir() {
-                let path_bytes: Vec<u8>;
-                let hash_input: &[u8] = match result {
-                    crate::core::tools::primitive::ReadResult::Text(t) => t.content.as_bytes(),
+                let hash_input: Vec<u8> = match result {
+                    // `Text::content` 是准备给模型显示的文本，可能带行号等展示格式；
+                    // mutation guard 的 content_hash 必须是原始文件字节，才能在 mtime
+                    // 变动时可靠判断内容是否仍相同。
+                    crate::core::tools::primitive::ReadResult::Text(t) => {
+                        std::fs::read(&resolved).unwrap_or_else(|_| t.content.as_bytes().to_vec())
+                    }
                     crate::core::tools::primitive::ReadResult::Image(b)
                     | crate::core::tools::primitive::ReadResult::Pdf(b) => {
-                        path_bytes = b.path.as_os_str().as_encoded_bytes().to_vec();
-                        &path_bytes[..]
+                        b.path.as_os_str().as_encoded_bytes().to_vec()
                     }
-                    crate::core::tools::primitive::ReadResult::FileUnchanged { .. } => &[],
+                    crate::core::tools::primitive::ReadResult::FileUnchanged { .. } => Vec::new(),
                 };
                 let (covered_lines, reached_eof) = match result {
                     crate::core::tools::primitive::ReadResult::Text(t) => (
@@ -292,7 +295,7 @@ async fn read_one(
                     mtime_ms: crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta),
                     size: meta.len(),
                     content_hash: crate::core::tools::pipeline::read_state::hash_content(
-                        hash_input,
+                        &hash_input,
                     ),
                     offset,
                     limit,

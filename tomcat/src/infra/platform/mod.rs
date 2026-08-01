@@ -1,5 +1,6 @@
 //! 跨平台基础适配：路径规范化、通用文件读写、进程/系统信息接口。
 
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use super::error::AppError;
@@ -88,6 +89,29 @@ pub fn write_file_atomic(path: &Path, content: &[u8]) -> Result<(), AppError> {
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
     std::fs::write(&tmp, content).map_err(AppError::Io)?;
+    std::fs::rename(&tmp, path).map_err(AppError::Io)?;
+    Ok(())
+}
+
+/// 流式版本的 [`write_file_atomic`]。调用方直接写入临时文件，随后仍通过 rename 原子替换
+/// 目标文件；适合 JSONL 全文件重写，避免在内存里再拼出第二份完整字符串。
+pub fn write_file_atomic_with(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<std::fs::File>) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config("路径无父目录".to_string()))?;
+    std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+    let tmp = parent.join(format!(
+        ".{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let file = std::fs::File::create(&tmp).map_err(AppError::Io)?;
+    let mut writer = BufWriter::new(file);
+    write(&mut writer)?;
+    writer.flush().map_err(AppError::Io)?;
+    drop(writer);
     std::fs::rename(&tmp, path).map_err(AppError::Io)?;
     Ok(())
 }

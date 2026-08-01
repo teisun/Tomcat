@@ -21,10 +21,11 @@ use crate::core::llm::types::{
     ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, StreamEvent, ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
-use crate::infra::error::{
-    llm_http_status, llm_http_status_error, llm_stage, llm_summary, AppError, LlmErrorStage,
-};
 use crate::infra::LlmConfig;
+use crate::infra::error::{
+    AppError, LlmErrorStage, LlmFailureKind, classify_llm_failure, llm_http_status,
+    llm_http_status_error, llm_stage, llm_summary,
+};
 
 use bytes::Bytes;
 use serde_json::json;
@@ -306,6 +307,54 @@ fn responses_payload_completed_function_call_prefers_tool_calls_finish_reason() 
 }
 
 #[test]
+fn responses_payload_completed_empty_reasoning_exhaustion_maps_to_max_output_tokens() {
+    let raw = json!({
+        "id": "resp_reasoning_exhausted",
+        "status": "completed",
+        "output": [{"type": "reasoning", "summary": []}],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 8192,
+            "output_tokens_details": {"reasoning_tokens": 8000}
+        }
+    });
+
+    let response = responses_payload_to_chat_response(&raw);
+
+    assert_eq!(
+        response.choices[0].finish_reason.as_deref(),
+        Some("max_output_tokens"),
+        "completed + no visible output + reasoning-dominated output budget is likely a truncated answer"
+    );
+    assert_eq!(
+        response.choices[0].message.finish_reason.as_deref(),
+        Some("max_output_tokens")
+    );
+}
+
+#[test]
+fn responses_payload_completed_empty_structured_response_stays_stop_without_reasoning_exhaustion() {
+    let raw = json!({
+        "id": "resp_legitimate_empty",
+        "status": "completed",
+        "output": [],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 8,
+            "output_tokens_details": {"reasoning_tokens": 0}
+        }
+    });
+
+    let response = responses_payload_to_chat_response(&raw);
+
+    assert_eq!(
+        response.choices[0].finish_reason.as_deref(),
+        Some("stop"),
+        "the heuristic must not turn an ordinary structured empty completion into a truncation"
+    );
+}
+
+#[test]
 fn responses_payload_incomplete_content_filter_maps_to_error_metadata() {
     let raw = json!({
         "id": "resp_2c",
@@ -415,7 +464,12 @@ fn responses_chunk_completed_emits_finish_and_usage() {
     let value = json!({
         "type": "response.completed",
         "response": {
-            "usage": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11}
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 4,
+                "total_tokens": 11,
+                "output_tokens_details": {"reasoning_tokens": 3}
+            }
         }
     });
     let events = responses_chunk_to_events(&value, &mut tracks);
@@ -429,11 +483,16 @@ fn responses_chunk_completed_emits_finish_and_usage() {
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        reasoning_tokens,
+        text_tokens,
+        ..
     } = &events[1]
     {
         assert_eq!(*prompt_tokens, 7);
         assert_eq!(*completion_tokens, 4);
         assert_eq!(*total_tokens, Some(11));
+        assert_eq!(*reasoning_tokens, Some(3));
+        assert_eq!(*text_tokens, Some(1));
     } else {
         panic!("expected Usage, got {:?}", events[1]);
     }
@@ -1032,8 +1091,8 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
 }
 
 #[test]
-fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_uses_previous_response_id(
-) {
+fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_uses_previous_response_id()
+ {
     let cfg = LlmConfig {
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         openai_responses: crate::infra::config::OpenAiResponsesConfig {
@@ -1811,6 +1870,92 @@ async fn responses_stream_auto_detects_ndjson_when_no_data_prefix() {
     );
 }
 
+#[tokio::test]
+async fn responses_stream_keeps_sse_mode_after_comment_keepalives() {
+    use tokio_stream::StreamExt;
+
+    for keepalive in [":\n", ": ping\n", ":\n\n", "\n"] {
+        let chunks: Vec<Result<Bytes, AppError>> = vec![
+            Ok(Bytes::from(keepalive.to_string())),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"x\"}\n\n",
+            )),
+        ];
+        let mut stream = new_responses_stream(tokio_stream::iter(chunks), false);
+        let item = stream
+            .next()
+            .await
+            .expect("comment followed by SSE data must yield an event")
+            .expect("SSE payload must parse");
+        assert!(
+            matches!(item, StreamEvent::ContentDelta { ref delta } if delta == "x"),
+            "keepalive {keepalive:?} must not lock the stream into NDJSON"
+        );
+    }
+}
+
+#[tokio::test]
+async fn responses_stream_parse_before_any_event_is_transport_interruption() {
+    use tokio_stream::StreamExt;
+
+    let chunks: Vec<Result<Bytes, AppError>> = vec![Ok(Bytes::from("not-json\n"))];
+    let mut stream = new_responses_stream(tokio_stream::iter(chunks), false);
+    let error = stream
+        .next()
+        .await
+        .expect("invalid first frame must surface an error")
+        .expect_err("first-frame parse failure is not a valid event");
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted
+    );
+}
+
+#[tokio::test]
+async fn responses_stream_parse_after_valid_event_stays_protocol_failure() {
+    use tokio_stream::StreamExt;
+
+    let chunks: Vec<Result<Bytes, AppError>> = vec![
+        Ok(Bytes::from(
+            "{\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"x\"}\n",
+        )),
+        Ok(Bytes::from("not-json\n")),
+    ];
+    let mut stream = new_responses_stream(tokio_stream::iter(chunks), false);
+    assert!(matches!(
+        stream
+            .next()
+            .await
+            .expect("event")
+            .expect("valid first event"),
+        StreamEvent::ContentDelta { .. }
+    ));
+    let error = stream
+        .next()
+        .await
+        .expect("invalid later frame must surface an error")
+        .expect_err("later protocol break must remain fatal");
+    assert_eq!(llm_stage(&error), Some(LlmErrorStage::Parse));
+}
+
+#[tokio::test]
+async fn responses_stream_eof_does_not_swallow_residual_invalid_frame() {
+    use tokio_stream::StreamExt;
+
+    // 没有换行时 `drain_buffer` 不会取走这段残留；它仍必须显式报错。
+    let chunks: Vec<Result<Bytes, AppError>> = vec![Ok(Bytes::from("not-json"))];
+    let mut stream = new_responses_stream(tokio_stream::iter(chunks), true);
+    let error = stream
+        .next()
+        .await
+        .expect("residual invalid frame must not be swallowed")
+        .expect_err("residual invalid frame must fail");
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
     use tokio_stream::StreamExt;
@@ -1843,8 +1988,8 @@ async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
 
 #[tokio::test(start_paused = true)]
 async fn responses_keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
-    use tokio_stream::wrappers::IntervalStream;
     use tokio_stream::StreamExt;
+    use tokio_stream::wrappers::IntervalStream;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
     let source = IntervalStream::new(interval).map(|_| {
@@ -2074,14 +2219,16 @@ async fn responses_chat_stream_after_first_delta_body_read_error_is_not_retried(
     let body = responses_sse_body(&[
         r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"Hello"}"#,
     ]);
-    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
-        status: 200,
-        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
-        body,
-        delay_ms: 0,
-        declared_content_length: None,
-    }
-    .with_declared_content_length(256)])
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body,
+            delay_ms: 0,
+            declared_content_length: None,
+        }
+        .with_declared_content_length(256),
+    ])
     .await;
     let provider = responses_stream_test_provider(server.base_url.clone(), None, 2);
     let mut stream = provider

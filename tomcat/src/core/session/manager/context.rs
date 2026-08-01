@@ -7,30 +7,32 @@ use chrono::{NaiveDate, Utc};
 
 use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
 use crate::core::session::resume_index::{
-    load_or_rebuild_resume_index, rebuild_resume_index, ResumeAnchor, ResumeIndex,
-    ResumeIndexIoStats, ResumeIndexSource,
+    ResumeAnchor, ResumeIndex, ResumeIndexIoStats, ResumeIndexSource, load_or_rebuild_resume_index,
+    rebuild_resume_index,
 };
 use crate::core::session::transcript::{
-    read_entries_tail_with_stats, BranchSummaryEntry, TranscriptEntry, TranscriptReadStats,
+    BranchSummaryEntry, TranscriptEntry, TranscriptReadStats, read_entries_tail_with_stats,
 };
 use crate::core::session::{
     append_message_chain::collect_recent_chat_messages_from_tail, find_dangling_tail_tool_calls,
 };
-use crate::infra::config::{compute_context_budget_chars, ContextConfig, ResumeHydrationMode};
+use crate::infra::config::{ContextConfig, ResumeHydrationMode, compute_context_budget_chars};
 use crate::infra::error::AppError;
 
-use super::session_impl::generate_entry_id;
 use super::session_impl::SessionManager;
+use super::session_impl::generate_entry_id;
 use crate::core::compaction::preheat::Preheat;
 
 use super::types::{
-    estimate_msg_chars, CompactionResult, ContextState, PlanEventRef, PlanModeTransition,
-    ResumeControlState, SessionContextObservation,
+    CompactionResult, ContextState, PlanEventRef, PlanModeTransition, ResumeControlState,
+    SessionContextObservation, estimate_msg_chars,
 };
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
 const MAX_PLAN_SCAN: usize = 5000;
-pub(crate) const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
+pub const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
+pub const PENDING_TOOL_RESULT_TEXT: &str = "[pending]";
+pub const UNKNOWN_RESTART_TOOL_RESULT_TEXT: &str = "[unknown after restart: this tool may have partially or fully executed; verify its effects before depending on it]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HydrateTraceMode {
@@ -580,28 +582,26 @@ fn heal_dangling_tail_tool_call(
 
     tracing::warn!(
         tool_call_ids = ?tool_calls.iter().map(|call| &call.id).collect::<Vec<_>>(),
-        "hydrate detected dangling tail tool_call block; appending synthetic interrupted tool results"
+        "hydrate detected dangling tail tool_call block"
     );
 
+    let mut appended = false;
     for tool_call in tool_calls {
-        let content = if tool_call.name == "ask_question" {
-            serde_json::json!({
-                "answers": [],
-                "cancelled": true,
-                "outcome": "host_disconnected",
-            })
-            .to_string()
+        let content = if crate::core::tools::contract::catalog::is_replay_safe_tool(&tool_call.name)
+        {
+            PENDING_TOOL_RESULT_TEXT.to_string()
         } else {
-            INTERRUPTED_TOOL_RESULT_TEXT.to_string()
+            UNKNOWN_RESTART_TOOL_RESULT_TEXT.to_string()
         };
         session.append_message(serde_json::json!({
             "role": "tool",
             "tool_call_id": tool_call.id,
             "content": content,
         }))?;
+        appended = true;
     }
 
-    Ok(true)
+    Ok(appended)
 }
 
 /// Returns true if the message is a "turn start" — i.e., starts a new logical turn.
@@ -725,7 +725,7 @@ pub fn init_context_state(
                 budget,
                 token_budget,
                 session_obs,
-            ))
+            ));
         }
     };
     let today = Utc::now().date_naive();

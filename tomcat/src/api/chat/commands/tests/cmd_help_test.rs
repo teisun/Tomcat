@@ -1,6 +1,6 @@
 //! Tests for `commands::cmd_help`.
 
-use super::super::{parse_chat_command, ChatCommand};
+use super::super::{ChatCommand, parse_chat_command};
 use crate::api::chat::commands::help_text;
 
 fn assert_not_command(input: &str) {

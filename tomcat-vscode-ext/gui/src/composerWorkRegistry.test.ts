@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ComposerWorkRegistry } from "./composerWorkRegistry";
 
@@ -9,6 +9,10 @@ function deferred() {
 }
 
 describe("ComposerWorkRegistry", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("waits only for source-session work at or before the click cutoff", async () => {
     const registry = new ComposerWorkRegistry();
     const before = registry.begin("source", "paste");
@@ -37,5 +41,27 @@ describe("ComposerWorkRegistry", () => {
     expect(registry.complete(ticket.operationId)).toBe(true);
     expect(registry.complete(ticket.operationId)).toBe(false);
     expect(registry.complete("unknown")).toBe(false);
+  });
+
+  it("releases a draft fork cutoff after the bounded wait and reports it", async () => {
+    vi.useFakeTimers();
+    const reportTimeout = vi.fn();
+    const registry = new ComposerWorkRegistry(10_000, reportTimeout);
+    registry.begin("source", "picker");
+
+    const waiting = registry.waitForCutoff("source", registry.cutoff("source"));
+    await vi.advanceTimersByTimeAsync(9_999);
+    let settled = false;
+    void waiting.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waiting;
+
+    expect(reportTimeout).toHaveBeenCalledWith(
+      expect.stringContaining("timed out waiting 10000ms"),
+    );
+    expect(registry.pendingCount("source")).toBe(1);
   });
 });

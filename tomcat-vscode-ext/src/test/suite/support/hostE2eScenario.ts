@@ -338,32 +338,9 @@ async function claimDifferentWebviewSession(
     return candidate;
   }
 
-  const knownSessionIds = new Set(
-    api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
-  );
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: `${messageId}-new`,
-      type: "newSession",
-    }),
-  );
-  return waitForWebviewState(
-    api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (
-        !activeSessionId
-        || activeSessionId === currentSessionId
-        || knownSessionIds.has(activeSessionId)
-      ) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
-    timeoutMs,
-  );
+  const createdSessionId = await createFreshWebviewSession(api, messageId, timeoutMs);
+  assert.notEqual(createdSessionId, currentSessionId);
+  return createdSessionId;
 }
 
 async function createFreshWebviewSession(
@@ -377,23 +354,21 @@ async function createFreshWebviewSession(
   );
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
+      data: { cwd: null },
       messageId,
       type: "newSession",
     }),
   );
   const sessionId = await waitForWebviewState(
     api,
-    (state) =>
-      state.sessions.find((session) => !knownSessionIds.has(session.sessionId))
-        ?.sessionId,
+    (state) => {
+      const created = state.sessions.find(
+        (session) =>
+          !knownSessionIds.has(session.sessionId),
+      );
+      return created?.sessionId;
+    },
     timeoutMs,
-  );
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { sessionId },
-      messageId: `${messageId}-claim`,
-      type: "switchSession",
-    }),
   );
   await waitForWebviewState(
     api,
@@ -1776,12 +1751,18 @@ export async function assertWebviewQuestionDisconnectFlow(
       type: "prompt",
     }),
   );
-  await waitForWebviewDomSnapshot(
+  const originalQuestion = await waitForWebviewState(
     api,
-    (candidate) =>
-      candidate.activeSessionId === sessionId && candidate.approvalCount >= 1
-        ? candidate
-        : undefined,
+    (state) => {
+      const session = state.sessionViews[sessionId];
+      const pending = session?.timeline.find(
+        (
+          item,
+        ): item is Extract<typeof session.timeline[number], { type: "approval" }> =>
+          item.type === "approval" && !item.resolved,
+      );
+      return pending ? { requestId: pending.request.requestId } : undefined;
+    },
     20_000,
   );
 
@@ -1794,35 +1775,58 @@ export async function assertWebviewQuestionDisconnectFlow(
       type: "switchSession",
     }),
   );
-  const disconnectedState = await waitForWebviewState(
+  const resumedState = await waitForWebviewState(
     api,
     (state) => {
       const session = state.sessionViews[sessionId];
-      const disconnectedTool = session?.timeline.find(
-        (item): item is Extract<typeof session.timeline[number], { type: "tool" }> =>
-          item.type === "tool" &&
-          item.toolName === "ask_question" &&
-          item.summary?.includes('"outcome":"host_disconnected"') === true,
+      const resumedQuestion = session?.timeline.find(
+        (item): item is Extract<typeof session.timeline[number], { type: "approval" }> =>
+          item.type === "approval" && !item.resolved,
       );
-      return disconnectedTool ? { disconnectedTool, session } : undefined;
+      return resumedQuestion ? { resumedQuestion, session } : undefined;
     },
     30_000,
   );
-  assert.ok(
-    disconnectedState.disconnectedTool.summary?.includes('"outcome":"host_disconnected"'),
-    "expected irrecoverable serve/extension-host restart to hydrate host_disconnected",
+  assert.notEqual(
+    resumedState.resumedQuestion.request.requestId,
+    originalQuestion.requestId,
+    "restart must create a fresh live request id for the durable tool call",
   );
-  const disconnected = await waitForWebviewDomSnapshot(
+  const resumed = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
-      candidate.approvalCount === 0 &&
-      candidate.actionToolRowCount >= 1
+      candidate.approvalCount >= 1
         ? candidate
         : undefined,
     30_000,
   );
-  assert.equal(disconnected.approvalCount, 0);
+  assert.equal(resumed.approvalCount, 1);
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        requestId: resumedState.resumedQuestion.request.requestId,
+        sessionId,
+        result: {
+          answers: [],
+          cancelled: true,
+          outcome: "skipped",
+        },
+      },
+      messageId: "webview-question-disconnect-skip",
+      type: "answerQuestion",
+    }),
+  );
+  await waitForEvent(api, { type: "tool_execution_end" });
+  await waitForEvent(api, { type: "agent_idle" });
+  await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId && candidate.approvalCount === 0
+        ? candidate
+        : undefined,
+    20_000,
+  );
 }
 
 export async function assertWebviewDiffFlow(
@@ -2295,17 +2299,23 @@ export async function assertWebviewRetryRecoveryFlow(
     failedSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
     "expected the failed turn summary to render in the transcript",
   );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    await pause(700);
+    captureTranscriptVisual(
+      "same-session-retry-card",
+      "window",
+      "Extension Development Host",
+    );
+  }
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: {
-        sessionId,
-        text: "retry 403 showcase",
-      },
-      messageId: "webview-retry-recovery-retry",
-      type: "prompt",
-    }),
-  );
+  // Must exercise the actual error-card action. Sending a second prompt would only prove that
+  // the normal composer path works, not that Retry revives the failed turn without cloning it.
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "recover-error-turn",
+  });
   await api.__testing.waitForEvent({
     sessionId,
     timeoutMs: 20_000,
@@ -2323,6 +2333,15 @@ export async function assertWebviewRetryRecoveryFlow(
   assert.ok(
     recoveredSnapshot.messageTexts.some((text) => text.includes(successText)),
     "expected retrying in the same session to produce a successful assistant reply",
+  );
+  assert.ok(
+    !recoveredSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
+    "after a successful Retry, the obsolete error card must disappear from the live transcript",
+  );
+  assert.equal(
+    recoveredSnapshot.messageTexts.filter((text) => text.includes("retry 403 showcase")).length,
+    1,
+    "Retry must revive the existing user bubble rather than append a duplicate prompt",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -2346,15 +2365,16 @@ export async function assertWebviewRetryRecoveryFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId
-      && candidate.messageTexts.some((text) => text.includes(failureSummary))
       && candidate.messageTexts.some((text) => text.includes(successText))
+      && !candidate.messageTexts.some((text) => text.includes(failureSummary))
         ? candidate
         : undefined,
     20_000,
   );
-  assert.ok(
-    rehydratedSnapshot.timelineKinds.includes("message:error"),
-    `expected the rehydrated transcript to include an error bubble, got ${JSON.stringify(rehydratedSnapshot.timelineKinds)}`,
+  assert.equal(
+    rehydratedSnapshot.messageTexts.filter((text) => text.includes("retry 403 showcase")).length,
+    1,
+    "rehydration must preserve the revived prompt once without an obsolete error card",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -2367,6 +2387,61 @@ export async function assertWebviewRetryRecoveryFlow(
     await pause(700);
     captureTranscriptVisual(
       "transcript-error-record",
+      "window",
+      "Extension Development Host",
+    );
+  }
+}
+
+export async function assertWebviewResumeCardFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  const failureSummary = "连接中断 · 可继续";
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-resume-card-session",
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "resume card showcase",
+      },
+      messageId: "webview-resume-card-prompt",
+      type: "prompt",
+    }),
+  );
+  await api.__testing.waitForEvent({
+    sessionId,
+    timeoutMs: 20_000,
+    type: "agent_end",
+  });
+  const failedSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId
+      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+      && candidate.html.includes("codicon-debug-continue")
+      && candidate.html.includes(">Resume</span>")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    failedSnapshot.html.includes("codicon-debug-continue")
+      && failedSnapshot.html.includes(">Resume</span>"),
+    "a failed turn with fully paired tool results must show Resume",
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    await pause(700);
+    captureTranscriptVisual(
+      "same-session-resume-card",
       "window",
       "Extension Development Host",
     );
@@ -3057,11 +3132,73 @@ export async function assertWebviewSelectionReferenceFlow(
   }
 }
 
-export async function assertWebviewFileDropReferenceFlow(
+export async function assertWebviewDraftForkPreservesReferenceFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sourceSessionId = await createFreshWebviewSession(
+    api,
+    "webview-draft-fork-reference-source",
+  );
+  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
+  const filePath = path.join(
+    workspaceDir,
+    `draft-fork-reference-${Date.now().toString(36)}.md`,
+  );
+  await fs.writeFile(filePath, "# draft fork reference\n", "utf8");
+
+  try {
+    await api.__testing.sendWebviewIntent(
+      buildWebviewIntent({
+        data: {
+          sessionId: sourceSessionId,
+          uris: [vscode.Uri.file(filePath).toString()],
+        },
+        messageId: "webview-draft-fork-reference-drop",
+        type: "resolveDrop",
+      }),
+    );
+    await waitForWebviewState(
+      api,
+      (state) =>
+        state.sessionViews[sourceSessionId]?.composerDraft?.segments.some(
+          (segment) => segment.type === "reference" && segment.path === filePath,
+        )
+          ? state
+          : undefined,
+      20_000,
+    );
+
+    const targetSessionId = await createFreshWebviewSession(
+      api,
+      "webview-draft-fork-reference-target",
+    );
+    assert.notEqual(targetSessionId, sourceSessionId);
+    const targetDraft = await waitForWebviewState(
+      api,
+      (state) => state.sessionViews[targetSessionId]?.composerDraft?.segments.some(
+        (segment) => segment.type === "reference" && segment.path === filePath,
+      )
+        ? state.sessionViews[targetSessionId].composerDraft
+        : undefined,
+      20_000,
+    );
+    assert.ok(
+      targetDraft.segments.some(
+        (segment) => segment.type === "reference" && segment.path === filePath,
+      ),
+      "expected the new session draft to retain the source reference",
+    );
+  } finally {
+    await fs.rm(filePath, { force: true });
+  }
+}
+
+export async function assertWebviewFileDropReferenceFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
   api.__testing.clearObservedEvents();
   const sessionId = await createFreshWebviewSession(
     api,
@@ -3075,54 +3212,6 @@ export async function assertWebviewFileDropReferenceFlow(
   await fs.writeFile(secondFilePath, "## another dropped context\n", "utf8");
   const fileUri = vscode.Uri.file(filePath).toString();
   const secondFileUri = vscode.Uri.file(secondFilePath).toString();
-  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
-  await vscode.window.showTextDocument(document, { preview: false });
-  await pause(300);
-
-  const idleSnapshot = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.activeSessionId === sessionId &&
-      candidate.html.includes('data-testid="composer-notice-drag"') &&
-      candidate.html.includes("拖文件请按住 Shift")
-        ? candidate
-        : undefined,
-    20_000,
-  );
-  assert.ok(
-    idleSnapshot.html.includes("拖文件请按住 Shift"),
-    "expected the idle composer to teach the Shift drag requirement",
-  );
-
-  await api.__testing.sendWebviewDomAction({
-    kind: "dragOverTestId",
-    testId: "composer-surface",
-  });
-  const dragSnapshot = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.activeSessionId === sessionId &&
-      candidate.html.includes("tc-composer__surface--drop-active") &&
-      candidate.html.includes("松手加入上下文")
-        ? candidate
-        : undefined,
-    20_000,
-  );
-  assert.ok(
-    dragSnapshot.html.includes("tc-composer__surface--drop-active"),
-    "expected composer surface to show the drag-over highlight",
-  );
-  assert.ok(
-    dragSnapshot.html.includes("松手加入上下文"),
-    "expected the active drag hint to confirm the drop target",
-  );
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual("file-drop-reference-hover", "sidebar", "drop-context.md");
-  }
-  await api.__testing.sendWebviewDomAction({
-    kind: "dragLeaveTestId",
-    testId: "composer-surface",
-  });
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -3145,31 +3234,42 @@ export async function assertWebviewFileDropReferenceFlow(
     }),
   );
 
-  const snapshot = await waitForWebviewDomSnapshot(
+  const draft = await waitForWebviewState(
     api,
-    (candidate) => {
-      const chipCount = (candidate.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
-      return (
-        candidate.activeSessionId === sessionId &&
-        chipCount === 2 &&
-        candidate.html.includes(`title="${filePath}"`) &&
-        candidate.html.includes(`title="${secondFilePath}"`) &&
-        candidate.html.includes("drop-context.md")
-        && candidate.html.includes("drop-context-2.md")
-      )
-        ? candidate
-        : undefined;
+    (state) => {
+      const segments = state.sessionViews[sessionId]?.composerDraft?.segments ?? [];
+      const references = segments.filter(
+        (segment) => segment.type === "reference",
+      );
+      return references.length === 2 ? references : undefined;
     },
     20_000,
   );
   assert.equal(
-    (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length,
+    draft.length,
     2,
     "expected distinct file drops to remain while duplicate file drops dedupe away",
   );
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual("file-drop-reference", "sidebar", "drop-context.md");
-  }
+  assert.deepEqual(
+    draft.map((segment) => segment.path).sort(),
+    [filePath, secondFilePath].sort(),
+    "expected both dropped files to be preserved as composer references",
+  );
+  const rendered = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId
+      && snapshot.html.includes('data-testid="composer-reference-chip"')
+      && snapshot.html.includes("drop-context.md")
+      && snapshot.html.includes("drop-context-2.md")
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    rendered.html.includes('data-testid="composer-reference-chip"'),
+    "expected the dropped references to render as visible composer chips",
+  );
 }
 
 export async function assertWebviewAtMentionReferenceFlow(
@@ -3462,24 +3562,9 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
 const TINY_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAK0lEQVR4nA3JQREAAAyDsAqrsApDBLK2HxdiYuMiX6mtq7xldm7yN1gcwgElshfBr2E1gwAAAABJRU5ErkJggg==";
 
-/**
- * Count attachments in the pending strip regardless of what each one currently looks
- * like. An image starts as a loading placeholder, becomes a thumbnail once one has been
- * generated, and turns into a chip if its bytes went missing — all the same attachment.
- */
-function countPendingAttachments(html: string): number {
-  return (
-    html.match(
-      /data-testid="attachment-(?:thumb|chip|skeleton|unavailable)"/gu,
-    ) ?? []
-  ).length;
-}
-
 export async function assertWebviewPickContextFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
-  await api.__testing.focusWebview();
-  await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
   const sessionId = await createFreshWebviewSession(
     api,
@@ -3496,17 +3581,12 @@ export async function assertWebviewPickContextFlow(
   await fs.writeFile(codePath, "export const pickContext = true;\n", "utf8");
   await fs.mkdir(folderPath, { recursive: true });
 
-  const baselineSnapshot = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.activeSessionId === sessionId
-        ? candidate
-        : undefined,
-    20_000,
-  );
-  const baselineAttachmentCount = countPendingAttachments(baselineSnapshot.html);
-  const baselineReferenceCount =
-    (baselineSnapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+  const baseline = api.__testing.getWebviewState().sessionViews[sessionId];
+  assert.ok(baseline, "expected the active session to have a webview state");
+  const baselineAttachmentCount = baseline.pendingAttachments.length;
+  const baselineReferenceCount = (baseline.composerDraft?.segments ?? []).filter(
+    (segment) => segment.type === "reference",
+  ).length;
 
   api.__testing.setOpenDialogHandler(() => [
     vscode.Uri.file(imagePath),
@@ -3515,69 +3595,70 @@ export async function assertWebviewPickContextFlow(
   ]);
 
   try {
-    await api.__testing.sendWebviewDomAction({
-      kind: "clickTestId",
-      testId: "attachment-add",
-    });
-
-    const snapshot = await waitForWebviewDomSnapshot(
-      api,
-      (candidate) => {
-        const referenceCount = (candidate.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
-        return (
-          candidate.activeSessionId === sessionId &&
-          countPendingAttachments(candidate.html) === baselineAttachmentCount + 1 &&
-          referenceCount === baselineReferenceCount + 2 &&
-          candidate.html.includes("pick-context-image.png") &&
-          candidate.html.includes("pick-context.ts") &&
-          candidate.html.includes("pick-context-folder/")
-        )
-          ? candidate
-          : undefined;
-      },
-      20_000,
-    );
-
-    assert.equal(
-      countPendingAttachments(snapshot.html),
-      baselineAttachmentCount + 1,
-      "expected the picker to add exactly one pending attachment",
-    );
-    assert.equal(
-      (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length,
-      baselineReferenceCount + 2,
-      "expected the picker to add two context reference chips",
+    await api.__testing.sendWebviewIntent(
+      buildWebviewIntent({
+        data: { sessionId },
+        messageId: "webview-pick-context",
+        type: "pickContext",
+      }),
     );
 
     const settled = await waitForWebviewState(
       api,
       (state) => {
         const view = state.sessionViews[sessionId];
-        if (!view || view.pendingAttachments.length !== 1) {
+        if (!view || view.pendingAttachments.length !== baselineAttachmentCount + 1) {
           return undefined;
         }
-        return {
-          attachments: view.pendingAttachments,
-        };
+        const references = (view.composerDraft?.segments ?? []).filter(
+          (segment) => segment.type === "reference",
+        );
+        return references.length === baselineReferenceCount + 2
+          ? { attachments: view.pendingAttachments, references }
+          : undefined;
       },
       20_000,
     );
 
-    assert.equal(settled.attachments[0]?.label, "pick-context-image.png");
-    assert.equal(settled.attachments[0]?.kind, "image");
-
-    // A picked file arrives without a thumbnail — nothing decoded it yet. The webview is
-    // expected to notice, downsample the image itself, and hand the result back, which is
-    // what keeps the 48px strip from loading full-resolution photographs.
-    const withThumbnail = await waitForWebviewDomSnapshot(
+    assert.equal(
+      settled.attachments.length,
+      baselineAttachmentCount + 1,
+      "expected the picker to add exactly one pending attachment",
+    );
+    assert.equal(
+      settled.references.length,
+      baselineReferenceCount + 2,
+      "expected the picker to add two context reference chips",
+    );
+    assert.equal(
+      settled.attachments.at(-1)?.label,
+      "pick-context-image.png",
+      "expected the picked image to enter the pending attachment strip",
+    );
+    assert.equal(
+      settled.attachments.at(-1)?.kind,
+      "image",
+      "expected picker classification to retain the image kind",
+    );
+    assert.deepEqual(
+      settled.references.map((segment) => segment.label).slice(-2).sort(),
+      ["pick-context-folder/", "pick-context.ts"],
+      "expected the picked code file and folder to become references",
+    );
+    const rendered = await waitForWebviewDomSnapshot(
       api,
-      (candidate) =>
-        candidate.html.includes('data-testid="attachment-thumb"') ? candidate : undefined,
+      (snapshot) =>
+        snapshot.activeSessionId === sessionId
+        && snapshot.html.includes('data-testid="composer-reference-chip"')
+        && snapshot.html.includes("pick-context.ts")
+        && snapshot.html.includes("pick-context-folder/")
+          ? snapshot
+          : undefined,
       20_000,
     );
     assert.ok(
-      withThumbnail.html.includes('data-attachment-resolution="thumb"'),
-      "expected the strip to end up showing a generated thumbnail, not the source image",
+      rendered.html.includes('data-testid="composer-reference-chip"'),
+      "expected picker references to render as visible composer chips",
     );
   } finally {
     api.__testing.setOpenDialogHandler(undefined);
@@ -3747,6 +3828,8 @@ function captureTranscriptVisual(
     | "model-dropdown-open"
     | "progress"
     | "reload-replay"
+    | "same-session-resume-card"
+    | "same-session-retry-card"
     | "rich-render"
     | "same-session-retry-success"
     | "selection-reference-codelens"

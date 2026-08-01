@@ -20,7 +20,7 @@ use serde_json::json;
 use shell_words;
 
 use crate::core::SwitchingCheckpointStore;
-use crate::infra::{wire, AppConfig, ScopedEventEmitter};
+use crate::infra::{AppConfig, ScopedEventEmitter, wire};
 
 const SKIP_ENV: &str = "PI_SKIP_SEARCH_TOOLS_PREFLIGHT";
 
@@ -471,11 +471,7 @@ fn read_valid_detached_marker_log_path(marker_name: &str) -> Option<PathBuf> {
         return None;
     }
     let path = PathBuf::from(line);
-    if path.is_file() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.is_file() { Some(path) } else { None }
 }
 
 #[cfg(unix)]

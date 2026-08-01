@@ -35,6 +35,12 @@ async function main(): Promise<void> {
   );
   const fixture = await createHostE2eFixture();
   const extensionTestsEnv = { ...fixture.env };
+  for (const name of ["TOMCAT_E2E_SCREENSHOT", "TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR"]) {
+    const value = process.env[name];
+    if (value) {
+      extensionTestsEnv[name] = value;
+    }
+  }
   // Coding-agent shells may run Electron as Node; never leak that mode into VS Code.
   delete extensionTestsEnv.ELECTRON_RUN_AS_NODE;
   const electronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;

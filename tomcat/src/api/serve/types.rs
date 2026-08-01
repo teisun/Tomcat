@@ -246,6 +246,14 @@ pub enum ServeCommand {
         #[serde(default, skip_serializing_if = "ServeMessageParams::is_empty")]
         params: ServeMessageParams,
     },
+    /// 在不追加用户消息的前提下，基于当前 transcript 继续请求模型。
+    #[serde(rename_all = "camelCase")]
+    Resume {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     GetState {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,6 +280,14 @@ pub enum ServeCommand {
         revert_files: bool,
         #[serde(default, rename = "dryRun", skip_serializing_if = "Option::is_none")]
         dry_run: Option<bool>,
+    },
+    /// 主动压缩当前会话上下文，保留摘要以继续会话。
+    #[serde(rename_all = "camelCase")]
+    Compact {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     SetPlanMode {
@@ -530,9 +546,11 @@ impl ServeCommand {
             Self::Prompt { id, .. }
             | Self::Steer { id, .. }
             | Self::FollowUp { id, .. }
+            | Self::Resume { id, .. }
             | Self::GetState { id, .. }
             | Self::ListCheckpoints { id, .. }
             | Self::RestoreCheckpoint { id, .. }
+            | Self::Compact { id, .. }
             | Self::SetPlanMode { id, .. }
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
@@ -562,9 +580,11 @@ impl ServeCommand {
             Self::Prompt { session_id, .. }
             | Self::Steer { session_id, .. }
             | Self::FollowUp { session_id, .. }
+            | Self::Resume { session_id, .. }
             | Self::GetState { session_id, .. }
             | Self::ListCheckpoints { session_id, .. }
             | Self::RestoreCheckpoint { session_id, .. }
+            | Self::Compact { session_id, .. }
             | Self::SetPlanMode { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::SetThinkingLevel { session_id, .. }
@@ -610,9 +630,11 @@ impl ServeCommand {
             Self::Prompt { .. } => "prompt",
             Self::Steer { .. } => "steer",
             Self::FollowUp { .. } => "follow_up",
+            Self::Resume { .. } => "resume",
             Self::GetState { .. } => "get_state",
             Self::ListCheckpoints { .. } => "list_checkpoints",
             Self::RestoreCheckpoint { .. } => "restore_checkpoint",
+            Self::Compact { .. } => "compact",
             Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",

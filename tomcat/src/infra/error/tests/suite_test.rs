@@ -152,12 +152,105 @@ fn is_context_overflow_matches_truth_table() {
     )));
     assert!(!is_context_overflow(&llm_http_status_error(
         "openai",
-        503,
-        "context_length_exceeded",
+        400,
+        "invalid model"
     )));
-    assert!(!is_context_overflow(&llm_http_status_error(
-        "openai", 400, ""
+    assert!(is_context_overflow(&llm_stream_terminal_error(
+        "fcodex",
+        "request exceeds the context window",
+        Some("invalid_request_error".to_string()),
     )));
+    assert!(is_context_overflow(&llm_http_status_error(
+        "anthropic",
+        413,
+        "request entity too large",
+    )));
+}
+
+#[test]
+fn context_overflow_text_corpus_is_specific() {
+    for sample in [
+        "exceeds the context window",
+        "prompt is too long",
+        "input length 200000 plus max_tokens exceeds the limit",
+        "model_context_window_exceeded",
+    ] {
+        assert!(
+            is_context_overflow_text(sample),
+            "context overflow corpus must match {sample:?}"
+        );
+    }
+    for sample in [
+        "context is available",
+        "rate limit exceeded for this context",
+        "token limit has reset",
+    ] {
+        assert!(
+            !is_context_overflow_text(sample),
+            "broad context/token wording must not falsely match {sample:?}"
+        );
+    }
+}
+
+#[test]
+fn llm_failure_classification_obeys_billing_before_status() {
+    let cases = [
+        (
+            llm_stream_terminal_error(
+                "openai",
+                r#"{"error":{"code":"insufficient_quota","type":"insufficient_quota"}}"#,
+                Some("insufficient_quota".to_string()),
+            ),
+            LlmFailureKind::Billing,
+            FailureDomain::Account,
+        ),
+        (
+            llm_http_status_error(
+                "anthropic",
+                403,
+                r#"{"error":{"type":"billing_error","message":"insufficient credits"}}"#,
+            ),
+            LlmFailureKind::Billing,
+            FailureDomain::Account,
+        ),
+        (
+            llm_http_status_error("fcodex", 403, "forbidden"),
+            LlmFailureKind::Authentication,
+            FailureDomain::Account,
+        ),
+        (
+            llm_http_status_error("deepseek", 429, "SPEND_LIMIT reached"),
+            LlmFailureKind::Billing,
+            FailureDomain::Account,
+        ),
+        (
+            llm_http_status_error("openai", 429, "rate limit exceeded"),
+            LlmFailureKind::RateLimit,
+            FailureDomain::Transport,
+        ),
+        (
+            llm_http_status_error(
+                "transit",
+                400,
+                r#"{"error":{"code":"upstream_error","message":"Upstream request failed"}}"#,
+            ),
+            LlmFailureKind::UpstreamTransient,
+            FailureDomain::Transport,
+        ),
+    ];
+    for (error, kind, domain) in cases {
+        let failure = classify_llm_failure(&error);
+        assert_eq!(failure.kind, kind);
+        assert_eq!(failure.domain, domain);
+    }
+}
+
+#[test]
+fn llm_failure_classifies_402_without_body_evidence_as_billing() {
+    let failure = classify_llm_failure(&llm_http_status_error("transit", 402, "Payment Required"));
+
+    assert_eq!(failure.kind, LlmFailureKind::Billing);
+    assert_eq!(failure.domain, FailureDomain::Account);
 }
 
 #[test]

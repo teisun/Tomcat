@@ -129,6 +129,7 @@ let assistantMessageCounter = 1;
 let pendingApproval = null;
 let pendingInterrupt = null;
 let activeSessionId = null;
+const RESUME_STATE_PATH = path.join(path.dirname(setupMarkerPath), "fake-serve-resume.json");
 const debugGetMessages = process.env.TOMCAT_E2E_DEBUG_GET_MESSAGES === "1";
 const historyPageDelayMs = Math.max(
   0,
@@ -138,7 +139,55 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.21";
+const serverVersion = "0.1.22";
+
+function persistPendingApproval() {
+  if (!pendingApproval || pendingApproval.kind !== "answer-card") {
+    try {
+      fs.unlinkSync(RESUME_STATE_PATH);
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    return;
+  }
+  fs.mkdirSync(path.dirname(RESUME_STATE_PATH), { recursive: true });
+  fs.writeFileSync(RESUME_STATE_PATH, JSON.stringify({
+    activeSessionId,
+    assistantMessageCounter,
+    historyCounter,
+    pendingApproval,
+    sessionCounter,
+    sessions: [...sessions.entries()],
+  }));
+}
+
+function restorePendingApproval() {
+  if (!fs.existsSync(RESUME_STATE_PATH)) {
+    return;
+  }
+  try {
+    const state = JSON.parse(fs.readFileSync(RESUME_STATE_PATH, "utf8"));
+    if (!state || !Array.isArray(state.sessions) || !state.pendingApproval) {
+      return;
+    }
+    for (const [sessionId, session] of state.sessions) {
+      if (typeof sessionId === "string" && session && typeof session === "object") {
+        sessions.set(sessionId, session);
+      }
+    }
+    activeSessionId = typeof state.activeSessionId === "string" ? state.activeSessionId : null;
+    pendingApproval = state.pendingApproval;
+    sessionCounter = Number.isInteger(state.sessionCounter) ? state.sessionCounter : sessionCounter;
+    historyCounter = Number.isInteger(state.historyCounter) ? state.historyCounter : historyCounter;
+    assistantMessageCounter = Number.isInteger(state.assistantMessageCounter)
+      ? state.assistantMessageCounter
+      : assistantMessageCounter;
+  } catch {
+    // A corrupt synthetic state must not make unrelated extension-host tests fail.
+  }
+}
 
 if (process.argv[2] === "--version") {
   process.stdout.write("tomcat fake " + serverVersion + "\\n");
@@ -360,7 +409,10 @@ function createSession() {
   return sessionId;
 }
 
-createSession();
+restorePendingApproval();
+if (sessions.size === 0) {
+  createSession();
+}
 
 function send(frame) {
   process.stdout.write(JSON.stringify(frame) + "\\n");
@@ -1197,8 +1249,10 @@ function handlePrompt(frame) {
     seedTranscriptSwitchBackHistory(sessionId);
   }
   const normalizedUserContent = normalizeHistoryContent(text, segments);
-  recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
-  emitSessionTitleUpdated(sessionId, normalizedUserContent);
+  if (!frame.resume) {
+    recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
+    emitSessionTitleUpdated(sessionId, normalizedUserContent);
+  }
   if (text.includes("answer card showcase")) {
     const requestId = \`ask-answer-\${sessionId}\`;
     const request = {
@@ -1216,6 +1270,7 @@ function handlePrompt(frame) {
       responseEvent: \`plan.ask_question.response.\${requestId}\`,
     };
     pendingApproval = { kind: "answer-card", request, requestId, sessionId };
+    persistPendingApproval();
     send({
       payload: request,
       requestId,
@@ -1313,6 +1368,31 @@ function handlePrompt(frame) {
     recordHistoryMessage(sessionId, "assistant", "same session retry succeeded");
     emitContextMetrics(sessionId, 0.44);
     finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("resume card showcase")) {
+    const tool = {
+      args: { path: "README.md" },
+      result: "# Tomcat\\n",
+      toolCallId: "resume-card-read-1",
+      toolName: "read",
+    };
+    emitCompletedTool(sessionId, tool);
+    recordHistoryAssistantWithTools(
+      sessionId,
+      "I read the project overview before the connection failed.",
+      [tool],
+      "Read project overview",
+    );
+    recordHistoryToolResult(sessionId, tool);
+    markLatestUserMessageFailed(sessionId);
+    recordHistoryError(
+      sessionId,
+      "连接中断 · 可继续",
+      "The model stopped after all tool calls had already completed.",
+    );
+    finishTurn(sessionId, "连接中断 · 可继续");
     return;
   }
 
@@ -1714,6 +1794,35 @@ function handlePrompt(frame) {
   finishTurn(sessionId, null);
 }
 
+function handleResume(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const session = touchSession(ensureSession(sessionId));
+  let previousUser = null;
+  for (let index = session.history.length - 1; index >= 0; index -= 1) {
+    const entry = session.history[index];
+    if (entry?.type === "message" && entry?.message?.role === "user") {
+      previousUser = entry;
+      break;
+    }
+  }
+  const content = previousUser?.message?.content;
+  if (typeof content !== "string" || !content.trim()) {
+    send({
+      error: "resume_without_user_prompt",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+  // The real server revives the same persisted user entry before starting a no-input turn.
+  // Mirror that contract so the E2E exercises Retry instead of quietly issuing a fresh prompt.
+  delete previousUser.message.superseded;
+  delete previousUser.message.turn_failed;
+  handlePrompt({ ...frame, params: {}, resume: true, sessionId, text: content });
+}
+
 function handleControlResponse(frame) {
   if (!pendingApproval || frame.requestId !== pendingApproval.requestId) {
     return;
@@ -1721,6 +1830,7 @@ function handleControlResponse(frame) {
 
   const pending = pendingApproval;
   pendingApproval = null;
+  persistPendingApproval();
   const sessionId = pending.sessionId;
   const result =
     frame.payload && frame.payload.result && typeof frame.payload.result === "object"
@@ -1857,6 +1967,25 @@ function handleCommand(frame) {
           sessionId,
           type: "control_response",
         });
+          if (pendingApproval && pendingApproval.kind === "answer-card") {
+            const requestId = \`ask-resumed-\${pendingApproval.sessionId}-\${Date.now()}\`;
+            const request = {
+              ...pendingApproval.request,
+              requestId,
+              responseEvent: \`plan.ask_question.response.\${requestId}\`,
+            };
+            pendingApproval = { ...pendingApproval, request, requestId };
+            persistPendingApproval();
+            setTimeout(() => {
+              send({
+                payload: request,
+                requestId,
+                sessionId: pendingApproval.sessionId,
+                subtype: "ask_question",
+                type: "control_request",
+              });
+            }, 0);
+          }
       }
       break;
     case "control_response":
@@ -2227,6 +2356,9 @@ function handleCommand(frame) {
     case "prompt":
     case "follow_up":
       handlePrompt(frame);
+      break;
+    case "resume":
+      handleResume(frame);
       break;
     case "interrupt":
       handleInterrupt(frame);

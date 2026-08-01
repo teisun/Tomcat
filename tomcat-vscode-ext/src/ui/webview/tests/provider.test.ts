@@ -190,6 +190,187 @@ describe("picked uri classification", () => {
     await expect(classifyPickedUri(vscode.Uri.file("/workspace/src/app.ts"))).resolves.toBe("reference");
     await expect(classifyPickedUri(vscode.Uri.file("/workspace/tmp/blob.bin"))).resolves.toBe("reference");
   });
+
+  it("commits a mixed picker selection through one draft lane", async () => {
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+    const host = provider as any;
+    const firstReference = {
+      kind: "file",
+      path: "/workspace/src/first.ts",
+      type: "reference",
+    };
+    const secondReference = {
+      kind: "file",
+      path: "/workspace/src/second.ts",
+      type: "reference",
+    };
+    const attachment = {
+      blobSha: "a".repeat(64),
+      bytes: 12,
+      filename: "diagram.png",
+      id: "attachment-1",
+      kind: "image",
+      mimeType: "image/png",
+    };
+    const run = vi.spyOn(host.draftCoordinator, "run");
+    vi.spyOn(host, "resolvePickedUri")
+      .mockResolvedValueOnce({ kind: "reference", reference: firstReference })
+      .mockResolvedValueOnce({ kind: "attachment", upload: { filename: "diagram.png" } })
+      .mockResolvedValueOnce({ kind: "reference", reference: secondReference });
+    vi.spyOn(host, "ingestUploads").mockImplementation(async (...args: unknown[]) => {
+      const sessionId = args[0] as string;
+      await host.saveAttachmentsToDraft(sessionId, [attachment]);
+      return [attachment];
+    });
+    vi.spyOn(host, "postInsertedReference").mockResolvedValue(undefined);
+    vi.spyOn(host, "reportAttachmentOutcome").mockResolvedValue(undefined);
+
+    await host.ingestPickedUris("s1", [
+      vscode.Uri.file("/workspace/src/first.ts"),
+      vscode.Uri.file("/workspace/assets/diagram.png"),
+      vscode.Uri.file("/workspace/src/second.ts"),
+    ]);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(host.draftStore.peek("s1")).toMatchObject({
+      attachments: [attachment],
+      segments: [firstReference, secondReference],
+    });
+    provider.dispose();
+  });
+});
+
+describe("draft fork delivery", () => {
+  function attachFailingWebview(
+    provider: TomcatWebviewViewProvider,
+    postMessage: ReturnType<typeof vi.fn>,
+  ): void {
+    provider.resolveWebviewView({
+      onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+      show() {},
+      visible: true,
+      webview: {
+        asWebviewUri: (uri: vscode.Uri) => uri,
+        cspSource: "vscode-test-webview",
+        html: "",
+        onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+        options: {},
+        postMessage,
+      },
+    } as unknown as vscode.WebviewView);
+  }
+
+  it("retries a failed fork-result hand-off three times then rejects and clears the operation", async () => {
+    vi.useFakeTimers();
+    try {
+      const postMessage = vi.fn().mockRejectedValue(new Error("bridge down"));
+      const provider = new TomcatWebviewViewProvider({
+        extensionUri: vscode.Uri.file("/workspace/extension"),
+        getDefaultCwd: () => "/workspace",
+        ide: {} as never,
+        initialize: async () => ({} as never),
+        messenger: { onEvent: () => ({ dispose() {} }) } as never,
+        sessionRouter: {} as never,
+      });
+      attachFailingWebview(provider, postMessage);
+      const host = provider as any;
+      const resolve = vi.fn();
+      const reject = vi.fn();
+      const operation = {
+        captureAccepted: false,
+        cwd: null,
+        operationId: "fork-delivery-failure",
+        promise: Promise.resolve("unused"),
+        reject,
+        resolve,
+        sourceSessionId: "s1",
+      };
+      host.pendingDraftForks.set(operation.operationId, operation);
+      host.pendingDraftForkBySource.set(operation.sourceSessionId, operation);
+      vi.spyOn(host, "executeDraftFork").mockResolvedValue("target-session");
+
+      const capture = host.handleDraftForkCapture({
+        cwd: null,
+        operationId: operation.operationId,
+        segments: [],
+        sourceSessionId: "s1",
+        text: "",
+      });
+      await vi.runAllTimersAsync();
+      await capture;
+
+      expect(postMessage).toHaveBeenCalledTimes(3);
+      expect(resolve).not.toHaveBeenCalled();
+      expect(reject).toHaveBeenCalledWith(expect.objectContaining({ message: "bridge down" }));
+      expect(host.pendingDraftForks.size).toBe(0);
+      expect(host.pendingDraftForkBySource.size).toBe(0);
+      provider.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps ordinary event delivery best effort when the bridge rejects", async () => {
+    const postMessage = vi.fn().mockRejectedValue(new Error("bridge down"));
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+    attachFailingWebview(provider, postMessage);
+
+    await expect((provider as any).postEvent({
+      data: { hasErrors: false, message: "attached" },
+      type: "attachmentFeedback",
+    })).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    provider.dispose();
+  });
+
+  it("rejects and clears pending draft forks when a test webview reloads", () => {
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+    const host = provider as any;
+    const reject = vi.fn();
+    const operation = {
+      captureAccepted: false,
+      cwd: null,
+      operationId: "reload-fork",
+      promise: Promise.resolve("unused"),
+      reject,
+      resolve: vi.fn(),
+      sourceSessionId: "s1",
+    };
+    host.pendingDraftForks.set(operation.operationId, operation);
+    host.pendingDraftForkBySource.set(operation.sourceSessionId, operation);
+
+    provider.resetForTestReload();
+
+    expect(reject).toHaveBeenCalledOnce();
+    expect(reject.mock.calls[0]?.[0]).toMatchObject({
+      message: "Tomcat webview reloaded before draft fork capture completed",
+    });
+    expect(host.pendingDraftForks.size).toBe(0);
+    expect(host.pendingDraftForkBySource.size).toBe(0);
+    provider.dispose();
+  });
 });
 
 describe("model catalog parsing", () => {
@@ -238,6 +419,93 @@ describe("model catalog parsing", () => {
         "text-only": [],
       },
     });
+  });
+});
+
+describe("error-turn recovery", () => {
+  function createRecoveryProvider(resume: ReturnType<typeof vi.fn>) {
+    return new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ sessionId: "s1" } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: { resume } as never,
+    });
+  }
+
+  function seedRetryableError(provider: TomcatWebviewViewProvider): void {
+    const host = provider as any;
+    host.stateStore.setActiveSession("s1");
+    host.stateStore.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "keep this exact prompt",
+            role: "user",
+            superseded: true,
+            turn_failed: true,
+          },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ sessionId: "s1" });
+    vi.spyOn(host, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(host, "refreshSessionState").mockResolvedValue(undefined);
+    vi.spyOn(host, "refreshSessions").mockResolvedValue(undefined);
+    vi.spyOn(host, "postState").mockResolvedValue(undefined);
+  }
+
+  it("retries a failed prompt through durable resume without a second user bubble", async () => {
+    const resume = vi.fn().mockResolvedValue(undefined);
+    const provider = createRecoveryProvider(resume);
+    seedRetryableError(provider);
+    const host = provider as any;
+    const sendUserMessage = vi.spyOn(host, "sendUserMessage");
+
+    await host.handleIntent({
+      data: { action: "retry", errorId: "error-1", sessionId: "s1" },
+      messageId: "retry-error-1",
+      type: "recoverErrorTurn",
+    });
+
+    expect(resume).toHaveBeenCalledWith("s1");
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    const users = host.currentState().sessionViews.s1.timeline.filter(
+      (item: { kind?: string; type: string }) => item.type === "message" && item.kind === "user",
+    );
+    expect(users).toHaveLength(1);
+    expect(users[0]).toMatchObject({ id: "user-1", text: "keep this exact prompt" });
+    expect(
+      host.currentState().sessionViews.s1.timeline.some(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toBe(false);
+    provider.dispose();
+  });
+
+  it("restores the same card when resume request itself is rejected", async () => {
+    const resume = vi.fn().mockRejectedValue(new Error("bridge unavailable"));
+    const provider = createRecoveryProvider(resume);
+    seedRetryableError(provider);
+    const host = provider as any;
+
+    await host.handleIntent({
+      data: { action: "retry", errorId: "error-1", sessionId: "s1" },
+      messageId: "retry-error-1",
+      type: "recoverErrorTurn",
+    });
+
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ recoveryAction: "retry" });
+    provider.dispose();
   });
 });
 
@@ -1787,6 +2055,7 @@ describe("plan preview auto-open after review", () => {
 describe("draft fork provider transaction", () => {
   function makeDraftForkProvider(failAt?: "create" | "retain" | "install" | "switch") {
     const order: string[] = [];
+    const installedDrafts: unknown[] = [];
     const router = {
       createDetachedSession: vi.fn(async () => {
         order.push("create");
@@ -1826,7 +2095,15 @@ describe("draft fork provider transaction", () => {
         mimeType: "image/png",
         providerSha: "b".repeat(64),
       }],
-      segments: [{ text: "draft", type: "text" as const }],
+      segments: [
+        { text: "draft", type: "text" as const },
+        {
+          kind: "file" as const,
+          label: "main.rs",
+          path: "/workspace/main.rs",
+          type: "reference" as const,
+        },
+      ],
       text: "draft",
     };
     const internals = provider as unknown as {
@@ -1844,6 +2121,7 @@ describe("draft fork provider transaction", () => {
       installIfEmpty: async (_sessionId, value) => {
         order.push("install");
         if (failAt === "install") throw new Error("install failed");
+        installedDrafts.push(value);
         return value;
       },
       peek: () => draft,
@@ -1867,11 +2145,11 @@ describe("draft fork provider transaction", () => {
         text: draft.text,
       },
     );
-    return { execute, order, provider, router };
+    return { execute, installedDrafts, order, provider, router };
   }
 
   it("commits in the durable order and retains blob/provider hashes without bytes", async () => {
-    const { execute, order, provider, router } = makeDraftForkProvider();
+    const { execute, installedDrafts, order, provider, router } = makeDraftForkProvider();
     await expect(execute()).resolves.toBe("target-1");
     expect(order).toEqual(["persist", "create", "retain", "install", "switch", "select"]);
     expect(router.retainAttachmentLeases).toHaveBeenCalledWith("target-1", [{
@@ -1879,6 +2157,19 @@ describe("draft fork provider transaction", () => {
       providerSha: "b".repeat(64),
     }]);
     expect(router.discardDetachedSession).not.toHaveBeenCalled();
+    expect(installedDrafts).toEqual([
+      expect.objectContaining({
+        segments: [
+          { text: "draft", type: "text" },
+          {
+            kind: "file",
+            label: "main.rs",
+            path: "/workspace/main.rs",
+            type: "reference",
+          },
+        ],
+      }),
+    ]);
     provider.dispose();
   });
 

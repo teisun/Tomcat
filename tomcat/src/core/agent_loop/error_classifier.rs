@@ -17,15 +17,17 @@
 
 use tracing::info;
 
+use crate::core::agent_loop::current_tail_guard::collapse_to_branch_summary;
 use crate::core::compaction::force_drop_oldest_to_target;
 use crate::core::llm::{
     degrade_unsupported_multimodal, Capabilities, ChatMessage, ChatMessageRole,
 };
-use crate::core::session::manager::{build_context_from_state, estimated_tokens_from_chars};
+use crate::core::session::manager::{
+    build_context_from_state, estimate_msg_chars, estimated_tokens_from_chars,
+};
 use crate::infra::error::{
-    is_context_overflow, is_deterministic_stream_refusal_text, is_retryable_llm_error,
-    is_unsupported_multimodal_text, llm_http_status, llm_stage, llm_summary, AppError,
-    LlmErrorStage,
+    classify_llm_failure, is_context_overflow, is_unsupported_multimodal_text, llm_http_status,
+    llm_stage, llm_summary, AppError, LlmFailureKind,
 };
 use crate::infra::events::AgentEvent;
 
@@ -87,120 +89,52 @@ fn temporary_capabilities_for(kind: UnsupportedMultimodalKind) -> Capabilities {
 
 /// 错误分类：把 `AppError` 映射为 `LoopError::Retryable` / `LoopError::Fatal`。
 ///
-/// 分类顺序严格如下（**次序不可交换**，保证 400 + context_length_exceeded 优先走
-/// Retryable → 触发 L3 截断路径；否则 400 会被"400 generic"分支吞掉直接 Fatal）：
-///
-/// 1. `401`                                  → `Fatal`（鉴权失败）
-/// 2. `is_context_overflow(err)`             → `Retryable`（走 L3 trim）
-/// 3. `400` 且不属于 #2                      → `Fatal`（请求体错误，重试无用）
-/// 4. `429 / 500 / 502 / 503 / 504 / 传输阶段` → `Retryable`（限流 / 网关 / 传输）
-/// 5. 其它                                    → `Fatal`（默认收紧）
-///
-/// 每个分支写入 `target="tomcat_chat_diag"` 的诊断 `info!`，branch 字面值：
-/// `fatal_401 / retryable_context_overflow / fatal_400_generic / retryable_rate_or_server
-/// / fatal_default`（观测面保持稳定）。
+/// 先由 `infra::error::classify_llm_failure` 归一化错误语义，再决定尝试循环策略。
+/// 绝不把 HTTP 状态直接当成语义：同一个 403 可以是鉴权或余额不足，流内终局错误则
+/// 根本没有 HTTP 状态码。归一化函数内固定 code > type > status > summary 的证据顺序。
 pub(super) fn classify_error(err: AppError) -> LoopError {
     let s = err.to_string();
     let snippet = err_snippet(&s);
-    let summary = llm_summary(&err).unwrap_or_else(|| s.clone());
-    if let Some(stage) = llm_stage(&err) {
-        let branch = match stage {
-            LlmErrorStage::Connect
-            | LlmErrorStage::Send
-            | LlmErrorStage::BodyRead
-            | LlmErrorStage::IdleTimeout
-            | LlmErrorStage::ReadTimeout => "retryable_llm_transport_stage",
-            LlmErrorStage::NonStreamStale => "fatal_llm_non_stream_stale_stage",
-            LlmErrorStage::Parse => "fatal_llm_parse_stage",
-        };
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "classify_error",
-            branch,
-            stage = %stage,
-            snippet = %snippet
-        );
-        return match stage {
-            LlmErrorStage::Connect
-            | LlmErrorStage::Send
-            | LlmErrorStage::BodyRead
-            | LlmErrorStage::IdleTimeout
-            | LlmErrorStage::ReadTimeout => LoopError::Retryable(err),
-            LlmErrorStage::NonStreamStale | LlmErrorStage::Parse => LoopError::Fatal(err),
-        };
-    }
-    if llm_http_status(&err) == Some(401) {
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "classify_error",
-            branch = "fatal_401",
-            snippet = %snippet
-        );
-        return LoopError::Fatal(err);
-    }
-    // HTTP 400 + context_length_exceeded 等：须为 Retryable，Attempt loop 才能走 L3 截断。
-    if is_context_overflow(&err) {
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "classify_error",
-            branch = "retryable_context_overflow",
-            snippet = %snippet
-        );
-        return LoopError::Retryable(err);
-    }
-    // 这两条分支必须在 generic 400 之前：
-    //
-    // - `content_filter` 之类是“端点明确拒绝”，重试只会重复同样的拒绝；
-    // - 其余流内终局错误（无 stage / 无 http_status）则正是本役要补救的缺口，
-    //   需要进入 Attempt Loop，统一享受指数退避与后续降级策略。
-    if is_stream_terminal_error(&err) && is_deterministic_stream_refusal_text(&summary) {
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "classify_error",
-            branch = "fatal_deterministic_stream_refusal",
-            snippet = %snippet
-        );
-        return LoopError::Fatal(err);
-    }
-    if is_stream_terminal_error(&err) {
-        let branch = if is_unsupported_multimodal_text(&summary) {
-            "retryable_stream_terminal_unsupported_multimodal"
-        } else {
-            "retryable_stream_terminal_error"
-        };
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "classify_error",
-            branch,
-            snippet = %snippet
-        );
-        return LoopError::Retryable(err);
-    }
-    if llm_http_status(&err) == Some(400) {
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "classify_error",
-            branch = "fatal_400_generic",
-            snippet = %snippet
-        );
-        return LoopError::Fatal(err);
-    }
-    if is_retryable_llm_error(&err) {
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "classify_error",
-            branch = "retryable_rate_or_server",
-            snippet = %snippet
-        );
-        return LoopError::Retryable(err);
-    }
+    let failure = classify_llm_failure(&err);
+    let stage = llm_stage(&err);
+    let branch = match failure.kind {
+        LlmFailureKind::ContextOverflow => "retryable_context_overflow",
+        LlmFailureKind::RateLimit => "retryable_rate_limit",
+        LlmFailureKind::UpstreamTransient => "retryable_upstream_transient",
+        LlmFailureKind::StreamInterrupted => "retryable_stream_interrupted",
+        LlmFailureKind::UnsupportedMultimodal => "retryable_unsupported_multimodal",
+        LlmFailureKind::Billing => "fatal_billing",
+        LlmFailureKind::Authentication => "fatal_authentication",
+        LlmFailureKind::ContentFiltered => "fatal_content_filtered",
+        LlmFailureKind::InvalidRequest => "fatal_invalid_request",
+        LlmFailureKind::Unknown if is_stream_terminal_error(&err) => {
+            "retryable_stream_terminal_unknown"
+        }
+        LlmFailureKind::Unknown => "fatal_unknown",
+    };
     info!(
         target: "tomcat_chat_diag",
         phase = "classify_error",
-        branch = "fatal_default",
+        branch,
+        failure_kind = failure.kind.as_str(),
+        failure_domain = failure.domain.as_str(),
+        stage = ?stage,
+        http_status = ?llm_http_status(&err),
         snippet = %snippet
     );
-    LoopError::Fatal(err)
+    match failure.kind {
+        LlmFailureKind::ContextOverflow
+        | LlmFailureKind::RateLimit
+        | LlmFailureKind::UpstreamTransient
+        | LlmFailureKind::StreamInterrupted
+        | LlmFailureKind::UnsupportedMultimodal => LoopError::Retryable(err),
+        LlmFailureKind::Unknown if is_stream_terminal_error(&err) => LoopError::Retryable(err),
+        LlmFailureKind::Billing
+        | LlmFailureKind::Authentication
+        | LlmFailureKind::ContentFiltered
+        | LlmFailureKind::InvalidRequest
+        | LlmFailureKind::Unknown => LoopError::Fatal(err),
+    }
 }
 
 /// L3 强制截断 + 消息重建，仅在 `Retryable` 分支内由 Attempt Loop 调用。
@@ -227,7 +161,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
 ///   `run_attempt_loop` 持有，避免 retry 控制流所有权扩散。
 /// - 事件通过 `agent.emit_event(...)`（`pub(super)`）发射；时序严格保持
 ///   `ContextOverflowTrimStart` → （trim/rebuild） → `ContextOverflowTrimEnd` 各一次。
-pub(super) fn handle_overflow_retry(
+pub(super) async fn handle_overflow_retry(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
     attempt: u32,
@@ -272,6 +206,9 @@ pub(super) fn handle_overflow_retry(
         .map(|cs| cs.usage_ratio())
         .unwrap_or(0.0);
 
+    let before_message_count = messages.len();
+    let before_chars = messages.iter().map(estimate_msg_chars).sum::<usize>();
+
     agent.emit_event(AgentEvent::ContextOverflowTrimStart {
         reason: "context_overflow".into(),
         ratio: ratio_before,
@@ -279,7 +216,14 @@ pub(super) fn handle_overflow_retry(
 
     let mut trim_tokens = 0usize;
     let mut trim_turns = 0usize;
-    if let Some(ref mut ctx_state) = agent.context_state {
+    let mut collapse_failed = None;
+    if attempt >= 2 {
+        // 被动 overflow 的第二次命中直接复用主动侧最强的 Collapse，不另造一套
+        // “递进裁剪”。这条路径能覆盖原先 L3 永远原样保留 tail 的盲点。
+        if let Err(error) = collapse_to_branch_summary(agent, messages).await {
+            collapse_failed = Some(error);
+        }
+    } else if let Some(ref mut ctx_state) = agent.context_state {
         let (turns_removed, chars_removed) = force_drop_oldest_to_target(ctx_state);
         trim_turns = turns_removed;
         trim_tokens = estimated_tokens_from_chars(chars_removed);
@@ -302,6 +246,13 @@ pub(super) fn handle_overflow_retry(
         *messages = rebuilt;
         agent.start_idx = tail_start_in_rebuilt;
     }
+    let after_message_count = messages.len();
+    let after_chars = messages.iter().map(estimate_msg_chars).sum::<usize>();
+    // “裁剪成功”不能只看函数是否被调用。消息条数与估算字符数必须同时下降，
+    // 否则下一次请求是同一 payload，重试没有任何进展。
+    let applied = collapse_failed.is_none()
+        && after_message_count < before_message_count
+        && after_chars < before_chars;
 
     let ratio_after = agent
         .context_state
@@ -311,7 +262,7 @@ pub(super) fn handle_overflow_retry(
     agent.emit_event(AgentEvent::ContextOverflowTrimEnd {
         ratio_before,
         ratio_after,
-        will_retry: true,
+        will_retry: applied,
         estimated_tokens_freed: trim_tokens,
         turns_removed: trim_turns,
     });
@@ -327,6 +278,13 @@ pub(super) fn handle_overflow_retry(
         attempt,
         turns_removed = trim_turns,
         trim_tokens,
+        route = if attempt >= 2 { "collapse" } else { "reduce" },
+        before_message_count,
+        after_message_count,
+        before_chars,
+        after_chars,
+        applied,
+        collapse_error = ?collapse_failed.as_ref().map(ToString::to_string),
         ratio_before,
         ratio_after,
         compaction_count_after
@@ -337,7 +295,7 @@ pub(super) fn handle_overflow_retry(
         trim_turns,
         ratio_before,
         ratio_after,
-        applied: true,
+        applied,
     }
 }
 

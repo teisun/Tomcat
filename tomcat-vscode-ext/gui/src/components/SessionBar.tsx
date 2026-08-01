@@ -21,7 +21,9 @@ function formatSessionLabel(session: WebviewSessionTab): string {
 
 export function SessionBar({
   activeSessionId,
+  canCompact = false,
   creating = false,
+  onCompact,
   onNewSession,
   ready,
   onSwitchSession,
@@ -29,7 +31,9 @@ export function SessionBar({
   sessions,
 }: {
   activeSessionId: string | null;
+  canCompact?: boolean;
   creating?: boolean;
+  onCompact?(): void;
   onNewSession(): void;
   ready: boolean;
   onSwitchSession(sessionId: string): void;
@@ -120,6 +124,17 @@ export function SessionBar({
         <span className="tc-topbar__caret" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>
+      </button>
+      <button
+        aria-label="Compact conversation context"
+        className="tc-icon-button tc-topbar__compact"
+        data-testid="compact-context-button"
+        disabled={!canCompact || creating}
+        onClick={onCompact}
+        title="Compact context"
+        type="button"
+      >
+        ⊙
       </button>
       <button
         aria-busy={creating}

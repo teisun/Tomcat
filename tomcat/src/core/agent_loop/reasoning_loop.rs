@@ -47,6 +47,12 @@ pub(super) async fn run_reasoning_loop(
         if agent.cancel_token.is_cancelled() {
             return Err(agent.make_aborted(messages, final_text));
         }
+        if crate::core::session::has_dangling_tool_calls_in_messages(messages) {
+            return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
+                "llm_request",
+                "refusing to send a transcript with unpaired tool calls; hydrate or resolve the pending tool result first",
+            )));
+        }
 
         if let Some(ref mut ctx_state) = agent.context_state {
             ctx_state.live.finish_reason = None;
@@ -99,6 +105,7 @@ pub(super) async fn run_reasoning_loop(
             thinking_text,
             reasoning_continuation,
             continuity,
+            usage,
             aborted,
         } = outcome;
 
@@ -147,10 +154,38 @@ pub(super) async fn run_reasoning_loop(
             })
             .collect();
 
+        // “只思考、不回答”不是成功回合。三个条件必须同时成立：
+        // - 无正文：排除正常文本完成；
+        // - 无工具：排除纯工具调用回合；
+        // - 有 thinking：排除 provider 合法的空结构化响应。
+        //
+        // 不能让它落入 finalize_turn_after_text：那里会把空 assistant 写进
+        // transcript 并发 AgentEnd(error=None)，UI 便会静默结束且允许输入下一条。
+        if tool_calls.is_empty()
+            && content_buf.trim().is_empty()
+            && thinking_text
+                .as_deref()
+                .is_some_and(|thinking| !thinking.trim().is_empty())
+        {
+            let thinking_chars = thinking_text.as_deref().map(str::len).unwrap_or_default();
+            let _ = agent.persist_custom_entry_if_needed(serde_json::json!({
+                "event": "empty_turn",
+                "turn_index": turn_index,
+                "finish_reason": finish_reason.as_deref(),
+                "thinking_chars": thinking_chars,
+                "has_reasoning_continuation": reasoning_continuation.is_some(),
+            }));
+            agent.clear_pending_assistant_entry_id();
+            return Err(LoopError::Fatal(crate::infra::error::AppError::Llm(
+                "本轮只产生了思考、没有产生回答。请使用 Resume 重试，或换一个模型后重试。"
+                    .to_string(),
+            )));
+        }
+
         if tool_calls.is_empty() {
             // 收束分支：text-only 回合的 timing ⑤ 与 TurnEnd 由 turn_finalize 处理。
             // completion guard 命中时回合并未结束，继续下一轮而不是返回。
-            let outcome = turn_finalize::finalize_turn_after_text(
+            let outcome = turn_finalize::finalize_turn_after_text_with_usage(
                 agent,
                 messages,
                 &content_buf,
@@ -161,6 +196,7 @@ pub(super) async fn run_reasoning_loop(
                 thinking_text.clone(),
                 reasoning_continuation.clone(),
                 continuity.clone(),
+                usage.clone(),
             )
             .await
             .map_err(LoopError::Fatal)?;
@@ -175,7 +211,7 @@ pub(super) async fn run_reasoning_loop(
         // ToolExecutionStart → ExtensionEvent::ToolCall → execute_tool →
         // ExtensionEvent::ToolResult → ToolExecutionEnd；cancel 抢占点均保留
         // "先发 End 让 UI 配对再 make_aborted" 的原语义。
-        let dispatch = tool_dispatcher::run_tool_calls(
+        let dispatch = tool_dispatcher::run_tool_calls_with_usage(
             agent,
             messages,
             &tool_calls,
@@ -187,6 +223,7 @@ pub(super) async fn run_reasoning_loop(
             thinking_text.clone(),
             reasoning_continuation.clone(),
             continuity.clone(),
+            usage,
         )
         .await?;
 

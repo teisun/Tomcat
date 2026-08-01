@@ -645,6 +645,9 @@ pub struct ChatMessage {
     /// replay 所需的 turn 级元数据；旧 transcript 缺失时按 None 兼容。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuity: Option<ContinuityMetadata>,
+    /// 本条 assistant 消息对应的 provider 账目；持久化到 transcript 供事故回溯。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
     /// turn/tool 折叠标题；仅本地持久化与 transcript/webview 恢复使用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_title: Option<String>,
@@ -678,6 +681,7 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
             tool_display: None,
             msg_id: None,
@@ -702,6 +706,7 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
             tool_display: None,
             msg_id: None,
@@ -724,6 +729,7 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
             tool_display: None,
             msg_id: None,
@@ -749,6 +755,7 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
             tool_display: None,
             msg_id: None,
@@ -771,6 +778,7 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
             tool_display: None,
             msg_id: None,
@@ -793,6 +801,7 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
             tool_display: None,
             msg_id: None,
@@ -815,6 +824,7 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
             tool_display: None,
             msg_id: None,
@@ -837,6 +847,7 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
             tool_display: None,
             msg_id: None,
@@ -871,6 +882,12 @@ impl ChatMessage {
         self
     }
 
+    /// 把本轮 provider usage 归属到最终 assistant 消息，避免只留在易失的 ContextState。
+    pub fn with_usage(mut self, usage: Option<TokenUsage>) -> Self {
+        self.usage = usage;
+        self
+    }
+
     /// 为 assistant/tool 回合附加 transcript/webview 使用的折叠摘要标题。
     pub fn with_summary_title(mut self, summary_title: Option<String>) -> Self {
         self.summary_title = summary_title;
@@ -893,6 +910,7 @@ impl ChatMessage {
         cloned.thinking_text = None;
         cloned.reasoning_continuation = None;
         cloned.continuity = None;
+        cloned.usage = None;
         cloned.summary_title = None;
         cloned.tool_display = None;
         cloned
@@ -967,6 +985,12 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u32>,
+    /// Provider 明确给出的 reasoning 输出 token；未给出时保持 None，绝不猜测。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
+    /// 正文输出 token。仅当 provider 同时给出总输出和 reasoning 时可精确得出。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_tokens: Option<u32>,
 }
 
 /// Thinking/Reasoning 增量来源：原始推理链路（raw）或模型给出的摘要（summary）。
@@ -1054,5 +1078,7 @@ pub enum StreamEvent {
         prompt_tokens: u32,
         completion_tokens: u32,
         total_tokens: Option<u32>,
+        reasoning_tokens: Option<u32>,
+        text_tokens: Option<u32>,
     },
 }

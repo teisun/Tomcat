@@ -8,19 +8,19 @@ use tracing::{info, warn};
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
 use crate::core::llm::resolver::validate_capabilities;
-use crate::core::llm::{degrade_unsupported_multimodal, ChatMessage, LlmScene};
+use crate::core::llm::{ChatMessage, LlmScene, degrade_unsupported_multimodal};
 use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
 };
+use crate::infra::ScopedEventEmitter;
 use crate::infra::error::AppError;
 use crate::infra::events::AgentEvent;
-use crate::infra::ScopedEventEmitter;
 use crate::{AgentLoop, AgentLoopConfig, CheckpointKind};
 
 use crate::core::plan_runtime;
 
 use super::super::render::MarkdownRenderer;
-use super::commands::{dispatch_chat_command, parse_chat_command, ChatCommandOutcome};
+use super::commands::{ChatCommandOutcome, dispatch_chat_command, parse_chat_command};
 use super::context::ChatContext;
 use super::prompt::{agent_prompt_for_mode, user_prompt_for_mode_with_model};
 use super::{cli_turn_renderer, events, preflight};
@@ -37,6 +37,7 @@ mod workspace_state;
 pub(crate) use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
 use self::persist::push_turn_message;
+pub(crate) use self::rehydrate::has_resumable_tail_ask_question;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
 pub(crate) use self::rehydrate::{recover_context_state_after_failed_turn, render_error_message};
 use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_session_title};
@@ -361,6 +362,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     }
 
     let mut auto_turn_count: u32 = 0;
+    // `--resume` is a real zero-input turn: it may reopen a tail ask_question before the
+    // next model request, rather than waiting for an unrelated new user prompt.
+    let mut resume_without_input = resume;
     let mut fatal_error: Option<AppError> = None;
 
     let exit_reason = loop {
@@ -374,7 +378,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         }
 
         let queued_follow_ups = !ctx.session_runtime.follow_up_queue.lock().is_empty();
-        let auto_drain = queued_follow_ups && auto_turn_count < AUTO_TURN_BUDGET;
+        let auto_drain =
+            resume_without_input || (queued_follow_ups && auto_turn_count < AUTO_TURN_BUDGET);
         if !auto_drain {
             if auto_turn_count >= AUTO_TURN_BUDGET && queued_follow_ups {
                 eprintln!(
@@ -419,22 +424,29 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             if trimmed.is_empty() {
                 continue;
             } else {
-                let (parsed, history_line) =
-                    match dispatch_chat_command(ctx, parse_chat_command(&trimmed), &mut rl).await {
-                        ChatCommandOutcome::Continue {
-                            line,
-                            echo_user,
-                            history_line,
-                        } => {
-                            if echo_user {
-                                print!("{}{}", current_user_prompt(ctx), line);
-                                println!();
-                                io::stdout().flush().map_err(AppError::Io)?;
-                            }
-                            (line, history_line)
+                let (parsed, history_line) = match dispatch_chat_command(
+                    ctx,
+                    parse_chat_command(&trimmed),
+                    &mut rl,
+                    &mut context_state,
+                    &system_text,
+                )
+                .await
+                {
+                    ChatCommandOutcome::Continue {
+                        line,
+                        echo_user,
+                        history_line,
+                    } => {
+                        if echo_user {
+                            print!("{}{}", current_user_prompt(ctx), line);
+                            println!();
+                            io::stdout().flush().map_err(AppError::Io)?;
                         }
-                        ChatCommandOutcome::Handled => continue,
-                    };
+                        (line, history_line)
+                    }
+                    ChatCommandOutcome::Handled => continue,
+                };
                 let history_line = history_line.unwrap_or_else(|| parsed.clone());
                 let _ = rl.add_history_entry(&history_line);
                 parsed
@@ -443,6 +455,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
         if input.is_empty() {
             auto_turn_count += 1;
+            resume_without_input = false;
         } else {
             auto_turn_count = 0;
         }
@@ -542,6 +555,21 @@ pub async fn run_chat_turn_with_message(
     ctx.session_runtime
         .plan_runtime
         .attach_cancel_hook(turn_token.clone());
+    let recovered_pending_question = if input_message.is_none() {
+        rehydrate::resume_tail_ask_questions(ctx).await?
+    } else {
+        rehydrate::skip_tail_ask_questions_for_new_input(ctx)?
+    };
+    if recovered_pending_question {
+        // The recovered or skipped tool result is already durable. Reload instead of manually
+        // splicing it into the live context, so supersede+append and the normal append path
+        // share one source of truth.
+        *context_state = init_context_state(
+            &ctx.session_runtime.session,
+            &ctx.config.context,
+            system_text,
+        )?;
+    }
     let session_id = ctx
         .session_runtime
         .session

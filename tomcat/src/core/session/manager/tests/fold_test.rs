@@ -168,9 +168,11 @@ fn filter_enough_today_no_backfill() {
 
     let selected = filter_turns_by_day(messages, today, 10);
     assert_eq!(selected.len(), 12, "today has 12 >= 10, no backfill needed");
-    assert!(selected
-        .iter()
-        .all(|m| parse_date(m.timestamp.as_deref().unwrap_or("")) == Some(today)));
+    assert!(
+        selected
+            .iter()
+            .all(|m| parse_date(m.timestamp.as_deref().unwrap_or("")) == Some(today))
+    );
 }
 
 #[test]

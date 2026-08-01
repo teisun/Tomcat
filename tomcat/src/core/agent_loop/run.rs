@@ -329,7 +329,20 @@ impl AgentLoop {
                     // L3 overflow trim 与诊断日志统一放在 error_classifier 中处理；
                     // retry 控制流（last_err / max_attempts 判定）仍由本函数持有，
                     // 保证"谁拥有 attempt 循环谁决定终止"。
-                    let _stats = handle_overflow_retry(self, messages, attempt, &e);
+                    let overflow_hit = crate::infra::error::is_context_overflow(&e);
+                    let overflow_stats = handle_overflow_retry(self, messages, attempt, &e).await;
+                    // ContextOverflow 只能在 payload 确实缩小后才允许下一次请求。
+                    // 否则每次都会发送同一份超限上下文，消耗完 attempt 后才给用户一个
+                    // 更晚、更难理解的错误。
+                    if overflow_hit && !overflow_stats.applied {
+                        tracing::warn!(
+                            target: "tomcat_chat_diag",
+                            phase = "context_overflow_no_progress",
+                            attempt,
+                            "context overflow recovery did not shrink the payload; stop retrying"
+                        );
+                        return Err(LoopError::Fatal(e));
+                    }
                     let unsupported_multimodal_hit = matches!(&e, AppError::LlmDetailed(_))
                         && llm_stage(&e).is_none()
                         && llm_http_status(&e).is_none()

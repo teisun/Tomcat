@@ -11,6 +11,7 @@ type HostE2eHelper = {
   assertTranscriptSwitchBackOrder(api: unknown): Promise<void>;
   assertWebviewAddModelsFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
+  assertWebviewDraftForkPreservesReferenceFlow(api: unknown): Promise<void>;
   assertWebviewFileDropReferenceFlow(api: unknown): Promise<void>;
   assertWebviewPickContextFlow(api: unknown): Promise<void>;
   assertWebviewGiantGroupLazyLoadFlow(api: unknown): Promise<void>;
@@ -203,6 +204,11 @@ suite("Installed Tomcat extension", () => {
   test("deduplicates dropped file references in the webview composer", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewFileDropReferenceFlow(api);
+  });
+
+  test("keeps source draft references when creating a session", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewDraftForkPreservesReferenceFlow(api);
   });
 
   test("routes smart picker selections into attachments and context chips", async () => {

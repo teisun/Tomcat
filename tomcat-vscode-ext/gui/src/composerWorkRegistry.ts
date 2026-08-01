@@ -4,6 +4,8 @@ export interface ComposerWorkTicket {
   sessionId: string;
 }
 
+const DEFAULT_CUTOFF_WAIT_TIMEOUT_MS = 10_000;
+
 interface PendingWork extends ComposerWorkTicket {
   promise: Promise<void>;
   resolve(): void;
@@ -17,6 +19,11 @@ export class ComposerWorkRegistry {
   private operationCounter = 0;
   private readonly nextSequenceBySession = new Map<string, number>();
   private readonly pendingByOperation = new Map<string, PendingWork>();
+
+  constructor(
+    private readonly cutoffWaitTimeoutMs = DEFAULT_CUTOFF_WAIT_TIMEOUT_MS,
+    private readonly reportTimeout: (message: string) => void = console.warn,
+  ) {}
 
   begin(sessionId: string, kind: "attach" | "drop" | "paste" | "picker" | "reference"): ComposerWorkTicket {
     const sequence = (this.nextSequenceBySession.get(sessionId) ?? 0) + 1;
@@ -47,7 +54,28 @@ export class ComposerWorkRegistry {
     const work = [...this.pendingByOperation.values()]
       .filter((pending) => pending.sessionId === sessionId && pending.sequence <= cutoff)
       .map((pending) => pending.promise);
-    await Promise.all(work);
+    if (work.length === 0) {
+      return;
+    }
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(work),
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(() => {
+            this.reportTimeout(
+              `Tomcat timed out waiting ${this.cutoffWaitTimeoutMs}ms for composer work before a draft fork; continuing with the persisted draft.`,
+            );
+            resolve();
+          }, this.cutoffWaitTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
+    }
   }
 
   pendingCount(sessionId?: string): number {

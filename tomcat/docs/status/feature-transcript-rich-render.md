@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-07-29 08:36 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-01 11:04 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 会话卡死与失败恢复整改已落地：失败回合用 `revive_trailing_failed_user_messages` 撤掉尾部 user 的 `superseded/turn_failed`，error 卡 Retry/Resume 统一走 `ServeCommand::Resume`（无输入开轮、不复制用户气泡）；pending/`ask_question` 结果替换先内存校验再落盘，sidecar 盖章只刷 size/mtime，JSONL 改写改为流式原子写；`HostDraftCoordinator` 同会话重入直接抛错、draft-fork 投递可 await 并超时放行；单文件 `edit` 成功后刷新 ReadStamp；LLM 侧补 402 Billing、首帧前 parse→Transport、空回合/overflow 进度与 `/compact` ratio 断言；错误卡 UI 将诊断链接与全宽主按钮分离（Retry=refresh、Resume=debug-continue）。版本 CLI `0.1.22` / 扩展 `0.1.32`（`bundledCliVersion=0.1.22`）。验证：定向 Rust revive/resume/resume-index；扩展 `lint` + unit（含 MessageBubble）；`TOMCAT_E2E_SCREENSHOT=1` host E2E 含真实点击 Retry 与 Resume 卡截图；`gate:full`/安装 E2E 在旁路撤回后曾真绿。@2026-08-01
 - [✓] **[P0]** Planner/Executor 仅在 `dispatch_agent` description 条件满足时派发 Explorer；catalog 明确简单任务、已知位置、一两批直接工具、自审及 Reviewer 已覆盖时禁用，并锁定首次合并问题、仅新阻塞点可二次派发；同步 prompt/catalog 回归和生成文档。@2026-07-29
 - [✓] **[P0]** Planner todo 改为“非简单任务按 milestone 精确拆解、简单单面修改使用 flat linear todo”；每个问题固定为“背景与证据 → 根因 → 解决方案（Key decisions）→ 验证”，要求不了解代码上下文的读者也能看懂，并删除一处重复第一性原理文案。@2026-07-29
 - [✓] **[P0]** Plan Preview selection 去重修复：列表项获得精确源行，selection identity 始终纳入文本快照 hash；不同条目可连续加入、完全相同引用仍去重，wire 协议不变；补齐 blockquote 内列表项递归行号映射与 2s 连续稳定性 host E2E 断言。@2026-07-29
@@ -46,6 +47,10 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- 失败恢复：`ServeCommand::Resume` 在 `start_turn` 前调用 `revive_trailing_failed_user_messages`；webview `recoverErrorTurn` 只发 `resume`，不再反查文本/附件重建 prompt；error 卡仅当前未覆盖失败可操作，成功/新提示后乐观隐藏。
+- transcript：公开 `PENDING_TOOL_RESULT_TEXT` / `INTERRUPTED_TOOL_RESULT_TEXT` / `UNKNOWN_RESTART_TOOL_RESULT_TEXT`；扩展侧 `toolResultPlaceholders.ts` 契约对齐；`replace_tool_result_by_tool_call_id` 允许无旧 result 时追加（悬空 ask_question）；非结构性盖章走 `refresh_resume_index_after_nonstructural_rewrite`。
+- 新增 CLI `/compact`（`cmd_compact`）与 serve compact ratio 字段断言；手动 compact 与自动 overflow 路径分工写入 `context-management.md`。
+- 发布版本：CLI `0.1.22`、扩展 `0.1.32`、`bundledCliVersion=0.1.22`；fake-serve E2E 夹具 `serverVersion` 同步。
 - `dispatch_agent` catalog description 与 Planner/Executor 行为合同收紧为条件式 Explorer 派发；工具 schema 与 wire 协议不变。
 - Plan Preview Markdown 列表项新增内部 `_sourceLine` 递归标记；`WebviewReference` wire 类型不变，selection 去重身份改为 `path + range + text hash`。
 - 发布版本接口：根 `release-versions.json` 新增 `cli`、`extension.version`、`extension.bundledCli` 三个权威字段；`scripts/release-version.mjs` 提供 `bump` / `set` / `sync` / `check`；Cargo.toml/Cargo.lock 与扩展 package/package-lock 降为生成镜像；私有 GUI manifest/lock 根包不再含 `version`；CLI/EXT tag guard 在检查 tag 前先验证全仓镜像，EXT guard 的 `bundled_cli_version` / `extension_version` GitHub outputs 保持兼容。
@@ -78,13 +83,13 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
+| `cargo test --lib` 仍有 serve 附件/能力相关失败 | 串行复现约 8–9 例（多模态/content_filter/degrade 请求计数等），表现为能力校验前拦截、录制 provider 未收到请求；与本轮 resume/撤章/错误卡整改无直接交集 | 单独排查 serve 附件与模型能力夹具，不阻塞本轮恢复语义合入 |
 | 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但真实 `dispatch_agent > 0` 路径仍待授权验证 | 获得明确授权后，在隔离夹具中补跑一次并检查首次是否合并全部独立问题 |
-| Rust 全量 `gate-fast` 非全绿 | `clippy -D warnings` 命中 3 个当前工作树问题；`cargo test --lib` 为 2374 passed / 13 failed / 1 ignored，失败集中在 resolver/files/serve fixture 等非本轮定向面；integration 编译还存在 `CodeReviewerDispatcher::dispatch` 测试桩签名未同步 | 相关基线问题单独修复后重跑全量门禁 |
-| VS Code devhost E2E 未进入场景断言 | `npm run test:e2e:vscode-devhost` 完成 build/compile 后，Electron 以仓库根目录为 Node 入口并报 `Cannot find module '/Users/yankeben/workspace/tomcat-agent'` | 修正 devhost 启动路径后重跑 selection flow |
-| `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；本轮在 HEAD 隔离工作树复跑仍红，与交付控制改动无关。 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |
+| `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；与本轮恢复整改无关 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-01 11:04）：卡死机制整改与版本发布合入工作区：CLI `0.1.22` / 扩展 `0.1.32`；错误卡主按钮视觉与真实 Retry/Resume E2E 截图已验收；定向 Rust revive/resume/index 与扩展 MessageBubble/state/provider 测试绿；完整 `cargo test --lib` 仍有既有 serve 附件失败未清。`run-vscode-devhost` 现透传 `TOMCAT_E2E_SCREENSHOT` / `TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR`。
 - 最新补充（2026-07-29 08:36）：定向 Rust 验证通过：`core::prompts::tests::load_test` 24/24、catalog 12/12、`tool_catalog_doc` 2/2、`prompt_size_budget` 3/3；`git diff --check` 通过。
 - 最新补充（2026-07-29 08:36）：VS Code `npm run gate:fast` 通过：24 个 extension/core 测试文件 282 个测试、52 个 GUI 测试文件 442 个测试全部通过；devhost 命令在场景执行前因上述启动路径问题退出。
 - 最新补充（2026-07-29 08:36）：工程规则审计确认 `.cursor/rules/engineering-standards.mdc:7` 的问题章节说明已按计划同步；明确排除 `:10` 的本地 todo 数量规则。Planner `ask_question`、`core_identity`、Plan/Code Reviewer、共享 64 轮预算和 `WebviewReference` wire 类型未被意外修改。

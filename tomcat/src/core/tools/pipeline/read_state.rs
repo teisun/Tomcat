@@ -35,6 +35,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::RwLock;
 
@@ -128,14 +129,33 @@ impl ReadStamp {
 ///
 /// 由 [`crate::core::agent_loop::AgentLoopConfig::read_file_state`] 持有；
 /// 测试可直接 `ReadFileState::default()` + `Arc::new` 注入。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ReadFileState {
     inner: RwLock<HashMap<PathBuf, ReadStamp>>,
+    refresh_mutation_stamp: AtomicBool,
+}
+
+impl Default for ReadFileState {
+    fn default() -> Self {
+        Self::with_mutation_stamp_refresh(true)
+    }
 }
 
 impl ReadFileState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_mutation_stamp_refresh(enabled: bool) -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+            refresh_mutation_stamp: AtomicBool::new(enabled),
+        }
+    }
+
+    /// 是否允许成功的局部变更把 ReadStamp 前移到刚写入的版本。
+    pub fn mutation_stamp_refresh_enabled(&self) -> bool {
+        self.refresh_mutation_stamp.load(Ordering::Relaxed)
     }
 
     /// 查找 `path` 上次 read 的 stamp（`None` ⇔ 未 read 过）。

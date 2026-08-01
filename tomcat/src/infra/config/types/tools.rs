@@ -38,19 +38,31 @@ pub struct ToolsConfig {
 pub struct ToolsReadConfig {
     #[serde(default = "default_tools_read_max_bytes")]
     pub max_bytes: u64,
+    /// 成功的局部 edit / hashline_edit 后是否把 ReadStamp 更新为刚写入的版本。
+    ///
+    /// 默认开启：避免 agent 自己刚写过的文件被下一次局部编辑误判为外部 Stale。
+    /// 紧急回滚可设为 `false`；这只恢复旧的额外 read 往返，不会关闭外部修改检测。
+    #[serde(default = "default_tools_read_refresh_mutation_stamp")]
+    pub refresh_mutation_stamp: bool,
 }
 
 /// 25 MiB；read.md §2.5 决策表 R6 #2「自设」入选值。
 pub const DEFAULT_TOOLS_READ_MAX_BYTES: u64 = 25 * 1024 * 1024;
+pub const DEFAULT_TOOLS_READ_REFRESH_MUTATION_STAMP: bool = true;
 
 fn default_tools_read_max_bytes() -> u64 {
     DEFAULT_TOOLS_READ_MAX_BYTES
+}
+
+fn default_tools_read_refresh_mutation_stamp() -> bool {
+    DEFAULT_TOOLS_READ_REFRESH_MUTATION_STAMP
 }
 
 impl Default for ToolsReadConfig {
     fn default() -> Self {
         Self {
             max_bytes: default_tools_read_max_bytes(),
+            refresh_mutation_stamp: default_tools_read_refresh_mutation_stamp(),
         }
     }
 }

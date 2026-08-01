@@ -24,7 +24,9 @@ type MessageBubbleProps = {
   mediaRoots?: WebviewMediaRoot[];
   onOpenFile?: (path: string, line?: number) => void;
   onOpenImagePreview?: (imageId: string) => void;
+  onRecover?: (messageId: string, action: "resume" | "retry") => void;
   onRetry?: (messageId: string) => void;
+  recoveryDisabled?: boolean;
   onZoomImage?: (image: { alt: string; src: string }) => void;
 };
 
@@ -33,15 +35,22 @@ function MessageBubbleComponent({
   mediaRoots,
   onOpenFile,
   onOpenImagePreview,
+  onRecover,
   onRetry,
+  recoveryDisabled = false,
   onZoomImage,
 }: MessageBubbleProps) {
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const showHeader = item.kind !== "user" && item.kind !== "assistant";
   const isFailedUserMessage = item.kind === "user" && item.deliveryState === "failed";
   const isPendingUserMessage = item.kind === "user" && item.deliveryState === "pending";
   const showRetry = isFailedUserMessage && item.retryable === true && typeof onRetry === "function";
+  const recoveryAction =
+    item.kind === "error" && item.recoveryAction && typeof onRecover === "function"
+      ? item.recoveryAction
+      : null;
+  const showHeader =
+    item.kind !== "user" && item.kind !== "assistant" && recoveryAction === null;
   const rawErrorDetail =
     item.kind === "error" && typeof item.detailText === "string" && item.detailText.trim().length > 0
       ? item.detailText
@@ -127,39 +136,60 @@ function MessageBubbleComponent({
         }}
         readonly
       />
-      {canToggleRawError ? (
-        <div className="tc-message__detail-actions" data-testid="error-detail-actions">
-          <button
-            aria-expanded={detailsExpanded}
-            className="tc-message__detail-button"
-            data-testid="toggle-error-detail"
-            onClick={() => setDetailsExpanded((value) => !value)}
-            type="button"
-          >
-            <span
-              aria-hidden="true"
-              className={`codicon ${detailsExpanded ? "codicon-chevron-down" : "codicon-chevron-right"}`}
-            />
-            <span>{detailsExpanded ? "Hide original error" : "Show original error"}</span>
-          </button>
-          <button
-            className="tc-message__detail-button"
-            data-testid="copy-error-detail"
-            onClick={() => {
-              void copyRawError();
-            }}
-            type="button"
-          >
-            <span aria-hidden="true" className="codicon codicon-copy" />
-            <span>
-              {copyState === "copied"
-                ? "Copied"
-                : copyState === "failed"
-                  ? "Copy failed"
-                  : "Copy original"}
-            </span>
-          </button>
-        </div>
+      {canToggleRawError || recoveryAction ? (
+        <>
+          {canToggleRawError ? (
+            <div className="tc-message__detail-actions" data-testid="error-detail-actions">
+              <button
+                aria-expanded={detailsExpanded}
+                className="tc-message__detail-button"
+                data-testid="toggle-error-detail"
+                onClick={() => setDetailsExpanded((value) => !value)}
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`codicon ${detailsExpanded ? "codicon-chevron-down" : "codicon-chevron-right"}`}
+                />
+                <span>{detailsExpanded ? "Hide original error" : "Show original error"}</span>
+              </button>
+              <button
+                className="tc-message__detail-button"
+                data-testid="copy-error-detail"
+                onClick={() => {
+                  void copyRawError();
+                }}
+                type="button"
+              >
+                <span aria-hidden="true" className="codicon codicon-copy" />
+                <span>
+                  {copyState === "copied"
+                    ? "Copied"
+                    : copyState === "failed"
+                      ? "Copy failed"
+                      : "Copy original"}
+                </span>
+              </button>
+            </div>
+          ) : null}
+          {recoveryAction ? (
+            <div className="tc-message__recovery-actions" data-testid="error-recovery-actions">
+              <button
+                className="tc-button tc-button--primary tc-message__recovery-button"
+                data-testid="recover-error-turn"
+                disabled={recoveryDisabled}
+                onClick={() => onRecover?.(item.id, recoveryAction)}
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`codicon ${recoveryAction === "retry" ? "codicon-refresh" : "codicon-debug-continue"}`}
+                />
+                <span>{recoveryAction === "retry" ? "Retry" : "Resume"}</span>
+              </button>
+            </div>
+          ) : null}
+        </>
       ) : null}
       {detailsExpanded && rawErrorDetail ? (
         <pre className="tc-message__detail" data-testid="error-detail-text">
@@ -173,7 +203,9 @@ function MessageBubbleComponent({
       ) : null}
       {isFailedUserMessage ? (
         <div className="tc-message__status" data-testid="user-message-status">
-          <span>{item.deliveryError ?? "Send failed."}</span>
+          <span title={item.deliveryErrorDetail ?? undefined}>
+            {item.deliveryError ?? "Send failed."}
+          </span>
           {showRetry ? (
             <button
               className="tc-message__retry"
@@ -196,7 +228,9 @@ function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbl
     prev.item === next.item &&
     prev.onOpenFile === next.onOpenFile &&
     prev.onOpenImagePreview === next.onOpenImagePreview &&
+    prev.onRecover === next.onRecover &&
     prev.onRetry === next.onRetry &&
+    prev.recoveryDisabled === next.recoveryDisabled &&
     prev.onZoomImage === next.onZoomImage
   );
 }

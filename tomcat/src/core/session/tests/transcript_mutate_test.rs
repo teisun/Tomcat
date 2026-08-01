@@ -370,6 +370,102 @@ fn mark_message_entries_after_anchor_superseded_requires_anchor() {
 }
 
 #[test]
+fn mark_tool_result_entries_by_tool_call_id_superseded_marks_only_matching_active_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tool_result_superseded.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+
+    for (id, message) in [
+        (
+            "assistant-1",
+            serde_json::json!({
+                "role":"assistant",
+                "tool_calls":[{
+                    "id":"ask-1",
+                    "type":"function",
+                    "function":{"name":"ask_question","arguments":"{}"}
+                }]
+            }),
+        ),
+        (
+            "tool-1",
+            serde_json::json!({
+                "role":"tool",
+                "tool_call_id":"ask-1",
+                "content":"[pending]"
+            }),
+        ),
+        (
+            "tool-2",
+            serde_json::json!({
+                "role":"tool",
+                "tool_call_id":"other",
+                "content":"ok"
+            }),
+        ),
+        (
+            "tool-3",
+            serde_json::json!({
+                "role":"tool",
+                "tool_call_id":"ask-1",
+                "content":"stale old result",
+                "superseded":true
+            }),
+        ),
+    ] {
+        append_entry(
+            &path,
+            &TranscriptEntry::Message(MessageEntry {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+                message,
+            }),
+        )
+        .unwrap();
+    }
+
+    let changed = mark_tool_result_entries_by_tool_call_id_superseded(&path, "ask-1").unwrap();
+    assert_eq!(changed, 1);
+
+    let entries = read_entries_tail(&path, 10).unwrap();
+    let tool_flags: Vec<(String, Option<bool>)> = entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(me)
+                if me.message.get("role").and_then(|value| value.as_str()) == Some("tool") =>
+            {
+                Some((
+                    me.message["tool_call_id"].as_str().unwrap().to_string(),
+                    me.message
+                        .get("superseded")
+                        .and_then(|value| value.as_bool()),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tool_flags,
+        vec![
+            ("ask-1".to_string(), Some(true)),
+            ("other".to_string(), None),
+            ("ask-1".to_string(), Some(true)),
+        ]
+    );
+}
+
+#[test]
 fn mark_trailing_user_messages_superseded_marks_only_active_user_tail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tail_superseded.jsonl");
@@ -432,6 +528,141 @@ fn mark_trailing_user_messages_superseded_marks_only_active_user_tail() {
     );
 }
 
+fn append_recovery_error(path: &std::path::Path, id: &str) {
+    append_entry(
+        path,
+        &TranscriptEntry::Error(ErrorEntry {
+            id: Some(id.to_string()),
+            parent_id: None,
+            timestamp: "2025-01-01T00:00:02.000Z".to_string(),
+            phase: None,
+            provider: None,
+            model: None,
+            api_family: None,
+            status_code: None,
+            request_id: None,
+            failure_kind: None,
+            failure_domain: None,
+            summary: "failed".to_string(),
+            detail: "failed".to_string(),
+        }),
+    )
+    .unwrap();
+}
+
+fn append_recovery_message(
+    path: &std::path::Path,
+    id: &str,
+    role: &str,
+    content: &str,
+    failed: bool,
+) {
+    let mut message = serde_json::json!({ "role": role, "content": content });
+    if failed {
+        message["superseded"] = serde_json::json!(true);
+        message["turn_failed"] = serde_json::json!(true);
+    }
+    append_entry(
+        path,
+        &TranscriptEntry::Message(MessageEntry {
+            id: Some(id.to_string()),
+            parent_id: None,
+            timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+            message,
+        }),
+    )
+    .unwrap();
+}
+
+fn write_recovery_header(path: &std::path::Path) {
+    write_header(
+        path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn revive_trailing_failed_users_clears_the_failure_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("revive.jsonl");
+    write_recovery_header(&path);
+    append_recovery_message(&path, "user-1", "user", "retry me", true);
+    append_recovery_error(&path, "error-1");
+
+    assert_eq!(revive_trailing_failed_user_messages(&path).unwrap(), 1);
+    let entries = read_entries_tail(&path, 4).unwrap();
+    let TranscriptEntry::Message(user) = &entries[0] else {
+        panic!("expected user message");
+    };
+    assert_eq!(user.message.get("superseded"), None);
+    assert_eq!(user.message.get("turn_failed"), None);
+}
+
+#[test]
+fn revive_failed_users_is_a_noop_after_assistant_or_new_live_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let assistant_tail = dir.path().join("assistant-tail.jsonl");
+    write_recovery_header(&assistant_tail);
+    append_recovery_message(&assistant_tail, "user-1", "user", "retry me", true);
+    append_recovery_message(&assistant_tail, "assistant-1", "assistant", "done", false);
+    let before_assistant = std::fs::read(&assistant_tail).unwrap();
+    assert_eq!(
+        revive_trailing_failed_user_messages(&assistant_tail).unwrap(),
+        0
+    );
+    assert_eq!(std::fs::read(&assistant_tail).unwrap(), before_assistant);
+
+    let tool_result_tail = dir.path().join("tool-result-tail.jsonl");
+    write_recovery_header(&tool_result_tail);
+    append_recovery_message(&tool_result_tail, "user-1", "user", "retry me", true);
+    append_recovery_message(&tool_result_tail, "tool-1", "tool", "read result", false);
+    let before_tool_result = std::fs::read(&tool_result_tail).unwrap();
+    assert_eq!(
+        revive_trailing_failed_user_messages(&tool_result_tail).unwrap(),
+        0
+    );
+    assert_eq!(
+        std::fs::read(&tool_result_tail).unwrap(),
+        before_tool_result,
+        "a completed tool result belongs to a later active turn and must block revival"
+    );
+
+    let later_turn = dir.path().join("later-turn.jsonl");
+    write_recovery_header(&later_turn);
+    append_recovery_message(&later_turn, "user-1", "user", "retry me", true);
+    append_recovery_error(&later_turn, "error-1");
+    append_recovery_message(&later_turn, "user-2", "user", "new prompt", false);
+    append_recovery_message(&later_turn, "assistant-2", "assistant", "new answer", false);
+    let before_later_turn = std::fs::read(&later_turn).unwrap();
+    assert_eq!(
+        revive_trailing_failed_user_messages(&later_turn).unwrap(),
+        0
+    );
+    assert_eq!(std::fs::read(&later_turn).unwrap(), before_later_turn);
+}
+
+#[test]
+fn failed_user_can_be_marked_revived_and_marked_again_repeatedly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovery-cycle.jsonl");
+    write_recovery_header(&path);
+    append_recovery_message(&path, "user-1", "user", "retry me", false);
+
+    assert_eq!(mark_trailing_user_messages_superseded(&path).unwrap(), 1);
+    append_recovery_error(&path, "error-1");
+    assert_eq!(revive_trailing_failed_user_messages(&path).unwrap(), 1);
+    assert_eq!(mark_trailing_user_messages_superseded(&path).unwrap(), 1);
+    append_recovery_error(&path, "error-2");
+    assert_eq!(revive_trailing_failed_user_messages(&path).unwrap(), 1);
+}
+
 #[test]
 fn error_entry_roundtrips_as_type_error() {
     let entry = TranscriptEntry::Error(ErrorEntry {
@@ -444,6 +675,8 @@ fn error_entry_roundtrips_as_type_error() {
         api_family: Some("openai-responses".to_string()),
         status_code: Some(403),
         request_id: Some("req-123".to_string()),
+        failure_kind: Some("billing".to_string()),
+        failure_domain: Some("account".to_string()),
         summary: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123".to_string(),
         detail: "API 错误 403: <html>...</html>".to_string(),
     });

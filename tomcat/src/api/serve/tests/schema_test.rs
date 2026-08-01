@@ -63,6 +63,7 @@ fn serve_dts_includes_checkpoint_commands() {
     assert!(dts.contains("checkpointId: string;"));
     assert!(dts.contains("revertFiles: boolean;"));
     assert!(dts.contains("dryRun?: boolean | null;"));
+    assert!(dts.contains("type: \"compact\";"));
 }
 
 #[test]

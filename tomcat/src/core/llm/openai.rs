@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
@@ -18,18 +18,19 @@ use tracing::warn;
 
 use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, plan_scoped, replay_requirement_for_profile, CaptureMode,
-    ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
+    CaptureMode, ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
+    apply_text_downgrade, plan_scoped, replay_requirement_for_profile,
 };
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::AppError;
 use crate::infra::error::{
-    is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
-    llm_http_status_error, llm_http_status_error_with_stage, LlmErrorStage,
+    LlmErrorStage, is_retryable_llm_error, llm_connect_or_network, llm_error,
+    llm_error_with_source, llm_http_status_error, llm_http_status_error_with_stage,
+    llm_stream_interrupted_error,
 };
 
 use super::super::auth::Credential;
-use super::super::catalog::{infer_default_base_url, ModelEntry};
+use super::super::catalog::{ModelEntry, infer_default_base_url};
 use super::super::endpoint::build_path_aware_endpoint;
 use super::super::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::core::llm::files_api::{FilesApiAdapter, ImageRefSlot};
@@ -41,8 +42,8 @@ use crate::core::llm::types::{
     ReasoningFormat, StreamEvent, ThinkingSource, TokenUsage,
 };
 use crate::core::llm::{
-    build_openai_compatible_files_adapter, degrade_unsupported_multimodal, Capabilities,
-    FilesApiProviderContext,
+    Capabilities, FilesApiProviderContext, build_openai_compatible_files_adapter,
+    degrade_unsupported_multimodal,
 };
 
 const PROVIDER_NAME: &str = "openai";
@@ -1075,6 +1076,9 @@ struct SseEventStream<S> {
     /// 已解析待输出的事件队列（同一 chunk 可能解析出多个事件）。
     pending: std::vec::IntoIter<StreamEvent>,
     reasoning: OpenAiReasoningState,
+    /// 首个有效事件前的畸形帧往往是中转站截断/拼接问题，允许上层重试；已开始输出后
+    /// 才损坏则保留 Parse，避免掩盖协议不兼容。
+    seen_valid_event: bool,
 }
 
 #[derive(Debug)]
@@ -1205,7 +1209,19 @@ impl<S> SseEventStream<S> {
                 continuity_enabled,
                 ..OpenAiReasoningState::default()
             },
+            seen_valid_event: false,
         }
+    }
+}
+
+fn map_completions_stream_parse_error(error: AppError, seen_valid_event: bool) -> AppError {
+    if seen_valid_event {
+        error
+    } else {
+        llm_stream_interrupted_error(
+            PROVIDER_NAME,
+            format!("首个 Chat Completions SSE 事件解析失败: {error}"),
+        )
     }
 }
 
@@ -1242,13 +1258,19 @@ where
                     match drain_ready_sse_events(&mut this.buffer, &mut this.reasoning) {
                         Ok(events) => {
                             if let Some((first, rest)) = events.split_first() {
+                                this.seen_valid_event = true;
                                 #[allow(clippy::unnecessary_to_owned)]
                                 let pending_vec = rest.to_vec();
                                 this.pending = pending_vec.into_iter();
                                 return Poll::Ready(Some(Ok(first.clone())));
                             }
                         }
-                        Err(e) => return Poll::Ready(Some(Err(e))),
+                        Err(error) => {
+                            return Poll::Ready(Some(Err(map_completions_stream_parse_error(
+                                error,
+                                this.seen_valid_event,
+                            ))));
+                        }
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
@@ -1256,16 +1278,26 @@ where
                 }
                 Poll::Ready(None) => {
                     if !this.buffer.is_empty() {
+                        // `parse_sse_buffer` 只消费以空行结束的完整 frame。EOF 时把残留
+                        // 视为最后一个 frame：合法但缺分隔符的服务端响应仍可消费，畸形 JSON
+                        // 则必须上抛，不能静默 flush 后伪装成正常结束。
+                        this.buffer.extend_from_slice(b"\n\n");
                         match drain_ready_sse_events(&mut this.buffer, &mut this.reasoning) {
                             Ok(events) => {
                                 if let Some((first, rest)) = events.split_first() {
+                                    this.seen_valid_event = true;
                                     #[allow(clippy::unnecessary_to_owned)]
                                     let pending_vec = rest.to_vec();
                                     this.pending = pending_vec.into_iter();
                                     return Poll::Ready(Some(Ok(first.clone())));
                                 }
                             }
-                            Err(e) => return Poll::Ready(Some(Err(e))),
+                            Err(error) => {
+                                return Poll::Ready(Some(Err(map_completions_stream_parse_error(
+                                    error,
+                                    this.seen_valid_event,
+                                ))));
+                            }
                         }
                     }
                     let flushed = this.reasoning.flush_scrubber();
@@ -1426,6 +1458,8 @@ fn openai_chunk_to_stream_events_with_state(
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            reasoning_tokens: None,
+            text_tokens: None,
         });
     }
 

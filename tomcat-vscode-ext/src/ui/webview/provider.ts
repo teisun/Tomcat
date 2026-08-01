@@ -110,6 +110,14 @@ type DomSnapshot = Extract<
 
 type UserSubmitKind = "prompt" | "steer";
 
+type WebviewMessageDelivery = {
+  /**
+   * Workbench hand-off result. Most host frames are best-effort state projections, but
+   * draft-fork completion needs this signal to avoid leaving the composer locked forever.
+   */
+  delivered: Promise<void>;
+};
+
 function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -422,6 +430,26 @@ function formatBridgeError(action: string, error: unknown): string {
   return `Unable to ${action}: ${message}`;
 }
 
+function displayDeliveryError(error: string): string {
+  if (error.trim().toLowerCase() === "busy") {
+    return "上一条请求仍在处理中。请等待完成，或先停止当前任务后再试。";
+  }
+  return error;
+}
+
+function retryAttachmentRef(attachment: WebviewAttachmentView): DraftAttachmentRef {
+  return {
+    blobSha: attachment.blobSha,
+    bytes: attachment.bytes ?? 0,
+    filename: attachment.filename,
+    hasThumb: attachment.hasThumb,
+    id: attachment.id,
+    kind: attachment.kind,
+    mimeType: attachment.mimeType,
+    sourcePath: attachment.path ?? null,
+  };
+}
+
 export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly contextSearch = new ContextSearchService();
   private readonly domSnapshots = new PendingMessageTracker<DomSnapshot>();
@@ -560,6 +588,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return promise;
   }
 
+  /**
+   * Test scaffolding for scenarios that need an isolated session but are not exercising
+   * draft-fork UX. Production new-session requests must continue through beginNewSession,
+   * which preserves the composer draft by asking the webview to capture it first.
+   */
+  async createFreshSessionForTest(cwd?: string | null): Promise<string> {
+    await this.ensureInitialized();
+    const sessionId = await this.sessionPool.createSession(cwd ?? this.deps.getDefaultCwd());
+    await this.selectSession(sessionId);
+    return sessionId;
+  }
+
   private async requestDraftForkCapture(operation: PendingDraftForkOperation): Promise<void> {
     await this.postEvent({
       operationId: operation.operationId,
@@ -648,11 +688,16 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.waitUntilReady();
     const messageId = createHostFrameMessageId("webview-dom");
     const pending = this.domSnapshots.create(messageId, 20_000);
-    await this.postMessage({
+    // `Webview.postMessage()` is acknowledged by the workbench, not the webview document.
+    // In installed-host tests that acknowledgement can remain pending while the sidebar
+    // changes focus, even though the document still receives the frame. The response
+    // tracker is the actual delivery contract, so do not let the acknowledgement bypass
+    // its timeout and turn a failed snapshot into a hung test.
+    void this.postMessage({
       channel: "event",
       content: { type: "__test.capture_dom" },
       messageId,
-    });
+    }).delivered.catch(() => undefined);
     return pending;
   }
 
@@ -669,6 +714,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   resetForTestReload(): void {
+    for (const operation of this.pendingDraftForks.values()) {
+      operation.reject(new Error("Tomcat webview reloaded before draft fork capture completed"));
+    }
+    this.pendingDraftForks.clear();
+    this.pendingDraftForkBySource.clear();
     this.isReady = false;
     this.lastContextSearchIntent = null;
     this.openFileObserved = false;
@@ -845,16 +895,34 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
     }
 
+    const references: WebviewReference[] = [];
     const uploads: AttachmentUpload[] = [];
     for (const entry of resolved) {
       if (entry.kind === "reference") {
-        await this.postInsertReference(sessionId, entry.reference);
+        references.push(entry.reference);
       } else {
         uploads.push(entry.upload);
       }
     }
 
-    const accepted = await this.ingestUploads(sessionId, uploads, errors);
+    const { accepted, insertedReferences } = await this.draftCoordinator.run(
+      sessionId,
+      async () => {
+        const insertedReferences: WebviewReference[] = [];
+        for (const reference of references) {
+          if (await this.insertReferenceIntoDraft(sessionId, reference)) {
+            insertedReferences.push(reference);
+          }
+        }
+        return {
+          accepted: await this.ingestUploads(sessionId, uploads, errors),
+          insertedReferences,
+        };
+      },
+    );
+    await Promise.all(
+      insertedReferences.map((reference) => this.postInsertedReference(sessionId, reference)),
+    );
     await this.reportAttachmentOutcome(accepted, errors);
   }
 
@@ -945,7 +1013,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private lookupRetryableUserMessage(
     sessionId: string,
     messageId: string,
-  ): { segments?: WebviewMessageSegment[]; submitKind: UserSubmitKind; text: string } | null {
+  ): {
+    attachments: DraftAttachmentRef[];
+    segments?: WebviewMessageSegment[];
+    submitKind: UserSubmitKind;
+    text: string;
+  } | null {
     const session = this.peekState().sessionViews[sessionId];
     const message = session?.timeline.find(
       (item): item is WebviewMessageBlock =>
@@ -960,10 +1033,29 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return null;
     }
     return {
+      attachments: (message.attachments ?? []).map(retryAttachmentRef),
       segments: message.segments,
       submitKind: message.submitKind,
       text: message.text,
     };
+  }
+
+  private lookupErrorRecovery(
+    sessionId: string,
+    errorId: string,
+  ): { action: "resume" | "retry" } | null {
+    const timeline = this.peekState().sessionViews[sessionId]?.timeline ?? [];
+    const errorIndex = timeline.findIndex(
+      (item) => item.type === "message" && item.kind === "error" && item.id === errorId,
+    );
+    const error =
+      errorIndex >= 0 && timeline[errorIndex]?.type === "message"
+        ? timeline[errorIndex]
+        : null;
+    if (!error?.recoveryAction) {
+      return null;
+    }
+    return { action: error.recoveryAction };
   }
 
   private async sendUserMessage(
@@ -972,16 +1064,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     text: string,
     segments?: WebviewMessageSegment[],
     options?: {
+      attachments?: DraftAttachmentRef[];
       messageId?: string;
       retrying?: boolean;
     },
   ): Promise<void> {
     const userMessageId = options?.messageId ?? randomUUID();
     // Steering messages join a turn already in flight and carry no attachments.
-    const attachments =
+    const attachments = options?.attachments ?? (
       submitKind === "prompt"
         ? this.draftStore.peek(sessionId).attachments
-        : [];
+        : []
+    );
     this.stateStore.setActiveSession(sessionId);
     if (options?.retrying) {
       this.stateStore.markLocalUserMessagePending(sessionId, userMessageId);
@@ -1015,11 +1109,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         type: submitKind,
       });
       if (!response.success) {
+        const rawError = response.error ?? `Tomcat ${submitKind} failed`;
         this.stateStore.markLocalUserMessageFailed(
           sessionId,
           userMessageId,
-          response.error ?? `Tomcat ${submitKind} failed`,
+          displayDeliveryError(rawError),
           true,
+          rawError,
         );
       } else {
         this.stateStore.markLocalUserMessageConfirmed(sessionId, userMessageId);
@@ -1284,8 +1380,35 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           {
             messageId: intent.data.messageId,
             retrying: true,
+          attachments: retry.attachments,
           },
         );
+        return;
+      }
+      case "recoverErrorTurn": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSession(intent.data.sessionId);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        const recovery = this.lookupErrorRecovery(sessionId, intent.data.errorId);
+        if (!recovery || recovery.action !== intent.data.action) {
+          return;
+        }
+        // Retry and Resume share the same durable path: the core revives the failed
+        // tail prompt, rebuilds its context, then starts a no-input turn. Reconstructing
+        // a fresh webview prompt here used to duplicate bubbles and could lose attachments.
+        this.stateStore.dismissErrorRecovery(sessionId, intent.data.errorId);
+        try {
+          await this.deps.sessionRouter.resume(sessionId);
+          await this.refreshSessionState(sessionId, { trustBusy: true });
+          await this.refreshSessions();
+          await this.postState();
+        } catch (error) {
+          this.stateStore.restoreDismissedErrorRecovery(sessionId, intent.data.errorId);
+          await this.postState();
+        }
         return;
       }
       case "resolveDrop": {
@@ -1307,7 +1430,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
               // Ignore malformed drop payload entries; the editor keeps the rest.
             }
           }
-          await this.draftCoordinator.run(sessionId, () => this.ingestPickedUris(sessionId, uris));
+          await this.ingestPickedUris(sessionId, uris);
           await this.postComposerWorkResult(intent.data.operationId, sessionId);
         } catch (error) {
           await this.postComposerWorkResult(intent.data.operationId, sessionId, error);
@@ -1332,7 +1455,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           sessionId = resolvedSessionId;
           const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
           if (picks?.length) {
-            await this.draftCoordinator.run(sessionId, () => this.ingestPickedUris(sessionId, picks));
+            await this.ingestPickedUris(sessionId, picks);
           }
           await this.postComposerWorkResult(intent.data?.operationId, sessionId);
         } catch (error) {
@@ -1499,6 +1622,36 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.refreshSessionHistory(sessionId);
         await this.refreshCheckpoints(sessionId);
         await this.refreshSessions();
+        await this.postState();
+        return;
+      }
+      case "compact": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSessionWithoutHistory(intent.data.sessionId);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        try {
+          const report = await this.deps.sessionRouter.compact(sessionId);
+          this.stateStore.appendMessage(
+            sessionId,
+            "notice",
+            `上下文已压缩：${(report.beforeUsageRatio * 100).toFixed(1)}% → ${(
+              report.afterUsageRatio * 100
+            ).toFixed(1)}%。`,
+          );
+        } catch (error) {
+          this.stateStore.appendMessage(
+            sessionId,
+            "error",
+            formatBridgeError("compact context", error),
+          );
+          await this.postState();
+          return;
+        }
+        await this.refreshSessionState(sessionId, { trustBusy: true });
+        await this.refreshSessionHistory(sessionId);
         await this.postState();
         return;
       }
@@ -1909,11 +2062,21 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async postEvent(content: HostEventFrameContent): Promise<void> {
-    await this.postMessage({
+    this.postMessage({
       channel: "event",
       content,
       messageId: createHostFrameMessageId("event"),
     });
+  }
+
+  private postEventWithDelivery(
+    content: HostEventFrameContent,
+  ): Promise<void> {
+    return this.postMessage({
+      channel: "event",
+      content,
+      messageId: createHostFrameMessageId("event"),
+    }).delivered;
   }
 
   private async flushStateBroadcastPlan(
@@ -1985,11 +2148,23 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
   }
 
-  private async postMessage(frame: HostToWebviewFrame): Promise<void> {
-    if (!this.view) {
-      return;
-    }
-    await this.view.webview.postMessage(frame);
+  private postMessage(frame: HostToWebviewFrame): WebviewMessageDelivery {
+    const delivered = this.view
+      ? Promise.resolve(this.view.webview.postMessage(frame)).then((accepted) => {
+        if (!accepted) {
+          throw new Error("VS Code rejected the webview message");
+        }
+      })
+      : Promise.reject(new Error("Tomcat webview is not available"));
+    // VS Code's promise only acknowledges the workbench hand-off. It does not provide an
+    // application-level delivery guarantee and, while a WebviewView changes visibility, can
+    // stay pending indefinitely. Host state must never be held behind that acknowledgement:
+    // the webview receives a full snapshot when it becomes visible again.
+    //
+    // Attach a sink for callers that deliberately do not await the delivery signal, while
+    // still returning the original promise to the one reliability-sensitive fork-result path.
+    void delivered.catch(() => undefined);
+    return { delivered };
   }
 
   private async postState(): Promise<void> {
@@ -2050,6 +2225,50 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   async postInsertReference(sessionId: string, reference: WebviewReference): Promise<void> {
+    // Persist first. A webview event is an immediate rendering aid, not the source of
+    // truth: it can arrive while another session is active or after the UI has reloaded.
+    const inserted = await this.draftCoordinator.run(sessionId, () =>
+      this.insertReferenceIntoDraft(sessionId, reference),
+    );
+    if (inserted) {
+      await this.postInsertedReference(sessionId, reference);
+    }
+  }
+
+  /**
+   * Persist a reference while the caller already owns the session's draft lane.
+   * `ingestPickedUris` uses this directly to commit a mixed reference/upload selection
+   * as one queue item; external callers must use `postInsertReference` above.
+   */
+  private async insertReferenceIntoDraft(
+    sessionId: string,
+    reference: WebviewReference,
+  ): Promise<boolean> {
+    const current = this.draftStore.peek(sessionId);
+    const alreadyPresent = current.segments.some(
+      (segment) =>
+        segment.type === "reference" &&
+        segment.kind === reference.kind &&
+        segment.path === reference.path &&
+        segment.lineStart === reference.lineStart &&
+        segment.lineEnd === reference.lineEnd,
+    );
+    if (alreadyPresent) {
+      return false;
+    }
+    const draft = await this.draftStore.replaceAndFlush(sessionId, {
+      attachments: current.attachments,
+      segments: [...current.segments, reference],
+      text: current.text,
+    });
+    await this.applyDraftToState(sessionId, draft);
+    return true;
+  }
+
+  private async postInsertedReference(
+    sessionId: string,
+    reference: WebviewReference,
+  ): Promise<void> {
     await this.postEvent({
       reference,
       sessionId,
@@ -2366,6 +2585,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       const draft = await this.draftStore.hydrate(sessionId, (candidate) =>
         this.sessionExists(candidate),
       );
+      await this.retainDraftAttachmentLeases(sessionId, draft);
       await this.applyDraftToState(sessionId, draft);
       await this.syncImagePreviewPanel(sessionId);
       await this.postState();
@@ -2373,6 +2593,35 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       // A draft that will not load must never block the composer. Worst case the user
       // types again; refusing to render the input box would be unusable.
       console.warn("Tomcat failed to hydrate the Composer draft", error);
+    }
+  }
+
+  /**
+   * A persisted draft is still user-owned input. Refresh its pending-blob leases whenever
+   * it is hydrated so an idle sidebar cannot lose images to the seven-day pending GC.
+   */
+  private async retainDraftAttachmentLeases(
+    sessionId: string,
+    draft: ComposerDraft,
+  ): Promise<void> {
+    const refs = [...new Map(
+      draft.attachments.map((attachment) => [
+        `${attachment.blobSha}\0${attachment.providerSha ?? ""}`,
+        {
+          blobSha: attachment.blobSha,
+          providerSha: attachment.providerSha ?? null,
+        },
+      ]),
+    ).values()];
+    if (refs.length === 0) {
+      return;
+    }
+    try {
+      await this.deps.sessionRouter.retainAttachmentLeases(sessionId, refs);
+    } catch (error) {
+      // Hydration must remain usable if serve is temporarily offline. The next hydrate
+      // retries the renewal; retaining an old lease is safer than discarding the draft.
+      console.warn("Tomcat could not renew draft attachment leases", error);
     }
   }
 
@@ -2868,29 +3117,72 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     operation.captureAccepted = true;
 
+    let targetSessionId: string;
     try {
-      const targetSessionId = await this.executeDraftFork(operation, capture);
+      targetSessionId = await this.executeDraftFork(operation, capture);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
       this.removePendingDraftFork(operation);
-      await this.postEvent({
+      try {
+        await this.postDraftForkResult({
+          error: formatBridgeError("create a session from this draft", normalized),
+          operationId: operation.operationId,
+          sourceSessionId: operation.sourceSessionId,
+          success: false,
+          type: "draftForkResult",
+        });
+      } catch (deliveryError) {
+        operation.reject(
+          deliveryError instanceof Error ? deliveryError : new Error(String(deliveryError)),
+        );
+        return;
+      }
+      operation.reject(normalized);
+      return;
+    }
+
+    try {
+      await this.postDraftForkResult({
         operationId: operation.operationId,
         sourceSessionId: operation.sourceSessionId,
         success: true,
         targetSessionId,
         type: "draftForkResult",
-      }).catch(() => undefined);
+      });
+      this.removePendingDraftFork(operation);
       operation.resolve(targetSessionId);
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error(String(error));
       this.removePendingDraftFork(operation);
-      await this.postEvent({
-        error: formatBridgeError("create a session from this draft", normalized),
-        operationId: operation.operationId,
-        sourceSessionId: operation.sourceSessionId,
-        success: false,
-        type: "draftForkResult",
-      }).catch(() => undefined);
+      // If the successful completion frame itself could not reach the webview, a second
+      // error frame cannot make the compositor recover; both use the same broken bridge.
+      // Rejecting the operation is the reliable host-side terminal state, while the GUI's
+      // bounded cutoff wait is its independent escape hatch.
       operation.reject(normalized);
     }
+  }
+
+  /**
+   * A fork result unlocks the only "new session" control in the webview. Treat delivery
+   * as a small reliable hand-off instead of silently dropping it on a transient bridge
+   * failure and leaving the UI permanently pending.
+   */
+  private async postDraftForkResult(
+    event: Extract<HostEventFrameContent, { type: "draftForkResult" }>,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.postEventWithDelivery(event);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   private async executeDraftFork(

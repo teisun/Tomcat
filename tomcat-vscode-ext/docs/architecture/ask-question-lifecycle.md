@@ -1,6 +1,6 @@
 # Ask Question lifecycle
 
-`ask_question` is a durable tool round with a live, host-owned answer channel. It has **no wall-clock timeout** and no fallback result.
+`ask_question` is a durable tool round with a live, host-owned answer channel. It has **no wall-clock timeout**. A normal answer, skip, or explicit interrupt produces a terminal result; a process restart produces a durable `[pending]` placeholder instead, so the same question can be continued after reconnection.
 
 ```text
 assistant message (tool call, toolCallId)
@@ -14,12 +14,20 @@ Extension host pending map (sessionId + requestId + child generation)
                   v
 Webview fixed “Needs your answer” panel
                   |
-       answer / skip / interrupt / disconnect
+       answer / skip / explicit interrupt
                   v
 serve control_response or terminal control_cancel
                   |
                   v
 tool result message (same toolCallId) -> history AnswerCard
+
+restart before a result
+                  |
+                  v
+hydrate writes `[pending]` -> history ApprovalCard + fresh control_request
+                  |
+                  v
+answer supersedes `[pending]`, appends the real result, starts a new turn
 ```
 
 ## Identities
@@ -37,10 +45,10 @@ tool result message (same toolCallId) -> history AnswerCard
 | `answered` | User submitted the request; individual questions may still carry `skipped: true`. |
 | `skipped` | User skipped the entire request. |
 | `interrupted` | The current turn was explicitly interrupted. |
-| `host_disconnected` | The CLI input channel, serve child, pipe, Extension Host, or window closed irrecoverably. |
+| `host_disconnected` | A live transport positively confirmed that its host disconnected. It is retained for old transcripts; restart recovery treats the old synthetic form as resumable. |
 | `cancelled_unknown` | Read-only compatibility label for an old `cancelled: true` payload without a typed outcome. |
 
-A webview DOM reload is not terminal. The Provider owns pending questions and reprojects them into the new DOM. A serve child/window/Extension Host restart is terminal for the old live channel and becomes `host_disconnected`.
+A webview DOM reload is not terminal. The Provider reprojects an existing pending question into the new DOM. For a backend, frontend, or machine restart, hydrate first creates `[pending]`; the new connection then registers a new `requestId` for the same durable `toolCallId`. A stale answer for the old `requestId` remains rejected.
 
 ## UI state
 
@@ -53,7 +61,24 @@ A webview DOM reload is not terminal. The Provider owns pending questions and re
 
 The assistant tool declaration and its tool result are the source of truth. `get_messages` expands a page that begins with a tool result to include its assistant companion, joined by `toolCallId`. Old custom ask-question entries are rendered only when the standard companion is missing.
 
-A dangling assistant `ask_question` call discovered during hydration is repaired with a structured `host_disconnected` tool result.
+This replaces the previous design, which repaired a dangling `ask_question` with a terminal `host_disconnected` result. Hydration now makes every tool round structurally valid immediately:
+
+- a restart-dangling `ask_question` receives `[pending]`;
+- other dangling tools receive an explicit “unknown after restart” terminal result;
+- an explicit user interrupt remains `[interrupted]`.
+
+`[pending]` is a synthetic, non-terminal result. When the question is answered or skipped, the old row is marked `superseded` and a new real tool result is appended under the same `toolCallId`. Consumers must ignore superseded messages; this preserves the historical timeline without presenting two tool results to an LLM.
+
+When the user sends a new prompt instead of answering, the session append gate first changes every tail `[pending]` question into `skipped`, then appends that prompt. This rule lives in the session layer so CLI, serve, and plugin append paths cannot disagree.
+
+## Decision boundaries
+
+Revisit this design if any of these becomes true:
+
+1. `ask_question` gains an external side effect; it would no longer be `replay_safe`.
+2. A question can become stale while disconnected, for example when its options name mutable code locations.
+3. `[pending]` appears frequently in provider requests; that signals a missing resolve path and the resolution must move into request construction.
+4. Two windows can produce more than one active result for a `toolCallId`; recovery must then fall back to a first-answer-wins lock.
 
 ## Removed timeout configuration
 

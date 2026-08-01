@@ -252,6 +252,40 @@ fn search_files_catalog_contract_matches_plan() {
 }
 
 #[test]
+fn replay_safety_is_independent_from_read_only() {
+    let ask_question = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "ask_question")
+        .expect("ask_question catalog entry");
+    let read = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "read")
+        .expect("read catalog entry");
+    let edit = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "edit")
+        .expect("edit catalog entry");
+
+    assert!(ask_question.requires_user_interaction);
+    assert!(
+        super::super::catalog::is_replay_safe_tool(ask_question.name),
+        "ask_question only re-shows a durable user interaction and is safe to continue"
+    );
+    assert!(
+        read.read_only && !super::super::catalog::is_replay_safe_tool(read.name),
+        "read-only does not prove an interrupted invocation did not already run"
+    );
+    assert!(
+        !super::super::catalog::is_replay_safe_tool(edit.name),
+        "mutation tools must never be silently replayed"
+    );
+    assert!(
+        !super::super::catalog::is_replay_safe_tool("third_party_tool"),
+        "unknown tools are fail-closed"
+    );
+}
+
+#[test]
 fn web_search_registered() {
     let entry = BUILTIN_TOOL_CATALOG
         .iter()

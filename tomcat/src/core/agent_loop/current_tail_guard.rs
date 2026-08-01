@@ -579,7 +579,7 @@ fn rewrite_transcript_best_effort(path: &Path, rewrites: Vec<MessageTextRewrite>
     }
 }
 
-async fn collapse_to_branch_summary(
+pub(super) async fn collapse_to_branch_summary(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
 ) -> Result<(), AppError> {

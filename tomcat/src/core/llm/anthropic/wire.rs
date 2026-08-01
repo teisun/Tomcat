@@ -148,11 +148,23 @@ pub(super) fn final_stream_events(
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+            text_tokens: usage.text_tokens,
         });
     }
     if let Some(stop_reason) = stop_reason {
+        let finish_reason = normalize_finish_reason(&stop_reason);
+        // Anthropic 的 `max_tokens` 是正常 stream terminal，不会像 Responses 那样
+        // 自动带用户可见 notice。没有这条，界面只能看到一个看似正常的 stop，
+        // 很难区分“模型完成”与“输出预算耗尽”。
+        if stop_reason == "max_tokens" {
+            events.push(StreamEvent::LlmNotice {
+                finish_reason: finish_reason.clone(),
+                message: "模型达到本轮最大输出长度，回复可能不完整。".to_string(),
+            });
+        }
         events.push(StreamEvent::FinishReason {
-            reason: normalize_finish_reason(&stop_reason),
+            reason: finish_reason,
         });
     }
     events
@@ -424,6 +436,8 @@ fn usage_from_value(usage: Option<&Value>) -> Option<TokenUsage> {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: Some(prompt + completion),
+            reasoning_tokens: None,
+            text_tokens: None,
         })
     }
 }
@@ -615,13 +629,13 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
 
-    use super::{build_request_body, response_to_chat_response};
+    use super::{build_request_body, final_stream_events, response_to_chat_response};
     use crate::core::llm::files_api::FilesApiAdapter;
     use crate::core::llm::openai_files::{FilePurpose, OpenAiFileMeta};
     use crate::core::llm::replay_policy::ProviderCompatProfile;
     use crate::core::llm::thinking_policy::ThinkingFormat;
     use crate::core::llm::types::{
-        ChatMessage, ChatMessageContentPart, ChatRequest, ReasoningFormat,
+        ChatMessage, ChatMessageContentPart, ChatRequest, ReasoningFormat, StreamEvent,
     };
     use crate::core::llm::Capabilities;
     use crate::infra::config::ThinkingConfig;
@@ -830,6 +844,34 @@ mod tests {
             body["messages"][0]["content"][1]["text"],
             "[文件已省略：当前模型不支持文件输入]"
         );
+    }
+
+    #[test]
+    fn final_stream_events_notices_anthropic_max_tokens() {
+        let events = final_stream_events(
+            &ProviderCompatProfile::anthropic_messages("claude-opus-4-6"),
+            true,
+            vec![],
+            None,
+            false,
+            None,
+            Some("max_tokens".to_string()),
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::LlmNotice {
+                    finish_reason,
+                    message,
+                } if finish_reason == "max_tokens" && message.contains("最大输出长度")
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::FinishReason { reason } if reason == "max_tokens"
+            )
+        }));
     }
 
     #[test]

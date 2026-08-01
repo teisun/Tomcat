@@ -17,6 +17,7 @@ fn normal_msg(id: &str) -> ChatMessage {
         thinking_text: None,
         reasoning_continuation: None,
         continuity: None,
+        usage: None,
         summary_title: None,
         tool_display: None,
         msg_id: Some(id.to_string()),

@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 
 use super::super::cmd_path::{
-    effective_workspace_root, extra_root_menu_line, is_path_token, precheck_existence,
-    render_path_menu, PathMenuChoice, PathMenuOptions,
+    PathMenuChoice, PathMenuOptions, effective_workspace_root, extra_root_menu_line, is_path_token,
+    precheck_existence, render_path_menu,
 };
-use super::super::{parse_chat_command, ChatCommand};
+use super::super::{ChatCommand, parse_chat_command};
 
 use crate::core::permission::{
     DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, SessionGrants,

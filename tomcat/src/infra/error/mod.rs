@@ -10,14 +10,18 @@ mod llm;
 #[cfg(test)]
 pub use llm::is_context_overflow_text;
 #[cfg(test)]
+pub use llm::is_deterministic_stream_refusal_text;
+#[cfg(test)]
 pub use llm::llm_code;
 pub use llm::{
-    is_context_overflow, is_deterministic_stream_refusal_text, is_retryable_llm_error,
+    classify_llm_failure, is_context_overflow, is_retryable_llm_error,
     is_unsupported_multimodal_text, llm_connect_or_network, llm_error, llm_error_with_source,
     llm_http_status, llm_http_status_error, llm_http_status_error_with_stage,
-    llm_http_status_error_with_summary, llm_source_chain, llm_stage, llm_stream_terminal_error,
-    llm_summary, LlmError, LlmErrorStage,
+    llm_http_status_error_with_summary, llm_source_chain, llm_stage, llm_stream_interrupted_error,
+    llm_stream_terminal_error, llm_summary, LlmError, LlmErrorStage, LlmFailureKind,
 };
+#[allow(unused_imports)]
+pub use llm::{FailureDomain, LlmFailure};
 
 /// 项目统一错误枚举，覆盖 IO、配置、插件、事件、4 原语、工具、序列化等场景。
 #[derive(Debug, Error)]

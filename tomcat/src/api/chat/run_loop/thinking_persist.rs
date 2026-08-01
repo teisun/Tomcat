@@ -3,8 +3,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tracing::warn;
 
-use crate::infra::event_bus::EventListenerId;
 use crate::infra::EventBus;
+use crate::infra::event_bus::EventListenerId;
 
 #[derive(Default)]
 struct ThinkingPersistState {

@@ -496,6 +496,8 @@ fn cli_text_stream_with_usage(
             prompt_tokens,
             completion_tokens,
             total_tokens: Some(prompt_tokens + completion_tokens),
+            reasoning_tokens: None,
+            text_tokens: None,
         }),
     ]
 }

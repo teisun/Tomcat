@@ -17,6 +17,11 @@ fn tools_read_config_default_value() {
     let cfg = ToolsReadConfig::default();
     assert_eq!(cfg.max_bytes, DEFAULT_TOOLS_READ_MAX_BYTES);
     assert_eq!(cfg.max_bytes, 25 * 1024 * 1024);
+    assert_eq!(
+        cfg.refresh_mutation_stamp,
+        DEFAULT_TOOLS_READ_REFRESH_MUTATION_STAMP
+    );
+    assert!(cfg.refresh_mutation_stamp);
 }
 
 #[test]
@@ -61,11 +66,27 @@ fn tools_read_max_bytes_toml_override() {
 }
 
 #[test]
+fn tools_read_refresh_mutation_stamp_toml_override_off() {
+    let dir = std::env::temp_dir().join("tomcat_tools_read_refresh_stamp_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(b"[tools.read]\nrefresh_mutation_stamp = false\n")
+        .unwrap();
+    drop(f);
+    let cfg = load_config(Some(path.as_path())).expect("load_config");
+    assert!(!cfg.tools.read.refresh_mutation_stamp);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
 fn app_config_default_roundtrip_preserves_tools_read() {
     let cfg = AppConfig::default();
     let j = serde_json::to_string(&cfg).unwrap();
     let back: AppConfig = serde_json::from_str(&j).unwrap();
     assert_eq!(back.tools.read.max_bytes, DEFAULT_TOOLS_READ_MAX_BYTES);
+    assert!(back.tools.read.refresh_mutation_stamp);
 }
 
 // ── T2-P0-016 PR-G：[tools.write] normalize_crlf ─────────────────────────────

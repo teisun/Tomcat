@@ -17,10 +17,10 @@ use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextReference,
 };
 use crate::core::llm::{
-    thinking_policy::resolve_request_fields, Capabilities, Credential, ModelEntry, ThinkingLevel,
+    Capabilities, Credential, ModelEntry, ThinkingLevel, thinking_policy::resolve_request_fields,
 };
-use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::LlmConfig;
+use crate::infra::error::{AppError, llm_http_status_error};
 
 fn deepseek_entry(api_key_env: &str) -> ModelEntry {
     ModelEntry {
@@ -228,8 +228,7 @@ fn is_retriable_returns_false_for_non_llm_error() {
 #[test]
 fn parts_with_image_degrade_to_placeholder_text() {
     use base64::Engine;
-    const TINY_PNG_B64: &str =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(TINY_PNG_B64)
         .unwrap();

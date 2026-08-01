@@ -133,7 +133,26 @@
 
 ---
 
-## 5. 常用命令
+## 5. E2E 断言不能只看一层
+
+安装版 E2E 的两种断言各自回答不同的问题，不能为了让测试更稳定只保留其中一种：
+
+```text
+getWebviewState()
+  └─ 数据契约：host 是否真的把正确的草稿、附件、引用写进状态？
+
+captureWebviewDom()
+  └─ 渲染回归：用户是否真的能在界面上看见这些数据？
+```
+
+例如拖放/选择器的用例必须同时断言：
+
+1. `getWebviewState()` 里的 `composerDraft.segments` 与 `pendingAttachments`；
+2. DOM 快照里的 `composer-reference-chip` 和对应文件名。
+
+前者能准确定位数据或跨进程协议错误，后者能抓住「状态是对的、组件却没渲染/被样式藏掉」的问题。需要验证用户可见结果的 E2E 一律两层都写；仅验证纯后台副作用时，可只写数据契约并在用例说明原因。
+
+## 6. 常用命令
 
 ```bash
 npm run lint                      # tsc --noEmit，最快的门禁

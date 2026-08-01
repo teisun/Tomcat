@@ -331,7 +331,7 @@ pub(crate) async fn create_session_slot(
     )))
 }
 
-pub(crate) fn register_slot_hooks(state: &ServeState, slot: &Arc<SessionSlot>) {
+pub(crate) fn register_slot_hooks(state: &Arc<ServeState>, slot: &Arc<SessionSlot>) {
     let event_ids = event_pump::register_session_event_pump(slot, state.writer.clone());
     slot.listener_ids.lock().extend(event_ids);
     let ask_listener = state.ask_question.register_request_listener(
@@ -351,6 +351,29 @@ pub(crate) fn register_slot_hooks(state: &ServeState, slot: &Arc<SessionSlot>) {
     }
     if slot.background_task_listener.lock().is_none() {
         *slot.background_task_listener.lock() = Some(spawn_background_task_listener(slot));
+    }
+    match crate::api::chat::has_resumable_tail_ask_question(&slot.ctx.session_runtime.session) {
+        Ok(true) => {
+            let state = Arc::clone(state);
+            let slot = Arc::clone(slot);
+            tokio::spawn(async move {
+                if let Err(error) = crate::api::serve::commands::start_turn(
+                    state,
+                    slot,
+                    None,
+                    None,
+                    crate::api::serve::commands::TurnAck::Silent,
+                )
+                .await
+                {
+                    tracing::warn!(error = %error, "serve pending ask_question auto-resume failed");
+                }
+            });
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "serve failed to inspect pending ask_question state");
+        }
     }
 }
 
@@ -530,7 +553,7 @@ pub(crate) async fn cleanup_session_slot(
 
 pub(crate) async fn run_slot_turn(
     slot: Arc<SessionSlot>,
-    input_message: ChatMessage,
+    input_message: Option<ChatMessage>,
     turn_token: tokio_util::sync::CancellationToken,
 ) -> Result<crate::AgentRunOutcome, AppError> {
     let mut turn_state = TurnStateLease::acquire(Arc::clone(&slot))?;
@@ -545,7 +568,7 @@ pub(crate) async fn run_slot_turn(
     turn_state.replace_system_text(next_system_text.clone());
     let result = run_chat_turn_with_message(
         &slot.ctx,
-        Some(input_message),
+        input_message,
         &next_system_text,
         turn_state.context_state_mut(),
         turn_token,

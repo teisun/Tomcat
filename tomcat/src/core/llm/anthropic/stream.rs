@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -7,7 +7,9 @@ use tokio_stream::Stream;
 
 use crate::core::llm::replay_policy::ProviderCompatProfile;
 use crate::core::llm::types::{StreamEvent, ThinkingSource, TokenUsage};
-use crate::infra::error::{llm_error_with_source, AppError, LlmErrorStage};
+use crate::infra::error::{
+    AppError, LlmErrorStage, llm_error_with_source, llm_stream_interrupted_error,
+};
 
 use super::wire::final_stream_events;
 
@@ -35,6 +37,9 @@ pub(super) struct AnthropicStream<S> {
     source_profile: ProviderCompatProfile,
     continuity_enabled: bool,
     terminal_emitted: bool,
+    /// 与 OpenAI Responses 对齐：首个有效事件前的解析失败更可能是中转流截断，可重试；
+    /// 已输出事件后才失败则是协议错误，保留 Parse 阶段供诊断。
+    seen_valid_event: bool,
 }
 
 impl<S> AnthropicStream<S> {
@@ -54,6 +59,7 @@ impl<S> AnthropicStream<S> {
             source_profile,
             continuity_enabled,
             terminal_emitted: false,
+            seen_valid_event: false,
         }
     }
 
@@ -75,12 +81,17 @@ impl<S> AnthropicStream<S> {
             return Ok(Vec::new());
         }
         let value: Value = serde_json::from_str(&data).map_err(|error| {
-            llm_error_with_source(
-                PROVIDER_NAME,
-                LlmErrorStage::Parse,
-                "解析 Anthropic SSE 失败".to_string(),
-                anyhow::anyhow!("{error} | raw={raw}"),
-            )
+            let summary = format!("解析 Anthropic SSE 失败: {error} | raw={raw}");
+            if self.seen_valid_event {
+                llm_error_with_source(
+                    PROVIDER_NAME,
+                    LlmErrorStage::Parse,
+                    summary,
+                    anyhow::anyhow!("{error} | raw={raw}"),
+                )
+            } else {
+                llm_stream_interrupted_error(PROVIDER_NAME, summary)
+            }
         })?;
         let event = event_name
             .or_else(|| {
@@ -90,7 +101,9 @@ impl<S> AnthropicStream<S> {
                     .map(str::to_string)
             })
             .unwrap_or_default();
-        self.events_for_value(&event, &value)
+        let events = self.events_for_value(&event, &value)?;
+        self.seen_valid_event |= !events.is_empty();
+        Ok(events)
     }
 
     fn events_for_value(
@@ -271,6 +284,8 @@ impl<S> AnthropicStream<S> {
             prompt_tokens,
             completion_tokens,
             total_tokens: Some(prompt_tokens + completion_tokens),
+            reasoning_tokens: None,
+            text_tokens: None,
         });
     }
 
@@ -380,11 +395,13 @@ fn find_double_newline(buffer: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use tokio_stream::StreamExt;
     use tokio_stream::empty;
 
     use super::AnthropicStream;
     use crate::core::llm::replay_policy::ProviderCompatProfile;
     use crate::core::llm::types::{ReasoningFormat, StreamEvent};
+    use crate::infra::error::{LlmFailureKind, classify_llm_failure};
 
     #[test]
     fn parse_block_emits_thinking_and_terminal_events() {
@@ -445,12 +462,36 @@ mod tests {
                 prompt_tokens: 12,
                 completion_tokens: 34,
                 total_tokens: Some(46),
+                ..
             }
         )));
         assert!(terminal.iter().any(|event| matches!(
             event,
             StreamEvent::FinishReason { reason } if reason == "stop"
         )));
+    }
+
+    #[tokio::test]
+    async fn malformed_first_sse_frame_is_retryable_transport() {
+        let source = tokio_stream::iter(vec![Ok::<Bytes, reqwest::Error>(Bytes::from(
+            "event: message_start\ndata: {not-json\n\n",
+        ))]);
+        let mut stream = AnthropicStream::new(
+            source,
+            ProviderCompatProfile::anthropic_messages("claude-opus-4-6"),
+            true,
+        );
+
+        let error = stream
+            .next()
+            .await
+            .expect("malformed first frame must surface")
+            .expect_err("first frame cannot parse");
+        assert_eq!(
+            classify_llm_failure(&error).kind,
+            LlmFailureKind::StreamInterrupted,
+            "before any valid event, a malformed intermediary frame is transport-retryable"
+        );
     }
 
     #[test]

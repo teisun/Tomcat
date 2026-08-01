@@ -1,8 +1,8 @@
 use super::super::{register_thinking_persist_listeners, unregister_thinking_persist_listeners};
+use crate::SessionManager;
 use crate::infra::event_bus::EventContext;
 use crate::infra::events::wire;
 use crate::infra::{DefaultEventBus, EventBus};
-use crate::SessionManager;
 
 fn temp_sessions_dir() -> std::path::PathBuf {
     let mut p = std::env::temp_dir();

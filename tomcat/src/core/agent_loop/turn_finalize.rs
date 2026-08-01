@@ -16,7 +16,9 @@
 use std::sync::Arc;
 
 use crate::core::compaction::run_layer0_cleanup;
-use crate::core::llm::{ChatMessage, ContinuityMetadata, MessageKind, ReasoningContinuation};
+use crate::core::llm::{
+    ChatMessage, ContinuityMetadata, MessageKind, ReasoningContinuation, TokenUsage,
+};
 use crate::core::plan_runtime::file_store::{self, PlanFileState, TodoStatus};
 use crate::core::plan_runtime::{PlanRuntime, PlanState};
 use crate::core::session::manager::estimated_tokens_from_chars;
@@ -121,6 +123,36 @@ pub(super) async fn finalize_turn_after_text(
     reasoning_continuation: Option<ReasoningContinuation>,
     continuity: Option<ContinuityMetadata>,
 ) -> Result<TurnOutcome, crate::infra::error::AppError> {
+    finalize_turn_after_text_with_usage(
+        agent,
+        messages,
+        content_buf,
+        turn_index,
+        finish_reason,
+        error_message,
+        error_code,
+        thinking_text,
+        reasoning_continuation,
+        continuity,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn finalize_turn_after_text_with_usage(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    content_buf: &str,
+    turn_index: usize,
+    finish_reason: Option<String>,
+    error_message: Option<String>,
+    error_code: Option<String>,
+    thinking_text: Option<String>,
+    reasoning_continuation: Option<ReasoningContinuation>,
+    continuity: Option<ContinuityMetadata>,
+    usage: Option<TokenUsage>,
+) -> Result<TurnOutcome, crate::infra::error::AppError> {
     if let Some(ref mut ctx_state) = agent.context_state {
         ctx_state.on_message_appended(content_buf.len());
     }
@@ -129,7 +161,8 @@ pub(super) async fn finalize_turn_after_text(
         messages,
         ChatMessage::assistant(content_buf)
             .with_completion_metadata(finish_reason, error_message, error_code)
-            .with_reasoning_state(thinking_text, reasoning_continuation, continuity),
+            .with_reasoning_state(thinking_text, reasoning_continuation, continuity)
+            .with_usage(usage),
         &forced_id,
     )?;
 

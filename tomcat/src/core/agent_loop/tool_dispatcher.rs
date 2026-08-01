@@ -18,7 +18,7 @@
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::llm::{ChatMessage, ContinuityMetadata, ReasoningContinuation};
+use crate::core::llm::{ChatMessage, ContinuityMetadata, ReasoningContinuation, TokenUsage};
 use crate::core::session::manager::INTERRUPTED_TOOL_RESULT_TEXT;
 use crate::infra::error::AppError;
 use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput};
@@ -112,6 +112,38 @@ pub(super) async fn run_tool_calls(
     reasoning_continuation: Option<ReasoningContinuation>,
     continuity: Option<ContinuityMetadata>,
 ) -> Result<DispatchOutcome, LoopError> {
+    run_tool_calls_with_usage(
+        agent,
+        messages,
+        tool_calls,
+        assistant_content,
+        partial_text_for_abort,
+        finish_reason,
+        error_message,
+        error_code,
+        thinking_text,
+        reasoning_continuation,
+        continuity,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_tool_calls_with_usage(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    tool_calls: &[ToolCallInfo],
+    assistant_content: &str,
+    partial_text_for_abort: &str,
+    finish_reason: Option<String>,
+    error_message: Option<String>,
+    error_code: Option<String>,
+    thinking_text: Option<String>,
+    reasoning_continuation: Option<ReasoningContinuation>,
+    continuity: Option<ContinuityMetadata>,
+    usage: Option<TokenUsage>,
+) -> Result<DispatchOutcome, LoopError> {
     let persisted_arguments: Vec<String> = tool_calls
         .iter()
         .map(tool_exec::persisted_tool_call_arguments)
@@ -160,11 +192,8 @@ pub(super) async fn run_tool_calls(
                     )
                     .with_completion_metadata(finish_reason, error_message, error_code)
                     .with_summary_title(summary_title.clone())
-                    .with_reasoning_state(
-                        thinking_text,
-                        reasoning_continuation,
-                        continuity,
-                    ),
+                    .with_reasoning_state(thinking_text, reasoning_continuation, continuity)
+                    .with_usage(usage),
                     &forced_id,
                 )
                 .map_err(LoopError::Fatal)?,

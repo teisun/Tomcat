@@ -1,15 +1,192 @@
 use chrono::Utc;
 use regex::Regex;
 use reqwest::Url;
+use serde_json::Value;
 use tracing::warn;
 
 use crate::api::chat::ChatContext;
 use crate::core::compaction::preheat::Preheat;
 use crate::core::session::manager::init_context_state;
-use crate::core::session::ErrorEntry;
-use crate::infra::error::{llm_http_status, llm_source_chain, llm_stage, llm_summary, AppError};
+use crate::core::session::{
+    ErrorEntry, ResumableAskQuestionResult, TranscriptEntry,
+    classify_resumable_ask_question_result, collect_recent_chat_messages_from_tail,
+    find_dangling_tail_tool_calls, is_tool_call_pending,
+};
+use crate::infra::error::{
+    AppError, LlmFailureKind, classify_llm_failure, llm_http_status, llm_source_chain, llm_stage,
+    llm_summary,
+};
 
 const MAX_ERROR_DETAIL_CHARS: usize = 8 * 1024;
+
+#[derive(Debug, Clone)]
+struct ResumableTailAskQuestion {
+    tool_call_id: String,
+    arguments: Value,
+}
+
+fn tool_call_name(tool_call: &Value) -> Option<&str> {
+    tool_call.get("function")?.get("name")?.as_str()
+}
+
+fn tool_call_arguments(tool_call: &Value) -> Option<Value> {
+    serde_json::from_str(tool_call.get("function")?.get("arguments")?.as_str()?).ok()
+}
+
+fn find_resumable_tail_ask_questions(entries: &[TranscriptEntry]) -> Vec<ResumableTailAskQuestion> {
+    let recent = collect_recent_chat_messages_from_tail(entries);
+
+    if let Some(dangling) = find_dangling_tail_tool_calls(&recent) {
+        return dangling
+            .into_iter()
+            .filter_map(|tool_call| {
+                crate::core::tools::contract::catalog::is_replay_safe_tool(&tool_call.name).then(
+                    || {
+                        Some(ResumableTailAskQuestion {
+                            tool_call_id: tool_call.id,
+                            arguments: tool_call.arguments?,
+                        })
+                    },
+                )?
+            })
+            .collect();
+    }
+
+    let mut trailing_tools = Vec::new();
+    for message in recent.iter().rev() {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match role {
+            "tool" => trailing_tools.push(message),
+            "assistant" => {
+                let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+                    return Vec::new();
+                };
+                if tool_calls.is_empty() || trailing_tools.len() != tool_calls.len() {
+                    return Vec::new();
+                }
+                trailing_tools.reverse();
+                if !tool_calls
+                    .iter()
+                    .zip(&trailing_tools)
+                    .all(|(tool_call, result)| {
+                        tool_call.get("id").and_then(Value::as_str)
+                            == result.get("tool_call_id").and_then(Value::as_str)
+                    })
+                {
+                    return Vec::new();
+                }
+                return tool_calls
+                    .iter()
+                    .zip(trailing_tools)
+                    .filter_map(|(tool_call, result)| {
+                        let content = result.get("content").and_then(Value::as_str)?;
+                        let result_state = classify_resumable_ask_question_result(content)?;
+                        let is_pending = result_state == ResumableAskQuestionResult::Pending;
+                        (tool_call_name(tool_call).is_some_and(
+                            crate::core::tools::contract::catalog::is_replay_safe_tool,
+                        )
+                            // `[pending]` needs the explicit active-result predicate; legacy
+                            // host_disconnected has already passed through the superseded-filtered
+                            // `recent` chain above and is therefore active by construction.
+                            && (!is_pending
+                                || is_tool_call_pending(
+                                    entries,
+                                    tool_call
+                                        .get("id")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default(),
+                                )))
+                        .then(|| {
+                            Some(ResumableTailAskQuestion {
+                                tool_call_id: tool_call.get("id")?.as_str()?.to_string(),
+                                arguments: tool_call_arguments(tool_call)?,
+                            })
+                        })?
+                    })
+                    .collect();
+            }
+            _ => return Vec::new(),
+        }
+    }
+    Vec::new()
+}
+
+async fn execute_resumed_ask_question(
+    ctx: &ChatContext,
+    tool_call_id: &str,
+    arguments: &Value,
+) -> Result<Value, AppError> {
+    let panel = ctx
+        .session_runtime
+        .plan_runtime
+        .ask_question_panel()
+        .ok_or_else(|| {
+            AppError::Config("ask_question panel is unavailable during resume".to_string())
+        })?;
+    crate::core::tools::plan_tool::ask_question::execute_for_tool(
+        &ctx.session_runtime.plan_runtime,
+        panel.as_ref(),
+        arguments,
+        crate::core::plan_runtime::AskQuestionTermination::default(),
+        Some(tool_call_id),
+    )
+    .await
+    .map_err(|error| AppError::Tool(format!("resume ask_question failed: {error}")))
+}
+
+/// Replays restart-interrupted tail `ask_question` calls before a no-input agent turn.
+///
+/// The normal append path is deliberately used for genuinely dangling calls, so each result still
+/// passes `append_message_chain`. Existing placeholders (`[pending]` or legacy
+/// `host_disconnected`) are first superseded by `tool_call_id`, then a fresh real result is
+/// appended so the transcript remains append-only.
+pub(crate) fn has_resumable_tail_ask_question(
+    session: &crate::core::session::SessionManager,
+) -> Result<bool, AppError> {
+    let entries = session.get_entries(256)?;
+    Ok(!find_resumable_tail_ask_questions(&entries).is_empty())
+}
+
+pub(crate) async fn resume_tail_ask_questions(ctx: &ChatContext) -> Result<bool, AppError> {
+    let session = &ctx.session_runtime.session;
+    let entries = session.get_entries(256)?;
+    let resumable = find_resumable_tail_ask_questions(&entries);
+    if resumable.is_empty() {
+        return Ok(false);
+    }
+    for pending in resumable {
+        let result =
+            execute_resumed_ask_question(ctx, &pending.tool_call_id, &pending.arguments).await?;
+        session.replace_tool_result_by_tool_call_id(&pending.tool_call_id, result.to_string())?;
+    }
+    Ok(true)
+}
+
+/// 用户明确开始新输入时，不再让旧的 `[pending]` ask_question 占住本轮。
+///
+/// 这不是重跑工具：旧问题被记录为 `skipped`，随后用户的新 prompt 才会落盘。这样
+/// transcript 与 provider 都能看到完整的 tool round，而不是把 `[pending]` 误当成答案。
+pub(crate) fn skip_tail_ask_questions_for_new_input(ctx: &ChatContext) -> Result<bool, AppError> {
+    let session = &ctx.session_runtime.session;
+    let entries = session.get_entries(256)?;
+    let resumable = find_resumable_tail_ask_questions(&entries);
+    if resumable.is_empty() {
+        return Ok(false);
+    }
+    let skipped = serde_json::json!({
+        "outcome": "skipped",
+        "cancelled": true,
+        "answers": [],
+    })
+    .to_string();
+    for pending in resumable {
+        session.replace_tool_result_by_tool_call_id(&pending.tool_call_id, skipped.clone())?;
+    }
+    Ok(true)
+}
 
 pub(super) fn make_fallback_context_state(
     ctx: &ChatContext,
@@ -185,6 +362,17 @@ fn error_phase(error: &AppError) -> Option<String> {
 
 pub(crate) fn render_error_message(error: &AppError) -> String {
     let detail = error_detail_text(error);
+    let failure = classify_llm_failure(error);
+    match failure.kind {
+        LlmFailureKind::Billing => {
+            return "账户余额或额度不足。充值或切换 Provider 后可重试。".to_string();
+        }
+        LlmFailureKind::ContextOverflow => {
+            return "上下文超过当前模型限制。可用 /compact 压缩上下文，或用 /restore 回退后重试。"
+                .to_string();
+        }
+        _ => {}
+    }
     if let Some(status) = llm_http_status(error) {
         let mut parts = vec![format!("API 错误 {status}")];
         if let Some(host) = extract_gateway_host(&detail) {
@@ -212,6 +400,7 @@ fn build_error_entry(ctx: &ChatContext, error: &AppError) -> ErrorEntry {
             .with_catalog(|catalog| catalog.lookup(model_id).cloned())
     });
     let detail = error_detail_text(error);
+    let failure = classify_llm_failure(error);
     ErrorEntry {
         id: Some(format!("err_{}", Utc::now().timestamp_micros())),
         parent_id: None,
@@ -222,6 +411,8 @@ fn build_error_entry(ctx: &ChatContext, error: &AppError) -> ErrorEntry {
         api_family: catalog_entry.as_ref().map(|entry| entry.api.clone()),
         status_code: llm_http_status(error),
         request_id: extract_request_id(&detail),
+        failure_kind: Some(failure.kind.as_str().to_string()),
+        failure_domain: Some(failure.domain.as_str().to_string()),
         summary: render_error_message(error),
         detail,
     }

@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider};
-use crate::core::session::manager::{is_rule_derived_title, SessionManager};
+use crate::core::session::manager::{SessionManager, is_rule_derived_title};
 use crate::core::summary::generate_session_title;
-use crate::infra::events::wire;
 use crate::infra::ScopedEventEmitter;
+use crate::infra::events::wire;
 
 pub(crate) fn maybe_emit_rule_session_title(
     session: &SessionManager,

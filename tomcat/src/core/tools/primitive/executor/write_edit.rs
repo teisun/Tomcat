@@ -520,9 +520,24 @@ fn apply_string_edits(
             )));
         }
         if !seg.replace_all && n_hits.len() > 1 {
+            let hit_lines = n_hits
+                .iter()
+                .map(|start| {
+                    // `n_text` only normalizes matching-relevant characters and preserves
+                    // newlines, so its byte offset gives the user the same line number they
+                    // see in a fresh `read`.
+                    n_text.as_bytes()[..*start]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count()
+                        + 1
+                })
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(AppError::Primitive(format!(
-                "Ambiguous: edits[{}] 的 old_content 在文件 `{}` 中出现 {} 次; 请扩大上下文使其唯一, 或设置 replace_all: true",
-                idx, user_path, n_hits.len()
+                "Ambiguous: edits[{}] 的 old_content 在文件 `{}` 中出现 {} 次（匹配行号：{}）；请扩大上下文使其唯一，或设置 replace_all: true",
+                idx, user_path, n_hits.len(), hit_lines
             )));
         }
         if !seg.replace_all {

@@ -13,23 +13,26 @@ use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::api::chat::commands::{checkpoint_kind_label, restore_core, RestoreCoreReport};
+use crate::AppError;
+use crate::api::chat::commands::{
+    RestoreCoreReport, checkpoint_kind_label, compact_session, restore_core,
+};
 use crate::core::llm::{
-    list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind, ContextReference,
-    ProviderKeyInput, ThinkingLevel,
+    ProviderKeyInput, ThinkingLevel, list_model_views, list_provider_keys, remove_user_model,
+    set_provider_key, upsert_user_model,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::attachments::{
-    safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore,
-    REBUILDABLE_MAX_BYTES,
+    AttachmentBlobStore, REBUILDABLE_MAX_BYTES, safe_filename, validate_file_bytes,
+    validate_image_bytes,
 };
+use crate::core::session::manager::init_context_state;
 use crate::core::session::transcript::{
-    entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset,
-    TranscriptEntry, TranscriptPage,
+    TranscriptEntry, TranscriptPage, entry_id, find_entry_line_offset, read_entries_tail_before,
+    read_entry_at_offset,
 };
 use crate::infra::events::{AgentEvent, WireEvent};
-use crate::AppError;
 use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
 
 use super::control;
@@ -41,12 +44,13 @@ use super::types::{
     SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse,
 };
 use super::{
-    cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
+    ServeState, cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn,
 };
 
-enum TurnAck {
+pub(crate) enum TurnAck {
     Accepted,
     Payload(serde_json::Value),
+    Silent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,7 +241,6 @@ pub(crate) async fn handle_command(
                 send_error(&state, id, session_id, "busy")?;
                 return Ok(());
             }
-
             let (archival_message, mut input_message) =
                 match build_turn_messages(&slot, text, &params) {
                     Ok(pair) => pair,
@@ -246,11 +249,14 @@ pub(crate) async fn handle_command(
                         return Ok(());
                     }
                 };
-            let row_id = persist_turn_input_message(&slot, &archival_message, &params)?;
-            input_message.msg_id = Some(row_id);
+            let persisted = persist_turn_input_message(&slot, &archival_message, &params)?;
+            input_message.msg_id = Some(persisted.row_id);
+            if persisted.settled_pending_question && !slot.is_busy() {
+                rehydrate_slot_context_state(&slot)?;
+            }
             release_attachment_leases(&slot, &params);
 
-            start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
+            start_turn(state, slot, id, Some(input_message), TurnAck::Accepted).await?;
         }
         ServeCommand::Steer {
             id,
@@ -263,8 +269,11 @@ pub(crate) async fn handle_command(
                 return Ok(());
             };
             let mut input_message = ChatMessage::steering(text);
-            let row_id = persist_turn_input_message(&slot, &input_message, &params)?;
-            input_message.msg_id = Some(row_id);
+            let persisted = persist_turn_input_message(&slot, &input_message, &params)?;
+            input_message.msg_id = Some(persisted.row_id);
+            if persisted.settled_pending_question && !slot.is_busy() {
+                rehydrate_slot_context_state(&slot)?;
+            }
             if slot.is_busy() {
                 slot.ctx
                     .session_runtime
@@ -278,7 +287,7 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
+            start_turn(state, slot, id, Some(input_message), TurnAck::Accepted).await?;
         }
         ServeCommand::FollowUp {
             id,
@@ -298,8 +307,11 @@ pub(crate) async fn handle_command(
                         return Ok(());
                     }
                 };
-            let row_id = persist_turn_input_message(&slot, &archival_message, &params)?;
-            input_message.msg_id = Some(row_id);
+            let persisted = persist_turn_input_message(&slot, &archival_message, &params)?;
+            input_message.msg_id = Some(persisted.row_id);
+            if persisted.settled_pending_question && !slot.is_busy() {
+                rehydrate_slot_context_state(&slot)?;
+            }
             release_attachment_leases(&slot, &params);
             if slot.is_busy() {
                 slot.ctx
@@ -314,7 +326,26 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
+            start_turn(state, slot, id, Some(input_message), TurnAck::Accepted).await?;
+        }
+        ServeCommand::Resume { id, session_id } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id).await? else {
+                return Ok(());
+            };
+            if slot.is_busy() {
+                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+                return Ok(());
+            }
+            if slot
+                .ctx
+                .session_runtime
+                .session
+                .revive_trailing_failed_user_messages()?
+                > 0
+            {
+                rehydrate_slot_context_state(&slot)?;
+            }
+            start_turn(state, slot, id, None, TurnAck::Accepted).await?;
         }
         ServeCommand::NewSession { id, params } => {
             if params.detached {
@@ -532,10 +563,62 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
+            if let Err(error) = rehydrate_slot_context_state(&slot) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    format!("restore persisted but failed to refresh runtime context: {error}"),
+                )?;
+                return Ok(());
+            }
+            rearm_pending_question_after_transcript_change(Arc::clone(&state), Arc::clone(&slot))
+                .await?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
                 Some(restore_core_payload(report)),
+            )))?;
+        }
+        ServeCommand::Compact { id, session_id } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id).await? else {
+                return Ok(());
+            };
+            if slot.is_busy() {
+                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+                return Ok(());
+            }
+            let report = match compact_session(&slot.ctx).await {
+                Ok(report) => report,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        Some(slot.session_id.clone()),
+                        format!("compact failed: {error}"),
+                    )?;
+                    return Ok(());
+                }
+            };
+            // `/compact` 已将 boundary 写入 transcript。与 /restore 一样必须立刻重载
+            // slot 的内存状态，否则下一轮会继续带着已失效的消息。
+            if let Err(error) = rehydrate_slot_context_state(&slot) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    format!("compact persisted but failed to refresh runtime context: {error}"),
+                )?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                Some(json!({
+                    "beforeUsageRatio": report.before_ratio,
+                    "afterUsageRatio": report.after_ratio,
+                    "coveredMessageCount": report.covered_count,
+                })),
             )))?;
         }
         ServeCommand::ListSessions { id, scope } => {
@@ -871,10 +954,10 @@ pub(crate) async fn handle_command(
                                 Arc::clone(&state),
                                 slot,
                                 id,
-                                ChatMessage::user(format!(
+                                Some(ChatMessage::user(format!(
                                     "start building {}",
                                     outcome.plan_path.to_string_lossy()
-                                )),
+                                ))),
                                 TurnAck::Payload(response_payload),
                             )
                             .await?;
@@ -1368,11 +1451,11 @@ fn normalize_plan_runtime_error_code(error: &PlanRuntimeError) -> &'static str {
     }
 }
 
-async fn start_turn(
+pub(crate) async fn start_turn(
     state: Arc<ServeState>,
     slot: Arc<super::registry::SessionSlot>,
     id: Option<String>,
-    input_message: ChatMessage,
+    input_message: Option<ChatMessage>,
     ack: TurnAck,
 ) -> Result<(), AppError> {
     if !slot.mark_busy() {
@@ -1415,6 +1498,7 @@ async fn start_turn(
                 Some(payload),
             )))?;
         }
+        TurnAck::Silent => {}
     }
 
     let slot_for_task = Arc::clone(&slot);
@@ -1459,6 +1543,42 @@ async fn start_turn(
     });
     *slot.run_task.lock() = Some(handle);
     Ok(())
+}
+
+/// 任何直接改写 transcript 历史的 serve 命令都经此处同步内存 context。
+///
+/// `/compact`、`/restore` 与 pending-question 结算都会改变逻辑消息链；只改 JSONL 会让
+/// 下一轮仍发送旧内存副本。入口处已保证 slot 不 busy，故可安全读取并替换 turn state。
+fn rehydrate_slot_context_state(slot: &Arc<super::registry::SessionSlot>) -> Result<(), AppError> {
+    let system_text = slot
+        .turn_state
+        .lock()
+        .as_ref()
+        .map(|state| state.system_text.clone())
+        .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
+    let context_state = init_context_state(
+        &slot.ctx.session_runtime.session,
+        &slot.ctx.config.context,
+        &system_text,
+    )?;
+    let mut turn_state = slot.turn_state.lock();
+    let state = turn_state
+        .as_mut()
+        .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
+    state.context_state = context_state;
+    Ok(())
+}
+
+/// `/restore` 可能把一个未回答的问题重新带回 transcript 尾部。它与 session attach
+/// 共享同一条 no-input resume 入口，避免「磁盘里已是 pending、界面却没有卡片」。
+async fn rearm_pending_question_after_transcript_change(
+    state: Arc<ServeState>,
+    slot: Arc<super::registry::SessionSlot>,
+) -> Result<(), AppError> {
+    if !crate::api::chat::has_resumable_tail_ask_question(&slot.ctx.session_runtime.session)? {
+        return Ok(());
+    }
+    start_turn(state, slot, None, None, TurnAck::Silent).await
 }
 
 fn rollback_created_session(slot: &super::registry::SessionSlot) -> Result<(), AppError> {
@@ -1616,15 +1736,18 @@ fn normalized_user_message_id(params: &ServeMessageParams) -> Option<&str> {
 
 /// 把输入消息落进 transcript，返回它的 row id。
 ///
-/// 只返回 row id 而不返回整条消息：调用方需要的就只是这个 id，
-/// 让它回抄到「发给模型」那条消息上。返回整条消息会诱使调用方手工搬字段
-/// （旧实现就是 `input_message.msg_id = persisted.msg_id`），
-/// 将来 persist 若再规范化别的字段，provider 那条会静默漏掉。
+/// Persist 结果只暴露调用方必须知道的两件事：稳定 row id，以及 session 门闩是否刚
+/// 结算了 pending question。后者让 serve 刷新内存 context，却不在上层重复改写 transcript。
+struct PersistedTurnInput {
+    row_id: String,
+    settled_pending_question: bool,
+}
+
 fn persist_turn_input_message(
     slot: &Arc<super::registry::SessionSlot>,
     message: &ChatMessage,
     params: &ServeMessageParams,
-) -> Result<String, AppError> {
+) -> Result<PersistedTurnInput, AppError> {
     let payload = serde_json::to_value(message)?;
     if let Some(forced_id) = normalized_user_message_id(params) {
         if slot
@@ -1638,10 +1761,21 @@ fn persist_turn_input_message(
                 .ctx
                 .session_runtime
                 .session
-                .append_message_with_id(payload, forced_id);
+                .append_message_with_id_and_pending_resolution(payload, forced_id)
+                .map(|(row_id, settled_pending_question)| PersistedTurnInput {
+                    row_id,
+                    settled_pending_question,
+                });
         }
     }
-    slot.ctx.session_runtime.session.append_message(payload)
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message_with_pending_resolution(payload)
+        .map(|(row_id, settled_pending_question)| PersistedTurnInput {
+            row_id,
+            settled_pending_question,
+        })
 }
 
 /// 发送成功后释放这一回合用到的全部附件租约。

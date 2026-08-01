@@ -85,6 +85,12 @@ export interface RestoreCheckpointPayload {
   warnings: string[];
 }
 
+export interface CompactPayload {
+  afterUsageRatio: number;
+  beforeUsageRatio: number;
+  coveredMessageCount: number;
+}
+
 function requireSuccessfulResponse(response: ResponseFrame, action: string): void {
   if (!response.success) {
     throw new Error(response.error ?? `Tomcat ${action} failed`);
@@ -397,5 +403,39 @@ export class SessionRouter {
       transcriptTruncated: payload.transcriptTruncated === true,
       warnings: parseStringArray(payload.warnings),
     };
+  }
+
+  async compact(sessionId: string): Promise<CompactPayload> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "compact",
+    } as never);
+    if (!response.success) {
+      throw new Error(response.error ?? "Tomcat compact failed");
+    }
+    const payload = response.payload;
+    if (
+      !isRecord(payload) ||
+      typeof payload.beforeUsageRatio !== "number" ||
+      typeof payload.afterUsageRatio !== "number" ||
+      typeof payload.coveredMessageCount !== "number"
+    ) {
+      throw new Error("Tomcat compact payload is invalid");
+    }
+    return {
+      afterUsageRatio: payload.afterUsageRatio,
+      beforeUsageRatio: payload.beforeUsageRatio,
+      coveredMessageCount: payload.coveredMessageCount,
+    };
+  }
+
+  async resume(sessionId: string): Promise<void> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "resume",
+    } as never);
+    if (!response.success) {
+      throw new Error(response.error ?? "Tomcat resume failed");
+    }
   }
 }

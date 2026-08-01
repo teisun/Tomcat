@@ -85,6 +85,243 @@ fn try_append_returns_err_on_violation() {
 }
 
 #[test]
+fn every_user_append_resolves_pending_ask_question_before_writing_prompt() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    mgr.append_message(serde_json::json!({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "ask-1",
+            "type": "function",
+            "function": {
+                "name": "ask_question",
+                "arguments": "{\"questions\":[]}"
+            }
+        }]
+    }))
+    .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role": "tool",
+        "tool_call_id": "ask-1",
+        "content": "[pending]"
+    }))
+    .unwrap();
+
+    mgr.try_append_message(serde_json::json!({
+        "role": "user",
+        "content": "不回答旧问题，发新提示词"
+    }))
+    .expect("the central append gate must settle pending question");
+
+    let entries = mgr.get_entries(16).unwrap();
+    let messages = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message) => Some(&message.message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let active_ask_results = messages
+        .iter()
+        .filter(|message| {
+            message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                && message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ask-1")
+                && message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(active_ask_results.len(), 1);
+    assert_eq!(
+        active_ask_results[0]["content"],
+        r#"{"outcome":"skipped","cancelled":true,"answers":[]}"#
+    );
+    crate::core::session::assert_active_tool_result_integrity(&entries)
+        .expect("settling a pending question must leave one active result");
+    assert_eq!(
+        messages
+            .last()
+            .and_then(|message| message.get("role"))
+            .and_then(serde_json::Value::as_str),
+        Some("user")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn concurrent_question_answers_keep_only_first_terminal_result() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = std::sync::Arc::new(SessionManager::new(dir.clone()));
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    mgr.append_message(serde_json::json!({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "ask-race",
+            "type": "function",
+            "function": {
+                "name": "ask_question",
+                "arguments": "{\"questions\":[]}"
+            }
+        }]
+    }))
+    .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role": "tool",
+        "tool_call_id": "ask-race",
+        "content": "[pending]"
+    }))
+    .unwrap();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut handles = Vec::new();
+    for result in ["first", "second"] {
+        let mgr = std::sync::Arc::clone(&mgr);
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            mgr.replace_tool_result_by_tool_call_id("ask-race", result.to_string())
+        }));
+    }
+    barrier.wait();
+    let outcomes = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("answer worker"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "the second window must not overwrite a real answer"
+    );
+
+    let entries = mgr.get_entries(16).unwrap();
+    let active_results = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message)
+                if message
+                    .message
+                    .get("role")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("tool")
+                    && message
+                        .message
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("ask-race")
+                    && message
+                        .message
+                        .get("superseded")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true) =>
+            {
+                Some(
+                    message.message["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(active_results.len(), 1);
+    assert!(matches!(active_results[0].as_str(), "first" | "second"));
+    crate::core::session::assert_active_tool_result_integrity(&entries)
+        .expect("concurrent replacement must leave one active result");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failed_tool_result_replacement_validation_keeps_transcript_byte_identical() {
+    use crate::core::session::transcript::{ErrorEntry, MessageEntry, append_entry};
+
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    mgr.append_message(serde_json::json!({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "ask-1",
+            "type": "function",
+            "function": {
+                "name": "ask_question",
+                "arguments": "{\"questions\":[]}"
+            }
+        }]
+    }))
+    .unwrap();
+
+    // Bypass the normal append gate to create a deliberately malformed old transcript:
+    // the owning assistant falls just outside the bounded validation tail. This is the
+    // exact case that used to mark `[pending]` superseded before discovering it could
+    // not append the replacement.
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    for index in 0..64 {
+        append_entry(
+            &path,
+            &TranscriptEntry::Error(ErrorEntry {
+                id: Some(format!("noise-{index}")),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+                phase: None,
+                provider: None,
+                model: None,
+                api_family: None,
+                status_code: None,
+                request_id: None,
+                failure_kind: None,
+                failure_domain: None,
+                summary: "noise".to_string(),
+                detail: "noise".to_string(),
+            }),
+        )
+        .unwrap();
+    }
+    append_entry(
+        &path,
+        &TranscriptEntry::Message(MessageEntry {
+            id: Some("pending-ask".to_string()),
+            parent_id: None,
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            message: serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "ask-1",
+                "content": "[pending]"
+            }),
+        }),
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let result = mgr.replace_tool_result_by_tool_call_id("ask-1", "answer".to_string());
+
+    assert!(
+        result.is_err(),
+        "the bounded chain cannot validate without its owner"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a rejected replacement must not supersede the durable placeholder"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn append_generates_unique_ids() {
     let id1 = generate_entry_id();
     let id2 = generate_entry_id();

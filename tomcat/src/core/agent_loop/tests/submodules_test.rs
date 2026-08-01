@@ -202,7 +202,7 @@ async fn handle_overflow_retry_skipped_when_not_overflow() {
     let mut agent = make_agent();
     let mut messages = vec![ChatMessage::user("hi")];
     let err = llm_http_status_error("mock", 429, "rate limit");
-    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err);
+    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err).await;
     assert!(
         !stats.applied,
         "non-overflow error must not trigger L3 trim, stats={:?}",
@@ -223,7 +223,7 @@ async fn handle_overflow_retry_skipped_when_no_context_state() {
         400,
         r#"{"error":{"code":"context_length_exceeded"}}"#,
     );
-    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err);
+    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err).await;
     assert!(
         !stats.applied,
         "overflow without context_state must skip trim, stats={:?}",

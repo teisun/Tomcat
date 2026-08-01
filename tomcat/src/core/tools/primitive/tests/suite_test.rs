@@ -1740,6 +1740,11 @@ async fn edit_validation_failure_restores_or_noop() {
         "错误文案应含 Ambiguous：{}",
         msg2
     );
+    assert!(
+        msg2.contains("匹配行号：1, 2"),
+        "Ambiguous 应列出全部匹配行号：{}",
+        msg2
+    );
     assert_eq!(std::fs::read_to_string(&f2).unwrap(), original2);
     assert!(!dir.join("f.bak").exists());
 }

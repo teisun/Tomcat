@@ -99,6 +99,98 @@ fn validate_duplicate_tool_call_id() {
 }
 
 #[test]
+fn validate_duplicate_tool_call_id_ignores_superseded_result() {
+    let recent = vec![
+        mk_assistant_tc(&["c1", "c2"]),
+        serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "[pending]",
+            "superseded": true,
+        }),
+    ];
+    assert!(
+        validate_append_message(&mk_tool("c1"), &recent).is_ok(),
+        "superseded tool results must not block a replacement result"
+    );
+}
+
+#[test]
+fn pending_tool_call_predicate_uses_latest_non_superseded_result() {
+    let message = |id: &str, content: &str, superseded: bool| {
+        TranscriptEntry::Message(MessageEntry {
+            id: Some(id.to_string()),
+            parent_id: None,
+            timestamp: "t".to_string(),
+            message: serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "ask-1",
+                "content": content,
+                "superseded": superseded,
+            }),
+        })
+    };
+
+    assert!(
+        is_tool_call_pending(&[message("pending", "[pending]", false)], "ask-1"),
+        "an active pending result keeps the question open"
+    );
+    assert!(
+        !is_tool_call_pending(
+            &[
+                message("pending", "[pending]", true),
+                message("answer", "{\"outcome\":\"answered\"}", false),
+            ],
+            "ask-1",
+        ),
+        "a newer real answer closes the question even if history retains its placeholder"
+    );
+    assert!(
+        !is_tool_call_pending(
+            &[
+                message("answer", "{\"outcome\":\"answered\"}", false),
+                message("pending", "[pending]", true),
+            ],
+            "ask-1",
+        ),
+        "superseded pending history never reopens a completed question"
+    );
+}
+
+#[test]
+fn outbound_guard_detects_unpaired_tool_calls_but_accepts_paired_or_pending_results() {
+    let declaration = crate::core::llm::ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({
+            "id": "call-1",
+            "type": "function",
+            "function": { "name": "ask_question", "arguments": "{}" },
+        })],
+    );
+    assert!(
+        has_dangling_tool_calls_in_messages(&[declaration.clone()]),
+        "unpaired declaration must never reach provider"
+    );
+    assert!(
+        !has_dangling_tool_calls_in_messages(&[
+            declaration.clone(),
+            crate::core::llm::ChatMessage::tool("call-1", "[pending]"),
+        ]),
+        "the pending placeholder structurally closes the provider protocol"
+    );
+    assert!(
+        !has_dangling_tool_calls_in_messages(&[
+            declaration,
+            crate::core::llm::ChatMessage::tool(
+                "call-1",
+                r#"{"outcome":"skipped","cancelled":true,"answers":[]}"#,
+            ),
+        ]),
+        "a terminal result also closes the provider protocol"
+    );
+}
+
+#[test]
 fn validate_assistant_tc_then_assistant() {
     let recent = vec![mk_assistant_tc(&["c1"])];
     assert!(validate_append_message(&mk_assistant("hi"), &recent).is_err());
@@ -244,6 +336,38 @@ fn collect_skips_non_message() {
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0]["role"], "user");
     assert_eq!(msgs[1]["role"], "assistant");
+}
+
+#[test]
+fn collect_skips_superseded_messages_like_context_hydration() {
+    let entries = vec![
+        TranscriptEntry::Message(MessageEntry {
+            id: Some("active".into()),
+            parent_id: None,
+            timestamp: "t".into(),
+            message: mk_user("active"),
+        }),
+        TranscriptEntry::Message(MessageEntry {
+            id: Some("discarded".into()),
+            parent_id: None,
+            timestamp: "t".into(),
+            message: {
+                let mut message = mk_assistant_tc(&["discarded-call"]);
+                message
+                    .as_object_mut()
+                    .expect("assistant message is an object")
+                    .insert("superseded".to_string(), serde_json::json!(true));
+                message
+            },
+        }),
+    ];
+
+    let messages = collect_recent_chat_messages_from_tail(&entries);
+    assert_eq!(messages, vec![mk_user("active")]);
+    assert!(
+        validate_append_message(&mk_user("next"), &messages).is_ok(),
+        "append validation must not observe messages hidden from hydrated context"
+    );
 }
 
 #[test]

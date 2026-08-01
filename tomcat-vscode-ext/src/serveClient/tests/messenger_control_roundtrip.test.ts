@@ -140,4 +140,34 @@ describe("TomcatMessenger control roundtrip", () => {
     expect(secondChild.readStdin()).toBe("");
     messenger.dispose();
   });
+
+  it("aborts the matching inbound control handler on control_cancel", async () => {
+    const child = new FakeChildProcess();
+    const messenger = new TomcatMessenger({
+      executable: "tomcat",
+      spawnFactory: createSpawnFactory(child),
+    });
+    const wait = deferred<AskQuestionResult>();
+    let signal: AbortSignal | undefined;
+    messenger.registerAskQuestionHandler((_request, _frame, context) => {
+      signal = context.signal;
+      return wait.promise;
+    });
+
+    messenger.start();
+    child.emitStdout(askFrame("ask-cancel", "s1"));
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    child.emitStdout(
+      `${JSON.stringify({
+        requestId: "ask-cancel",
+        sessionId: "s1",
+        type: "control_cancel",
+      })}\n`,
+    );
+    expect(signal?.aborted).toBe(true);
+
+    wait.resolve({ answers: [], cancelled: true, outcome: "skipped" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(child.readStdin()).toBe("");
+  });
 });

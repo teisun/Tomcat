@@ -63,11 +63,9 @@ fn estimate_msg_chars_text_only_returns_string_len() {
 #[test]
 fn estimate_msg_chars_with_image_part_uses_image_estimate() {
     let png = write_b64_tempfile(TINY_PNG_B64);
-    let m = ChatMessage::user_with_parts(vec![ChatMessageContentPart::image_b64(
-        "image/png",
-        png.path(),
-    )
-    .expect("png")]);
+    let m = ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::image_b64("image/png", png.path()).expect("png"),
+    ]);
     let n = estimate_msg_chars(&m);
     assert!(
         n >= 3600,
@@ -81,12 +79,9 @@ fn estimate_msg_chars_with_image_part_uses_image_estimate() {
 #[test]
 fn estimate_msg_chars_with_file_part_uses_file_estimate() {
     let pdf = write_b64_tempfile("UERG");
-    let m = ChatMessage::user_with_parts(vec![ChatMessageContentPart::file_b64(
-        "x.pdf",
-        "application/pdf",
-        pdf.path(),
-    )
-    .expect("pdf")]);
+    let m = ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::file_b64("x.pdf", "application/pdf", pdf.path()).expect("pdf"),
+    ]);
     let n = estimate_msg_chars(&m);
     assert!(
         n >= 8000,

@@ -15,14 +15,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::multimodal::UNSUPPORTED_FILE_INPUT_PLACEHOLDER;
-use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, StreamEvent};
-use crate::core::session::manager::MessageAppendSink;
-use crate::infra::error::{llm_http_status_error, AppError};
+use crate::core::llm::{
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, MessageKind, StreamEvent,
+};
+use crate::core::session::manager::{ContextState, MessageAppendSink, estimate_msg_chars};
+use crate::infra::error::{AppError, llm_http_status_error};
 use crate::infra::event_bus::EventBus;
-use crate::infra::{wire, DefaultEventBus, EventContext};
+use crate::infra::{DefaultEventBus, EventContext, wire};
 
 use super::mocks::{
-    test_binding, MockLlmProvider, MockPrimitiveExecutor, RecordingStreamLlmProvider,
+    MockLlmProvider, MockPrimitiveExecutor, RecordingStreamLlmProvider, test_binding,
 };
 
 fn unsupported_file_stream() -> Vec<Result<StreamEvent, AppError>> {
@@ -58,6 +60,28 @@ fn pdf_user_message() -> ChatMessage {
         ChatMessageContentPart::file_base64_data("notes.pdf", "application/pdf", pdf_b64)
             .expect("pdf part"),
     ])
+}
+
+fn overbudget_context_state(messages: Vec<ChatMessage>) -> ContextState {
+    let estimate_context_chars = messages.iter().map(estimate_msg_chars).sum();
+    ContextState {
+        messages,
+        estimate_context_chars,
+        context_budget_chars: 10_000,
+        context_budget_tokens: 2_500,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }
+}
+
+fn large_user_turn(label: &str) -> ChatMessage {
+    ChatMessage::user(format!("{label}: {}", "x".repeat(3_200)))
 }
 
 #[derive(Default)]
@@ -151,6 +175,118 @@ async fn run_retries_on_429_then_succeeds() {
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "OK");
+}
+
+#[tokio::test]
+async fn run_stops_after_one_request_when_overflow_trim_cannot_shrink_payload() {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            400,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        ))],
+        ok_text_stream("must not send"),
+    ]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "overflow-no-progress".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("no context state")]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Failed(_)),
+        "without ContextState the overflow retry cannot reduce its payload"
+    );
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        1,
+        "a retry with applied=false must fail honestly instead of resending the same payload"
+    );
+}
+
+#[tokio::test]
+async fn run_second_overflow_collapses_and_strictly_shrinks_main_requests() {
+    let initial_messages = vec![
+        large_user_turn("oldest"),
+        large_user_turn("middle"),
+        large_user_turn("latest"),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            400,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        ))],
+        vec![Err(llm_http_status_error(
+            "mock",
+            400,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        ))],
+        ok_text_stream("recovered after collapse"),
+    ]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "overflow-collapse-progress".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    loop_.set_context_state(Some(overbudget_context_state(initial_messages.clone())));
+
+    let outcome = loop_.run(initial_messages).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "the third request should receive the collapsed context and succeed: {outcome:?}"
+    );
+    let recorded = requests.0.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 3, "original + L3 retry + collapse retry");
+    let request_chars = |index: usize| {
+        recorded[index]
+            .messages
+            .iter()
+            .map(estimate_msg_chars)
+            .sum::<usize>()
+    };
+    assert!(
+        recorded[1].messages.len() < recorded[0].messages.len()
+            && request_chars(1) < request_chars(0),
+        "first overflow must make strict L3 progress"
+    );
+    assert!(
+        recorded[2].messages.len() < recorded[1].messages.len()
+            && request_chars(2) < request_chars(1),
+        "second overflow must take Collapse and send a strictly smaller payload"
+    );
+
+    let context = loop_
+        .take_context_state()
+        .expect("context state remains available after recovery");
+    assert_eq!(
+        context.session_obs.compaction_count, 2,
+        "one L3 reduction plus one Collapse must be recorded"
+    );
+    assert!(
+        matches!(
+            context.messages.as_slice(),
+            [message] if message.kind == MessageKind::CompactionSummary
+        ),
+        "second overflow must replace retained history with a compaction summary"
+    );
 }
 
 #[test]
@@ -514,9 +650,9 @@ async fn run_persists_auto_retry_events_to_transcript_sink() {
     assert_eq!(entries[1]["success"].as_bool(), Some(true));
 }
 
-/// 工具循环：第 1 次 LLM 返回 read tool call，第 2 次返回纯文本；断言 final_text 含第 2 次文本。
+/// 空正文、无 thinking 的纯工具轮是合法中间态，不能被空回合守卫误判。
 #[tokio::test]
-async fn run_tool_loop_calls_tool_then_returns_text() {
+async fn run_pure_tool_turn_without_thinking_completes_in_two_requests() {
     let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
@@ -536,7 +672,8 @@ async fn run_tool_loop_calls_tool_then_returns_text() {
             reason: "stop".to_string(),
         }),
     ];
-    let llm = Arc::new(MockLlmProvider::new(vec![stream_tool, stream_text]));
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream_tool, stream_text]);
+    let llm = Arc::new(provider);
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
@@ -554,6 +691,91 @@ async fn run_tool_loop_calls_tool_then_returns_text() {
     let messages = vec![ChatMessage::user("read /tmp/x")];
     let result = loop_.run(messages).await.unwrap();
     assert!(result.final_text.contains("done"));
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        2,
+        "pure tool turn must execute then ask the model for its follow-up exactly once"
+    );
+}
+
+/// 某些兼容端点会在合法的结构化空收尾使用 `end_turn`，但没有正文和 thinking。
+/// 它与“只思考、不回答”不同，不能被终止守卫当成失败。
+#[tokio::test]
+async fn run_structured_end_turn_without_content_is_not_empty_turn_failure() {
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![vec![Ok(StreamEvent::FinishReason {
+            reason: "end_turn".to_string(),
+        })]]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "structured-empty-end-turn".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_
+        .run(vec![ChatMessage::user("return structured empty")])
+        .await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "end_turn without content or thinking is a provider-valid structured completion: {outcome:?}"
+    );
+    assert_eq!(requests.0.lock().unwrap().len(), 1);
+}
+
+/// 工具已完整执行时，下一次收尾请求即使是空 `end_turn` 也不能把整个工具回合判失败。
+#[tokio::test]
+async fn run_empty_end_turn_after_tool_result_is_not_empty_turn_failure() {
+    let stream_tool = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_empty_tail".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/tmp/x"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let stream_empty_tail = vec![Ok(StreamEvent::FinishReason {
+        reason: "end_turn".to_string(),
+    })];
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![stream_tool, stream_empty_tail]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "tool-result-empty-tail".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("read then end")]).await;
+
+    let AgentRunOutcome::Completed(result) = outcome else {
+        panic!("a completed tool round followed by end_turn must remain successful");
+    };
+    assert!(result.final_text.is_empty());
+    assert!(
+        result
+            .new_messages
+            .iter()
+            .any(|message| message.role == crate::core::llm::ChatMessageRole::Tool),
+        "the successfully produced tool result must survive the empty tail"
+    );
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        2,
+        "one request for the tool turn and one for its empty structured tail"
+    );
 }
 
 #[tokio::test]
@@ -644,6 +866,92 @@ async fn run_empty_messages_does_not_crash() {
     let result = loop_.run(messages).await;
     assert!(result.is_ok());
     assert!(result.unwrap().final_text.is_empty());
+}
+
+#[tokio::test]
+async fn reasoning_only_empty_turn_is_fatal_and_never_auto_retries() {
+    let stream = vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: Some("first reason through the task".to_string()),
+            reasoning_continuation: None,
+            continuity: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let llm = Arc::new(provider);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "s-reasoning-only".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+    assert!(
+        matches!(outcome, AgentRunOutcome::Failed(_)),
+        "thinking-only response must surface as a failed turn"
+    );
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        1,
+        "the empty-turn guard must not retry an unchanged request"
+    );
+}
+
+#[tokio::test]
+async fn final_assistant_message_persists_provider_usage() {
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "done".to_string(),
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 12,
+            completion_tokens: 34,
+            total_tokens: Some(46),
+            reasoning_tokens: Some(20),
+            text_tokens: Some(14),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "s-usage-persist".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+    let AgentRunOutcome::Completed(result) = outcome else {
+        panic!("text reply should complete");
+    };
+    let usage = result
+        .new_messages
+        .iter()
+        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::Assistant))
+        .expect("result must include an assistant message")
+        .usage
+        .as_ref()
+        .expect("assistant transcript message must keep provider usage");
+    assert_eq!(usage.prompt_tokens, 12);
+    assert_eq!(usage.completion_tokens, 34);
+    assert_eq!(usage.total_tokens, Some(46));
+    assert_eq!(usage.reasoning_tokens, Some(20));
+    assert_eq!(usage.text_tokens, Some(14));
 }
 
 #[tokio::test]

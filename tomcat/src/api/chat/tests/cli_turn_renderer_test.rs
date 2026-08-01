@@ -5,15 +5,15 @@
 //! - 工具单行摘要的内置类型（read/bash）与回退（未知工具）；
 //! - kind 缺省走 content_delta 的向后兼容性。
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use parking_lot::Mutex;
 use serde_json::json;
 
 use super::{
-    error_extra_lines, one_line_summary, result_summary, result_summary_for_tool, CliTurnRenderer,
-    CliWriter,
+    CliTurnRenderer, CliWriter, error_extra_lines, one_line_summary, result_summary,
+    result_summary_for_tool,
 };
 use crate::api::render::MarkdownRenderer;
 use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};

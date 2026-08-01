@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::super::scope::{
-    fnv1a_hex, project_root, resolve_session_mode, session_key_for, session_key_for_agent,
-    SessionMode,
+    SessionMode, fnv1a_hex, project_root, resolve_session_mode, session_key_for,
+    session_key_for_agent,
 };
 
 #[test]

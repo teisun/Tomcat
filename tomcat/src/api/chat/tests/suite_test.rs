@@ -1,8 +1,8 @@
 use super::super::*;
+use crate::SessionEntry;
 use crate::api::chat::run_loop::cleanup_plugin_sessions_on_session_end;
 use crate::api::chat::run_loop::compose_planned_turn_messages;
 use crate::core::session::manager::init_context_state;
-use crate::SessionEntry;
 use crate::{
     AgentRunOutcome, AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
     CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
@@ -652,7 +652,10 @@ fn chat_context_attaches_cli_ask_question_panel() {
     unsafe { std::env::set_var(ENV_KEY, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     assert!(
-        ctx.session_runtime.plan_runtime.ask_question_panel().is_some(),
+        ctx.session_runtime
+            .plan_runtime
+            .ask_question_panel()
+            .is_some(),
         "CLI ChatContext 应默认挂载 AskQuestionPanel，避免真 LLM 调 ask_question 时直接报工具不可用"
     );
     // SAFETY: 清理测试环境变量。
@@ -1224,6 +1227,12 @@ fn failed_turn_recovery_summarizes_403_html_and_redacts_sensitive_detail() {
         error_entry.summary,
         "API 错误 403 · PS-SHA-01JfN78 · Request-Id req_turn2"
     );
+    assert_eq!(
+        error_entry.failure_kind.as_deref(),
+        Some("authentication"),
+        "an isolated 403 must not be misclassified as billing"
+    );
+    assert_eq!(error_entry.failure_domain.as_deref(), Some("account"));
     assert!(error_entry.detail.contains("Request-Id: req_turn2"));
     assert!(error_entry.detail.contains("Host: PS-SHA-01JfN78"));
     assert!(error_entry.detail.contains("Authorization: [REDACTED]"));
@@ -1248,6 +1257,28 @@ fn failed_turn_recovery_summarizes_403_html_and_redacts_sensitive_detail() {
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn failed_turn_recovery_renders_actionable_normalized_failure_messages() {
+    let billing = crate::infra::error::llm_http_status_error(
+        "transit",
+        403,
+        r#"{"error":{"code":"insufficient_quota","message":"insufficient balance"}}"#,
+    );
+    assert_eq!(
+        crate::api::chat::render_error_message(&billing),
+        "账户余额或额度不足。充值或切换 Provider 后可重试。"
+    );
+
+    let overflow = crate::infra::error::llm_stream_terminal_error(
+        "transit",
+        "request exceeds the context window",
+        Some("context_length_exceeded".to_string()),
+    );
+    let rendered = crate::api::chat::render_error_message(&overflow);
+    assert!(rendered.contains("/compact"));
+    assert!(rendered.contains("/restore"));
 }
 
 #[test]
@@ -1374,15 +1405,21 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
         error_entry.summary,
         "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
     );
-    assert!(error_entry
-        .detail
-        .contains("Node information: PS-CZX-01wky52"));
-    assert!(error_entry
-        .detail
-        .contains("URL: https://aigateway.sunmi.com/v1/responses"));
-    assert!(error_entry
-        .detail
-        .contains("Request-Id: 6a59715c_PS-CZX-01wky52_16724-27663"));
+    assert!(
+        error_entry
+            .detail
+            .contains("Node information: PS-CZX-01wky52")
+    );
+    assert!(
+        error_entry
+            .detail
+            .contains("URL: https://aigateway.sunmi.com/v1/responses")
+    );
+    assert!(
+        error_entry
+            .detail
+            .contains("Request-Id: 6a59715c_PS-CZX-01wky52_16724-27663")
+    );
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };

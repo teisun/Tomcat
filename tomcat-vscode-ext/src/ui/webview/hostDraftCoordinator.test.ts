@@ -41,4 +41,29 @@ describe("HostDraftCoordinator", () => {
     await expect(coordinator.run("source", async () => { throw new Error("boom"); })).rejects.toThrow("boom");
     await expect(coordinator.run("source", async () => "recovered")).resolves.toBe("recovered");
   });
+
+  it("rejects a nested operation for the same session instead of deadlocking", async () => {
+    const coordinator = new HostDraftCoordinator();
+
+    await expect(coordinator.run("source", async () => {
+      await Promise.resolve();
+      coordinator.run("source", async () => undefined);
+    })).rejects.toThrow(
+      "HostDraftCoordinator cannot re-enter the active draft lane for session source",
+    );
+    expect(coordinator.isPending("source")).toBe(false);
+  });
+
+  it("allows a nested operation for a different session", async () => {
+    const coordinator = new HostDraftCoordinator();
+    const order: string[] = [];
+
+    await coordinator.run("source", async () => {
+      order.push("source:start");
+      await coordinator.run("other", async () => { order.push("other"); });
+      order.push("source:end");
+    });
+
+    expect(order).toEqual(["source:start", "other", "source:end"]);
+  });
 });

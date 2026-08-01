@@ -70,6 +70,18 @@ pub struct BuiltinToolCatalogEntry {
     pub requires_user_interaction: bool,
 }
 
+/// 工具在进程掉线后能否从持久化的调用声明安全地继续。
+///
+/// 这与 `read_only` 无关：read 不改磁盘却无法证明此前是否已经执行；ask_question
+/// 需要用户交互却没有副作用，重连时重新展示同一问题是安全的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolReplaySafety {
+    /// 工具的已声明但无结果调用可在重连后继续。
+    ReplaySafe,
+    /// 无法区分「没有执行」与「已部分执行但结果丢失」，不能静默重跑。
+    NotReplaySafe,
+}
+
 impl BuiltinToolCatalogEntry {
     pub fn effective_category(&self) -> ToolCategory {
         self.category
@@ -80,6 +92,14 @@ impl BuiltinToolCatalogEntry {
         self.display_summary
             .map(str::to_string)
             .unwrap_or_else(|| summarize_tool_description(self.description))
+    }
+
+    /// 恢复契约的唯一权威入口。新增可续跑工具必须在这里显式登记并补回归测试。
+    pub fn replay_safety(&self) -> ToolReplaySafety {
+        match self.name {
+            "ask_question" => ToolReplaySafety::ReplaySafe,
+            _ => ToolReplaySafety::NotReplaySafe,
+        }
     }
 }
 
@@ -421,6 +441,12 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
 
 pub fn builtin_tool_by_name(name: &str) -> Option<&'static BuiltinToolCatalogEntry> {
     BUILTIN_TOOL_CATALOG.iter().find(|entry| entry.name == name)
+}
+
+/// 供 session hydrate / resume 使用的工具恢复契约查询。
+pub fn is_replay_safe_tool(name: &str) -> bool {
+    builtin_tool_by_name(name)
+        .is_some_and(|entry| entry.replay_safety() == ToolReplaySafety::ReplaySafe)
 }
 
 pub fn build_function_definitions() -> Vec<Value> {

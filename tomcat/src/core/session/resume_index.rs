@@ -11,7 +11,7 @@ use crate::core::session::manager::{
     AgentMode, PlanEventKind, PlanEventRef, PlanModeTransition, ResumeControlState,
 };
 use crate::core::session::transcript::{
-    read_entries_tail_with_stats, TranscriptEntry, TranscriptReadStats,
+    TranscriptEntry, TranscriptReadStats, read_entries_tail_with_stats,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
@@ -572,6 +572,42 @@ pub(crate) fn update_resume_index_after_append(
     index.transcript_size = fs::metadata(transcript_path).map_err(AppError::Io)?.len();
     index.transcript_mtime_ms = transcript_mtime_ms(transcript_path)?;
     write_sidecar(transcript_path, &index)
+}
+
+/// A supersede/revive rewrite changes message metadata but never adds, removes, reorders, or
+/// changes any field consumed by `ResumeIndex`. Keep the sidecar valid by refreshing only its
+/// file identity instead of parsing every JSONL entry again.
+///
+/// A missing, corrupt, or old-schema sidecar is deliberately discarded. The next hydrate lazily
+/// rebuilds it from the authoritative transcript; guessing an index would be worse than a cold
+/// rebuild.
+pub(crate) fn refresh_resume_index_after_nonstructural_rewrite(
+    transcript_path: &Path,
+) -> Result<(), AppError> {
+    let Some(mut index) = read_sidecar_raw(transcript_path)? else {
+        #[cfg(test)]
+        LAST_INLINE_REBUILD_STATS.with(|slot| {
+            *slot.borrow_mut() = Some(ResumeIndexIoStats::default());
+        });
+        return Ok(());
+    };
+    if index.schema_version != RESUME_INDEX_SCHEMA_VERSION {
+        remove_resume_index(transcript_path)?;
+        #[cfg(test)]
+        LAST_INLINE_REBUILD_STATS.with(|slot| {
+            *slot.borrow_mut() = Some(ResumeIndexIoStats::default());
+        });
+        return Ok(());
+    }
+
+    index.transcript_size = fs::metadata(transcript_path).map_err(AppError::Io)?.len();
+    index.transcript_mtime_ms = transcript_mtime_ms(transcript_path)?;
+    write_sidecar(transcript_path, &index)?;
+    #[cfg(test)]
+    LAST_INLINE_REBUILD_STATS.with(|slot| {
+        *slot.borrow_mut() = Some(ResumeIndexIoStats::default());
+    });
+    Ok(())
 }
 
 pub(crate) fn remove_resume_index(transcript_path: &Path) -> Result<(), AppError> {

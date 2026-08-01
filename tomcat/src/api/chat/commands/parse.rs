@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use crate::api::chat::ChatContext;
 
 use super::{
-    cmd_ckpt, cmd_effort, cmd_help, cmd_install, cmd_model, cmd_path, cmd_plan, cmd_restore,
-    cmd_skill, cmd_thinking,
+    cmd_ckpt, cmd_compact, cmd_effort, cmd_help, cmd_install, cmd_model, cmd_path, cmd_plan,
+    cmd_restore, cmd_skill, cmd_thinking,
 };
 
 pub use cmd_install::InstallCommand;
@@ -38,6 +38,8 @@ pub enum ChatCommand {
     },
     /// `/help`.
     Help,
+    /// `/compact`：主动创建一个持久化上下文摘要。
+    Compact,
     /// `/thinking minimal|summary|full|toggle`：切换 CliTurnRenderer 的显示档位。
     Thinking {
         action: ThinkingAction,
@@ -98,6 +100,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         first_token,
         "/path"
             | "/help"
+            | "/compact"
             | "/thinking"
             | "/effort"
             | "/model"
@@ -122,6 +125,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
     match first_token {
         "/path" => cmd_path::parse_args(tokens, trimmed),
         "/help" => cmd_help::parse_args(tokens),
+        "/compact" => cmd_compact::parse_args(tokens),
         "/thinking" => cmd_thinking::parse_args(tokens),
         "/effort" => cmd_effort::parse_args(tokens),
         "/model" => cmd_model::parse_args(tokens),
@@ -138,6 +142,8 @@ pub(crate) async fn dispatch_chat_command(
     ctx: &ChatContext,
     command: ChatCommand,
     rl: &mut rustyline::DefaultEditor,
+    context_state: &mut crate::core::session::manager::ContextState,
+    system_text: &str,
 ) -> ChatCommandOutcome {
     match command {
         ChatCommand::NotACommand(line) => ChatCommandOutcome::Continue {
@@ -146,6 +152,7 @@ pub(crate) async fn dispatch_chat_command(
             history_line: None,
         },
         ChatCommand::Help => cmd_help::run(),
+        ChatCommand::Compact => cmd_compact::run(ctx, context_state, system_text).await,
         ChatCommand::UsageError { message } => {
             println!("{}\n\n{}", message, cmd_help::help_text());
             ChatCommandOutcome::Handled

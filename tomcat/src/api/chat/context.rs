@@ -17,22 +17,22 @@ use crate::ext::{
 use crate::infra::config::ThinkingDisplay;
 use crate::infra::error::AppError;
 use crate::infra::http_client::{
-    build_outbound_client, clamp_timeout_within_budget, default_connect_timeout_for, has_proxy_env,
-    OutboundClientErrorKind, OutboundClientOptions,
+    OutboundClientErrorKind, OutboundClientOptions, build_outbound_client,
+    clamp_timeout_within_budget, default_connect_timeout_for, has_proxy_env,
 };
 use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_model_thinking_path,
-    resolve_plugins_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
-    session_key_for_agent, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider,
-    ModelThinkingStore, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode,
-    ThinkingLevel, Tool, ToolExecutor, ToolRegistry,
+    AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, ModelThinkingStore,
+    PrimitiveExecutor, SessionEntry, SessionManager, SessionMode, ThinkingLevel, Tool,
+    ToolExecutor, ToolRegistry, resolve_agent_definition_dir, resolve_agent_trail_dir,
+    resolve_model_thinking_path, resolve_plugins_dir, resolve_sessions_dir,
+    resolve_workspace_roots_paths, session_key_for_agent,
 };
 
-use crate::core::llm::thinking_policy::clamp_reasoning_level;
 use crate::core::llm::LlmScene;
+use crate::core::llm::thinking_policy::clamp_reasoning_level;
 use crate::core::plan_runtime;
 
 use super::session_runtime::{GlobalServices, ScopeContainer, ScopeServices, SessionRuntime};
@@ -194,8 +194,8 @@ fn checkpoint_store_for(
     store
 }
 
-fn scope_runtime_cache(
-) -> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
+fn scope_runtime_cache()
+-> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
     static CACHE: OnceLock<
         RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>>,
     > = OnceLock::new();
@@ -584,8 +584,11 @@ impl ChatContext {
             .unwrap_or(config.reviewer.max_turns);
         // 只捕获 override；为空时由 dispatcher 在每次派发时取当前会话模型。
         let reviewer_model_override = config.reviewer.model_override.clone();
-        let read_file_state =
-            Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default());
+        let read_file_state = Arc::new(
+            crate::core::tools::pipeline::read_state::ReadFileState::with_mutation_stamp_refresh(
+                config.tools.read.refresh_mutation_stamp,
+            ),
+        );
         let prod_plan_reviewer = plan_runtime::prod_reviewer::ProdPlanReviewerDispatcher::new(
             "chat_context",
             plan_runtime::prod_reviewer::ProdReviewerDeps {
@@ -1514,7 +1517,7 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::{resolve_bash_production_policy, ChatContext};
+    use super::{ChatContext, resolve_bash_production_policy};
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
     use crate::core::plan_runtime::prod_reviewer::resolve_subagent_runtime;
     use crate::{AppConfig, ThinkingLevel};

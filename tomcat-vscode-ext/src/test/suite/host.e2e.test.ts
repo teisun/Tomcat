@@ -8,8 +8,10 @@ import {
   assertWebviewReviewProgressFlow,
   assertWebviewAtMentionDirectoryAndWarningFlow,
   assertWebviewAtMentionReferenceFlow,
+  assertWebviewDraftForkPreservesReferenceFlow,
   assertWebviewFileDropReferenceFlow,
   assertWebviewPickContextFlow,
+  assertWebviewResumeCardFlow,
   assertWebviewRetryRecoveryFlow,
   assertWebviewGiantGroupLazyLoadFlow,
   assertWebviewInterruptFlow,
@@ -69,9 +71,14 @@ suite("Tomcat host E2E", () => {
     await assertWebviewReviewProgressFlow(api);
   });
 
-  test("recovers from a failed same-session retry and keeps the error in transcript history", async () => {
+  test("recovers a failed same-session retry without leaving an obsolete error card", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewRetryRecoveryFlow(api);
+  });
+
+  test("renders Resume when a failed turn already has every tool result", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewResumeCardFlow(api);
   });
 
   test("renders ask_question answers in the Tomcat webview transcript", async () => {
@@ -137,6 +144,11 @@ suite("Tomcat host E2E", () => {
   test("deduplicates dropped file references in the webview composer", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewFileDropReferenceFlow(api);
+  });
+
+  test("keeps source draft references when creating a session", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewDraftForkPreservesReferenceFlow(api);
   });
 
   test("routes smart picker selections into attachments and context chips", async () => {

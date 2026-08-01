@@ -64,7 +64,10 @@ export interface WebviewDomAction {
 export interface WebviewMessageBlock {
   assistantMessageId?: string;
   detailText?: string | null;
+  failureDomain?: string | null;
+  failureKind?: string | null;
   deliveryError?: string | null;
+  deliveryErrorDetail?: string | null;
   deliveryState?: "failed" | "pending";
   id: string;
   label?: string | null;
@@ -79,6 +82,8 @@ export interface WebviewMessageBlock {
   attachments?: WebviewAttachmentView[];
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
+  recoveryAction?: "resume" | "retry";
+  statusCode?: number | null;
   segments?: WebviewMessageSegment[];
   submitKind?: "prompt" | "steer";
   text: string;
@@ -767,6 +772,22 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "compact";
+      data: {
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "recoverErrorTurn";
+      data: {
+        action: "resume" | "retry";
+        errorId: string;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "openPlanFile";
       data: {
         path: string;
@@ -1144,6 +1165,15 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         isString(value.data.sessionId) &&
         isString(value.data.checkpointId) &&
         typeof value.data.revertFiles === "boolean"
+      );
+    case "compact":
+      return isRecord(value.data) && isString(value.data.sessionId);
+    case "recoverErrorTurn":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.sessionId) &&
+        isString(value.data.errorId) &&
+        (value.data.action === "retry" || value.data.action === "resume")
       );
     case "answerQuestion":
       return (

@@ -101,12 +101,23 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::core::session::resume_index::{
-    rebuild_resume_index_from_lines, remove_resume_index, update_resume_index_after_append,
+    rebuild_resume_index_from_lines, refresh_resume_index_after_nonstructural_rewrite,
+    remove_resume_index, update_resume_index_after_append,
 };
 use crate::infra::error::AppError;
-use crate::infra::platform::write_file_atomic;
+use crate::infra::platform::write_file_atomic_with;
 
 const REVERSE_CHUNK_BYTES: usize = 64 * 1024;
+
+fn write_jsonl_lines_atomically(path: &Path, lines: &[String]) -> Result<(), AppError> {
+    write_file_atomic_with(path, |writer| {
+        for line in lines {
+            writer.write_all(line.as_bytes()).map_err(AppError::Io)?;
+            writer.write_all(b"\n").map_err(AppError::Io)?;
+        }
+        Ok(())
+    })
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TranscriptReadStats {
@@ -193,6 +204,12 @@ pub struct ErrorEntry {
     pub status_code: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// 归一化后的失败语义；可选字段保证旧 transcript 可直接反序列化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+    /// 归一化后的处理域；与 `failure_kind` 配套用于事故回溯与 UI 遥测。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_domain: Option<String>,
     pub summary: String,
     pub detail: String,
 }
@@ -671,9 +688,7 @@ pub fn insert_entry_after_message_id(
             out.push(new_json.clone());
         }
     }
-    let mut content = out.join("\n");
-    content.push('\n');
-    write_file_atomic(path, content.as_bytes())?;
+    write_jsonl_lines_atomically(path, &out)?;
     let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(())
 }
@@ -733,10 +748,73 @@ pub fn mark_message_entries_after_anchor_superseded(
         )));
     }
 
-    let mut content = out.join("\n");
-    content.push('\n');
-    write_file_atomic(path, content.as_bytes())?;
-    let _ = rebuild_resume_index_from_lines(path, &out)?;
+    write_jsonl_lines_atomically(path, &out)?;
+    let _ = refresh_resume_index_after_nonstructural_rewrite(path);
+    Ok(changed)
+}
+
+/// 将指定 `tool_call_id` 的 tool result 行标记为 `message.superseded=true`。
+///
+/// 仅改写 `role=="tool"` 且 `tool_call_id` 精确匹配的 message 行；非 message 行保持原样。
+/// 没有命中时返回 `Ok(0)`，由上层决定这是「还没有旧结果」还是「漂移」。
+pub fn mark_tool_result_entries_by_tool_call_id_superseded(
+    path: &Path,
+    tool_call_id: &str,
+) -> Result<usize, AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut changed = 0usize;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.push(lines[0].clone());
+
+    for line in lines.into_iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push(line);
+            continue;
+        }
+        match serde_json::from_str::<TranscriptEntry>(trimmed) {
+            Ok(TranscriptEntry::Message(mut me)) => {
+                let should_supersede = me.message.get("role").and_then(|value| value.as_str())
+                    == Some("tool")
+                    && me
+                        .message
+                        .get("tool_call_id")
+                        .and_then(|value| value.as_str())
+                        == Some(tool_call_id)
+                    && me
+                        .message
+                        .get("superseded")
+                        .and_then(|value| value.as_bool())
+                        != Some(true);
+                if should_supersede {
+                    if let Some(message_obj) = me.message.as_object_mut() {
+                        message_obj.insert("superseded".to_string(), serde_json::json!(true));
+                    }
+                    changed += 1;
+                    out.push(serde_json::to_string(&TranscriptEntry::Message(me))?);
+                } else {
+                    out.push(line);
+                }
+            }
+            _ => out.push(line),
+        }
+    }
+
+    if changed == 0 {
+        return Ok(0);
+    }
+
+    write_jsonl_lines_atomically(path, &out)?;
+    let _ = refresh_resume_index_after_nonstructural_rewrite(path);
     Ok(changed)
 }
 
@@ -808,12 +886,87 @@ pub fn mark_trailing_user_messages_superseded(path: &Path) -> Result<usize, AppE
         lines[idx] = serde_json::to_string(&TranscriptEntry::Message(me))?;
     }
 
-    let mut content = lines.join("\n");
-    content.push('\n');
-    write_file_atomic(path, content.as_bytes())?;
-    let _ = rebuild_resume_index_from_lines(path, &lines)?;
+    write_jsonl_lines_atomically(path, &lines)?;
+    let _ = refresh_resume_index_after_nonstructural_rewrite(path);
     Ok(changed)
 }
+
+/// 撤销一次失败回合对尾部 user message 加上的 `superseded` / `turn_failed` 标记。
+///
+/// `Resume` 是用户明确要求再次处理刚才那条提示词的动作。错误条目只是诊断记录，
+/// 不应把原提示词永久藏起来；因此从尾部跳过 error，再复活连续的失败 user。
+/// 若尾部已经有新的活 user / assistant / tool，则说明旧错误已被后续回合处理，保持
+/// transcript 一个字节不动。
+pub fn revive_trailing_failed_user_messages(path: &Path) -> Result<usize, AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let mut lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut tail_indices = Vec::new();
+    for idx in (1..lines.len()).rev() {
+        let trimmed = lines[idx].trim();
+        if trimmed.is_empty() {
+            if tail_indices.is_empty() {
+                continue;
+            }
+            break;
+        }
+        match serde_json::from_str::<TranscriptEntry>(trimmed)? {
+            TranscriptEntry::Error(_) if tail_indices.is_empty() => continue,
+            TranscriptEntry::Message(me) => {
+                let role = me
+                    .message
+                    .get("role")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let superseded = me
+                    .message
+                    .get("superseded")
+                    .and_then(|value| value.as_bool())
+                    == Some(true);
+                let turn_failed = me
+                    .message
+                    .get("turn_failed")
+                    .and_then(|value| value.as_bool())
+                    == Some(true);
+                if role == "user" && superseded && turn_failed {
+                    tail_indices.push(idx);
+                    continue;
+                }
+                return Ok(0);
+            }
+            _ => return Ok(0),
+        }
+    }
+
+    if tail_indices.is_empty() {
+        return Ok(0);
+    }
+
+    let changed = tail_indices.len();
+    for idx in tail_indices {
+        let trimmed = lines[idx].trim();
+        let TranscriptEntry::Message(mut message) = serde_json::from_str(trimmed)? else {
+            continue;
+        };
+        if let Some(object) = message.message.as_object_mut() {
+            object.remove("superseded");
+            object.remove("turn_failed");
+        }
+        lines[idx] = serde_json::to_string(&TranscriptEntry::Message(message))?;
+    }
+
+    write_jsonl_lines_atomically(path, &lines)?;
+    let _ = refresh_resume_index_after_nonstructural_rewrite(path);
+    Ok(changed)
+}
+
 /// 按 `message.id` 批量重写 `message.content` 为纯文本。
 ///
 /// 非 message 行与未命中的行保持原样；命中但不是对象结构的 message 会被跳过。
@@ -886,9 +1039,7 @@ pub fn rewrite_message_text_entries_by_id(
         ));
     }
 
-    let mut content = out.join("\n");
-    content.push('\n');
-    write_file_atomic(path, content.as_bytes())?;
+    write_jsonl_lines_atomically(path, &out)?;
     let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(changed)
 }
@@ -968,9 +1119,7 @@ pub fn rewrite_message_summary_titles_by_id(
         ));
     }
 
-    let mut content = out.join("\n");
-    content.push('\n');
-    write_file_atomic(path, content.as_bytes())?;
+    write_jsonl_lines_atomically(path, &out)?;
     let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(changed)
 }
@@ -1027,9 +1176,7 @@ pub fn set_branch_summary_entry_is_boundary_true(
         )));
     }
 
-    let mut content = out.join("\n");
-    content.push('\n');
-    write_file_atomic(path, content.as_bytes())?;
+    write_jsonl_lines_atomically(path, &out)?;
     let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(())
 }
@@ -1075,9 +1222,7 @@ pub fn remove_branch_summary_entry_by_id(path: &Path, entry_id: &str) -> Result<
         )));
     }
 
-    let mut content = out.join("\n");
-    content.push('\n');
-    write_file_atomic(path, content.as_bytes())?;
+    write_jsonl_lines_atomically(path, &out)?;
     let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(())
 }

@@ -89,7 +89,17 @@ impl LlmProvider for RecordingStreamLlmProvider {
         "mock_recording_stream"
     }
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
-        Err(AppError::Llm("mock chat not used".to_string()))
+        // 二次 overflow 的 Collapse 路径会复用该 provider 生成摘要。该调用不记录为
+        // chat_stream 主请求，因而 requests 的长度仍精确表示实际发给主模型的次数。
+        Ok(ChatResponse {
+            id: None,
+            choices: vec![crate::core::llm::ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant("collapsed context"),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
     }
     async fn chat_stream(
         &self,

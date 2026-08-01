@@ -101,6 +101,8 @@ async fn run_chat_stream_preserves_finish_reason_and_trailing_usage() {
             prompt_tokens: 123,
             completion_tokens: 45,
             total_tokens: Some(168),
+            reasoning_tokens: Some(30),
+            text_tokens: Some(15),
         }),
     ];
     let mut agent = make_agent(vec![stream]);
@@ -111,6 +113,13 @@ async fn run_chat_stream_preserves_finish_reason_and_trailing_usage() {
         .expect("stream_handler should consume trailing usage");
 
     assert_eq!(outcome.content_buf, "hello");
+    assert_eq!(
+        outcome
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.reasoning_tokens),
+        Some(30)
+    );
     assert!(outcome.tool_calls_buf.is_empty());
     assert!(!outcome.aborted);
     assert_eq!(outcome.finish_reason.as_deref(), Some("stop"));

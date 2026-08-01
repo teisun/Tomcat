@@ -9,7 +9,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::{
-    safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore, PENDING_BLOB_TTL,
+    AttachmentBlobStore, PENDING_BLOB_TTL, safe_filename, validate_file_bytes, validate_image_bytes,
 };
 use crate::core::llm::{FILE_MAX_BYTES, IMAGE_MAX_BYTES};
 
@@ -371,14 +371,18 @@ fn retain_pending_batch_validates_every_sha_before_writing() {
     let (_tmp, store) = setup();
     let valid = store.put(b"valid blob").unwrap();
     let missing = "1".repeat(64);
-    assert!(store
-        .retain_pending_batch("target", vec![valid.clone(), missing])
-        .is_err());
+    assert!(
+        store
+            .retain_pending_batch("target", vec![valid.clone(), missing])
+            .is_err()
+    );
     assert!(store.list_pending("target").unwrap().is_empty());
 
-    assert!(store
-        .retain_pending_batch("target", vec![valid, "not-a-sha".to_string()])
-        .is_err());
+    assert!(
+        store
+            .retain_pending_batch("target", vec![valid, "not-a-sha".to_string()])
+            .is_err()
+    );
     assert!(store.list_pending("target").unwrap().is_empty());
 }
 

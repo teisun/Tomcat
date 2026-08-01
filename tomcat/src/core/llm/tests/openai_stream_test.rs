@@ -15,8 +15,11 @@ use crate::core::llm::types::{
     ReplayRequirement, StreamEvent, ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
-use crate::infra::error::{llm_http_status, llm_stage, llm_summary, AppError, LlmErrorStage};
 use crate::infra::LlmConfig;
+use crate::infra::error::{
+    AppError, LlmErrorStage, LlmFailureKind, classify_llm_failure, llm_http_status, llm_stage,
+    llm_summary,
+};
 use bytes::Bytes;
 use std::time::Duration;
 
@@ -35,6 +38,7 @@ fn test_openai_chunk_with_usage_emits_usage_event() {
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            ..
         } => {
             assert_eq!(*prompt_tokens, 150);
             assert_eq!(*completion_tokens, 42);
@@ -179,6 +183,61 @@ async fn sse_stream_drain_skips_empty_first_block_and_keeps_following_events() {
     assert!(saw_finish, "stream should still emit finish reason");
 }
 
+#[tokio::test]
+async fn sse_stream_eof_residual_invalid_first_frame_is_retryable_transport() {
+    use tokio_stream::StreamExt;
+
+    // 没有 `\n\n` 分隔符，旧实现会在 EOF 直接 flush 后正常结束，导致 agent 静默停下。
+    let source = tokio_stream::iter(vec![Ok(Bytes::from("data: {not-json"))]);
+    let mut stream = SseEventStream::new(
+        source,
+        ProviderCompatProfile::chat_completions("gpt-4"),
+        true,
+    );
+
+    let error = stream
+        .next()
+        .await
+        .expect("residual malformed frame must be surfaced")
+        .expect_err("malformed first frame cannot become a normal EOF");
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted,
+        "before any valid event, a malformed gateway frame is transport-retryable"
+    );
+}
+
+#[tokio::test]
+async fn sse_stream_parse_after_first_event_remains_protocol_error() {
+    use tokio_stream::StreamExt;
+
+    let source = tokio_stream::iter(vec![
+        Ok(Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        )),
+        Ok(Bytes::from("data: {not-json\n\n")),
+    ]);
+    let mut stream = SseEventStream::new(
+        source,
+        ProviderCompatProfile::chat_completions("gpt-4"),
+        true,
+    );
+    assert!(matches!(
+        stream
+            .next()
+            .await
+            .expect("first event")
+            .expect("valid chunk"),
+        StreamEvent::ContentDelta { .. }
+    ));
+    let error = stream
+        .next()
+        .await
+        .expect("later malformed frame must surface")
+        .expect_err("later protocol corruption must fail");
+    assert_eq!(llm_stage(&error), Some(LlmErrorStage::Parse));
+}
+
 /// 回归：chat-completions 类 provider 的 reasoning 单流必须发成 `ThinkingSource::Summary`。
 ///
 /// 这些模型（deepseek/mimo/doubao 等）没有 OpenAI Responses 的独立 summary/raw 双流，
@@ -294,7 +353,7 @@ fn test_openai_request_body_serializes_deepseek_thinking_fields_together() {
 
 #[test]
 fn test_openai_provider_disabled_thinking_has_no_reasoning_fields_in_request() {
-    use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
+    use crate::core::llm::thinking_policy::{ThinkingFormat, resolve_request_fields};
     use crate::infra::config::ThinkingConfig;
     let cfg = ThinkingConfig {
         enabled: false,
@@ -310,7 +369,7 @@ fn test_openai_provider_disabled_thinking_has_no_reasoning_fields_in_request() {
 
 #[test]
 fn test_openai_provider_thinking_high_writes_reasoning_effort() {
-    use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
+    use crate::core::llm::thinking_policy::{ThinkingFormat, resolve_request_fields};
     use crate::infra::config::ThinkingConfig;
     let cfg = ThinkingConfig {
         enabled: true,
@@ -687,8 +746,8 @@ async fn idle_timeout_errors_when_no_bytes_arrive() {
 
 #[tokio::test(start_paused = true)]
 async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
-    use tokio_stream::wrappers::IntervalStream;
     use tokio_stream::StreamExt;
+    use tokio_stream::wrappers::IntervalStream;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
     let source = IntervalStream::new(interval).map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
@@ -956,14 +1015,16 @@ async fn chat_stream_after_first_delta_body_read_error_is_not_retried() {
     use tokio_stream::StreamExt;
 
     let body = "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n".to_string();
-    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
-        status: 200,
-        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
-        body,
-        delay_ms: 0,
-        declared_content_length: None,
-    }
-    .with_declared_content_length(256)])
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body,
+            delay_ms: 0,
+            declared_content_length: None,
+        }
+        .with_declared_content_length(256),
+    ])
     .await;
     let provider = stream_test_provider(server.base_url.clone(), None, 2);
     let mut stream = provider

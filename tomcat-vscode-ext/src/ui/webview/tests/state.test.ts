@@ -1607,6 +1607,39 @@ describe("session state hydration", () => {
     ).toBe(false);
   });
 
+  it("offers a retry card when a turn ends without visible output", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    (
+      store as unknown as {
+        ensureSession(sessionId: string): { timeline: Array<{ id: string; kind: string; text: string; type: string }> };
+      }
+    ).ensureSession("s1").timeline.push({
+      id: "user-1",
+      kind: "user",
+      text: "continue",
+      type: "message",
+    });
+    store.applyEvent({ sessionId: "s1", type: "agent_start" });
+    store.applyEvent({ sessionId: "s1", timestamp: 1, type: "turn_start", turnIndex: 1 });
+    store.applyEvent({
+      error: null,
+      messages: [],
+      sessionId: "s1",
+      type: "agent_end",
+    });
+
+    expect(store.snapshot().sessionViews.s1.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "error",
+          recoveryAction: "retry",
+          text: "本轮没有产生可见回答。",
+        }),
+      ]),
+    );
+  });
+
   it("settles stale running tools when agent_idle arrives", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -2199,6 +2232,133 @@ describe("custom history replay", () => {
     });
   });
 
+  it("hydrates a pending ask_question result as one interactive approval card", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const questions = [{
+      id: "q1",
+      options: [
+        { id: "yes", label: "Yes", recommended: true },
+        { id: "no", label: "No", recommended: false },
+      ],
+      prompt: "Proceed?",
+    }];
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-ask-pending",
+          message: {
+            content: "",
+            role: "assistant",
+            tool_calls: [{
+              function: {
+                arguments: JSON.stringify({ questions }),
+                name: "ask_question",
+              },
+              id: "ask-call-pending",
+              type: "function",
+            }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-ask-pending",
+          message: {
+            content: "[pending]",
+            role: "tool",
+            tool_call_id: "ask-call-pending",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "tool"),
+    ).toEqual([]);
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "approval"),
+    ).toEqual([
+      expect.objectContaining({
+        request: expect.objectContaining({
+          requestId: "pending:ask-call-pending",
+          toolCallId: "ask-call-pending",
+        }),
+        resolved: false,
+      }),
+    ]);
+
+    store.applyEvent({
+      payload: {
+        questions,
+        requestId: "live-request-1",
+        responseEvent: "plan.ask_question.response.live-request-1",
+        sessionId: "s1",
+        toolCallId: "ask-call-pending",
+      },
+      requestId: "live-request-1",
+      sessionId: "s1",
+      subtype: "ask_question",
+      type: "control_request",
+    });
+    const approvals = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "approval",
+    );
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      request: expect.objectContaining({
+        requestId: "live-request-1",
+        toolCallId: "ask-call-pending",
+      }),
+    });
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-ask-pending",
+          message: {
+            content: "",
+            role: "assistant",
+            tool_calls: [{
+              function: {
+                arguments: JSON.stringify({ questions }),
+                name: "ask_question",
+              },
+              id: "ask-call-pending",
+              type: "function",
+            }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-ask-pending",
+          message: {
+            content: "[pending]",
+            role: "tool",
+            superseded: true,
+            tool_call_id: "ask-call-pending",
+          },
+          type: "message",
+        },
+        {
+          id: "tool-ask-answer",
+          message: {
+            content: "{\"outcome\":\"answered\",\"cancelled\":false,\"answers\":[]}",
+            role: "tool",
+            tool_call_id: "ask-call-pending",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "approval"),
+    ).toEqual([]);
+  });
+
   it("drops leading orphan tool entries until the assistant head arrives", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -2740,10 +2900,37 @@ describe("local user message delivery state", () => {
 
     expect(runtime.localUserMessageIds.has("missing-user-id")).toBe(false);
   });
+
+  it("keeps only the newest failed local user message actionable", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.appendLocalUserMessage("s1", "first", {
+      messageId: "first",
+      submitKind: "prompt",
+    });
+    store.markLocalUserMessageFailed("s1", "first", "busy", true);
+    store.appendLocalUserMessage("s1", "second", {
+      messageId: "second",
+      submitKind: "prompt",
+    });
+    store.markLocalUserMessageFailed("s1", "second", "network", true);
+
+    const users = store
+      .snapshot()
+      .sessionViews.s1.timeline.filter((item) => item.type === "message" && item.kind === "user");
+    expect(users.find((item) => item.id === "first")).toMatchObject({
+      text: "first",
+    });
+    expect(users.find((item) => item.id === "first")).not.toHaveProperty("deliveryState");
+    expect(users.find((item) => item.id === "second")).toMatchObject({
+      deliveryState: "failed",
+      retryable: true,
+    });
+  });
 });
 
 describe("checkpoint history replay", () => {
-  it("keeps turn_failed superseded users and their adjacent error entries visible", () => {
+  it("hides an error that a later user turn has already replaced", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
@@ -2798,19 +2985,176 @@ describe("checkpoint history replay", () => {
       session.timeline.map((item) =>
         item.type === "message" ? item.id : item.type,
       ),
-    ).toEqual(["user-1", "assistant-1", "user-failed", "error-1", "user-2"]);
-    const errorBubble = session.timeline.find(
-      (
-        item,
-      ): item is Extract<
-        (typeof session.timeline)[number],
-        { type: "message" }
-      > => item.type === "message" && item.id === "error-1",
+    ).toEqual(["user-1", "assistant-1", "user-failed", "user-2"]);
+    expect(
+      session.timeline.some((item) => item.type === "message" && item.id === "error-1"),
+    ).toBe(false);
+  });
+
+  it("marks a failed turn with fully paired tool results as resumable", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: { content: "inspect", role: "user" },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: null,
+            role: "assistant",
+            tool_calls: [{ id: "read-1", name: "read" }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-1",
+          message: { content: "file contents", role: "tool", tool_call_id: "read-1" },
+          type: "message",
+        },
+        { detail: "stream ended", id: "error-1", summary: "stream ended", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+
+    const error = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      );
+    expect(error).toMatchObject({ kind: "error", recoveryAction: "resume" });
+  });
+
+  it("only leaves the newest unresolved error actionable across repeated failures", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: { content: "first", role: "user", superseded: true, turn_failed: true },
+          type: "message",
+        },
+        { detail: "first", id: "error-1", summary: "first", type: "error" },
+        {
+          id: "user-2",
+          message: { content: "second", role: "user", superseded: true, turn_failed: true },
+          type: "message",
+        },
+        { detail: "second", id: "error-2", summary: "second", type: "error" },
+        {
+          id: "user-3",
+          message: { content: "third", role: "user", superseded: true, turn_failed: true },
+          type: "message",
+        },
+        { detail: "third", id: "error-3", summary: "third", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+
+    const errors = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "message" && item.kind === "error",
     );
-    expect(errorBubble?.kind).toBe("error");
-    expect(errorBubble?.detailText).toBe(
-      "API 错误 403: <html>forbidden</html>",
-    );
+    expect(errors).toEqual([
+      expect.objectContaining({ id: "error-3", recoveryAction: "retry" }),
+    ]);
+  });
+
+  it("shows a current error without a recovery button while the session is busy", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState({
+      busy: true,
+      interrupted: false,
+      model: "gpt-5.4",
+      sessionId: "s1",
+    });
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: { content: "retry me", role: "user", superseded: true, turn_failed: true },
+          type: "message",
+        },
+        { detail: "still running", id: "error-1", summary: "still running", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+
+    const error = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      );
+    expect(error).toMatchObject({ kind: "error" });
+    expect(error).not.toHaveProperty("recoveryAction");
+  });
+
+  it("removes the active error immediately when recovery starts and restores it on rejection", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: { content: "retry me", role: "user", superseded: true, turn_failed: true },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+
+    store.dismissErrorRecovery("s1", "error-1");
+    expect(
+      store.snapshot().sessionViews.s1.timeline.some(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toBe(false);
+
+    store.restoreDismissedErrorRecovery("s1", "error-1");
+    expect(
+      store.snapshot().sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ recoveryAction: "retry" });
+  });
+
+  it("uses the local failed bubble instead of rendering its superseded history duplicate", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.appendLocalUserMessage("s1", "retry me", {
+      messageId: "user-failed",
+      submitKind: "prompt",
+    });
+    store.markLocalUserMessageFailed("s1", "user-failed", "busy", true);
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-failed",
+          message: {
+            content: "retry me",
+            role: "user",
+            superseded: true,
+            turn_failed: true,
+          },
+          type: "message",
+        },
+        { detail: "busy", id: "error-1", summary: "busy", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+
+    const copies = store
+      .snapshot()
+      .sessionViews.s1.timeline.filter(
+        (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
+      );
+    expect(copies).toHaveLength(1);
+    expect(copies[0]).toMatchObject({ deliveryState: "failed", id: "user-failed" });
   });
 
   it("filters superseded spans and resumes rendering after checkpoint.restore", () => {

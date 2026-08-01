@@ -416,6 +416,8 @@ pub(super) struct StreamOutcome {
     pub(super) thinking_text: Option<String>,
     pub(super) reasoning_continuation: Option<crate::core::llm::ReasoningContinuation>,
     pub(super) continuity: Option<crate::core::llm::ContinuityMetadata>,
+    /// 本次 provider 最后报告的 token usage；由调用方归属到 assistant transcript 消息。
+    pub(super) usage: Option<crate::core::llm::TokenUsage>,
     pub(super) aborted: bool,
 }
 

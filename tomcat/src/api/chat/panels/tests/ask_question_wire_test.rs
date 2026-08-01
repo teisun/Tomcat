@@ -4,9 +4,9 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use super::super::{
-    ask_question_request_event_name, ask_question_response_event_name, Answer, AskQuestionOutcome,
-    AskQuestionPanel, AskQuestionResult, AskQuestionTermination, AskQuestionWireRequest,
-    AskQuestionWireResponse, EventBusAskQuestionPanel, Question, QuestionOption,
+    Answer, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination,
+    AskQuestionWireRequest, AskQuestionWireResponse, EventBusAskQuestionPanel, Question,
+    QuestionOption, ask_question_request_event_name, ask_question_response_event_name,
 };
 use crate::infra::{DefaultEventBus, EventBus, EventContext};
 
@@ -40,6 +40,20 @@ fn sample_result() -> AskQuestionResult {
         }],
         outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }
+}
+
+#[test]
+fn confirmed_host_disconnect_marks_shared_termination_before_returning_result() {
+    let termination = AskQuestionTermination::default();
+    let result = super::super::ask_question_wire::confirmed_host_disconnect(&termination);
+    assert_eq!(result.outcome, AskQuestionOutcome::HostDisconnected);
+    assert_eq!(
+        termination
+            .result()
+            .expect("termination should record host disconnect")
+            .outcome,
+        AskQuestionOutcome::HostDisconnected
+    );
 }
 
 #[tokio::test]
@@ -159,6 +173,12 @@ async fn event_bus_panel_request_event_carries_session_id() {
             .expect("host should receive request ctx");
         let req: AskQuestionWireRequest =
             serde_json::from_value(ctx.payload.clone()).expect("wire request should parse");
+        bus_for_host
+            .emit_sync(
+                &req.response_event,
+                EventContext::new(&req.response_event, serde_json::json!({"invalid": true})),
+            )
+            .expect("malformed response must not consume listener");
         let response = AskQuestionWireResponse {
             request_id: req.request_id.clone(),
             result: AskQuestionResult {

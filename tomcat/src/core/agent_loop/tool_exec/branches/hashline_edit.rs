@@ -1,5 +1,5 @@
 use super::super::args::parse_hashline_edit_args;
-use super::super::guard::check_mutation_stamp;
+use super::super::guard::{check_mutation_stamp, refresh_read_stamp};
 use super::super::{ToolDisplay, ToolExecCtx, AGENT_PLUGIN_ID};
 
 pub(in super::super) async fn handle_hashline_edit(
@@ -16,6 +16,9 @@ pub(in super::super) async fn handle_hashline_edit(
         .await
         .map(|r| {
             if r.applied {
+                if let Some(state) = ctx.read_file_state {
+                    refresh_read_stamp(state, path, ctx.tool_call_id);
+                }
                 *display_out = Some(ToolDisplay::File {
                     file: r.path.clone(),
                     added: r.added,

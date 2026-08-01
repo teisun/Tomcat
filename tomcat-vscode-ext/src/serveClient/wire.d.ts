@@ -463,6 +463,10 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   sessionId?: null | string;
+  type: "compact";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
   type: "get_state";
 } | {
   id?: null | string;
@@ -472,6 +476,10 @@ export type ServeCommand = {
   id?: null | string;
   sessionId?: null | string;
   type: "list_checkpoints";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
+  type: "resume";
 } | {
   id?: null | string;
   type: "list_models";

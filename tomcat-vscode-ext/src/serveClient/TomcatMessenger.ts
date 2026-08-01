@@ -110,6 +110,7 @@ function createDisposable(callback: () => void): DisposableLike {
 
 export class TomcatMessenger {
   private readonly controlHandlers = new Map<string, ControlRequestHandler>();
+  private readonly activeControlRequests = new Map<string, AbortController>();
   private readonly controlRequestListeners = new Set<
     (frame: ControlRequestFrame) => void
   >();
@@ -560,6 +561,10 @@ export class TomcatMessenger {
 
     const child = this.child;
     this.childAbort?.abort(reason);
+    for (const abort of this.activeControlRequests.values()) {
+      abort.abort(reason);
+    }
+    this.activeControlRequests.clear();
     this.childAbort = undefined;
     this.child = undefined;
     this.stdoutBuffer = "";
@@ -683,13 +688,29 @@ export class TomcatMessenger {
 
       const handler = this.controlHandlers.get(frame.subtype);
       if (handler) {
-        void this.runControlHandler(
-          handler,
-          frame,
-          this.childGeneration,
-          this.childAbort?.signal,
-        );
+        const abort = new AbortController();
+        this.activeControlRequests.set(frame.requestId, abort);
+        const parentSignal = this.childAbort?.signal;
+        const abortForChildExit = () => abort.abort();
+        parentSignal?.addEventListener("abort", abortForChildExit, { once: true });
+        void this.runControlHandler(handler, frame, this.childGeneration, abort.signal)
+          .finally(() => {
+            parentSignal?.removeEventListener("abort", abortForChildExit);
+            if (this.activeControlRequests.get(frame.requestId) === abort) {
+              this.activeControlRequests.delete(frame.requestId);
+            }
+          });
       }
+      return;
+    }
+
+    if (frame.type === "control_cancel") {
+      const active = this.activeControlRequests.get(frame.requestId);
+      if (!active) {
+        this.log("debug", `dropping unknown control cancel ${frame.requestId}`);
+        return;
+      }
+      active.abort();
       return;
     }
 

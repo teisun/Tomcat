@@ -1261,6 +1261,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
    * the wire.
    */
   const syncedDraftRef = useRef(new Map<string, string>());
+  // Local keystrokes win over a delayed host hydration for the current session. Without
+  // this, a failed send can leave an older persisted draft that overwrites newer text.
+  const locallyEditedDraftsRef = useRef(new Set<string>());
+  const applyingBackendDraftRef = useRef(false);
   const appliedComposerDraftRef = useRef<{
     // A digest of the draft content rather than a revision counter. The host no longer
     // hands out revisions: the draft lives in the extension layer, and the webview owns
@@ -1469,6 +1473,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     if (applied?.sessionId === sessionId && applied.signature === signature) {
       return;
     }
+    const isSessionSwitch = applied?.sessionId !== sessionId;
+    if (!isSessionSwitch && locallyEditedDraftsRef.current.has(sessionId)) {
+      return;
+    }
     appliedComposerDraftRef.current = { sessionId, signature };
     const nextDraft: ComposerDraft = {
       hasContent:
@@ -1480,8 +1488,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       text: backendDraft.text,
     };
     if (!draftsEqual(composer.getDraft(), nextDraft)) {
+      applyingBackendDraftRef.current = true;
       composer.replaceDraft(nextDraft);
+      applyingBackendDraftRef.current = false;
     }
+    locallyEditedDraftsRef.current.delete(sessionId);
   }, [activeSession?.composerDraft, activeSession?.sessionId]);
 
   useEffect(() => {
@@ -2043,6 +2054,19 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     },
     [activeSession?.sessionId, canPrompt, vscodeApi],
   );
+  const handleRecoverErrorTurn = useCallback(
+    (errorId: string, action: "resume" | "retry") => {
+      if (!activeSession?.sessionId || !canPrompt) {
+        return;
+      }
+      postIntent(vscodeApi, "recoverErrorTurn", {
+        action,
+        errorId,
+        sessionId: activeSession.sessionId,
+      });
+    },
+    [activeSession?.sessionId, canPrompt, vscodeApi],
+  );
   const handleOpenImagePreview = useCallback(
     (imageId: string) => {
       if (!activeSession?.sessionId) {
@@ -2284,7 +2308,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     <main className="tc-shell">
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
+        canCompact={Boolean(activeSession && !activeSession.busy)}
         creating={draftForkFeedback.pending}
+        onCompact={() => {
+          if (!activeSession || activeSession.busy) return;
+          postIntent(vscodeApi, "compact", { sessionId: activeSession.sessionId });
+        }}
         onNewSession={handleNewSession}
         ready={state.ready}
         onSwitchSession={(sessionId) => {
@@ -2347,6 +2376,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onOpenFile={handleOpenFile}
                 onOpenImagePreview={handleOpenImagePreview}
                 onOpenPlanFile={handleOpenPlanFile}
+                onRecoverErrorTurn={handleRecoverErrorTurn}
                 onRetryUserMessage={handleRetryUserMessage}
                 canBuildPlan={canBuildPlan}
                 onBuildPlan={handleBuildPlan}
@@ -2508,6 +2538,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         }}
         onDraftChange={(draft) => {
           if (activeSession?.sessionId) {
+            if (!applyingBackendDraftRef.current) {
+              locallyEditedDraftsRef.current.add(activeSession.sessionId);
+            }
             scheduleComposerDraftSync(activeSession.sessionId, draft);
           }
         }}

@@ -2,12 +2,12 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::super::cmd_install::{run, InstallCommand, InstallTarget};
+use super::super::cmd_install::{InstallCommand, InstallTarget, run};
 use super::super::parse::ChatCommandOutcome;
+use crate::AppConfig;
 use crate::api::chat::panels::{Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel};
 use crate::api::chat::{ChatContext, ChatContextOverrides};
 use crate::core::SessionMode;
-use crate::AppConfig;
 use serial_test::serial;
 
 struct EnvGuard {

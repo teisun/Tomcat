@@ -1,12 +1,12 @@
 use super::super::manager::{AgentMode, PlanEventKind, SessionManager};
 use super::super::resume_index::{
-    load_or_rebuild_resume_index, rebuild_resume_index, resume_index_path,
-    take_last_inline_rebuild_stats_for_tests, ResumeIndexSource,
+    ResumeIndexSource, load_or_rebuild_resume_index, rebuild_resume_index, resume_index_path,
+    take_last_inline_rebuild_stats_for_tests,
 };
 use super::super::transcript::{
-    append_line, insert_entry_after_message_id, mark_message_entries_after_anchor_superseded,
+    BranchSummaryEntry, MessageTextRewrite, SessionHeader, TranscriptEntry, append_line,
+    insert_entry_after_message_id, mark_message_entries_after_anchor_superseded,
     rewrite_message_text_entries_by_id, set_branch_summary_entry_is_boundary_true, write_header,
-    BranchSummaryEntry, MessageTextRewrite, SessionHeader, TranscriptEntry,
 };
 
 fn setup_mgr() -> (tempfile::TempDir, SessionManager) {
@@ -312,18 +312,59 @@ fn sidecar_inline_rebuilt_after_rewrite_stays_valid() {
     )
     .unwrap();
     assert_eq!(changed, 1);
+    let sidecar_path = resume_index_path(&transcript_path);
+    let before: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
     mark_message_entries_after_anchor_superseded(&transcript_path, &anchor_id).unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
+    let mut before_stable = before.clone();
+    let mut after_stable = after.clone();
+    for field in ["transcript_size", "transcript_mtime_ms"] {
+        before_stable.as_object_mut().unwrap().remove(field);
+        after_stable.as_object_mut().unwrap().remove(field);
+    }
+    assert_eq!(
+        after_stable, before_stable,
+        "a metadata-only supersede must preserve every structural sidecar field"
+    );
     let inline_stats = take_last_inline_rebuild_stats_for_tests()
         .expect("rewrite path should record inline rebuild stats");
     assert_eq!(
         inline_stats.bytes_scanned, 0,
-        "inline rebuild should reuse in-memory lines instead of rereading transcript"
+        "supersede must not reread the transcript to rebuild its sidecar"
+    );
+    assert_eq!(
+        inline_stats.entries_scanned, 0,
+        "supersede must not deserialize every transcript entry to rebuild its sidecar"
     );
 
     let load = load_or_rebuild_resume_index(&transcript_path).unwrap();
     assert_eq!(load.source, ResumeIndexSource::Existing);
     assert!(load.index.latest_boundary.is_some());
     assert_eq!(load.index.total_entries, 3);
+}
+
+#[test]
+fn supersede_without_a_sidecar_leaves_it_invalid_for_lazy_rebuild() {
+    let (_dir, mgr) = setup_mgr();
+    let anchor_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"anchor"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"later"}))
+        .unwrap();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let sidecar_path = resume_index_path(&transcript_path);
+    std::fs::remove_file(&sidecar_path).unwrap();
+
+    mark_message_entries_after_anchor_superseded(&transcript_path, &anchor_id).unwrap();
+
+    assert!(
+        !sidecar_path.exists(),
+        "a missing sidecar must remain absent until a reader asks for one"
+    );
+    let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
+    assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
 }
 
 #[test]

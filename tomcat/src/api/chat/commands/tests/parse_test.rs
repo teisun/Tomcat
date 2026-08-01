@@ -1,7 +1,7 @@
 //! Tests for `commands::parse` — slash-command recognition contract.
 
 use super::super::{
-    parse_chat_command, ChatCommand, InstallCommand, InstallTarget, PlanCommand, SkillCommand,
+    ChatCommand, InstallCommand, InstallTarget, PlanCommand, SkillCommand, parse_chat_command,
 };
 
 fn assert_not_command(input: &str) {
@@ -20,6 +20,15 @@ fn unknown_slash_commands_are_chat() {
 #[test]
 fn normal_text_with_path_is_chat() {
     assert_not_command("帮我看下 /a");
+}
+
+#[test]
+fn compact_command_parses_without_arguments_only() {
+    assert_eq!(parse_chat_command("/compact"), ChatCommand::Compact);
+    assert!(matches!(
+        parse_chat_command("/compact now"),
+        ChatCommand::UsageError { .. }
+    ));
 }
 
 #[test]

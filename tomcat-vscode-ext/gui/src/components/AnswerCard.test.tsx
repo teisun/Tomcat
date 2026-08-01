@@ -72,7 +72,7 @@ describe("AnswerCard", () => {
     ["skipped", "Entire request skipped"],
     ["interrupted", "Interrupted"],
     ["host_disconnected", "Disconnected"],
-    ["cancelled_unknown", "Cancelled (legacy result)"],
+    ["cancelled_unknown", "Cancelled"],
   ] as const) {
     it(`renders ${outcome} explicitly without hiding questions or options`, () => {
       render(<AnswerCard questions={questions} result={result(outcome)} />);
@@ -81,12 +81,12 @@ describe("AnswerCard", () => {
       expect(screen.getByTestId("answer-card-outcome").textContent).toBe(label);
       expect(screen.getAllByTestId("answer-card-question")).toHaveLength(2);
       expect(screen.getAllByRole("listitem")).toHaveLength(6);
-      expect(screen.getByTestId("answer-status-editor").textContent).toBe(label);
-      expect(screen.getByTestId("answer-status-language").textContent).toBe(label);
+      expect(screen.queryByTestId("answer-status-editor")).toBeNull();
+      expect(screen.queryByTestId("answer-status-language")).toBeNull();
     });
   }
 
-  it("labels an old cancelled payload as an unknown legacy cancellation", () => {
+  it("labels an old cancelled payload without exposing its compatibility detail", () => {
     render(
       <AnswerCard
         questions={questions}
@@ -98,7 +98,7 @@ describe("AnswerCard", () => {
       "cancelled_unknown",
     );
     expect(screen.getByTestId("answer-card-outcome").textContent).toBe(
-      "Cancelled (legacy result)",
+      "Cancelled",
     );
   });
 });

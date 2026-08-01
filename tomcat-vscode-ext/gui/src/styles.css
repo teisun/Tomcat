@@ -2028,6 +2028,7 @@ span.tc-attachment-strip__file-chip {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  margin-top: 2px;
 }
 
 .tc-message__detail-button {
@@ -2037,12 +2038,35 @@ span.tc-attachment-strip__file-chip {
   color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
   cursor: pointer;
   display: inline-flex;
+  font-size: 12px;
   gap: 6px;
   padding: 0;
 }
 
 .tc-message__detail-button:hover {
   color: var(--vscode-textLink-activeForeground, var(--vscode-focusBorder));
+}
+
+.tc-message__detail-button:focus-visible,
+.tc-message__recovery-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.tc-message__recovery-actions {
+  margin-top: 8px;
+}
+
+.tc-message__recovery-button {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+  justify-content: center;
+  width: 100%;
+}
+
+.tc-message__recovery-button:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
 }
 
 .tc-message__detail {
@@ -2119,6 +2143,13 @@ span.tc-attachment-strip__file-chip {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+.tc-answer-card__outcome {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  text-align: right;
 }
 
 .tc-answer-card__option {
@@ -2264,6 +2295,11 @@ span.tc-attachment-strip__file-chip {
 .tc-approval-question__prompt {
   display: flex;
   gap: 10px;
+}
+
+.tc-approval-question__prompt p {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .tc-approval-question__index {

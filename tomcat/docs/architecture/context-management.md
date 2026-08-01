@@ -996,6 +996,32 @@ fn force_drop_oldest_to_target(state: &mut ContextState):
 
 > **Layer 3 不受 m 值保护区约束**：当所有 turn 都在 protected zone 内（`protected_start = 0`）时，Layer 0/1/2 无法工作。Layer 3 作为最后兜底，**必须能删除任何 turn**（包括 protected zone 内的），否则极端场景下无法降压。
 
+### 6.4.2 手动 `/compact` 与自动 overflow 恢复不是同一条路径
+
+两者都在“让下一次请求的上下文变小”，但触发时机和优先目标不同，故意不强行复用：
+
+```
+用户主动整理会话                         当前请求已经被上游拒绝
+        │                                           │
+        ▼                                           ▼
+/compact                                      Context Overflow
+        │                                           │
+        ▼                                           ▼
+生成可持久化摘要 + 写 branch_summary boundary    先 force_drop_oldest_to_target
+        │                                           │
+        ▼                                           ▼
+重载会话：以后每轮都从摘要继续                 同一轮立即重组更小 payload 并重试
+```
+
+| 场景 | 目标 | 实现 | 持久化语义 |
+|---|---|---|---|
+| 手动 `/compact`（CLI / serve） | 把会话的**长期基线**变小，同时尽可能保留已经完成工作的可读摘要 | [`cmd_compact::compact_session`](../../../src/api/chat/commands/cmd_compact.rs)：先做可丢弃的大工具结果清理，再 `generate_summary`，最后 `append_compaction_boundary` | 是。`branch_summary` 成为新的 transcript boundary，重进会话仍从摘要恢复。 |
+| 自动 overflow 恢复 | 让**本次已经失败的请求**获得一个立刻可发送的 payload | [`force_drop_oldest_to_target`](../../../src/core/compaction/cascade.rs)；第二次 overflow 改走 [`collapse_to_branch_summary`](../../../src/core/agent_loop/current_tail_guard.rs) | 首次 L3 截断只改内存；第二次 Collapse 使用摘要收敛工作集。这里优先保证请求能继续，不承诺保存全部逐条历史。 |
+
+因此“手动命令没有调用 `force_drop_oldest_to_target`”不是实现漏接：前者需要一个能跨重启解释既往工作的 checkpoint，后者需要在错误返回后的最短路径内腾出空间。两条路径共用 `ContextState`、摘要生成能力和 `usage_ratio` 作为结果度量，但不共享触发策略。
+
+验收不以“命令成功”或“boundary 已写入”为准：CLI 重载后的 `usage_ratio`，以及 serve 响应内的 `afterUsageRatio`，都必须严格小于压缩前的值。
+
 ### 6.5 防振荡设计
 
 落盘后如果 LLM 再次全量读取同一文件，新 tool_result 仍可能超阈值、再次落盘，形成「读 → 落盘 → 再读 → 再落盘」的无效循环。

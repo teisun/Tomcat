@@ -124,6 +124,56 @@ describe("MessageBubble", () => {
     expect(retriedMessageId).toBe("u-failed");
   });
 
+  it("separates Retry or Resume as an icon-backed primary action", () => {
+    const onRecover = vi.fn();
+    const { rerender } = render(
+      <MessageBubble
+        item={{
+          detailText: "raw provider payload",
+          id: "error-1",
+          kind: "error",
+          recoveryAction: "retry",
+          text: "Request failed",
+          type: "message",
+        }}
+        onRecover={onRecover}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("recover-error-turn"));
+    expect(onRecover).toHaveBeenCalledWith("error-1", "retry");
+    expect(screen.getByTestId("error-detail-actions").textContent).not.toContain("Retry");
+    expect(
+      screen
+        .getByTestId("error-recovery-actions")
+        .contains(screen.getByTestId("recover-error-turn")),
+    ).toBe(true);
+    expect(screen.getByTestId("recover-error-turn").className).toContain("tc-button--primary");
+    expect(
+      screen
+        .getByTestId("recover-error-turn")
+        .querySelector(".codicon-refresh"),
+    ).not.toBeNull();
+
+    rerender(
+      <MessageBubble
+        item={{
+          id: "error-2",
+          kind: "error",
+          recoveryAction: "resume",
+          text: "Stream interrupted",
+          type: "message",
+        }}
+        onRecover={onRecover}
+      />,
+    );
+    expect(screen.getByTestId("recover-error-turn").textContent).toBe("Resume");
+    expect(
+      screen
+        .getByTestId("recover-error-turn")
+        .querySelector(".codicon-debug-continue"),
+    ).not.toBeNull();
+  });
+
   it("renders pending user status", () => {
     render(
       <MessageBubble

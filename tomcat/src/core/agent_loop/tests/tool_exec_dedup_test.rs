@@ -15,15 +15,15 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
+use crate::core::AllowAllConfirmation;
 use crate::core::agent_loop::ToolCallInfo;
+use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
 use crate::core::llm::openai_files::{
     CacheEntry, FilePurpose, OpenAiFilesClient, OpenAiFilesRuntime,
 };
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
-use crate::core::tools::pipeline::read_state::{ReadFileState, FILE_UNCHANGED_STUB};
+use crate::core::tools::pipeline::read_state::{FILE_UNCHANGED_STUB, ReadFileState};
 use crate::core::tools::primitive::{DefaultPrimitiveExecutor, PrimitiveExecutor};
-use crate::core::AllowAllConfirmation;
 use crate::infra::{PrimitiveConfig, TracingAuditRecorder};
 use sha2::{Digest, Sha256};
 
@@ -64,6 +64,11 @@ fn make_tc(args_json: &str) -> ToolCallInfo {
 /// 写入新内容 + 显式 set_modified，避免 fs 缓存或同秒 mtime 假命中。
 fn bump_mtime(path: &std::path::Path) {
     std::fs::write(path, b"changed-content\n").expect("rewrite file");
+    touch_mtime(path);
+}
+
+/// 保持文件字节不变，只让 mtime 失配。
+fn touch_mtime(path: &std::path::Path) {
     let new_t = SystemTime::now() + Duration::from_secs(2);
     if let Ok(file) = std::fs::File::open(path) {
         let _ = file.set_modified(new_t);
@@ -475,8 +480,8 @@ async fn edit_legacy_edit_file_returns_unknown_tool_error() {
 }
 
 #[tokio::test]
-async fn edit_rejected_when_read_stamp_stale() {
-    // 先 read 落 stamp → 外部改文件（mtime+size 都变）→ edit 必须被 Stale 拦截。
+async fn edit_accepts_content_identical_file_after_mtime_only_change() {
+    // 先 read 落完整 stamp → 外部 touch（只变 mtime）→ 内容 hash 相同，不能误报 Stale。
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let f = dir_path.join("stale.txt");
@@ -493,19 +498,64 @@ async fn edit_rejected_when_read_stamp_stale() {
     let (_, err1, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!err1);
     assert_eq!(state.len(), 1);
+    let normalized = crate::infra::platform::normalize_path(&f.to_string_lossy()).unwrap();
+    let stamp = state.get(&normalized).expect("read must create stamp");
+    assert_eq!(stamp.offset, None);
+    assert_eq!(stamp.limit, None);
+    assert_eq!(stamp.covered_lines.map(|(start, _)| start), Some(1));
+    assert!(stamp.reached_eof);
+    assert_eq!(
+        stamp.content_hash,
+        crate::core::tools::pipeline::read_state::hash_content(&std::fs::read(&f).unwrap())
+    );
 
-    // 外部修改文件（同时变 mtime 和 size）。
-    bump_mtime(&f);
+    // 外部 touch，只变 mtime。
+    touch_mtime(&f);
+    assert_eq!(
+        stamp.content_hash,
+        crate::core::tools::pipeline::read_state::hash_content(&std::fs::read(&f).unwrap())
+    );
 
-    // 此时 edit 必须被 Stale 拦截（在 primitive 调用之前）。
+    // 内容没有变，内容 hash fallback 应放行 edit。
     let edit_args = format!(
         r#"{{"path":{:?},"old_content":"hello","new_content":"hi"}}"#,
         f.to_string_lossy()
     );
     let edit_tc = make_edit_tc(&edit_args);
     let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
-    assert!(is_error, "stamp 不一致必须返回 is_error");
-    assert!(msg.contains("Stale"), "错误文案应含 Stale：{}", msg);
+    assert!(!is_error, "仅 mtime 改变不应误报 Stale：{}", msg);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "hi\nworld\n");
+}
+
+#[tokio::test]
+async fn edit_rejects_same_size_external_content_change_after_hash_fallback() {
+    // 内容 hash fallback 只能消除 touch 假阳性，绝不能放过同尺寸的真实外部改动。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("same-size-stale.txt");
+    std::fs::write(&f, b"hello\nworld\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let read_tc = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":false}}"#,
+        f.to_string_lossy()
+    ));
+    let (_, read_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
+    assert!(!read_error);
+
+    // 改动后的字节数完全相同；只有内容 hash 能识别这次外部写入。
+    std::fs::write(&f, b"HELLO\nworld\n").unwrap();
+    touch_mtime(&f);
+    let edit_tc = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"world","new_content":"planet"}}"#,
+        f.to_string_lossy()
+    ));
+    let (message, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
+    assert!(is_error, "外部同尺寸改动必须仍被拦截：{message}");
+    assert!(message.contains("Stale"), "错误文案应含 Stale：{message}");
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "HELLO\nworld\n");
 }
 
 #[tokio::test]
@@ -792,7 +842,100 @@ async fn read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hi
     );
 }
 
-// ─── T2-P0-017 Phase3 / PR-M：hashline_edit + read 闭环 ─────────────────────
+// ─── T2-P0-017 Phase3 / PR-M：edit / hashline_edit + read 闭环 ──────────────
+
+#[tokio::test]
+async fn single_file_edit_refreshes_read_stamp_so_a_second_edit_is_not_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("single-edit-refresh.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"one","new_content":"ONE"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (first_message, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error, "{first_message}");
+
+    let second = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"two","new_content":"TWO"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        !second_error && !second_message.contains("Stale"),
+        "single-file edit must refresh its own read stamp: {second_message}",
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nTWO\n");
+}
+
+#[tokio::test]
+async fn single_file_edit_refresh_does_not_hide_a_later_external_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("single-edit-external-change.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"one","new_content":"ONE"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (_, first_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error);
+
+    std::fs::write(&file, "EXTERNAL\ntwo\n").unwrap();
+    touch_mtime(&file);
+    let second = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"two","new_content":"TWO"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        second_error && second_message.contains("Stale"),
+        "a change after the refresh must still be caught: {second_message}",
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "EXTERNAL\ntwo\n");
+}
+
+#[tokio::test]
+async fn single_file_edit_refresh_switch_off_restores_stale_guard_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("single-edit-refresh-off.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::with_mutation_stamp_refresh(false));
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"one","new_content":"ONE"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (_, first_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error);
+
+    let second = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"two","new_content":"TWO"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        second_error && second_message.contains("Stale"),
+        "disabling the refresh switch must preserve the old guard: {second_message}",
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\ntwo\n");
+}
 
 #[tokio::test]
 async fn hashline_edit_replace_matches_read_hashline() {
@@ -825,6 +968,130 @@ async fn hashline_edit_replace_matches_read_hashline() {
         "alpha\nBETA\ngamma\ndelta\n",
         "第 2 行被替换为 BETA"
     );
+}
+
+#[tokio::test]
+async fn hashline_edit_refreshes_read_stamp_so_a_second_edit_is_not_stale() {
+    use crate::core::tools::primitive::compute_line_hash;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("twice.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = ToolCallInfo {
+        id: "hl-refresh-1".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("one", 2),
+        ),
+    };
+    let (first_message, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error, "{}", first_message);
+
+    let second = ToolCallInfo {
+        id: "hl-refresh-2".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"TWO\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("two", 2),
+        ),
+    };
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        !second_error && !second_message.contains("Stale"),
+        "agent 自己刚做的 hashline_edit 必须刷新 guard stamp：{second_message}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nTWO\n");
+}
+
+#[tokio::test]
+async fn hashline_edit_then_edit_completes_without_a_stale_recovery_round_trip() {
+    use crate::core::tools::primitive::compute_line_hash;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("hashline-then-edit.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    let mut tool_calls = 0;
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let hashline = ToolCallInfo {
+        id: "hashline-then-edit-1".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("one", 2),
+        ),
+    };
+    let (first_message, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &hashline).await;
+    tool_calls += 1;
+    assert!(!first_error, "{first_message}");
+
+    let edit = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"two","new_content":"TWO"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &edit).await;
+    tool_calls += 1;
+    assert!(
+        !second_error && !second_message.contains("Stale"),
+        "hashline_edit must refresh the guard for the next edit: {second_message}",
+    );
+    assert_eq!(tool_calls, 2, "the chain must not need a stale/read retry");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nTWO\n");
+}
+
+#[tokio::test]
+async fn hashline_edit_refresh_switch_off_restores_stale_guard_behavior() {
+    use crate::core::tools::primitive::compute_line_hash;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("refresh-off.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::with_mutation_stamp_refresh(false));
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = ToolCallInfo {
+        id: "hl-refresh-off-1".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("one", 2),
+        ),
+    };
+    let (_, first_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error);
+
+    let second = ToolCallInfo {
+        id: "hl-refresh-off-2".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"TWO\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("two", 2),
+        ),
+    };
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        second_error && second_message.contains("Stale"),
+        "关闭 refresh 后必须回到旧 Stale 守卫：{second_message}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\ntwo\n");
 }
 
 #[tokio::test]

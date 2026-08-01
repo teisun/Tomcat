@@ -58,7 +58,10 @@ export interface WebviewDomAction {
 export interface WebviewMessageBlock {
   assistantMessageId?: string;
   detailText?: string | null;
+  failureDomain?: string | null;
+  failureKind?: string | null;
   deliveryError?: string | null;
+  deliveryErrorDetail?: string | null;
   deliveryState?: "failed" | "pending";
   id: string;
   label?: string | null;
@@ -72,6 +75,8 @@ export interface WebviewMessageBlock {
   attachments?: WebviewAttachmentView[];
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
+  recoveryAction?: "resume" | "retry";
+  statusCode?: number | null;
   segments?: WebviewMessageSegment[];
   submitKind?: "prompt" | "steer";
   text: string;
@@ -719,6 +724,22 @@ export type WebviewIntent =
       data: {
         checkpointId: string;
         revertFiles: boolean;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "compact";
+      data: {
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "recoverErrorTurn";
+      data: {
+        action: "resume" | "retry";
+        errorId: string;
         sessionId: string;
       };
     }

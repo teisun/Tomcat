@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -12,7 +12,7 @@ use crate::core::plan_runtime::panels::{
     AskQuestionTermination, Question, QuestionOption,
 };
 use crate::infra::event_bus::EventListenerId;
-use crate::infra::{wire, EventBus, ScopedEventEmitter};
+use crate::infra::{EventBus, ScopedEventEmitter, wire};
 
 const CANCEL_POLL_MS: Duration = Duration::from_millis(10);
 
@@ -316,16 +316,18 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
         let tx = Arc::new(Mutex::new(Some(tx)));
         let request_id_for_listener = request_id.clone();
         let tx_for_listener = tx.clone();
-        let listener_id = self.event_bus.once(
+        let listener_id = self.event_bus.on(
             &response_event,
             Box::new(move |ctx| {
-                let parsed = serde_json::from_value::<AskQuestionWireResponse>(ctx.payload).ok();
-                let result = match parsed {
-                    Some(resp) if resp.request_id == request_id_for_listener => resp.result,
-                    _ => cancelled_result(),
+                let Ok(resp) = serde_json::from_value::<AskQuestionWireResponse>(ctx.payload)
+                else {
+                    return Ok(());
                 };
+                if resp.request_id != request_id_for_listener {
+                    return Ok(());
+                }
                 if let Some(tx) = tx_for_listener.lock().take() {
-                    let _ = tx.send(result);
+                    let _ = tx.send(resp.result);
                 }
                 Ok(())
             }),
@@ -346,7 +348,8 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
         let payload = match serde_json::to_value(&request) {
             Ok(payload) => payload,
             Err(_) => {
-                return AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected);
+                // This is a local serialization defect, not evidence that the host dropped.
+                return AskQuestionResult::terminal(AskQuestionOutcome::CancelledUnknown);
             }
         };
         if self
@@ -354,14 +357,15 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
             .emit_payload(ask_question_request_event_name(), payload)
             .is_err()
         {
-            return AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected);
+            return confirmed_host_disconnect(&termination);
         }
 
+        let termination_for_wait = termination.clone();
         let cancel_wait = async move {
-            while termination.reason().is_none() {
+            while termination_for_wait.reason().is_none() {
                 tokio::time::sleep(CANCEL_POLL_MS).await;
             }
-            termination
+            termination_for_wait
                 .result()
                 .expect("termination reason was observed")
         };
@@ -370,7 +374,7 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
         let result = tokio::select! {
             response = rx => match response {
                 Ok(result) => result,
-                Err(_) => AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected),
+                Err(_) => confirmed_host_disconnect(&termination),
             },
             result = &mut cancel_wait => result,
         };
@@ -378,6 +382,11 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
     }
 }
 
-fn cancelled_result() -> AskQuestionResult {
-    AskQuestionResult::terminal(AskQuestionOutcome::CancelledUnknown)
+/// Only transport failures that prove the live host path disappeared receive the
+/// `host_disconnected` terminal label. Local failures must not masquerade as a host action.
+pub(super) fn confirmed_host_disconnect(termination: &AskQuestionTermination) -> AskQuestionResult {
+    termination.host_disconnected();
+    termination
+        .result()
+        .expect("host_disconnected was just recorded")
 }

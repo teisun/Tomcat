@@ -95,4 +95,27 @@ describe("SessionRouter checkpoint methods", () => {
       }),
     );
   });
+
+  it("sends compact and validates its usage report", async () => {
+    const messenger = {
+      request: vi.fn().mockResolvedValue({
+        payload: {
+          afterUsageRatio: 0.21,
+          beforeUsageRatio: 0.93,
+          coveredMessageCount: 42,
+        },
+        success: true,
+      }),
+    };
+    const router = new SessionRouter(messenger as never, () => "/workspace");
+
+    await expect(router.compact("s1")).resolves.toEqual({
+      afterUsageRatio: 0.21,
+      beforeUsageRatio: 0.93,
+      coveredMessageCount: 42,
+    });
+    expect(messenger.request).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "s1", type: "compact" }),
+    );
+  });
 });

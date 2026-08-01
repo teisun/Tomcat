@@ -2,8 +2,8 @@ use super::*;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serial_test::serial;
@@ -15,13 +15,14 @@ use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
 };
 use crate::core::llm::{
-    Capabilities, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextRefKind,
-    FileSource, ImageSource, LlmProvider, MessageKind, ModelEntryInput, StreamEvent,
+    Capabilities, ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest,
+    ChatResponse, ChatResponseChoice, ContextRefKind, FileSource, ImageSource, LlmProvider,
+    MessageKind, ModelEntryInput, StreamEvent,
 };
 use crate::{
-    init_context_state, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
-    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
-    RestoreOptions,
+    CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
+    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
+    init_context_state,
 };
 
 // ── 附件测试脚手架 ────────────────────────────────────────────────────
@@ -42,6 +43,56 @@ fn test_png_bytes() -> Vec<u8> {
 
 fn test_pdf_bytes() -> Vec<u8> {
     b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n".to_vec()
+}
+
+/// `/compact` calls the non-streaming compaction scene, unlike normal agent turns.
+/// Keep this explicit so the serve command E2E catches accidental routing to chat_stream.
+struct CompactOnlyProvider {
+    streams: parking_lot::Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
+}
+
+impl CompactOnlyProvider {
+    fn with_streams(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
+        Self {
+            streams: parking_lot::Mutex::new(streams.into()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for CompactOnlyProvider {
+    fn provider_name(&self) -> &str {
+        "compact_only"
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AppError> {
+        Ok(ChatResponse {
+            id: Some("compact-summary".to_string()),
+            choices: vec![ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant("Compacted conversation summary."),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<
+        Box<dyn futures_util::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        let events = self.streams.lock().pop_front().ok_or_else(|| {
+            AppError::Llm("unexpected chat_stream after manual compact".to_string())
+        })?;
+        Ok(Box::new(tokio_stream::iter(events)))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
 }
 
 /// 把字节落进这个会话的 blob store，返回它的 sha —— 等价于走一遍 ingest_attachment。
@@ -684,13 +735,14 @@ async fn detached_target_retain_and_discard_preserves_source_and_reclaims_target
     )
     .await
     .unwrap();
-    assert!(slot
-        .ctx
-        .session_runtime
-        .session
-        .get_session_by_id(&target_id)
-        .unwrap()
-        .is_none());
+    assert!(
+        slot.ctx
+            .session_runtime
+            .session
+            .get_session_by_id(&target_id)
+            .unwrap()
+            .is_none()
+    );
     assert!(store.list_pending(&target_id).unwrap().is_empty());
     assert_eq!(state.registry.active_session_id(), active_before);
     assert_eq!(store.list_pending(&source_id).unwrap().len(), 2);
@@ -920,6 +972,8 @@ async fn serve_prompt_drives_agent_run() {
             prompt_tokens: 1,
             completion_tokens: 1,
             total_tokens: Some(2),
+            reasoning_tokens: None,
+            text_tokens: None,
         }),
     ];
     let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![stream]).await;
@@ -964,6 +1018,538 @@ async fn serve_prompt_drives_agent_run() {
         }),
         "expected agent_end, got {lines:?}"
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_reasks_dangling_ask_question_and_continues_turn() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "继续执行".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "需要一个选择",
+            "tool_calls": [{
+                "id": "restart-ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                }
+            }]
+        }))
+        .expect("seed dangling ask_question");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-dangling-ask".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+            && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+    })
+    .await;
+    let request = lines
+        .iter()
+        .find(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+                && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+        })
+        .expect("resume should request ask_question from the host");
+    let request_id = request["requestId"]
+        .as_str()
+        .expect("control request id")
+        .to_string();
+    assert_eq!(
+        request["payload"]["toolCallId"].as_str(),
+        Some("restart-ask-1"),
+        "resume must preserve the durable tool_call_id"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlResponse {
+            request_id,
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::json!({
+                "requestId": request["payload"]["requestId"],
+                "result": {
+                    "outcome": "answered",
+                    "cancelled": false,
+                    "answers": [{
+                        "questionId": "q1",
+                        "optionIds": ["yes"],
+                        "pickedRecommended": true
+                    }]
+                }
+            }),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").is_none_or(serde_json::Value::is_null)
+        }),
+        "answering the resumed question should continue and finish the agent turn: {lines:?}"
+    );
+
+    let results = session_message_entries(&slot)
+        .into_iter()
+        .filter(|message| {
+            message
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("tool")
+                && message
+                    .message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("restart-ask-1")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.len(),
+        1,
+        "resume must persist one real result, not append a synthetic companion"
+    );
+    let result: serde_json::Value = serde_json::from_str(
+        results[0].message["content"]
+            .as_str()
+            .expect("tool result content"),
+    )
+    .expect("ask_question result JSON");
+    assert_eq!(result["outcome"], "answered");
+    assert_eq!(result["answers"][0]["option_ids"][0], "yes");
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let provider: Arc<dyn LlmProvider> = Arc::new(DeterministicMockLlm::new(vec![vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "attach-resumed".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]]));
+    ensure_work_dir_structure(&cfg).expect("work dir");
+    let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
+    let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
+    let state = ServeState::new(cfg.clone(), writer, shared_model_thinking).expect("serve state");
+    let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let sessions_dir = crate::resolve_sessions_dir(&cfg).expect("sessions dir");
+    std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let session_key =
+        crate::session_key_for_agent(&cfg.agent.id, crate::SessionMode::Code, &cwd_path);
+    let session_manager = crate::SessionManager::new_scoped(sessions_dir, session_key);
+    let cwd_string = Some(cwd_path.to_string_lossy().to_string());
+    let current_entry = session_manager
+        .ensure_current_session(cwd_string.clone())
+        .expect("current session");
+    session_manager.pin_session(&current_entry.session_id);
+    let overrides = crate::api::chat::ChatContextOverrides::default()
+        .suppress_cli_output()
+        .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
+        .with_shared_model_thinking(Arc::clone(&state.shared_model_thinking))
+        .with_session_cwd_override(cwd_path.clone());
+    let mut ctx = crate::api::chat::ChatContext::from_config_with_mode_and_overrides(
+        cfg.clone(),
+        crate::SessionMode::Code,
+        overrides,
+    )
+    .expect("chat context");
+    state.shared_event_bus.register_session_bus(
+        current_entry.session_id.clone(),
+        ctx.global_services.event_bus.clone(),
+    );
+    let ask_panel = state.ask_question.panel_for_session(
+        ctx.global_services.event_bus.clone(),
+        &current_entry.session_id,
+    );
+    ctx.session_runtime
+        .plan_runtime
+        .attach_ask_question_panel(ask_panel);
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
+        provider,
+        "gpt-5.4",
+        ctx.global_services.model_catalog.snapshot(),
+    ));
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "需要一个选择",
+            "tool_calls": [{
+                "id": "auto-ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                }
+            }]
+        }))
+        .expect("seed pending ask_question before hook registration");
+    let context_budget_chars =
+        crate::infra::config::compute_context_budget_chars(&ctx.config.context);
+    let system_text = crate::api::chat::build_system_text(&ctx, context_budget_chars).await;
+    let context_state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        &system_text,
+    )
+    .expect("context state");
+    let slot = Arc::new(crate::api::serve::registry::SessionSlot::new(
+        current_entry.session_id.clone(),
+        Arc::new(ctx),
+        crate::SessionMode::Code,
+        cwd_string,
+        crate::api::serve::registry::SessionTurnState {
+            context_state,
+            system_text,
+            context_budget_chars,
+        },
+    ));
+    state
+        .registry
+        .insert(Arc::clone(&slot))
+        .expect("insert initial session");
+    register_slot_hooks(&state, &slot);
+    state.initialized.store(true, Ordering::SeqCst);
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+            && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+    })
+    .await;
+    let request = lines
+        .iter()
+        .find(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+                && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+        })
+        .expect("slot attach should rearm pending ask_question");
+    assert_eq!(
+        request["payload"]["toolCallId"].as_str(),
+        Some("auto-ask-1")
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlResponse {
+            request_id: request["requestId"]
+                .as_str()
+                .expect("control request id")
+                .to_string(),
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::json!({
+                "requestId": request["payload"]["requestId"],
+                "result": {
+                    "outcome": "answered",
+                    "cancelled": false,
+                    "answers": [{
+                        "questionId": "q1",
+                        "optionIds": ["yes"],
+                        "pickedRecommended": true
+                    }]
+                }
+            }),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").is_none_or(serde_json::Value::is_null)
+        }),
+        "re-armed attach flow should finish the recovered turn: {lines:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_skips_pending_ask_question_before_persisting_new_input() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "new prompt handled".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "需要一个选择",
+            "tool_calls": [{
+                "id": "skip-ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                }
+            }]
+        }))
+        .expect("seed dangling ask_question");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("new-prompt-after-question".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "跳过旧问题，继续做别的".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").is_none_or(serde_json::Value::is_null)
+        }),
+        "a new prompt must not be blocked by the old pending question: {lines:?}"
+    );
+
+    let entries = session_message_entries(&slot);
+    let skip = entries
+        .iter()
+        .find(|message| {
+            message
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("tool")
+                && message
+                    .message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("skip-ask-1")
+        })
+        .expect("old ask_question should be recorded as skipped before prompt append");
+    let result: serde_json::Value = serde_json::from_str(
+        skip.message["content"]
+            .as_str()
+            .expect("tool result content"),
+    )
+    .expect("skip result JSON");
+    assert_eq!(result["outcome"], "skipped");
+    assert_eq!(result["cancelled"], true);
+
+    let skipped_index = entries
+        .iter()
+        .position(|message| message.id == skip.id)
+        .expect("skip entry index");
+    let prompt_index = entries
+        .iter()
+        .position(|message| {
+            message
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("user")
+                && message
+                    .message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("跳过旧问题，继续做别的")
+        })
+        .expect("new prompt should be persisted");
+    assert!(
+        skipped_index < prompt_index,
+        "skipped tool result must precede the new user message"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_replaces_legacy_synthetic_ask_question_result() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "已根据选择继续".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "需要一个选择",
+            "tool_calls": [{
+                "id": "legacy-ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                }
+            }]
+        }))
+        .expect("seed ask_question declaration");
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "legacy-ask-1",
+            "content": "{\"answers\":[],\"cancelled\":true,\"outcome\":\"host_disconnected\"}"
+        }))
+        .expect("seed legacy synthetic ask_question result");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-legacy-ask".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+            && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+    })
+    .await;
+    let request = lines
+        .iter()
+        .find(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+                && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+        })
+        .expect("legacy result should be retried through the host");
+    assert_eq!(
+        request["payload"]["toolCallId"].as_str(),
+        Some("legacy-ask-1")
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlResponse {
+            request_id: request["requestId"]
+                .as_str()
+                .expect("control request id")
+                .to_string(),
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::json!({
+                "requestId": request["payload"]["requestId"],
+                "result": {
+                    "outcome": "answered",
+                    "cancelled": false,
+                    "answers": [{
+                        "questionId": "q1",
+                        "optionIds": ["no"],
+                        "pickedRecommended": false
+                    }]
+                }
+            }),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    let results = session_message_entries(&slot)
+        .into_iter()
+        .filter(|message| {
+            message
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("tool")
+                && message
+                    .message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("legacy-ask-1")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.len(),
+        2,
+        "legacy placeholder should be superseded and followed by one real result"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|message| {
+                message
+                    .message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            })
+            .count(),
+        1,
+        "there must be exactly one active result after recovery"
+    );
+    let result: serde_json::Value = serde_json::from_str(
+        results
+            .iter()
+            .find(|message| {
+                message
+                    .message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            })
+            .expect("active recovered result")
+            .message["content"]
+            .as_str()
+            .expect("tool result content"),
+    )
+    .expect("ask_question result JSON");
+    assert_eq!(result["outcome"], "answered");
+    assert_eq!(result["answers"][0]["option_ids"][0], "no");
 }
 
 #[tokio::test]
@@ -1519,8 +2105,7 @@ async fn serve_prompt_retries_stream_terminal_refusal_without_rendering_llm_erro
 #[serial(env_lock)]
 async fn serve_prompt_degrades_after_second_refusal_and_succeeds() {
     let _api_key = install_test_api_key();
-    let refusal_message =
-        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
+    let refusal_message = "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
     let (state, buffer, _temp, slot, requests) =
         build_initialized_state_with_recorded_streams(vec![
             unsupported_file_input_stream(refusal_message),
@@ -1592,8 +2177,7 @@ async fn serve_prompt_degrades_after_second_refusal_and_succeeds() {
 #[serial(env_lock)]
 async fn serve_prompt_exhausted_stream_terminal_refusal_surfaces_one_final_error() {
     let _api_key = install_test_api_key();
-    let refusal_message =
-        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
+    let refusal_message = "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
     let (state, buffer, _temp, slot, requests) =
         build_initialized_state_with_recorded_streams(vec![
             unsupported_file_input_stream(refusal_message),
@@ -1744,10 +2328,12 @@ async fn serve_prompt_without_attachments_falls_back_to_user_text() {
         &user_message.content,
         Some(ChatMessageContent::Text(text)) if text == "plain text"
     ));
-    assert!(user_message
-        .msg_id
-        .as_deref()
-        .is_some_and(|message_id| !message_id.is_empty()));
+    assert!(
+        user_message
+            .msg_id
+            .as_deref()
+            .is_some_and(|message_id| !message_id.is_empty())
+    );
 }
 
 #[test]
@@ -1923,10 +2509,12 @@ async fn serve_prompt_blank_user_message_id_falls_back_to_generated_entry_id() {
 
     let entry = latest_user_entry(&slot);
     assert_ne!(entry.id.as_deref(), Some("   "));
-    assert!(entry
-        .id
-        .as_deref()
-        .is_some_and(|message_id| !message_id.trim().is_empty()));
+    assert!(
+        entry
+            .id
+            .as_deref()
+            .is_some_and(|message_id| !message_id.trim().is_empty())
+    );
 }
 
 #[tokio::test]
@@ -2821,6 +3409,75 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_resume_revives_failed_prompt_without_duplicating_the_model_input() {
+    let _api_key = install_test_api_key();
+    let failed_stream = vec![Err(crate::AppError::Llm("temporary 403".to_string()))];
+    let recovered_stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "recovered".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![failed_stream, recovered_stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("resume-failed-prompt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "retry this exact prompt".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("temporary 403"))
+    })
+    .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-failed-prompt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").is_none_or(serde_json::Value::is_null)
+    })
+    .await;
+
+    let recorded = requests.0.lock().clone();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "one failed request and one resumed request"
+    );
+    let resumed_prompt_occurrences = recorded[1]
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content())
+        .filter(|text| *text == "retry this exact prompt")
+        .count();
+    assert_eq!(
+        resumed_prompt_occurrences, 1,
+        "Resume must reuse the single persisted user message instead of appending it again"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_prompt_failed_turn_retry_does_not_replay_superseded_user_tail() {
     let _api_key = install_test_api_key();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3421,18 +4078,16 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
         "deepseek follow-up should contain file omission placeholder in historical user message: {third_messages:?}"
     );
     assert!(
-        third_messages
-            .iter()
-            .all(|message| match &message.content {
-                Some(ChatMessageContent::Parts(parts)) => parts.iter().all(|part| {
-                    !matches!(
-                        part,
-                        ChatMessageContentPart::InputImage { .. }
-                            | ChatMessageContentPart::InputFile { .. }
-                    )
-                }),
-                _ => true,
+        third_messages.iter().all(|message| match &message.content {
+            Some(ChatMessageContent::Parts(parts)) => parts.iter().all(|part| {
+                !matches!(
+                    part,
+                    ChatMessageContentPart::InputImage { .. }
+                        | ChatMessageContentPart::InputFile { .. }
+                )
             }),
+            _ => true,
+        }),
         "deepseek follow-up should not carry raw multimodal parts after downgrade: {third_messages:?}"
     );
 }
@@ -3539,7 +4194,7 @@ async fn serve_set_thinking_level_roundtrips_in_get_state() {
         .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-effort-1"))
         .expect("get_state response");
     let payload = response["payload"].clone();
-    assert_eq!(response["success"].as_bool(), Some(true));
+    assert_eq!(response["success"].as_bool(), Some(true), "{response:?}");
     assert_eq!(payload["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(payload["thinkingLevel"].as_str(), Some("xhigh"));
 }
@@ -3733,11 +4388,13 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
         .expect("provider key entry");
     assert_eq!(provider_key["keyPresent"].as_bool(), Some(true));
     assert_eq!(provider_key["provider"].as_str(), Some(""));
-    assert!(key_list["payload"]["keys"]
-        .as_array()
-        .expect("provider keys array")
-        .iter()
-        .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY")));
+    assert!(
+        key_list["payload"]["keys"]
+            .as_array()
+            .expect("provider keys array")
+            .iter()
+            .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY"))
+    );
     assert!(
         !key_list.to_string().contains("relay-secret")
             && !key_list.to_string().contains("external-secret"),
@@ -3796,11 +4453,13 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
                 == Some("list-provider-keys-after-delete")
         })
         .expect("list_provider_keys after external delete");
-    assert!(!after_delete["payload"]["keys"]
-        .as_array()
-        .expect("provider keys after delete")
-        .iter()
-        .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY")));
+    assert!(
+        !after_delete["payload"]["keys"]
+            .as_array()
+            .expect("provider keys after delete")
+            .iter()
+            .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY"))
+    );
 
     handle_command(
         Arc::clone(&state),
@@ -4066,8 +4725,8 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
 #[serial(env_lock)]
 async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_to_chat() {
     use crate::core::plan_runtime::file_store::{
-        read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
-        PLAN_FILE_SCHEMA_VERSION,
+        PLAN_FILE_SCHEMA_VERSION, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
+        TodoStatus, read_plan, write_plan,
     };
 
     let _api_key = install_test_api_key();
@@ -4241,8 +4900,8 @@ async fn serve_get_state_contains_plan_and_session_todos() {
 #[serial(env_lock)]
 async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     use crate::core::plan_runtime::file_store::{
-        write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
-        PLAN_FILE_SCHEMA_VERSION,
+        PLAN_FILE_SCHEMA_VERSION, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
+        TodoStatus, write_plan,
     };
 
     let _api_key = install_test_api_key();
@@ -5126,6 +5785,230 @@ async fn serve_restore_checkpoint_transcript_only_reports_payload_and_supersedes
         .collect::<Vec<_>>();
     assert!(superseded_ids.contains(&superseded_user_id));
     assert!(superseded_ids.contains(&superseded_assistant_id));
+    let turn_state = slot.turn_state.lock();
+    let runtime_messages = &turn_state
+        .as_ref()
+        .expect("idle slot keeps turn state")
+        .context_state
+        .messages;
+    assert!(
+        runtime_messages.iter().all(|message| {
+            message.text_content() != Some("after checkpoint")
+                && message.text_content() != Some("after reply")
+        }),
+        "restore must also replace the in-memory context, not only supersede transcript rows"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_restore_rearms_a_question_unpaired_by_the_restore_boundary() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, initial_slot) = build_initialized_state_with_streams(vec![]).await;
+    let session_id = initial_slot.session_id.clone();
+    append_history_message(&initial_slot, "user", "restore this pending question");
+    let anchor = initial_slot
+        .ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": "需要选择",
+                "tool_calls": [{
+                    "id": "restore-ask-1",
+                    "type": "function",
+                    "function": {
+                        "name": "ask_question",
+                        "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                    }
+                }]
+            }),
+        )
+        .expect("append checkpoint anchor with ask_question");
+    initial_slot
+        .ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session_id,
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "restore-ask-1",
+                "content": "{\"outcome\":\"host_disconnected\",\"cancelled\":true,\"answers\":[]}"
+            }),
+        )
+        .expect("append result that restore will supersede");
+    drop(initial_slot);
+
+    let checkpoint_id = CheckpointId::new("ck_restore_pending_question");
+    let slot = install_checkpoint_store(
+        &state,
+        &session_id,
+        Arc::new(FixedCheckpointStore {
+            checkpoints: vec![CheckpointMeta {
+                id: checkpoint_id.clone(),
+                session_id: session_id.clone(),
+                turn_id: "turn-restore-pending-question".to_string(),
+                kind: CheckpointKind::TurnEnd,
+                git_commit: None,
+                message_anchor: Some(anchor),
+                created_at: "2026-07-31T12:00:00Z".to_string(),
+                notes: None,
+            }],
+            restore_report: CheckpointRestoreReport::default(),
+        }),
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RestoreCheckpoint {
+            id: Some("restore-pending-question".to_string()),
+            session_id: Some(session_id.clone()),
+            checkpoint_id: checkpoint_id.to_string(),
+            revert_files: false,
+            dry_run: None,
+        },
+    )
+    .await
+    .expect("restore checkpoint");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+            && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+            && line
+                .get("payload")
+                .and_then(|payload| payload.get("toolCallId"))
+                == Some(&serde_json::Value::String("restore-ask-1".to_string()))
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+                && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+                && line
+                    .get("payload")
+                    .and_then(|payload| payload.get("toolCallId"))
+                    == Some(&serde_json::Value::String("restore-ask-1".to_string()))
+        }),
+        "restore must rehydrate and rearm the question whose prior result it superseded: {lines:?}"
+    );
+    assert!(
+        session_message_entries(&slot).iter().any(|entry| {
+            entry.message["role"] == "tool"
+                && entry.message["tool_call_id"] == "restore-ask-1"
+                && entry.message["content"]
+                    == crate::core::session::manager::PENDING_TOOL_RESULT_TEXT
+        }),
+        "restore must leave the transcript protocol-complete with a [pending] result"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let provider: Arc<dyn LlmProvider> = Arc::new(CompactOnlyProvider::with_streams(vec![vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "the compacted session can continue".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    let large_history = format!("historical detail {}", "x".repeat(32_000));
+    append_history_message(&slot, "user", &large_history);
+    append_history_message(&slot, "assistant", &large_history);
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Compact {
+            id: Some("compact-session".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .expect("compact command");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("compact-session")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("compact-session"))
+        .expect("compact response");
+    assert_eq!(response["success"].as_bool(), Some(true));
+    let before_ratio = response["payload"]["beforeUsageRatio"]
+        .as_f64()
+        .expect("compact response must include beforeUsageRatio");
+    let after_ratio = response["payload"]["afterUsageRatio"]
+        .as_f64()
+        .expect("compact response must include afterUsageRatio");
+    assert!(
+        after_ratio < before_ratio,
+        "manual compact must return a strictly smaller context ratio: {response:?}"
+    );
+    assert!(
+        response["payload"]["coveredMessageCount"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 2,
+        "manual compact must cover transcript messages: {response:?}"
+    );
+    assert!(
+        slot.ctx
+            .session_runtime
+            .session
+            .get_entries(16)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry, crate::core::session::TranscriptEntry::BranchSummary(summary) if summary.is_boundary == Some(true))),
+        "compact must persist a durable boundary"
+    );
+    let turn_state = slot.turn_state.lock();
+    assert!(
+        turn_state
+            .as_ref()
+            .expect("idle slot")
+            .context_state
+            .messages
+            .iter()
+            .any(|message| message.kind == crate::core::llm::MessageKind::CompactionSummary),
+        "serve must use the compacted context immediately, without a restart"
+    );
+    drop(turn_state);
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("compact-follow-up".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "continue after compaction".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .expect("the compacted session accepts a following prompt");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("sessionId").and_then(serde_json::Value::as_str)
+                == Some(slot.session_id.as_str())
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("sessionId").and_then(serde_json::Value::as_str)
+                    == Some(slot.session_id.as_str())
+        }),
+        "the next prompt must complete after manual compaction: {lines:?}"
+    );
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 use super::super::{
-    cmd_model::format_model_list_line, parse_chat_command, ChatCommand, ModelCommand,
+    ChatCommand, ModelCommand, cmd_model::format_model_list_line, parse_chat_command,
 };
 use crate::api::chat::commands::help_text;
 use crate::core::llm::{Capabilities, ModelEntry};

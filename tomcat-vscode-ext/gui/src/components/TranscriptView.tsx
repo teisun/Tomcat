@@ -125,6 +125,7 @@ export function TranscriptView({
   onOpenFile,
   onOpenImagePreview,
   onOpenPlanFile,
+  onRecoverErrorTurn,
   onRestoreCheckpoint,
   onRetryUserMessage,
   onSetBuildModel,
@@ -156,6 +157,7 @@ export function TranscriptView({
   onOpenFile(path: string, line?: number): void;
   onOpenImagePreview?(imageId: string): void;
   onOpenPlanFile(path: string): void;
+  onRecoverErrorTurn?(errorId: string, action: "resume" | "retry"): void;
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
   onSetBuildModel?(modelId: string): void;
@@ -200,7 +202,9 @@ export function TranscriptView({
               mediaRoots={mediaRoots}
               onOpenFile={onOpenFile}
               onOpenImagePreview={onOpenImagePreview}
+              onRecover={onRecoverErrorTurn}
               onRetry={onRetryUserMessage}
+              recoveryDisabled={busy}
               onZoomImage={onZoomImage}
             />
           );
@@ -285,7 +289,9 @@ export function TranscriptView({
                 mediaRoots={mediaRoots}
                 onOpenFile={onOpenFile}
                 onOpenImagePreview={onOpenImagePreview}
+                onRecover={onRecoverErrorTurn}
                 onRetry={onRetryUserMessage}
+                recoveryDisabled={busy}
                 onZoomImage={onZoomImage}
               />
             ) : null}
