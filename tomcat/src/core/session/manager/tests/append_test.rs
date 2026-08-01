@@ -44,6 +44,19 @@ fn append_failed_turn_error(manager: &SessionManager) {
 #[test]
 fn copy_forward_preserves_failed_message_and_appends_a_live_copy_after_annotations() {
     let (_temp, manager) = new_copy_forward_manager();
+    let session_id = manager
+        .current_session_id()
+        .unwrap()
+        .expect("active session id");
+    let attachment_store = manager.attachment_store();
+    let unrelated_pending_blob = attachment_store.put(b"draft image bytes").unwrap();
+    attachment_store
+        .mark_pending(&session_id, &unrelated_pending_blob)
+        .unwrap();
+    let pending_before_copy = attachment_store.list_pending(&session_id).unwrap();
+    let blob_count_before_copy = std::fs::read_dir(attachment_store.blobs_dir())
+        .unwrap()
+        .count();
     let original_id = manager
         .append_message(serde_json::json!({
             "role": "user",
@@ -99,6 +112,18 @@ fn copy_forward_preserves_failed_message_and_appends_a_live_copy_after_annotatio
     assert_eq!(
         messages[1].message, expected_copy,
         "copy-forward must preserve every archived message field other than failure markers"
+    );
+    assert_eq!(
+        attachment_store.list_pending(&session_id).unwrap(),
+        pending_before_copy,
+        "copy-forward duplicates inline transcript JSON only; it must not acquire or release blob leases"
+    );
+    assert_eq!(
+        std::fs::read_dir(attachment_store.blobs_dir())
+            .unwrap()
+            .count(),
+        blob_count_before_copy,
+        "copy-forward must not duplicate attachment bytes into the blob store"
     );
 }
 

@@ -400,9 +400,9 @@ async fn inject_follow_up_messages_records_context_and_persists_msg_id() {
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let event_bus = Arc::new(DefaultEventBus::new());
     let follow_up_text = "<background-task-finished task_id=\"t-followup\" exit_code=\"0\">done</background-task-finished>";
-    let follow_up_queue = Arc::new(parking_lot::Mutex::new(vec![ChatMessage::user(
-        follow_up_text,
-    )]));
+    let mut background_signal = ChatMessage::user(follow_up_text);
+    background_signal.kind = MessageKind::Signal;
+    let follow_up_queue = Arc::new(parking_lot::Mutex::new(vec![background_signal]));
     let mut loop_ = AgentLoop::new(
         test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
@@ -435,6 +435,11 @@ async fn inject_follow_up_messages_records_context_and_persists_msg_id() {
     assert!(appended);
     let follow_up = messages.last().expect("follow-up should be appended");
     assert_eq!(follow_up.role, ChatMessageRole::User);
+    assert_eq!(
+        follow_up.kind,
+        MessageKind::Signal,
+        "background completion must retain its distinct persisted input kind"
+    );
     assert_eq!(follow_up.text_content(), Some(follow_up_text));
     assert!(
         follow_up.msg_id.is_some(),
@@ -456,6 +461,7 @@ async fn inject_follow_up_messages_records_context_and_persists_msg_id() {
         TranscriptEntry::Message(me) => {
             me.id == follow_up.msg_id
                 && me.message.get("content").and_then(|v| v.as_str()) == Some(follow_up_text)
+                && me.message.get("kind").and_then(|v| v.as_str()) == Some("signal")
         }
         _ => false,
     }));

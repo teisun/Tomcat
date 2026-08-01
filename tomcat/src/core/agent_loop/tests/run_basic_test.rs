@@ -173,6 +173,62 @@ async fn run_refuses_to_send_an_assistant_tailed_request() {
     ));
 }
 
+#[tokio::test]
+async fn outbound_invariant_allows_every_legal_path() {
+    let mut completion_nudge = ChatMessage::user("continue until the plan is complete");
+    completion_nudge.kind = MessageKind::Nudge;
+    let mut background_signal = ChatMessage::user("background task finished");
+    background_signal.kind = MessageKind::Signal;
+    let steering = ChatMessage::steering("answer in Chinese");
+    let mut tool_call = ChatMessage::assistant("");
+    tool_call.tool_calls = Some(vec![serde_json::json!({
+        "id": "read-1",
+        "type": "function",
+        "function": { "name": "read", "arguments": "{}" },
+    })]);
+    let legal_paths = vec![
+        (
+            "completion guard continuation",
+            vec![ChatMessage::user("start"), completion_nudge],
+        ),
+        (
+            "background follow-up injection",
+            vec![ChatMessage::user("start"), background_signal],
+        ),
+        (
+            "mid-turn steering injection",
+            vec![ChatMessage::user("start"), steering],
+        ),
+        (
+            "completed tool round",
+            vec![
+                ChatMessage::user("read the file"),
+                tool_call,
+                ChatMessage::tool("read-1", "file contents"),
+            ],
+        ),
+    ];
+
+    for (path, messages) in legal_paths {
+        let llm = Arc::new(MockLlmProvider::new(vec![ok_text_stream("accepted")]));
+        let mut loop_ = AgentLoop::new(
+            test_binding(llm, "gpt-4"),
+            Arc::new(MockPrimitiveExecutor),
+            Arc::new(DefaultEventBus::new()),
+            AgentLoopConfig {
+                session_id: format!("legal-tail-{path}"),
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        );
+        let outcome = loop_.run(messages).await;
+        assert!(
+            outcome.is_ok(),
+            "{path} must remain legal after the outbound tail invariant"
+        );
+    }
+}
+
 /// 重试：Mock LLM 先返回 429 再返回成功 -> 自动重试后得到文本。
 #[tokio::test]
 async fn run_retries_on_429_then_succeeds() {

@@ -1570,3 +1570,40 @@ fn init_context_state_restores_persisted_message_kinds_and_defaults_legacy_rows(
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn steering_survives_a_reload_without_becoming_a_turn_start() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = SessionManager::new(dir.clone());
+    let key = manager.current_session_key().to_string();
+    manager.create_session(&key, None).unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "implement the change",
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "use Chinese for the response",
+            "kind": "steering",
+        }))
+        .unwrap();
+
+    let rehydrated = init_context_state(&manager, &ContextConfig::default(), "sys").unwrap();
+    let steering = rehydrated
+        .messages
+        .iter()
+        .find(|message| message.text_content() == Some("use Chinese for the response"))
+        .expect("the persisted steering message must survive hydration");
+    assert_eq!(steering.kind, MessageKind::Steering);
+    assert!(
+        !steering.starts_logical_turn(),
+        "a reload must not turn an in-flight interjection into a new logical user turn"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

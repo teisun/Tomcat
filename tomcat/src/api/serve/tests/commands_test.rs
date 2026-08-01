@@ -3520,6 +3520,260 @@ async fn serve_resume_rejects_without_a_complete_tool_result_tail() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_resume_rejects_when_a_failed_user_hides_an_old_tool_tail() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("must not run")]).await;
+    let session = &slot.ctx.session_runtime.session;
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "user",
+                "content": "the older tool turn",
+            }),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "old-read",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"},
+                }],
+            }),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "old-read",
+                "content": "# old result",
+            }),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "user",
+                "content": "the failed retry target",
+                "superseded": true,
+                "turn_failed": true,
+            }),
+        )
+        .unwrap();
+    session
+        .append_error_entry(crate::core::session::transcript::ErrorEntry {
+            id: Some("error-old-tool-tail".to_string()),
+            parent_id: None,
+            timestamp: "2026-08-01T00:00:00.000Z".to_string(),
+            phase: None,
+            provider: None,
+            model: None,
+            api_family: None,
+            status_code: Some(503),
+            request_id: None,
+            failure_kind: None,
+            failure_domain: None,
+            summary: "failed retry target".to_string(),
+            detail: "failed retry target".to_string(),
+        })
+        .unwrap();
+    let transcript = session.transcript_path(&slot.session_id);
+    let before = std::fs::read(&transcript).unwrap();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-old-tool-tail".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("resume-old-tool-tail")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("resume-old-tool-tail")
+                && line.get("error").and_then(serde_json::Value::as_str)
+                    == Some("nothing_to_resume")
+        }),
+        "an old tool tail must not authorize Resume for the superseded newer user"
+    );
+    assert!(requests.0.lock().is_empty());
+    assert_eq!(std::fs::read(transcript).unwrap(), before);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_retry_rejects_a_stale_anchor_without_mutating_the_transcript() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("must not run")]).await;
+    let session = &slot.ctx.session_runtime.session;
+    let stale_id = session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({"role": "user", "content": "old failed request"}),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({"role": "user", "content": "newer live request"}),
+        )
+        .unwrap();
+    let transcript = session.transcript_path(&slot.session_id);
+    let before = std::fs::read(&transcript).unwrap();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Retry {
+            id: Some("retry-stale-anchor".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            message_id: stale_id,
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("retry-stale-anchor")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("retry-stale-anchor")
+                && line.get("error").and_then(serde_json::Value::as_str)
+                    == Some("retry_target_stale")
+        }),
+        "the service must report a stale Retry anchor rather than falling back to Resume"
+    );
+    assert!(requests.0.lock().is_empty());
+    assert_eq!(std::fs::read(transcript).unwrap(), before);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) = build_initialized_state_with_recorded_streams(
+        vec![ok_text_stream("resumed from placeholder")],
+    )
+    .await;
+    let session = &slot.ctx.session_runtime.session;
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "user",
+                "content": "finish the interrupted tool turn",
+            }),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "interrupted-read",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"},
+                }],
+            }),
+        )
+        .unwrap();
+    session
+        .append_error_entry(crate::core::session::transcript::ErrorEntry {
+            id: Some("error-interrupted-read".to_string()),
+            parent_id: None,
+            timestamp: "2026-08-01T00:00:00.000Z".to_string(),
+            phase: None,
+            provider: None,
+            model: None,
+            api_family: None,
+            status_code: None,
+            request_id: None,
+            failure_kind: None,
+            failure_domain: None,
+            summary: "interrupted tool turn".to_string(),
+            detail: "interrupted tool turn".to_string(),
+        })
+        .unwrap();
+    let system_text = slot
+        .turn_state
+        .lock()
+        .as_ref()
+        .expect("session turn state")
+        .system_text
+        .clone();
+    let healed_context = init_context_state(
+        &slot.ctx.session_runtime.session,
+        &slot.ctx.config.context,
+        &system_text,
+    )
+    .expect("failure recovery hydration must persist a placeholder after the error row");
+    if let Some(turn_state) = slot.turn_state.lock().as_mut() {
+        turn_state.context_state = healed_context;
+    }
+    let healed_entries = session.get_entries(16).unwrap();
+    assert!(
+        matches!(
+            healed_entries.last(),
+            Some(crate::core::session::transcript::TranscriptEntry::Message(entry))
+                if entry.message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                    && entry.message.get("tool_call_id").and_then(serde_json::Value::as_str)
+                        == Some("interrupted-read")
+                    && entry.message.get("content").and_then(serde_json::Value::as_str)
+                        == Some(crate::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+        ),
+        "hydration must append the healed result after the durable error annotation"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-post-error-placeholder".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").is_none_or(serde_json::Value::is_null)
+    })
+    .await;
+
+    let recorded = requests.0.lock().clone();
+    assert_eq!(recorded.len(), 1);
+    let tail = recorded[0]
+        .messages
+        .last()
+        .expect("Resume provider request tail");
+    assert_eq!(tail.role, crate::core::llm::ChatMessageRole::Tool);
+    assert_eq!(
+        tail.text_content(),
+        Some(crate::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT),
+        "the post-error healed placeholder is the legal continuation tail"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_prompt_failed_turn_retry_does_not_replay_superseded_user_tail() {
     let _api_key = install_test_api_key();
     let temp = tempfile::tempdir().expect("tempdir");

@@ -1023,6 +1023,45 @@ function markLatestUserMessageFailed(sessionId) {
   return null;
 }
 
+function recordHistoryCustom(sessionId, event, attempt) {
+  const session = touchSession(ensureSession(sessionId));
+  session.history.push({
+    attempt,
+    event,
+    type: "custom",
+  });
+}
+
+function copyUserMessageForward(sessionId, messageId) {
+  const session = touchSession(ensureSession(sessionId));
+  const targetIndex = session.history.findIndex(
+    (entry) => entry?.type === "message" && entry?.id === messageId && entry?.message?.role === "user",
+  );
+  if (targetIndex < 0) {
+    return null;
+  }
+  for (let index = targetIndex + 1; index < session.history.length; index += 1) {
+    const entry = session.history[index];
+    if (
+      entry?.type === "message"
+      && entry?.message?.role === "user"
+      && entry?.message?.superseded !== true
+    ) {
+      return null;
+    }
+  }
+  const message = JSON.parse(JSON.stringify(session.history[targetIndex].message));
+  delete message.superseded;
+  delete message.turn_failed;
+  const copy = {
+    id: "h-" + historyCounter++,
+    message,
+    type: "message",
+  };
+  session.history.push(copy);
+  return copy;
+}
+
 function recordHistoryError(sessionId, summary, detail) {
   const session = touchSession(ensureSession(sessionId));
   session.history.push({
@@ -1354,11 +1393,52 @@ function handlePrompt(frame) {
     return;
   }
 
+  if (text.includes("message kind showcase")) {
+    session.history.push(
+      {
+        id: "h-" + historyCounter++,
+        message: {
+          content: "please answer in Chinese",
+          kind: "steering",
+          role: "user",
+        },
+        type: "message",
+      },
+      {
+        id: "h-" + historyCounter++,
+        message: {
+          content: "Finish the remaining plan tasks before stopping.",
+          kind: "nudge",
+          role: "user",
+        },
+        type: "message",
+      },
+      {
+        id: "h-" + historyCounter++,
+        message: {
+          content: "Background task build-1 finished successfully.",
+          kind: "signal",
+          role: "user",
+        },
+        type: "message",
+      },
+    );
+    emitMessageDelta(sessionId, "message kinds recorded");
+    recordHistoryMessage(sessionId, "assistant", "message kinds recorded");
+    emitContextMetrics(sessionId, 0.36);
+    finishTurn(sessionId, null);
+    return;
+  }
+
   if (text.includes("retry 403 showcase")) {
     const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
     const failureDetail = "API 错误 403: <html>forbidden</html>\\nHost: aigateway.sunmi.com\\nRequest-Id: req-host-retry";
     session.retry403ShowcaseAttempts = Number(session.retry403ShowcaseAttempts || 0) + 1;
     if (session.retry403ShowcaseAttempts === 1) {
+      for (let attempt = 2; attempt <= 4; attempt += 1) {
+        recordHistoryCustom(sessionId, "auto_retry_start", attempt);
+      }
+      recordHistoryCustom(sessionId, "auto_retry_end", 4);
       markLatestUserMessageFailed(sessionId);
       recordHistoryError(sessionId, failureSummary, failureDetail);
       finishTurn(sessionId, failureSummary);
@@ -1374,24 +1454,25 @@ function handlePrompt(frame) {
   if (text.includes("resume card showcase")) {
     const tool = {
       args: { path: "README.md" },
-      result: "# Tomcat\\n",
+      result: "[pending]",
       toolCallId: "resume-card-read-1",
       toolName: "read",
     };
-    emitCompletedTool(sessionId, tool);
     recordHistoryAssistantWithTools(
       sessionId,
       "I read the project overview before the connection failed.",
       [tool],
       "Read project overview",
     );
-    recordHistoryToolResult(sessionId, tool);
     markLatestUserMessageFailed(sessionId);
     recordHistoryError(
       sessionId,
       "连接中断 · 可继续",
       "The model stopped after all tool calls had already completed.",
     );
+    // Recovery writes an unknown/pending tool result after its error record. The webview's
+    // Resume scanner must cross that annotation boundary and use this actual transcript tail.
+    recordHistoryToolResult(sessionId, tool);
     finishTurn(sessionId, "连接中断 · 可继续");
     return;
   }
@@ -1816,10 +1897,44 @@ function handleResume(frame) {
     });
     return;
   }
-  // The real server revives the same persisted user entry before starting a no-input turn.
-  // Mirror that contract so the E2E exercises Retry instead of quietly issuing a fresh prompt.
-  delete previousUser.message.superseded;
-  delete previousUser.message.turn_failed;
+  send({
+    id: frame.id,
+    payload: { accepted: true },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+  startTurn(sessionId);
+  if (content.includes("resume card showcase")) {
+    emitMessageDelta(sessionId, "same session Resume continued from the healed tool result");
+    recordHistoryMessage(
+      sessionId,
+      "assistant",
+      "same session Resume continued from the healed tool result",
+    );
+    emitContextMetrics(sessionId, 0.44);
+    finishTurn(sessionId, null);
+    return;
+  }
+  finishTurn(sessionId, null);
+}
+
+function handleRetry(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const copied = copyUserMessageForward(sessionId, frame.messageId);
+  const content = copied?.message?.content;
+  if (typeof content !== "string" || !content.trim()) {
+    send({
+      error: "retry_target_stale",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+  // The copy is already durable; use the normal prompt simulation only to execute the next
+  // model turn, never to synthesize another user row.
   handlePrompt({ ...frame, params: {}, resume: true, sessionId, text: content });
 }
 
@@ -2359,6 +2474,9 @@ function handleCommand(frame) {
       break;
     case "resume":
       handleResume(frame);
+      break;
+    case "retry":
+      handleRetry(frame);
       break;
     case "interrupt":
       handleInterrupt(frame);

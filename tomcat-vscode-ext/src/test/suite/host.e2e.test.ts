@@ -1,6 +1,8 @@
 import {
   assertPlanPreviewCustomEditorFlow,
   assertWebviewPlanModeSwitchFlow,
+  assertWebviewCompactControlFlow,
+  assertWebviewPersistedMessageKindFlow,
   assertWebviewAnswerCardFlow,
   assertWebviewAddModelsFlow,
   assertWebviewDiffFlow,
@@ -71,14 +73,24 @@ suite("Tomcat host E2E", () => {
     await assertWebviewReviewProgressFlow(api);
   });
 
-  test("recovers a failed same-session retry without leaving an obsolete error card", async () => {
+  test("copy-forwards a failed same-session retry while retaining its audit history", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewRetryRecoveryFlow(api);
   });
 
-  test("renders Resume when a failed turn already has every tool result", async () => {
+  test("resumes a failed tool turn after its post-error placeholder is persisted", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewResumeCardFlow(api);
+  });
+
+  test("places the compact control beside new session with a visible zip icon", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewCompactControlFlow(api);
+  });
+
+  test("rehydrates steering, guard, and background message kinds with their distinct UI", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewPersistedMessageKindFlow(api);
   });
 
   test("renders ask_question answers in the Tomcat webview transcript", async () => {

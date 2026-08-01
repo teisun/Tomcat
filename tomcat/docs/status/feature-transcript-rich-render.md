@@ -1,10 +1,11 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-01 16:11 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-01 22:12 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P1]** release 构建 dead-code/unused-import 告警收口：仅测试使用的 `assert_active_tool_result_integrity`、`run_tool_calls`、`finalize_turn_after_text` 加 `#[cfg(test)]`，生产路径继续走 `*_with_usage`；`cargo check --lib` 无上述 4 条 warning。@2026-08-01
 - [✓] **[P0/P1]** Retry/Resume 失败恢复已按 append-only transcript 重新收口：删除 `revive_trailing_failed_user_messages`；Retry 改为核心层同一锁内「保留旧章 + 按 message id 复制一条新 user 行」，旧失败提问、auto-retry custom 行与 error 均可审计，新行使用新 id，重复点击与陈旧锚点返回 `retry_target_stale` 且不动 transcript。Resume 不复制 user，只在活尾巴是完整配对的 tool result（含 `[pending]` 自愈占位）时开轮，否则返回 `nothing_to_resume`；出站再硬性拒绝 assistant 尾巴。跨 provider 的 opaque reasoning 一律 StripOpaque，绝不再把 continuity 伪装成 assistant 正文。`MessageKind` 已落盘并在 hydration/replay/UI 中保持语义，Nudge/Signal 折叠成系统注记。错误卡携带 retry anchor，Retry/Resume 分流后主动刷新 transcript，失败章、error 卡和复制出的两条 user 气泡都保留为历史；压缩按钮移到新建按钮右侧并使用 `codicon-file-zip`。验证：copy-forward/Resume/replay/guard 定向 Rust 回归全绿；扩展 lint、unit（333 core + 460 GUI）、host flow（Retry 两章 + Resume 占位）全绿；`npm run gate:full`（含安装 E2E）全绿。完整 `cargo test --lib` 为 2454 passed / 13 个既有无关红测。@2026-08-01
+- [✓] **[P0/P1]** Retry copy-forward 计划完成审计补测：附件复制不改 blob lease/字节仓库；所有合法出站尾巴（guard、Signal follow-up、Steering、完整 tool round）均可发出；旧 tool 尾巴不能误授权 Resume；失败后注水写出的占位 tool 结果可 Resume；serve 端陈旧 Retry 保持 transcript 字节不变；错误卡区分陈旧锚点与桥接失败。host E2E 夹具同步真实 copy-forward 语义（auto-retry custom 行、两条 user、错误记录保留），并覆盖 Resume 点击、压缩 zip 按钮截图、Steering/Nudge/Signal reload 渲染。验证：新增 Rust 定向回归与 `TOMCAT_E2E_SCREENSHOT=1` 四路径 host E2E 均绿，`npm run gate:full` 全绿。计划文件按此前约束未改，旧 `pending` 仅为清单状态滞后。@2026-08-01
 - [✓] **[P0]** Planner/Executor 仅在 `dispatch_agent` description 条件满足时派发 Explorer；catalog 明确简单任务、已知位置、一两批直接工具、自审及 Reviewer 已覆盖时禁用，并锁定首次合并问题、仅新阻塞点可二次派发；同步 prompt/catalog 回归和生成文档。@2026-07-29
 - [✓] **[P0]** Planner todo 改为“非简单任务按 milestone 精确拆解、简单单面修改使用 flat linear todo”；每个问题固定为“背景与证据 → 根因 → 解决方案（Key decisions）→ 验证”，要求不了解代码上下文的读者也能看懂，并删除一处重复第一性原理文案。@2026-07-29
 - [✓] **[P0]** Plan Preview selection 去重修复：列表项获得精确源行，selection identity 始终纳入文本快照 hash；不同条目可连续加入、完全相同引用仍去重，wire 协议不变；补齐 blockquote 内列表项递归行号映射与 2s 连续稳定性 host E2E 断言。@2026-07-29

@@ -2311,7 +2311,7 @@ export async function assertWebviewRetryRecoveryFlow(
   }
 
   // Must exercise the actual error-card action. Sending a second prompt would only prove that
-  // the normal composer path works, not that Retry revives the failed turn without cloning it.
+  // the normal composer path works, not that Retry copy-forwards the failed turn durably.
   await api.__testing.sendWebviewDomAction({
     kind: "clickTestId",
     testId: "recover-error-turn",
@@ -2335,13 +2335,13 @@ export async function assertWebviewRetryRecoveryFlow(
     "expected retrying in the same session to produce a successful assistant reply",
   );
   assert.ok(
-    !recoveredSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
-    "after a successful Retry, the obsolete error card must disappear from the live transcript",
+    recoveredSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
+    "a successful Retry consumes the action but preserves the error as durable history",
   );
   assert.equal(
     recoveredSnapshot.messageTexts.filter((text) => text.includes("retry 403 showcase")).length,
-    1,
-    "Retry must revive the existing user bubble rather than append a duplicate prompt",
+    2,
+    "Retry must retain the failed user chapter and append one copy-forward user message",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -2366,15 +2366,15 @@ export async function assertWebviewRetryRecoveryFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId
       && candidate.messageTexts.some((text) => text.includes(successText))
-      && !candidate.messageTexts.some((text) => text.includes(failureSummary))
+      && candidate.messageTexts.some((text) => text.includes(failureSummary))
         ? candidate
         : undefined,
     20_000,
   );
   assert.equal(
     rehydratedSnapshot.messageTexts.filter((text) => text.includes("retry 403 showcase")).length,
-    1,
-    "rehydration must preserve the revived prompt once without an obsolete error card",
+    2,
+    "rehydration must retain both the archived prompt and its copy-forward retry",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -2397,6 +2397,7 @@ export async function assertWebviewResumeCardFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
   const failureSummary = "连接中断 · 可继续";
+  const successText = "same session Resume continued from the healed tool result";
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
@@ -2446,6 +2447,121 @@ export async function assertWebviewResumeCardFlow(
       "Extension Development Host",
     );
   }
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "recover-error-turn",
+  });
+  await api.__testing.waitForEvent({
+    sessionId,
+    timeoutMs: 20_000,
+    type: "agent_end",
+  });
+  const resumedSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId
+      && candidate.messageTexts.some((text) => text.includes(successText))
+      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    resumedSnapshot.messageTexts.some((text) => text.includes(successText)),
+    "Resume must continue the tool turn from the post-error [pending] placeholder",
+  );
+}
+
+export async function assertWebviewCompactControlFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const sessionId = await createFreshWebviewSession(api, "webview-compact-control-session");
+  const snapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) => {
+      const newSessionIndex = candidate.html.indexOf('data-testid="new-session-button"');
+      const compactIndex = candidate.html.indexOf('data-testid="compact-context-button"');
+      return candidate.activeSessionId === sessionId
+        && newSessionIndex >= 0
+        && compactIndex > newSessionIndex
+        && candidate.html.includes("codicon-file-zip")
+        ? candidate
+        : undefined;
+    },
+    20_000,
+  );
+  const newSessionIndex = snapshot.html.indexOf('data-testid="new-session-button"');
+  const compactIndex = snapshot.html.indexOf('data-testid="compact-context-button"');
+  assert.ok(
+    compactIndex > newSessionIndex,
+    "the compact button must be immediately to the right of the new-session button",
+  );
+  assert.ok(
+    snapshot.html.includes("codicon-file-zip"),
+    "the compact control must use the zip-file codicon",
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    await pause(700);
+    captureTranscriptVisual(
+      "compact-control-position-and-icon",
+      "window",
+      "Extension Development Host",
+    );
+  }
+}
+
+export async function assertWebviewPersistedMessageKindFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const sessionId = await createFreshWebviewSession(api, "webview-message-kind-session");
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId, text: "message kind showcase" },
+      messageId: "webview-message-kind-prompt",
+      type: "prompt",
+    }),
+  );
+  await api.__testing.waitForEvent({
+    sessionId,
+    timeoutMs: 20_000,
+    type: "agent_end",
+  });
+
+  await api.__testing.reloadWebview();
+  await api.__testing.waitForWebviewReady();
+  const snapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId
+      && candidate.html.includes("please answer in Chinese")
+      && candidate.html.includes("计划未收口，已要求继续")
+      && candidate.html.includes("Finish the remaining plan tasks before stopping.")
+      && candidate.html.includes("后台任务已结束")
+      && candidate.html.includes("Background task build-1 finished successfully.")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    snapshot.html.includes("please answer in Chinese"),
+    "Steering remains a visible user bubble after hydration",
+  );
+  assert.ok(
+    snapshot.html.includes("计划未收口，已要求继续")
+      && snapshot.html.includes("后台任务已结束"),
+    "Nudge and Signal must rehydrate as named system-note boundaries",
+  );
+  assert.ok(
+    (snapshot.html.match(/class="tc-boundary"/gu) ?? []).length >= 2,
+    "Nudge and Signal must not fall back to user bubbles after reload",
+  );
 }
 
 export async function assertWebviewMultiSessionFlow(
@@ -3820,6 +3936,7 @@ function tryResolveVsCodeWindowWithTitle(
 function captureTranscriptVisual(
   name:
     | "collapsed"
+    | "compact-control-position-and-icon"
     | "diff-double-pane"
     | "expanded"
     | "file-drop-reference"

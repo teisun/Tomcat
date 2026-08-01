@@ -20,6 +20,11 @@ const __testing = (
     __testing: {
       registerDirectory(dirPath: string): void;
       setErrorMessageHandler(handler: ((message: string, items: string[]) => string | undefined) | undefined): void;
+      setWarningMessageHandler(
+        handler:
+          | ((message: string, items: string[], options?: { detail?: string; modal?: boolean }) => string | undefined)
+          | undefined,
+      ): void;
       registerFile(filePath: string, text: string): void;
       reset(): void;
       setConfiguration(key: string, value: unknown): void;
@@ -504,6 +509,11 @@ describe("error-turn recovery", () => {
     const provider = createRecoveryProvider(retry, resume);
     seedRetryableError(provider);
     const host = provider as any;
+    const warnings: string[] = [];
+    __testing.setWarningMessageHandler((message) => {
+      warnings.push(message);
+      return undefined;
+    });
 
     await host.handleIntent({
       data: { action: "retry", errorId: "error-1", sessionId: "s1" },
@@ -516,7 +526,9 @@ describe("error-turn recovery", () => {
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
     ).toMatchObject({ recoveryAction: "retry" });
+    expect(warnings).toEqual(["这张错误卡已经过期，无法重试。请刷新会话后重新输入。"]);
     provider.dispose();
+    __testing.setWarningMessageHandler(undefined);
   });
 
   it("keeps Resume on the no-input recovery route", async () => {
@@ -561,6 +573,59 @@ describe("error-turn recovery", () => {
     expect(resume).toHaveBeenCalledWith("s1");
     expect(retry).not.toHaveBeenCalled();
     provider.dispose();
+  });
+
+  it("distinguishes an unavailable bridge from a stale recovery anchor", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const resume = vi.fn().mockRejectedValue(new Error("bridge unavailable"));
+    const provider = createRecoveryProvider(retry, resume);
+    const host = provider as any;
+    host.stateStore.setActiveSession("s1");
+    host.stateStore.hydrateHistory("s1", {
+      messages: [
+        { id: "user-1", message: { content: "inspect", role: "user" }, type: "message" },
+        {
+          id: "assistant-1",
+          message: {
+            content: null,
+            role: "assistant",
+            tool_calls: [{ id: "read-1", name: "read" }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-1",
+          message: { content: "contents", role: "tool", tool_call_id: "read-1" },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ sessionId: "s1" });
+    vi.spyOn(host, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(host, "postState").mockResolvedValue(undefined);
+    const warnings: string[] = [];
+    __testing.setWarningMessageHandler((message) => {
+      warnings.push(message);
+      return undefined;
+    });
+
+    await host.handleIntent({
+      data: { action: "resume", errorId: "error-1", sessionId: "s1" },
+      messageId: "resume-error-1",
+      type: "recoverErrorTurn",
+    });
+
+    expect(resume).toHaveBeenCalledWith("s1");
+    expect(warnings).toEqual(["Unable to recover this turn: bridge unavailable"]);
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ recoveryAction: "resume" });
+    provider.dispose();
+    __testing.setWarningMessageHandler(undefined);
   });
 });
 
