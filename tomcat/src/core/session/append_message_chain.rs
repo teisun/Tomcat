@@ -216,6 +216,7 @@ pub(crate) fn is_tool_call_pending(entries: &[TranscriptEntry], tool_call_id: &s
 /// Transcript 的结构不变量：每个仍有效的 assistant tool call 都有且仅有一条仍有效的
 /// tool result。它是 hydrate / pending 替换测试共同使用的验收尺，避免「看起来能继续，
 /// 实际发到 provider 会因缺 result 或重复 result 被拒」。
+#[cfg(test)]
 pub(crate) fn assert_active_tool_result_integrity(
     entries: &[TranscriptEntry],
 ) -> Result<(), String> {

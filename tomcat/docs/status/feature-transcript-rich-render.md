@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-01 11:04 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-01 11:28 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** release 构建 dead-code/unused-import 告警收口：仅测试使用的 `assert_active_tool_result_integrity`、`run_tool_calls`、`finalize_turn_after_text` 加 `#[cfg(test)]`，生产路径继续走 `*_with_usage`；`cargo check --lib` 无上述 4 条 warning。@2026-08-01
 - [✓] **[P0]** 会话卡死与失败恢复整改已落地：失败回合用 `revive_trailing_failed_user_messages` 撤掉尾部 user 的 `superseded/turn_failed`，error 卡 Retry/Resume 统一走 `ServeCommand::Resume`（无输入开轮、不复制用户气泡）；pending/`ask_question` 结果替换先内存校验再落盘，sidecar 盖章只刷 size/mtime，JSONL 改写改为流式原子写；`HostDraftCoordinator` 同会话重入直接抛错、draft-fork 投递可 await 并超时放行；单文件 `edit` 成功后刷新 ReadStamp；LLM 侧补 402 Billing、首帧前 parse→Transport、空回合/overflow 进度与 `/compact` ratio 断言；错误卡 UI 将诊断链接与全宽主按钮分离（Retry=refresh、Resume=debug-continue）。版本 CLI `0.1.22` / 扩展 `0.1.32`（`bundledCliVersion=0.1.22`）。验证：定向 Rust revive/resume/resume-index；扩展 `lint` + unit（含 MessageBubble）；`TOMCAT_E2E_SCREENSHOT=1` host E2E 含真实点击 Retry 与 Resume 卡截图；`gate:full`/安装 E2E 在旁路撤回后曾真绿。@2026-08-01
 - [✓] **[P0]** Planner/Executor 仅在 `dispatch_agent` description 条件满足时派发 Explorer；catalog 明确简单任务、已知位置、一两批直接工具、自审及 Reviewer 已覆盖时禁用，并锁定首次合并问题、仅新阻塞点可二次派发；同步 prompt/catalog 回归和生成文档。@2026-07-29
 - [✓] **[P0]** Planner todo 改为“非简单任务按 milestone 精确拆解、简单单面修改使用 flat linear todo”；每个问题固定为“背景与证据 → 根因 → 解决方案（Key decisions）→ 验证”，要求不了解代码上下文的读者也能看懂，并删除一处重复第一性原理文案。@2026-07-29
@@ -89,6 +90,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-01 11:28）：release 路径 unused/dead_code 四条告警已用 `#[cfg(test)]` 收口；`cargo check --lib` 绿。本机另打纯插件包 `tomcat-vscode-ext-0.1.32.vsix`（不含 CLI，不入库）。
 - 最新补充（2026-08-01 11:04）：卡死机制整改与版本发布合入工作区：CLI `0.1.22` / 扩展 `0.1.32`；错误卡主按钮视觉与真实 Retry/Resume E2E 截图已验收；定向 Rust revive/resume/index 与扩展 MessageBubble/state/provider 测试绿；完整 `cargo test --lib` 仍有既有 serve 附件失败未清。`run-vscode-devhost` 现透传 `TOMCAT_E2E_SCREENSHOT` / `TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR`。
 - 最新补充（2026-07-29 08:36）：定向 Rust 验证通过：`core::prompts::tests::load_test` 24/24、catalog 12/12、`tool_catalog_doc` 2/2、`prompt_size_budget` 3/3；`git diff --check` 通过。
 - 最新补充（2026-07-29 08:36）：VS Code `npm run gate:fast` 通过：24 个 extension/core 测试文件 282 个测试、52 个 GUI 测试文件 442 个测试全部通过；devhost 命令在场景执行前因上述启动路径问题退出。

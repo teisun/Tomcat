@@ -110,6 +110,10 @@ fn should_apply_completion_guard(agent: &AgentLoop) -> Option<String> {
 /// `on_message_appended` 计费、重复发 `TurnEnd`。
 ///
 /// `content_buf`：本轮 delta 累积。`turn_index`：作为 `TurnEnd` 的 turn 序号。
+///
+/// 这是不带 usage 的测试便利包装；生产路径统一调用
+/// [`finalize_turn_after_text_with_usage`]，以保留 provider usage。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn finalize_turn_after_text(
     agent: &mut AgentLoop,

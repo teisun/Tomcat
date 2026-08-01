@@ -98,6 +98,10 @@ fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: 
 /// 然后 `steered = true; break;`。**当次** tool 的 result 已入 messages；余下
 /// tool_calls **不执行**。调用方应 `continue` reasoning loop 让下一次 LLM 请求
 /// 携带 steering 消息。
+///
+/// 这是不带 usage 的测试便利包装；生产路径统一调用
+/// [`run_tool_calls_with_usage`]，以便将 provider usage 透传到落盘事件。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_tool_calls(
     agent: &mut AgentLoop,

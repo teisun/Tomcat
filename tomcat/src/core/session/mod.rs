@@ -11,11 +11,12 @@ pub(crate) mod store;
 pub(crate) mod subagent_transcript;
 pub mod transcript;
 
+#[cfg(test)]
+pub(crate) use append_message_chain::assert_active_tool_result_integrity;
 pub(crate) use append_message_chain::{
-    ResumableAskQuestionResult, assert_active_tool_result_integrity,
-    classify_resumable_ask_question_result, collect_recent_chat_messages_from_tail,
-    find_dangling_tail_tool_call_ids, find_dangling_tail_tool_calls,
-    has_dangling_tool_calls_in_messages, is_tool_call_pending,
+    ResumableAskQuestionResult, classify_resumable_ask_question_result,
+    collect_recent_chat_messages_from_tail, find_dangling_tail_tool_call_ids,
+    find_dangling_tail_tool_calls, has_dangling_tool_calls_in_messages, is_tool_call_pending,
 };
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use manager::{
