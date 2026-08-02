@@ -2901,7 +2901,7 @@ describe("local user message delivery state", () => {
     expect(runtime.localUserMessageIds.has("missing-user-id")).toBe(false);
   });
 
-  it("keeps only the newest failed local user message actionable", () => {
+  it("drops an earlier failed local user message when a newer prompt starts", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.appendLocalUserMessage("s1", "first", {
@@ -2918,10 +2918,7 @@ describe("local user message delivery state", () => {
     const users = store
       .snapshot()
       .sessionViews.s1.timeline.filter((item) => item.type === "message" && item.kind === "user");
-    expect(users.find((item) => item.id === "first")).toMatchObject({
-      text: "first",
-    });
-    expect(users.find((item) => item.id === "first")).not.toHaveProperty("deliveryState");
+    expect(users.find((item) => item.id === "first")).toBeUndefined();
     expect(users.find((item) => item.id === "second")).toMatchObject({
       deliveryState: "failed",
       retryable: true,
@@ -2930,7 +2927,7 @@ describe("local user message delivery state", () => {
 });
 
 describe("checkpoint history replay", () => {
-  it("keeps an error as history after a later user turn has started", () => {
+  it("hides a completed failed chapter after a later user turn has started", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
@@ -2985,13 +2982,46 @@ describe("checkpoint history replay", () => {
       session.timeline.map((item) =>
         item.type === "message" ? item.id : item.type,
       ),
-    ).toEqual(["user-1", "assistant-1", "user-failed", "error-1", "user-2"]);
+    ).toEqual(["user-1", "assistant-1", "user-2"]);
+    expect(session.timeline.some((item) => item.type === "message" && item.id === "user-failed"))
+      .toBe(false);
+    expect(session.timeline.some((item) => item.type === "message" && item.id === "error-1"))
+      .toBe(false);
+  });
+
+  it("keeps the newest unresolved retry chapter visible after automatic retries", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "retry this exact prompt",
+            role: "user",
+            superseded: true,
+            turn_failed: true,
+          },
+          type: "message",
+        },
+        { event: "auto_retry_start", id: "retry-start-1", type: "custom" },
+        { event: "auto_retry_end", id: "retry-end-1", type: "custom" },
+        { detail: "rate limited", id: "error-1", summary: "API 错误 429", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    expect(
+      session.timeline.find((item) => item.type === "message" && item.id === "user-1"),
+    ).toMatchObject({ kind: "user", text: "retry this exact prompt" });
     expect(
       session.timeline.find((item) => item.type === "message" && item.id === "error-1"),
-    ).toMatchObject({ kind: "error" });
-    expect(
-      session.timeline.find((item) => item.type === "message" && item.id === "error-1"),
-    ).not.toHaveProperty("recoveryAction");
+    ).toMatchObject({
+      kind: "error",
+      recoveryAction: "retry",
+      recoveryTargetUserMessageId: "user-1",
+    });
   });
 
   it("marks a failed turn with fully paired tool results as resumable", () => {
@@ -3031,7 +3061,7 @@ describe("checkpoint history replay", () => {
     expect(error).toMatchObject({ kind: "error", recoveryAction: "resume" });
   });
 
-  it("only leaves the newest unresolved error actionable across repeated failures", () => {
+  it("shows only the newest unresolved failed chapter across repeated failures", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.hydrateHistory("s1", {
@@ -3061,16 +3091,16 @@ describe("checkpoint history replay", () => {
     const errors = store.snapshot().sessionViews.s1.timeline.filter(
       (item) => item.type === "message" && item.kind === "error",
     );
-    expect(errors).toHaveLength(3);
-    expect(errors[0]).toMatchObject({ id: "error-1", kind: "error" });
-    expect(errors[0]).not.toHaveProperty("recoveryAction");
-    expect(errors[1]).toMatchObject({ id: "error-2", kind: "error" });
-    expect(errors[1]).not.toHaveProperty("recoveryAction");
-    expect(errors[2]).toMatchObject({
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
       id: "error-3",
       recoveryAction: "retry",
       recoveryTargetUserMessageId: "user-3",
     });
+    const users = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "message" && item.kind === "user",
+    );
+    expect(users).toEqual([expect.objectContaining({ id: "user-3", text: "third" })]);
   });
 
   it("scans healed tool results written after an error and offers Resume", () => {
@@ -3145,7 +3175,7 @@ describe("checkpoint history replay", () => {
     expect(error).not.toHaveProperty("recoveryAction");
   });
 
-  it("keeps a recovered error as history and restores its action on rejection", () => {
+  it("drops a retry chapter immediately and restores it if Retry is rejected", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.hydrateHistory("s1", {
@@ -3165,12 +3195,12 @@ describe("checkpoint history replay", () => {
       store.snapshot().sessionViews.s1.timeline.find(
         (item) => item.type === "message" && item.id === "error-1",
       ),
-    ).toMatchObject({ kind: "error" });
+    ).toBeUndefined();
     expect(
       store.snapshot().sessionViews.s1.timeline.find(
-        (item) => item.type === "message" && item.id === "error-1",
+        (item) => item.type === "message" && item.id === "user-1",
       ),
-    ).not.toHaveProperty("recoveryAction");
+    ).toBeUndefined();
 
     store.restoreDismissedErrorRecovery("s1", "error-1");
     expect(
@@ -3178,6 +3208,11 @@ describe("checkpoint history replay", () => {
         (item) => item.type === "message" && item.id === "error-1",
       ),
     ).toMatchObject({ recoveryAction: "retry" });
+    expect(
+      store.snapshot().sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "user-1",
+      ),
+    ).toMatchObject({ kind: "user", text: "retry me" });
   });
 
   it("uses the local failed bubble instead of rendering its superseded history duplicate", () => {

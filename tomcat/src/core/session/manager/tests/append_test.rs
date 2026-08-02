@@ -128,12 +128,18 @@ fn copy_forward_preserves_failed_message_and_appends_a_live_copy_after_annotatio
 }
 
 #[test]
-fn copy_forward_accepts_an_unstamped_user_anchor() {
+fn copy_forward_stamps_an_unstamped_anchor_before_hydration() {
     let (_temp, manager) = new_copy_forward_manager();
     let original_id = manager
         .append_message(serde_json::json!({
             "role": "user",
             "content": "completion guard failed after this prompt",
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "I started, but the stream disconnected.",
         }))
         .unwrap();
     append_failed_turn_error(&manager);
@@ -148,12 +154,33 @@ fn copy_forward_accepts_an_unstamped_user_anchor() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
     assert_eq!(messages[0].id.as_deref(), Some(original_id.as_str()));
-    assert_eq!(messages[1].id.as_deref(), Some(copied_id.as_str()));
+    assert_eq!(messages[2].id.as_deref(), Some(copied_id.as_str()));
+    assert_eq!(messages[0].message["superseded"], true);
+    assert_eq!(messages[0].message["turn_failed"], true);
+    assert_eq!(messages[1].message["superseded"], true);
+
+    let context = init_context_state(&manager, &ContextConfig::default(), "system").unwrap();
+    let prompts = context
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == crate::core::llm::ChatMessageRole::User
+                && message.text_content() == Some("completion guard failed after this prompt")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompts.len(),
+        1,
+        "hydration must send only the fresh copy, never both source and copy"
+    );
+    assert_eq!(prompts[0].msg_id.as_deref(), Some(copied_id.as_str()));
     assert!(
-        messages[0].message.get("turn_failed").is_none(),
-        "copy-forward must not depend on a best-effort failure marker"
+        context.messages.iter().all(
+            |message| message.text_content() != Some("I started, but the stream disconnected.")
+        ),
+        "the abandoned partial assistant response must not survive alongside the copied prompt"
     );
 }
 

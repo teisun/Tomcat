@@ -441,6 +441,11 @@ export type HostToWebviewFrame =
             type: "insertReference";
           }
         | {
+            references: WebviewReference[];
+            sessionId: string;
+            type: "insertReferences";
+          }
+        | {
             error?: string;
             operationId: string;
             sessionId: string;

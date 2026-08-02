@@ -25,7 +25,7 @@ import { warmRichRenderModules } from "./components/markdown/richRenderRuntime";
 import { TranscriptView } from "./components/TranscriptView";
 import { readContextSearchDebounceMs } from "./contextSearchConfig";
 import { ComposerWorkRegistry } from "./composerWorkRegistry";
-import { isWebviewReference } from "./contextReferences";
+import { isWebviewReference, referenceIdentity } from "./contextReferences";
 import type {
   AskQuestionResult,
   ContextSearchMatch,
@@ -231,6 +231,27 @@ function isInsertReferenceEvent(
     typeof content.sessionId === "string" &&
     "reference" in content &&
     isWebviewReference(content.reference)
+  );
+}
+
+function isInsertReferencesEvent(
+  content: HostToWebviewFrame["content"],
+): content is {
+  references: WebviewReference[];
+  sessionId: string;
+  type: "insertReferences";
+} {
+  return (
+    !!content &&
+    typeof content === "object" &&
+    "type" in content &&
+    content.type === "insertReferences" &&
+    "sessionId" in content &&
+    typeof content.sessionId === "string" &&
+    "references" in content &&
+    Array.isArray(content.references) &&
+    content.references.length > 0 &&
+    content.references.every(isWebviewReference)
   );
 }
 
@@ -1475,6 +1496,26 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     }
     const isSessionSwitch = applied?.sessionId !== sessionId;
     if (!isSessionSwitch && locallyEditedDraftsRef.current.has(sessionId)) {
+      const presentReferenceIds = new Set(
+        composer
+          .getDraft()
+          .segments
+          .filter(isWebviewReference)
+          .map(referenceIdentity),
+      );
+      const missingReferences = backendDraft.segments
+        .filter(isWebviewReference)
+        .filter((reference) => !presentReferenceIds.has(referenceIdentity(reference)));
+      if (missingReferences.length > 0) {
+        // Local typing wins over stale host text, but it must never discard durable
+        // references that were added by a host-side picker while the draft was dirty.
+        applyingBackendDraftRef.current = true;
+        try {
+          composer.insertReferences(missingReferences);
+        } finally {
+          applyingBackendDraftRef.current = false;
+        }
+      }
       return;
     }
     appliedComposerDraftRef.current = { sessionId, signature };
@@ -1725,20 +1766,28 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         persistGuiState(vscodeApi, patched.state, approvalAnswersRef.current);
         return;
       }
-      if (
-        frame.channel === "event" &&
-        isInsertReferenceEvent(frame.content)
-      ) {
-        const insertion = {
-          reference: frame.content.reference,
-          sessionId: frame.content.sessionId,
-        };
-        if (composerRef.current && insertion.sessionId === stateRef.current.activeSessionId) {
-          composerRef.current.insertReference(insertion.reference);
-        } else {
-          pendingInsertionsRef.current.push(insertion);
+      if (frame.channel === "event") {
+        const insertions = isInsertReferenceEvent(frame.content)
+          ? {
+              references: [frame.content.reference],
+              sessionId: frame.content.sessionId,
+            }
+          : isInsertReferencesEvent(frame.content)
+            ? frame.content
+            : null;
+        if (insertions) {
+          if (composerRef.current && insertions.sessionId === stateRef.current.activeSessionId) {
+            composerRef.current.insertReferences(insertions.references);
+          } else {
+            pendingInsertionsRef.current.push(
+              ...insertions.references.map((reference) => ({
+                reference,
+                sessionId: insertions.sessionId,
+              })),
+            );
+          }
+          return;
         }
-        return;
       }
       if (frame.channel === "event") {
         if (
@@ -2538,9 +2587,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         }}
         onDraftChange={(draft) => {
           if (activeSession?.sessionId) {
-            if (!applyingBackendDraftRef.current) {
-              locallyEditedDraftsRef.current.add(activeSession.sessionId);
-            }
+            locallyEditedDraftsRef.current.add(activeSession.sessionId);
             scheduleComposerDraftSync(activeSession.sessionId, draft);
           }
         }}

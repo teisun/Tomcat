@@ -352,6 +352,38 @@ async function createFreshWebviewSession(
   const knownSessionIds = new Set(
     api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
   );
+  const sessionId = await api.__testing.createFreshWebviewSession(null);
+  assert.ok(
+    !knownSessionIds.has(sessionId),
+    `${messageId}: test fixture must create a session distinct from the bootstrap session`,
+  );
+  await waitForWebviewState(
+    api,
+    (state) =>
+      state.activeSessionId === sessionId
+      && state.sessionViews[sessionId]?.ownedByThisFrontend
+        ? state
+        : undefined,
+    timeoutMs,
+  );
+  return sessionId;
+}
+
+/**
+ * Exercise the production new-session draft-fork handshake.
+ *
+ * All other host scenarios use the isolated fixture helper above. They must not wait for a
+ * frontend draft capture they are not testing.
+ */
+async function createDraftForkWebviewSession(
+  api: TomcatExtensionApi,
+  messageId: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  await waitForWebviewBootstrapSettled(api);
+  const knownSessionIds = new Set(
+    api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
+  );
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { cwd: null },
@@ -363,8 +395,7 @@ async function createFreshWebviewSession(
     api,
     (state) => {
       const created = state.sessions.find(
-        (session) =>
-          !knownSessionIds.has(session.sessionId),
+        (session) => !knownSessionIds.has(session.sessionId),
       );
       return created?.sessionId;
     },
@@ -2335,13 +2366,13 @@ export async function assertWebviewRetryRecoveryFlow(
     "expected retrying in the same session to produce a successful assistant reply",
   );
   assert.ok(
-    recoveredSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
-    "a successful Retry consumes the action but preserves the error as durable history",
+    !recoveredSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
+    "a successful Retry must hide its completed failure chapter",
   );
   assert.equal(
     recoveredSnapshot.messageTexts.filter((text) => text.includes("retry 403 showcase")).length,
-    2,
-    "Retry must retain the failed user chapter and append one copy-forward user message",
+    1,
+    "Retry must render only its fresh copy-forward user message",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -2366,15 +2397,15 @@ export async function assertWebviewRetryRecoveryFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId
       && candidate.messageTexts.some((text) => text.includes(successText))
-      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+      && !candidate.messageTexts.some((text) => text.includes(failureSummary))
         ? candidate
         : undefined,
     20_000,
   );
   assert.equal(
     rehydratedSnapshot.messageTexts.filter((text) => text.includes("retry 403 showcase")).length,
-    2,
-    "rehydration must retain both the archived prompt and its copy-forward retry",
+    1,
+    "rehydration must keep only the fresh copy-forward user message",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -2386,7 +2417,7 @@ export async function assertWebviewRetryRecoveryFlow(
     });
     await pause(700);
     captureTranscriptVisual(
-      "transcript-error-record",
+      "transcript-current-attempt",
       "window",
       "Extension Development Host",
     );
@@ -2462,7 +2493,7 @@ export async function assertWebviewResumeCardFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId
       && candidate.messageTexts.some((text) => text.includes(successText))
-      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+      && !candidate.messageTexts.some((text) => text.includes(failureSummary))
         ? candidate
         : undefined,
     20_000,
@@ -2470,6 +2501,10 @@ export async function assertWebviewResumeCardFlow(
   assert.ok(
     resumedSnapshot.messageTexts.some((text) => text.includes(successText)),
     "Resume must continue the tool turn from the post-error [pending] placeholder",
+  );
+  assert.ok(
+    !resumedSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
+    "a successful Resume must hide its completed error card",
   );
 }
 
@@ -2487,7 +2522,7 @@ export async function assertWebviewCompactControlFlow(
       return candidate.activeSessionId === sessionId
         && newSessionIndex >= 0
         && compactIndex > newSessionIndex
-        && candidate.html.includes("codicon-file-zip")
+        && candidate.html.includes("codicon-layers")
         ? candidate
         : undefined;
     },
@@ -2500,8 +2535,8 @@ export async function assertWebviewCompactControlFlow(
     "the compact button must be immediately to the right of the new-session button",
   );
   assert.ok(
-    snapshot.html.includes("codicon-file-zip"),
-    "the compact control must use the zip-file codicon",
+    snapshot.html.includes("codicon-layers"),
+    "the compact control must use the layers codicon",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -3287,7 +3322,7 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
       20_000,
     );
 
-    const targetSessionId = await createFreshWebviewSession(
+    const targetSessionId = await createDraftForkWebviewSession(
       api,
       "webview-draft-fork-reference-target",
     );
@@ -3956,7 +3991,7 @@ function captureTranscriptVisual(
     | "switch-order"
     | "switch-restore"
     | "todo-expanded"
-    | "transcript-error-record"
+    | "transcript-current-attempt"
     | "tool-icons"
     | "tool-icons-bottom",
   region: CaptureRegion = "window",

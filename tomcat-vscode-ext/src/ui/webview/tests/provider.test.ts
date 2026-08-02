@@ -468,7 +468,7 @@ describe("error-turn recovery", () => {
     vi.spyOn(host, "postState").mockResolvedValue(undefined);
   }
 
-  it("copies a failed prompt forward through the durable Retry command", async () => {
+  it("hides the failed chapter while durable Retry starts", async () => {
     const retry = vi.fn().mockResolvedValue(undefined);
     const resume = vi.fn().mockResolvedValue(undefined);
     const provider = createRecoveryProvider(retry, resume);
@@ -485,21 +485,15 @@ describe("error-turn recovery", () => {
     expect(retry).toHaveBeenCalledWith("s1", "user-1");
     expect(resume).not.toHaveBeenCalled();
     expect(sendUserMessage).not.toHaveBeenCalled();
-    const users = host.currentState().sessionViews.s1.timeline.filter(
+    const failedChapter = host.currentState().sessionViews.s1.timeline.filter(
       (item: { kind?: string; type: string }) => item.type === "message" && item.kind === "user",
     );
-    expect(users).toHaveLength(1);
-    expect(users[0]).toMatchObject({ id: "user-1", text: "keep this exact prompt" });
+    expect(failedChapter).toHaveLength(0);
     expect(
       host.currentState().sessionViews.s1.timeline.find(
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
-    ).toMatchObject({ kind: "error" });
-    expect(
-      host.currentState().sessionViews.s1.timeline.find(
-        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
-      ),
-    ).not.toHaveProperty("recoveryAction");
+    ).toBeUndefined();
     provider.dispose();
   });
 
@@ -526,6 +520,11 @@ describe("error-turn recovery", () => {
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
     ).toMatchObject({ recoveryAction: "retry" });
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "user-1",
+      ),
+    ).toMatchObject({ kind: "user", text: "keep this exact prompt" });
     expect(warnings).toEqual(["这张错误卡已经过期，无法重试。请刷新会话后重新输入。"]);
     provider.dispose();
     __testing.setWarningMessageHandler(undefined);
@@ -572,6 +571,16 @@ describe("error-turn recovery", () => {
 
     expect(resume).toHaveBeenCalledWith("s1");
     expect(retry).not.toHaveBeenCalled();
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toBeUndefined();
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "user-1",
+      ),
+    ).toMatchObject({ kind: "user", text: "inspect" });
     provider.dispose();
   });
 

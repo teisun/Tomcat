@@ -818,6 +818,77 @@ pub fn mark_tool_result_entries_by_tool_call_id_superseded(
     Ok(changed)
 }
 
+/// 将指定 id 的 user message 标记为 `superseded=true + turn_failed=true`。
+///
+/// Retry copy-forward 的源行未必处在 transcript 尾部：模型可能已经写下不含 tool call
+/// 的 assistant 文本后才断流。无论失败时的尾部盖章是否漏过该行，只要复制了它，就必须
+/// 让它失去活输入资格，避免下一次注水把源行与副本同时交给 provider。
+///
+/// 锚点不存在、不是 user message，或两个标记本来都已存在时不改写并返回 `Ok(0)`；
+/// 否则精确改写这一行并返回 `Ok(1)`。
+pub fn mark_user_message_entry_superseded_by_id(
+    path: &Path,
+    message_id: &str,
+) -> Result<usize, AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut changed = 0usize;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.push(lines[0].clone());
+
+    for line in lines.into_iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push(line);
+            continue;
+        }
+        match serde_json::from_str::<TranscriptEntry>(trimmed) {
+            Ok(TranscriptEntry::Message(mut me))
+                if me.id.as_deref() == Some(message_id)
+                    && me.message.get("role").and_then(|value| value.as_str()) == Some("user") =>
+            {
+                let is_superseded = me
+                    .message
+                    .get("superseded")
+                    .and_then(|value| value.as_bool())
+                    == Some(true);
+                let turn_failed = me
+                    .message
+                    .get("turn_failed")
+                    .and_then(|value| value.as_bool())
+                    == Some(true);
+                if is_superseded && turn_failed {
+                    out.push(line);
+                    continue;
+                }
+                if let Some(message) = me.message.as_object_mut() {
+                    message.insert("superseded".to_string(), serde_json::json!(true));
+                    message.insert("turn_failed".to_string(), serde_json::json!(true));
+                }
+                changed += 1;
+                out.push(serde_json::to_string(&TranscriptEntry::Message(me))?);
+            }
+            _ => out.push(line),
+        }
+    }
+
+    if changed == 0 {
+        return Ok(0);
+    }
+
+    write_jsonl_lines_atomically(path, &out)?;
+    let _ = refresh_resume_index_after_nonstructural_rewrite(path);
+    Ok(changed)
+}
+
 /// 将 transcript 尾部连续、尚未 superseded 的 user message 标记为
 /// `superseded=true + turn_failed=true`。
 ///

@@ -73,17 +73,17 @@ suite("Tomcat host E2E", () => {
     await assertWebviewReviewProgressFlow(api);
   });
 
-  test("copy-forwards a failed same-session retry while retaining its audit history", async () => {
+  test("copy-forwards a failed same-session retry while showing only the current attempt", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewRetryRecoveryFlow(api);
   });
 
-  test("resumes a failed tool turn after its post-error placeholder is persisted", async () => {
+  test("resumes a failed tool turn and hides its completed error card", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewResumeCardFlow(api);
   });
 
-  test("places the compact control beside new session with a visible zip icon", async () => {
+  test("places the compact control beside new session with a visible layers icon", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewCompactControlFlow(api);
   });

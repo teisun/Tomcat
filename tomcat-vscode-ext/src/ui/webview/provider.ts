@@ -448,6 +448,10 @@ function displayRecoveryError(error: unknown): string {
   return formatBridgeError("recover this turn", error);
 }
 
+function referenceDraftKey(reference: WebviewReference): string {
+  return `${reference.kind}\0${reference.path}\0${reference.lineStart}\0${reference.lineEnd}`;
+}
+
 function retryAttachmentRef(attachment: WebviewAttachmentView): DraftAttachmentRef {
   return {
     blobSha: attachment.blobSha,
@@ -919,21 +923,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const { accepted, insertedReferences } = await this.draftCoordinator.run(
       sessionId,
       async () => {
-        const insertedReferences: WebviewReference[] = [];
-        for (const reference of references) {
-          if (await this.insertReferenceIntoDraft(sessionId, reference)) {
-            insertedReferences.push(reference);
-          }
-        }
+        const insertedReferences = await this.insertReferencesIntoDraft(sessionId, references);
         return {
           accepted: await this.ingestUploads(sessionId, uploads, errors),
           insertedReferences,
         };
       },
     );
-    await Promise.all(
-      insertedReferences.map((reference) => this.postInsertedReference(sessionId, reference)),
-    );
+    await this.postInsertedReferences(sessionId, insertedReferences);
+    // The picker changed one session's durable composer state. Follow its immediate
+    // rendering hint with that session's authoritative projection; unlike a broad state
+    // frame, it cannot be superseded by updates from another session.
+    await this.postSessionView(sessionId);
     await this.reportAttachmentOutcome(accepted, errors);
   }
 
@@ -2270,25 +2271,45 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     reference: WebviewReference,
   ): Promise<boolean> {
+    return (await this.insertReferencesIntoDraft(sessionId, [reference])).length > 0;
+  }
+
+  /**
+   * Add one picker transaction's references in one draft replacement and one state
+   * projection. Emitting a partial state after each item lets the webview classify the
+   * first reference as a local edit and reject the later, complete snapshot.
+   */
+  private async insertReferencesIntoDraft(
+    sessionId: string,
+    references: readonly WebviewReference[],
+  ): Promise<WebviewReference[]> {
     const current = this.draftStore.peek(sessionId);
-    const alreadyPresent = current.segments.some(
-      (segment) =>
-        segment.type === "reference" &&
-        segment.kind === reference.kind &&
-        segment.path === reference.path &&
-        segment.lineStart === reference.lineStart &&
-        segment.lineEnd === reference.lineEnd,
+    const existing = new Set(
+      current.segments.flatMap((segment) =>
+        segment.type === "reference"
+          ? [referenceDraftKey(segment)]
+          : [],
+      ),
     );
-    if (alreadyPresent) {
-      return false;
+    const inserted: WebviewReference[] = [];
+    for (const reference of references) {
+      const key = referenceDraftKey(reference);
+      if (existing.has(key)) {
+        continue;
+      }
+      existing.add(key);
+      inserted.push(reference);
+    }
+    if (inserted.length === 0) {
+      return inserted;
     }
     const draft = await this.draftStore.replaceAndFlush(sessionId, {
       attachments: current.attachments,
-      segments: [...current.segments, reference],
+      segments: [...current.segments, ...inserted],
       text: current.text,
     });
     await this.applyDraftToState(sessionId, draft);
-    return true;
+    return inserted;
   }
 
   private async postInsertedReference(
@@ -2299,6 +2320,26 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       reference,
       sessionId,
       type: "insertReference",
+    });
+  }
+
+  /**
+   * A picker confirmation may add several references to one durable draft transaction.
+   * Project that transaction to the webview in one frame so Chromium applies the same
+   * complete set in one editor update; one frame being lost must never leave a partial
+   * selection visible.
+   */
+  private async postInsertedReferences(
+    sessionId: string,
+    references: WebviewReference[],
+  ): Promise<void> {
+    if (references.length === 0) {
+      return;
+    }
+    await this.postEvent({
+      references,
+      sessionId,
+      type: "insertReferences",
     });
   }
 

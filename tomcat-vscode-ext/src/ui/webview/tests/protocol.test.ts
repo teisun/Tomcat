@@ -31,6 +31,36 @@ describe("webview protocol helpers", () => {
     ).toBe(true);
     expect(
       isHostToWebviewFrame({
+        channel: "event",
+        content: {
+          references: [
+            {
+              kind: "file",
+              label: "app.ts",
+              lineEnd: null,
+              lineStart: null,
+              path: "app.ts",
+              text: null,
+              type: "reference",
+            },
+            {
+              kind: "file",
+              label: "folder/",
+              lineEnd: null,
+              lineStart: null,
+              path: "folder/",
+              text: null,
+              type: "reference",
+            },
+          ],
+          sessionId: "s1",
+          type: "insertReferences",
+        },
+        messageId: "event-batch-1",
+      }),
+    ).toBe(true);
+    expect(
+      isHostToWebviewFrame({
         channel: "sessionView",
         content: {
           sessionId: "s1",

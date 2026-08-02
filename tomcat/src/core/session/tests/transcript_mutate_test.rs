@@ -529,6 +529,64 @@ fn mark_trailing_user_messages_superseded_marks_only_active_user_tail() {
 }
 
 #[test]
+fn mark_user_message_entry_superseded_by_id_is_precise_and_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("copy_forward_anchor.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+    for (id, role) in [
+        ("source", "user"),
+        ("assistant", "assistant"),
+        ("other", "user"),
+    ] {
+        append_entry(
+            &path,
+            &TranscriptEntry::Message(MessageEntry {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+                message: serde_json::json!({"role": role, "content": id}),
+            }),
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        mark_user_message_entry_superseded_by_id(&path, "source").unwrap(),
+        1
+    );
+    let after_first_stamp = std::fs::read(&path).unwrap();
+    assert_eq!(
+        mark_user_message_entry_superseded_by_id(&path, "source").unwrap(),
+        0,
+        "repeating the stamp must not rewrite an already stamped source row"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), after_first_stamp);
+
+    let entries = read_entries_tail(&path, 8).unwrap();
+    let messages = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message) => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(messages[0].message["superseded"], true);
+    assert_eq!(messages[0].message["turn_failed"], true);
+    assert!(messages[1].message.get("superseded").is_none());
+    assert!(messages[2].message.get("superseded").is_none());
+}
+
+#[test]
 fn error_entry_roundtrips_as_type_error() {
     let entry = TranscriptEntry::Error(ErrorEntry {
         id: Some("err-1".to_string()),

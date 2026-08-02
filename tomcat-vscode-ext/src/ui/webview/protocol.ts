@@ -433,6 +433,11 @@ export type HostEventFrameContent =
       type: "insertReference";
     }
   | {
+      references: WebviewReference[];
+      sessionId: string;
+      type: "insertReferences";
+    }
+  | {
       type: "__test.capture_dom";
     }
   | {

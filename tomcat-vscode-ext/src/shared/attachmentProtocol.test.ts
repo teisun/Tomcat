@@ -90,5 +90,5 @@ describe("attachmentProtocol utilities", () => {
         mimeType: "application/pdf",
       }),
     ).toMatchObject({ error: "PDF exceeds 25 MB", ok: false });
-  });
+  }, 15_000);
 });

@@ -145,7 +145,7 @@ export function SessionBar({
         title="Compact context"
         type="button"
       >
-        <span aria-hidden="true" className="codicon codicon-file-zip" />
+        <span aria-hidden="true" className="codicon codicon-layers" />
       </button>
       {open ? (
         <div className="tc-session-dropdown" data-testid="session-dropdown" role="listbox">

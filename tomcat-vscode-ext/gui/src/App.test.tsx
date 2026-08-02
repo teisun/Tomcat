@@ -1983,7 +1983,7 @@ describe("Tomcat webview App", () => {
     const compact = screen.getByTestId("compact-context-button");
     expect(newSession.nextElementSibling).toBe(compact);
     expect(topbar.lastElementChild).toBe(compact);
-    expect(compact.querySelector(".codicon-file-zip")).not.toBeNull();
+    expect(compact.querySelector(".codicon-layers")).not.toBeNull();
     fireEvent.click(compact);
     expect(
       postMessage.mock.calls.some(
@@ -3040,6 +3040,93 @@ describe("Tomcat webview App", () => {
         type: "prompt",
       }),
     );
+  });
+
+  it("applies every reference from one picker transaction", async () => {
+    mount();
+    await emitReadySessionState("s1");
+
+    await emitState({
+      channel: "event",
+      content: {
+        references: [
+          {
+            kind: "file",
+            label: "app.ts",
+            path: "src/app.ts",
+            type: "reference",
+          },
+          {
+            kind: "file",
+            label: "folder/",
+            path: "src/folder/",
+            type: "reference",
+          },
+        ],
+        sessionId: "s1",
+        type: "insertReferences",
+      },
+      messageId: "event-insert-reference-batch",
+    });
+
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(screen.getByLabelText("src/folder/")).toBeTruthy();
+  });
+
+  it("hydrates every reference from one durable draft snapshot", async () => {
+    mount();
+    const state = approvalDraftSnapshot("s1");
+    state.sessionViews.s1.composerDraft = {
+      segments: [
+        { kind: "file", label: "app.ts", path: "src/app.ts", type: "reference" },
+        { kind: "file", label: "folder/", path: "src/folder/", type: "reference" },
+      ],
+      text: "app.ts folder/ ",
+    };
+    await emitState({
+      channel: "state",
+      content: state,
+      messageId: "state-hydrate-reference-batch",
+    });
+
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(screen.getByLabelText("src/folder/")).toBeTruthy();
+  });
+
+  it("merges host-added references into a locally dirty draft", async () => {
+    mount();
+    await emitReadySessionState("s1");
+    await emitState({
+      channel: "event",
+      content: {
+        reference: {
+          kind: "file",
+          label: "app.ts",
+          path: "src/app.ts",
+          type: "reference",
+        },
+        sessionId: "s1",
+        type: "insertReference",
+      },
+      messageId: "event-local-reference",
+    });
+
+    const state = approvalDraftSnapshot("s1");
+    state.sessionViews.s1.composerDraft = {
+      segments: [
+        { kind: "file", label: "app.ts", path: "src/app.ts", type: "reference" },
+        { kind: "file", label: "folder/", path: "src/folder/", type: "reference" },
+      ],
+      text: "app.ts folder/ ",
+    };
+    await emitState({
+      channel: "state",
+      content: state,
+      messageId: "state-host-added-second-reference",
+    });
+
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(screen.getByLabelText("src/folder/")).toBeTruthy();
   });
 
   it("keeps composer content until a sent prompt is confirmed, then clears it", async () => {

@@ -420,6 +420,37 @@ describe("Composer", () => {
     });
   });
 
+  it("commits a picker batch as one draft update", async () => {
+    const { onDraftChange, ref } = renderComposer();
+    onDraftChange.mockClear();
+
+    await act(async () => {
+      ref.current?.insertReferences([
+        {
+          kind: "file",
+          label: "app.ts",
+          path: "src/app.ts",
+          type: "reference",
+        },
+        {
+          kind: "file",
+          label: "folder/",
+          path: "src/folder/",
+          type: "reference",
+        },
+        {
+          kind: "file",
+          label: "app.ts",
+          path: "src/app.ts",
+          type: "reference",
+        },
+      ]);
+    });
+
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(onDraftChange).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps distinct line-less selections from the same file as separate chips", async () => {
     const { ref } = renderComposer();
 

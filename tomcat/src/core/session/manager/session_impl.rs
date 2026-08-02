@@ -20,10 +20,11 @@ use crate::core::session::transcript::{
     append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
     mark_message_entries_after_anchor_superseded,
     mark_tool_result_entries_by_tool_call_id_superseded, mark_trailing_user_messages_superseded,
-    read_entries_tail, read_entries_tail_before, read_header, rewrite_message_summary_titles_by_id,
-    write_header, BranchSummaryEntry, CustomEntry, ErrorEntry, LabelEntry, MessageEntry,
-    MessageSummaryTitleRewrite, ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel,
-    ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry, TranscriptPage,
+    mark_user_message_entry_superseded_by_id, read_entries_tail, read_entries_tail_before,
+    read_header, rewrite_message_summary_titles_by_id, write_header, BranchSummaryEntry,
+    CustomEntry, ErrorEntry, LabelEntry, MessageEntry, MessageSummaryTitleRewrite,
+    ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry,
+    ThinkingTraceEntry, TranscriptEntry, TranscriptPage,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
@@ -873,9 +874,9 @@ impl SessionManager {
 
     /// 在完整 transcript 中按 entry id 找到可复制的 user message。
     ///
-    /// 锚点本身不要求带 `turn_failed` 或 `superseded`：盖章只是失败历史的展示/注水语义，
-    /// 不是 Retry 的控制流前提。唯一的时序前提是锚点之后没有更新的活 user 输入；一旦
-    /// copy-forward 成功，新行本身就让同一锚点的后续点击变成陈旧请求。
+    /// 锚点本身不要求带 `turn_failed` 或 `superseded`：Retry 的控制流只取决于它之后
+    /// 没有更新的活 user 输入。copy-forward 成功时会在同一把 transcript 锁内补盖
+    /// 两个标记，确保源行不会和副本一起进入下一次注水。
     fn retryable_user_message_from_transcript(
         path: &Path,
         message_id: &str,
@@ -1073,8 +1074,12 @@ impl SessionManager {
             let Some(message_object) = message.as_object_mut() else {
                 return Err(AppError::Config("retry_target_stale".to_string()));
             };
-            // The copied row starts a new live turn. The old row remains untouched, including
-            // both markers, so historical rendering and post-mortem inspection stay truthful.
+            // The copied row starts a new live turn. Whether failure stamping originally reached
+            // the source or not, the source row and any partial assistant response after it must
+            // become non-live before appending its copy. Otherwise a later hydrate would replay
+            // both identical user inputs or render an orphaned partial response.
+            mark_message_entries_after_anchor_superseded(&path, message_id)?;
+            mark_user_message_entry_superseded_by_id(&path, message_id)?;
             message_object.remove("superseded");
             message_object.remove("turn_failed");
             self.append_message_while_locked(&path, message, true, None)

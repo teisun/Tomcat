@@ -1191,7 +1191,7 @@ describe("webview provider integration", () => {
     expect(retriedUserMessages[0]).not.toHaveProperty("retryable");
   });
 
-  it("keeps both Retry chapters and the failure card after copy-forward recovery", async () => {
+  it("shows only the fresh Retry chapter after copy-forward recovery", async () => {
     const historyMessages: unknown[] = [
       {
         id: "user-1",
@@ -1262,29 +1262,17 @@ describe("webview provider integration", () => {
     const users = provider.currentState().sessionViews["session-1"]?.timeline.filter(
       (item) => item.type === "message" && item.kind === "user" && item.text === "retry this image",
     ) ?? [];
-    expect(users).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
-          id: "user-1",
-        }),
-        expect.objectContaining({
-          attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
-          id: "user-2",
-        }),
-      ]),
-    );
-    expect(users).toHaveLength(2);
+    expect(users).toEqual([
+      expect.objectContaining({
+        attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
+        id: "user-2",
+      }),
+    ]);
     expect(
       provider.currentState().sessionViews["session-1"]?.timeline.find(
         (item) => item.type === "message" && item.id === "error-1",
       ),
-    ).toMatchObject({ kind: "error" });
-    expect(
-      provider.currentState().sessionViews["session-1"]?.timeline.find(
-        (item) => item.type === "message" && item.id === "error-1",
-      ),
-    ).not.toHaveProperty("recoveryAction");
+    ).toBeUndefined();
     expect(
       provider.currentState().sessionViews["session-1"]?.timeline.find(
         (item) => item.type === "message" && item.id === "assistant-2",
@@ -1357,12 +1345,7 @@ describe("webview provider integration", () => {
       provider.currentState().sessionViews["session-1"]?.timeline.find(
         (item) => item.type === "message" && item.id === "error-1",
       ),
-    ).toMatchObject({ kind: "error" });
-    expect(
-      provider.currentState().sessionViews["session-1"]?.timeline.find(
-        (item) => item.type === "message" && item.id === "error-1",
-      ),
-    ).not.toHaveProperty("recoveryAction");
+    ).toBeUndefined();
     expect(
       provider.currentState().sessionViews["session-1"]?.timeline.find(
         (item) => item.type === "message" && item.id === "assistant-2",

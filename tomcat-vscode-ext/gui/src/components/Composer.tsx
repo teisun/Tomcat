@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -217,6 +218,7 @@ export interface ComposerHandle {
   closeMention(): void;
   getDraft(): ComposerDraft;
   insertReference(reference: WebviewReference): void;
+  insertReferences(references: readonly WebviewReference[]): void;
   replaceDraft(draft: ComposerDraft): void;
 }
 
@@ -479,6 +481,14 @@ const EMPTY_DRAFT: ComposerDraft = {
   text: "",
 };
 
+function sameDraft(left: ComposerDraft, right: ComposerDraft): boolean {
+  return (
+    left.hasContent === right.hasContent &&
+    left.text === right.text &&
+    JSON.stringify(left.segments) === JSON.stringify(right.segments)
+  );
+}
+
 interface ComposerProps {
   availableModels: string[];
   busy?: boolean;
@@ -590,6 +600,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const updateDraft = (next: ComposerDraft) => {
+    if (sameDraft(draftRef.current, next)) {
+      return;
+    }
     setDraft(next);
     draftRef.current = next;
     latestHandlersRef.current.onDraftChange(next);
@@ -863,6 +876,44 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setEffortMenuOpen(false);
   };
 
+  const insertReferences = useCallback((references: readonly WebviewReference[]) => {
+    if (!editor) {
+      return;
+    }
+    const seenReferenceIds = new Set<string>();
+    const inserted = references.filter((reference) => {
+      const id = referenceIdentity(reference);
+      if (seenReferenceIds.has(id) || editorHasReference(editor, reference)) {
+        return false;
+      }
+      seenReferenceIds.add(id);
+      return true;
+    });
+    if (inserted.length === 0) {
+      return;
+    }
+    editor
+      .chain()
+      .focus()
+      .insertContent(
+        inserted.flatMap((reference) => [
+          {
+            attrs: reference,
+            type: REFERENCE_NODE_NAME,
+          },
+          {
+            text: " ",
+            type: "text",
+          },
+        ]),
+      )
+      .run();
+    // A system picker can add N references at once. Persist its post-transaction
+    // document only once; emitting N intermediate drafts allows an older prefix to
+    // arrive after the complete draft and overwrite it in the extension host.
+    updateDraft(serializeComposerDocument(editor.getJSON()));
+  }, [editor]);
+
   useImperativeHandle(ref, () => ({
     clear() {
       if (!editor) {
@@ -880,24 +931,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return draftRef.current;
     },
     insertReference(reference: WebviewReference) {
-      if (!editor || editorHasReference(editor, reference)) {
-        return;
-      }
-      editor
-        .chain()
-        .focus()
-        .insertContent([
-          {
-            attrs: reference,
-            type: REFERENCE_NODE_NAME,
-          },
-          {
-            text: " ",
-            type: "text",
-          },
-        ])
-        .run();
-      updateDraft(serializeComposerDocument(editor.getJSON()));
+      insertReferences([reference]);
+    },
+    insertReferences(references: readonly WebviewReference[]) {
+      insertReferences(references);
     },
     replaceDraft(nextDraft: ComposerDraft) {
       if (!editor) {
@@ -913,7 +950,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       editor.commands.focus("end");
       updateDraft(serializeComposerDocument(editor.getJSON()));
     },
-  }), [editor, mentionSuggestion]);
+  }), [editor, insertReferences, mentionSuggestion]);
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
     if (!canPrompt) {

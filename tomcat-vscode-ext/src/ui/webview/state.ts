@@ -296,13 +296,12 @@ function isVisibleUserMessageEntry(entry: unknown): boolean {
   );
 }
 
-function isVisibleUserOrAssistantMessageEntry(entry: unknown): boolean {
+function isUserOrAssistantMessageEntry(entry: unknown): boolean {
   return (
     isRecord(entry) &&
     entry.type === "message" &&
     isRecord(entry.message) &&
-    (entry.message.role === "user" || entry.message.role === "assistant") &&
-    entry.message.superseded !== true
+    (entry.message.role === "user" || entry.message.role === "assistant")
   );
 }
 
@@ -316,14 +315,20 @@ function filterSupersededHistoryEntries(
 ): unknown[] {
   const filtered: unknown[] = [];
   let inSupersededSpan = false;
-  for (const entry of entries) {
+  const latestUserMessageIndex = entries.reduce(
+    (latestIndex, entry, index) => (messageRole(entry) === "user" ? index : latestIndex),
+    -1,
+  );
+  for (const [index, entry] of entries.entries()) {
     if (isSupersededMessageEntry(entry)) {
       if (isTurnFailedMessageEntry(entry)) {
-        // The optimistic failed bubble has the same forced `userMessageId`. It owns the
-        // retry controls, so showing this durable copy as well produces two identical
-        // user messages. Once the local bubble settles, this historical copy is visible
-        // again as the ordinary record of what the user sent.
-        if (!localUserMessageIds.has(historyEntryId(entry) ?? "")) {
+        // A failed prompt remains visible only while it is the newest user input. Once Retry
+        // copy-forwards it (or the user sends anything newer), the archived source row must not
+        // become a second identical bubble after history hydration.
+        if (
+          index === latestUserMessageIndex &&
+          !localUserMessageIds.has(historyEntryId(entry) ?? "")
+        ) {
           filtered.push(entry);
         }
         continue;
@@ -412,11 +417,27 @@ function isCurrentErrorEntry(entries: unknown[], errorIndex: number): boolean {
     if (isRecord(entry) && entry.type === "error") {
       return false;
     }
-    if (isVisibleUserOrAssistantMessageEntry(entry)) {
+    // A later user or assistant row means this failure has already been superseded by a
+    // newer attempt. A post-error tool result is hydration repair, not a new turn, and must
+    // leave this error visible so the user can still Resume.
+    if (isUserOrAssistantMessageEntry(entry)) {
       return false;
     }
   }
   return true;
+}
+
+function filterHandledErrorEntries(
+  entries: unknown[],
+  dismissedErrorIds: ReadonlySet<string>,
+): unknown[] {
+  return entries.filter((entry, index) => {
+    const errorId = historyEntryId(entry);
+    if (!errorId || !isRecord(entry) || entry.type !== "error") {
+      return true;
+    }
+    return !dismissedErrorIds.has(errorId) && isCurrentErrorEntry(entries, index);
+  });
 }
 
 function buildErrorRecoveryActions(
@@ -2728,7 +2749,7 @@ export class WebviewStateStore {
     session.timeline = session.timeline.filter(
       (item) => item.type !== "message" || item.kind !== "error",
     );
-    this.demoteOtherFailedLocalUserMessages(sessionId, options.messageId);
+    this.dropOtherFailedLocalUserMessages(sessionId, options.messageId);
     pushMessage(session, "user", text, options.messageId, {
       deliveryState: "pending",
       attachments: options.attachments,
@@ -2739,11 +2760,32 @@ export class WebviewStateStore {
   }
 
   dismissErrorRecovery(sessionId: string, errorId: string): void {
+    const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
+    const failedUserMessageId = session.timeline.find(
+      (item): item is WebviewMessageBlock =>
+        item.type === "message" &&
+        item.kind === "error" &&
+        item.id === errorId &&
+        item.recoveryAction === "retry" &&
+        typeof item.recoveryTargetUserMessageId === "string",
+    )?.recoveryTargetUserMessageId;
     runtime.dismissedErrorIds.add(errorId);
-    // The failure is part of the durable transcript and remains visible as history. Dismissal
-    // consumes only its one-shot recovery action, so a second click cannot start another Retry.
-    this.rebuildHistoryTimeline(sessionId);
+    // A recovery starts a fresh attempt. Drop its obsolete failure chapter optimistically so the
+    // UI never leaves a red card or duplicate user bubble on screen while the server works.
+    session.timeline = session.timeline.filter(
+      (item) =>
+        !(
+          item.type === "message" &&
+          ((item.kind === "error" && item.id === errorId) ||
+            (failedUserMessageId !== undefined &&
+              item.kind === "user" &&
+              item.id === failedUserMessageId))
+        ),
+    );
+    if (failedUserMessageId !== undefined) {
+      runtime.localUserMessageIds.delete(failedUserMessageId);
+    }
   }
 
   restoreDismissedErrorRecovery(sessionId: string, errorId: string): void {
@@ -2801,7 +2843,7 @@ export class WebviewStateStore {
   markLocalUserMessageConfirmed(sessionId: string, messageId: string): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
-    this.demoteOtherFailedLocalUserMessages(sessionId, messageId);
+    this.dropOtherFailedLocalUserMessages(sessionId, messageId);
     runtime.localUserMessageIds.delete(messageId);
     const message = session.timeline.find(
       (item): item is WebviewMessageBlock =>
@@ -3295,7 +3337,10 @@ export class WebviewStateStore {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
     const renderableEntries = trimLeadingHistoryEntries(
-      filterSupersededHistoryEntries(runtime.historyEntries, runtime.localUserMessageIds),
+      filterHandledErrorEntries(
+        filterSupersededHistoryEntries(runtime.historyEntries, runtime.localUserMessageIds),
+        runtime.dismissedErrorIds,
+      ),
     );
     const historyToolNames = buildHistoryToolNameLookup(renderableEntries);
     const toolCallToAssistant = buildToolCallToAssistantMap(renderableEntries);
@@ -3403,25 +3448,27 @@ export class WebviewStateStore {
   }
 
   /**
-   * A session has at most one actionable delivery failure. Older failures remain as
-   * ordinary user messages so they do not vanish from an in-memory busy rejection, but
-   * cannot hijack later retry actions or accumulate red cards.
+   * A session presents only its current attempt. As soon as another prompt starts, older
+   * locally failed bubbles leave the optimistic timeline; their durable transcript rows stay
+   * intact for diagnostics and are filtered from history once the newer user row is present.
    */
-  private demoteOtherFailedLocalUserMessages(sessionId: string, exceptMessageId: string): void {
+  private dropOtherFailedLocalUserMessages(sessionId: string, exceptMessageId: string): void {
     const session = this.ensureSession(sessionId);
-    for (const item of session.timeline) {
-      if (
-        item.type !== "message" ||
-        item.kind !== "user" ||
-        item.id === exceptMessageId ||
-        item.deliveryState !== "failed"
-      ) {
-        continue;
+    const runtime = this.ensureRuntime(sessionId);
+    const removedMessageIds = new Set<string>();
+    session.timeline = session.timeline.filter((item) => {
+      const shouldDrop =
+        item.type === "message" &&
+        item.kind === "user" &&
+        item.id !== exceptMessageId &&
+        item.deliveryState === "failed";
+      if (shouldDrop) {
+        removedMessageIds.add(item.id);
       }
-      delete item.deliveryState;
-      delete item.deliveryError;
-      delete item.deliveryErrorDetail;
-      delete item.retryable;
+      return !shouldDrop;
+    });
+    for (const messageId of removedMessageIds) {
+      runtime.localUserMessageIds.delete(messageId);
     }
   }
 
