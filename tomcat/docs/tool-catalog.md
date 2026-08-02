@@ -695,7 +695,7 @@ Parameters:
 
 ```json
 {
-  "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
+  "description": "Session-local todo scratchpad (visible in CHAT, PLAN, and EXEC). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
   "properties": {
     "new_todos": {
       "description": "If true, clear the current scratchpad before applying ops (same session file is overwritten). Default false.",

@@ -1178,7 +1178,7 @@ fn update_plan_parameters() -> Value {
 fn todos_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
+        "description": "Session-local todo scratchpad (visible in CHAT, PLAN, and EXEC). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
         "properties": {
             "new_todos": {
                 "type": "boolean",

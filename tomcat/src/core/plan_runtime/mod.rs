@@ -76,6 +76,18 @@ pub use review::Finding;
 pub use state::PlanState;
 pub use verify::VerifySummary;
 
+/// The single authoritative todo source preserved in a compaction summary.
+///
+/// A readable active PlanFile wins even when it has no todos: that empty list is
+/// still meaningful and must not silently fall back to an unrelated session
+/// scratchpad. Only when no readable plan exists may non-empty scratchpad todos
+/// provide Progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressSource {
+    PlanFile { todos: Vec<file_store::TodoItem> },
+    SessionScratchpad { todos: Vec<file_store::TodoItem> },
+}
+
 /// 会话控制态快照。摘要的 `<control_state>` 机器区块（第 3 章）与恢复日志共用这一份取数，
 /// 保证"UI 看到的模式"和"喂给模型的模式"永远来自同一个地方。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +99,9 @@ pub struct ControlSnapshot {
     pub plan_file_state: Option<String>,
     pub plan_id: Option<String>,
     pub model: Option<String>,
+    /// Runtime-selected Progress source. See [`ProgressSource`] for the
+    /// PlanFile-first, scratchpad-fallback invariant.
+    pub progress: Option<ProgressSource>,
 }
 
 /// 恢复时读计划文件；不存在或读不动都当作"没有计划"，由调用方决定兜底。
@@ -562,10 +577,18 @@ impl PlanRuntime {
     pub fn control_snapshot(&self, model: Option<&str>) -> ControlSnapshot {
         let mode = self.mode();
         let plan_path = self.active_plan_path();
-        let plan_file_state = plan_path
-            .as_deref()
-            .and_then(read_plan_for_restore)
+        let plan = plan_path.as_deref().and_then(read_plan_for_restore);
+        let plan_file_state = plan
+            .as_ref()
             .map(|plan| plan.frontmatter.state.as_str().to_string());
+        let progress = if let Some(plan) = plan {
+            Some(ProgressSource::PlanFile {
+                todos: plan.frontmatter.todos,
+            })
+        } else {
+            let todos = self.snapshot_session_todos();
+            (!todos.is_empty()).then_some(ProgressSource::SessionScratchpad { todos })
+        };
         let plan_id = mode
             .active_plan_id()
             .map(str::to_string)
@@ -576,6 +599,7 @@ impl PlanRuntime {
             plan_file_state,
             plan_id,
             model: model.map(str::to_string),
+            progress,
         }
     }
 

@@ -41,8 +41,8 @@ fn executor_prompt_says_a_non_pass_verdict_never_completes_the_plan() {
 }
 
 #[test]
-fn executor_prompt_requires_separating_regressions_from_pre_existing_failures() {
-    let s = load(PromptKey::ExecutorReminderFmt);
+fn verification_prompt_requires_separating_regressions_from_pre_existing_failures() {
+    let s = load(PromptKey::SystemVerification);
     assert!(s.contains("separate new regressions caused by your change"));
     assert!(s.contains("pre-existing failures and environment failures"));
     assert!(s.contains("never let one block verification of your own change"));
@@ -73,7 +73,9 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
     assert!(normalized.contains("Do not use jargon, terminology dumps, or abstract slogans"));
     assert!(normalized
         .contains("when a technical term is necessary, explain it immediately in everyday words"));
-    assert!(normalized.contains("Under solution, include a Key decisions checklist"));
+    assert!(normalized
+        .contains("Under solution, include an ASCII diagram that makes the design or flow clear"));
+    assert!(normalized.contains("then a Key decisions checklist"));
     assert!(normalized.contains("exact files, symbols, or contracts to change"));
     assert!(normalized.contains("behavior before and after; boundaries; and explicit non-goals"));
     assert!(
@@ -295,6 +297,9 @@ fn output_conventions_template_mentions_clickable_paths_and_forbidden_uris() {
     assert!(s.contains("![mockup](docs/mockup.png)"));
     assert!(s.contains("use `![alt](path)` only"));
     assert!(s.contains("src/app.ts:42"));
+    assert!(s.contains("src/app.ts:42:7"));
+    assert!(s.contains("src/app.ts:59-103"));
+    assert!(s.contains("src/app.ts#L9"));
     assert!(s.contains("workspace-relative path"));
     assert!(s.contains("Button.tsx"));
     assert!(s.contains("ChatMarkdown.tsx:172"));
@@ -332,7 +337,7 @@ fn parallel_tools_template_guides_batching() {
 }
 
 #[test]
-fn verification_template_is_language_neutral_and_delegates_mode_scope() {
+fn verification_template_contains_shared_discovery_and_reporting_rules() {
     let s = load(PromptKey::SystemVerification);
     assert!(s.contains("real completion"));
     assert!(s.contains("Never fabricate"));
@@ -343,19 +348,23 @@ fn verification_template_is_language_neutral_and_delegates_mode_scope() {
     assert!(s.contains("do not rerun the same command unchanged"));
     assert!(s.contains("`task_output`"));
     assert!(s.contains("`task_stop`"));
+    assert!(s.contains("start as specific as possible"));
+    for phase in ["P0:", "P1:", "P2:", "P3:", "P4:", "P5:"] {
+        assert!(s.contains(phase), "verification should contain {phase}");
+    }
+    assert!(s.contains("separate new regressions caused by your change"));
     assert!(!s.contains("Mini verification"));
-    assert!(!s.contains("Cargo.toml"));
-    assert!(!s.contains("`cargo test`"));
+    assert!(s.contains("Cargo.toml"));
+    assert!(s.contains("whole-workspace `npm test`, `cargo test`, or `pytest`"));
 }
 
 #[test]
 fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
     let s = load(PromptKey::PlannerReminder);
     const TODO_POLICY: &str = concat!(
-        "10. Decompose thoroughly. For non-trivial work, break the work into one or more\n",
-        "milestones, then precisely break each milestone down into detailed todos so\n",
-        "nothing is missed. However, for a simple, single-surface change, a flat linear\n",
-        "todo list is sufficient."
+        "6. Decompose thoroughly. For non-trivial work, break the work into one or more milestones, \n",
+        "then precisely break each milestone down into detailed todos so nothing is missed and over-decomposition is avoided. \n",
+        "However, for a simple, single-surface change, a flat linear todo list is sufficient."
     );
 
     assert!(s.contains(TODO_POLICY));
@@ -375,19 +384,19 @@ fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
     assert!(s.contains("Put user experience first"));
 }
 
-/// engineering-standards #6/#7/#8 必须在 core_identity、planner、两类 reviewer
-/// 模板中一字不差出现，防止不同角色提示词逐渐漂移。
+/// S6/S8 are shared by every actor, while S7 needs an edit-capable planning
+/// surface and is deliberately absent from the read-only code reviewer.
 #[test]
-fn standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers() {
-    const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and the implementation from first principles, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
-    const S7: &str = "Explain in plain, jargon-free language, assuming the reader knows nothing about the problem or the code; when explaining a design, a solution, or a root cause, include one overall ASCII diagram of the whole picture by default and add an ASCII diagram for each complex section; when you are creating or updating a development plan, write your full explanation into the plan itself rather than only replying in the chat.";
+fn standards_6_7_8_are_scoped_and_byte_identical() {
+    const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
+    const S7: &str = "Explain in plain, jargon-free language, assuming the reader knows nothing about the problem or the code. Do not let jargon, terminology dumps, or abstract slogans replace an explanation; when a technical term is necessary, explain it immediately in everyday words. When explaining a design, a solution, or a root cause, include one overall ASCII diagram of the whole picture by default and add an ASCII diagram for each complex section; when you are creating or updating a development plan, write your full explanation into the plan itself rather than only replying in the chat.";
     const S8: &str = "Put user experience first: when a task involves UI, design it from the user's experience and above all follow the existing UI design conventions of the user's project.";
 
     let identity = load(PromptKey::SystemCoreIdentity);
     let planner = load(PromptKey::PlannerReminder);
     let reviewer_plan = load(PromptKey::ReviewerPlan);
     let reviewer_code = load(PromptKey::ReviewerCode);
-    for (label, sentence) in [("S6", S6), ("S7", S7), ("S8", S8)] {
+    for (label, sentence) in [("S6", S6), ("S8", S8)] {
         assert!(
             identity.contains(sentence),
             "{label} 应逐字出现在 core_identity"
@@ -402,11 +411,22 @@ fn standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers() {
             "{label} 应逐字出现在 reviewer_code"
         );
     }
+    for (label, text) in [
+        ("core_identity", identity),
+        ("planner", planner),
+        ("reviewer_plan", reviewer_plan),
+    ] {
+        assert!(text.contains(S7), "S7 应逐字出现在 {label}");
+    }
+    assert!(
+        !reviewer_code.contains(S7),
+        "read-only code reviewer must not promise plan-file ASCII explanations"
+    );
 }
 
 #[test]
-fn executor_prompt_uses_p0_p5_evidence_without_ecosystem_specific_defaults() {
-    let s = load(PromptKey::ExecutorReminderFmt);
+fn verification_prompt_uses_p0_p5_evidence_without_ecosystem_specific_defaults() {
+    let s = load(PromptKey::SystemVerification);
     for phase in ["P0:", "P1:", "P2:", "P3:", "P4:", "P5:"] {
         assert!(s.contains(phase), "executor should contain {phase}");
     }
@@ -445,24 +465,22 @@ fn long_command_wait_expiry_keeps_same_task_without_unchanged_rerun_contract() {
 }
 
 #[test]
-fn planner_and_executor_share_one_scoped_verification_batch_per_target_contract() {
+fn planner_and_system_verification_share_one_scoped_batch_per_target_contract() {
     let planner = load(PromptKey::PlannerReminder);
-    let executor = load(PromptKey::ExecutorReminderFmt);
+    let verification = load(PromptKey::SystemVerification);
 
     assert!(planner.contains("verification batches as shared\n  build/test boundaries"));
     assert!(
         planner.contains("Group todos that share a build target into named verification batches")
     );
     assert!(planner.contains("milestone-level verification as the default granularity"));
-    assert!(
-        planner.contains("Do not schedule the same test family once per todo and again at the end")
-    );
-    assert!(
-        executor.contains("Follow the building plan's verification scope, timing, and batching")
-    );
-    assert!(executor
+    assert!(verification
+        .contains("Do not schedule the same test family once per todo and again at the end"));
+    assert!(verification
+        .contains("Finish all related production and test edits before running that batch"));
+    assert!(verification
         .contains("P0: commands and verification batches in the active plan or user request"));
-    assert!(executor.contains("Prefer the project's own focused command and command order"));
+    assert!(verification.contains("Prefer the project's own focused command and command order"));
 }
 
 #[test]
@@ -473,11 +491,11 @@ fn dynamic_time_regression_uses_plan_project_evidence_and_bounded_verification_c
 
     assert!(!workspace.contains("{now}"));
     assert!(!workspace.contains("Current date and time"));
-    assert!(executor
+    assert!(verification
         .contains("P0: commands and verification batches in the active plan or user request"));
-    assert!(executor.contains("P1: injected project rules"));
-    assert!(executor.contains("P2: the nearest manifest"));
-    assert!(executor.contains("Never default to"));
+    assert!(verification.contains("P1: injected project rules"));
+    assert!(verification.contains("P2: the nearest manifest"));
+    assert!(verification.contains("Never default to"));
     assert!(verification.contains("do not rerun the same command unchanged"));
 
     let cargo_test_mentions = executor.matches("cargo test").count()

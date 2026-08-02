@@ -265,7 +265,7 @@ Do not answer in prose.
 Treat the `<control_state>` and `## Progress` blocks inside the compaction summary as the source of truth for:
 - which step is currently active
 - which remaining step should become next in progress
-Use the provided plan file text only to recover the matching todo ids.
+The runtime-rendered Progress entries include the stable todo ids.
 Call update_plan exactly once.
 Do not add, remove, or rewrite todo contents.
 Use only `kind`, `id`, and `status` inside each op.
@@ -274,19 +274,10 @@ Do not include `content`, `path`, or `replace` unless absolutely required.
     .to_string()
 }
 
-fn keepalive_resume_user_prompt(fixture: &PlanFixture) -> String {
-    let plan_text =
-        std::fs::read_to_string(&fixture.plan_path).expect("读取 plan file 失败（resume prompt）");
-    format!(
-        "\
-Current active plan file: `{path}`
-
+fn keepalive_resume_user_prompt() -> String {
+    "\
 Use the `## Progress` block to identify the current step and the next pending step.
-Then map those contents back to todo ids in the plan file below and call `update_plan` exactly once:
-
-```md
-{plan_text}
-```
+Use their rendered ids to call `update_plan` exactly once.
 
 Expected transition:
 - mark the keepalive current step as completed
@@ -294,20 +285,17 @@ Expected transition:
 
 Return a single strict JSON tool call.
 Do not reply with plain text.
-",
-        path = fixture.plan_path.display(),
-        plan_text = plan_text.trim()
-    )
+"
+    .to_string()
 }
 
 async fn request_update_plan_args(
     llm: &Arc<dyn tomcat::LlmProvider>,
     context_messages: Vec<ChatMessage>,
-    fixture: &PlanFixture,
 ) -> Option<UpdatePlanArgs> {
     let mut messages = vec![ChatMessage::system(keepalive_resume_system_prompt())];
     messages.extend(context_messages);
-    messages.push(ChatMessage::user(keepalive_resume_user_prompt(fixture)));
+    messages.push(ChatMessage::user(keepalive_resume_user_prompt()));
     let tool_definitions = vec![make_update_plan_tool_definition()];
     let mut last_error = String::new();
 
@@ -528,8 +516,7 @@ async fn real_llm_reads_keepalive_and_calls_update_plan() {
         return;
     };
 
-    let Some(args) =
-        request_update_plan_args(&llm, vec![artifacts.summary_message.clone()], &fixture).await
+    let Some(args) = request_update_plan_args(&llm, vec![artifacts.summary_message.clone()]).await
     else {
         return;
     };
@@ -610,7 +597,7 @@ async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
 
     let mut reloaded_messages = state.messages.clone();
     reloaded_messages.retain(|msg| msg.kind == MessageKind::CompactionSummary);
-    let Some(args) = request_update_plan_args(&llm, reloaded_messages, &fixture).await else {
+    let Some(args) = request_update_plan_args(&llm, reloaded_messages).await else {
         return;
     };
     assert_update_plan_targets_current_and_next(&args, &fixture);

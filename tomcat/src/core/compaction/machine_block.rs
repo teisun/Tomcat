@@ -13,12 +13,13 @@
 //! 改写它们；模型如果自己吐了同名标签，[`strip`] 会先把它们清掉，保证全篇只有
 //! 一份、且这一份来自代码。
 //!
-//! `## Progress` 处在中间地带：有 active plan 时它的真理在计划文件里，
-//! 由 [`override_progress_section`] 用计划文件内容覆盖模型的说法。
+//! `## Progress` 处在中间地带：它的真理由 [`ControlSnapshot`] 在拍快照时
+//! 选择为 PlanFile todos 或 session scratchpad todos，再由
+//! [`override_progress_section`] 覆盖模型的说法。
 
 use crate::core::llm::{ChatMessage, ChatMessageRole};
-use crate::core::plan_runtime::file_store::{PlanFile, TodoItem, TodoStatus};
-use crate::core::plan_runtime::ControlSnapshot;
+use crate::core::plan_runtime::file_store::{TodoItem, TodoStatus};
+use crate::core::plan_runtime::{ControlSnapshot, ProgressSource};
 
 const CONTROL_OPEN: &str = "<control_state>";
 const CONTROL_CLOSE: &str = "</control_state>";
@@ -33,6 +34,8 @@ const VERBATIM_BUDGET_CHARS: usize = 6000;
 const VERBATIM_PER_MESSAGE_CHARS: usize = 2000;
 
 const PROGRESS_HEADING: &str = "## Progress";
+/// Avoid spending a compacted context on an unbounded completed-history list.
+const PROGRESS_ITEM_LIMIT: usize = 24;
 
 /// 从消息列表里逐字取出最近的真实用户消息。
 ///
@@ -159,11 +162,11 @@ pub fn prepend(blocks: &str, summary: &str) -> String {
     format!("{}\n\n{}", blocks.trim_end(), body)
 }
 
-/// 有 active plan 时，用计划文件的 todos 覆盖模型写的 `## Progress` 节。
+/// Use the runtime-selected todos to override the model-written `## Progress`.
 ///
 /// 覆盖范围是 `## Progress` 到下一个 `## ` 标题之间；摘要里没有这一节时追加到末尾。
-pub fn override_progress_section(summary: &str, plan: &PlanFile) -> String {
-    let rendered = render_progress(&plan.frontmatter.todos);
+pub fn override_progress_section(summary: &str, progress: &ProgressSource) -> String {
+    let rendered = render_progress(progress);
     let Some(start) = find_heading(summary, PROGRESS_HEADING) else {
         return format!("{}\n\n{}", summary.trim_end(), rendered);
     };
@@ -187,13 +190,24 @@ fn find_next_h2(text: &str) -> Option<usize> {
     text.find("\n## ").map(|idx| idx + 1)
 }
 
-fn render_progress(todos: &[TodoItem]) -> String {
+fn render_progress(progress: &ProgressSource) -> String {
+    let todos = match progress {
+        ProgressSource::PlanFile { todos } | ProgressSource::SessionScratchpad { todos } => todos,
+    };
     let mut out = String::from(PROGRESS_HEADING);
-    out.push_str(
-        "\nRendered from the plan file by the runtime; this supersedes any prose below.\n",
-    );
+    match progress {
+        ProgressSource::PlanFile { .. } => out.push_str(
+            "\nRendered from the active plan file by the runtime. Use `update_plan` to change it; this supersedes any prose below.\n",
+        ),
+        ProgressSource::SessionScratchpad { .. } => out.push_str(
+            "\nRendered from the session todo scratchpad by the runtime. Use `todos` to change it; this supersedes any prose below.\n",
+        ),
+    }
     if todos.is_empty() {
-        out.push_str("(the plan file has no todos)\n");
+        out.push_str(match progress {
+            ProgressSource::PlanFile { .. } => "(the active plan file has no todos)\n",
+            ProgressSource::SessionScratchpad { .. } => "(the session scratchpad has no todos)\n",
+        });
         return out;
     }
     let count = |status: TodoStatus| todos.iter().filter(|t| t.status == status).count();
@@ -205,15 +219,50 @@ fn render_progress(todos: &[TodoItem]) -> String {
         count(TodoStatus::Pending),
         count(TodoStatus::Cancelled),
     ));
-    for todo in todos {
+    if todos.len() <= PROGRESS_ITEM_LIMIT {
+        for todo in todos {
+            render_todo(&mut out, todo);
+        }
+        return out;
+    }
+
+    let mut rendered = 0usize;
+    for todo in todos
+        .iter()
+        .filter(|todo| todo.status != TodoStatus::Completed)
+    {
+        if rendered == PROGRESS_ITEM_LIMIT {
+            break;
+        }
+        render_todo(&mut out, todo);
+        rendered += 1;
+    }
+    let remaining_non_completed = todos
+        .iter()
+        .filter(|todo| todo.status != TodoStatus::Completed)
+        .count()
+        .saturating_sub(rendered);
+    if remaining_non_completed > 0 {
         out.push_str(&format!(
-            "- [{}] {}: {}\n",
-            todo.status.as_str(),
-            todo.id,
-            todo.content
+            "- ({remaining_non_completed} non-completed item(s) omitted to fit the Progress budget)\n"
+        ));
+    }
+    let completed = count(TodoStatus::Completed);
+    if completed > 0 {
+        out.push_str(&format!(
+            "- [completed] {completed} completed item(s) omitted to fit the Progress budget\n"
         ));
     }
     out
+}
+
+fn render_todo(out: &mut String, todo: &TodoItem) {
+    out.push_str(&format!(
+        "- [{}] {}: {}\n",
+        todo.status.as_str(),
+        todo.id,
+        todo.content
+    ));
 }
 
 #[cfg(test)]

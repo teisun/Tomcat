@@ -1,6 +1,7 @@
 use fs2::FileExt;
 
 use super::common::*;
+use crate::core::plan_runtime::ProgressSource;
 
 #[test]
 fn cancel_token_demotes_executing_to_pending() {
@@ -349,6 +350,52 @@ fn control_snapshot_reports_three_valued_mode_and_file_state() {
     assert_eq!(snap.plan_path, Some(path));
     assert_eq!(snap.plan_id.as_deref(), Some(plan_id));
     assert_eq!(snap.model.as_deref(), Some("gpt-5.6-sol"));
+    assert!(matches!(
+        snap.progress,
+        Some(ProgressSource::PlanFile { ref todos })
+            if todos.len() == 1 && todos[0].id == "step1"
+    ));
+    cleanup_home(&home);
+}
+
+#[test]
+fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+
+    let with_plan = PlanRuntime::new("session-a");
+    write_disk_plan("progress-plan", PlanFileState::Planning);
+    let plan_path = plan_path_for_id("progress-plan").unwrap();
+    let mut empty_plan = read_plan(&plan_path).unwrap();
+    empty_plan.frontmatter.todos.clear();
+    write_plan(&plan_path, &empty_plan, 2000).unwrap();
+    with_plan.set_active_planning_plan("progress-plan".into(), plan_path);
+    with_plan.replace_session_todos(vec![TodoItem {
+        id: "scratch".into(),
+        content: "must not leak over a readable empty plan".into(),
+        status: TodoStatus::Pending,
+    }]);
+    assert!(matches!(
+        with_plan.control_snapshot(None).progress,
+        Some(ProgressSource::PlanFile { ref todos }) if todos.is_empty()
+    ));
+
+    let scratchpad_only = PlanRuntime::new("session-b");
+    scratchpad_only
+        .set_active_planning_plan("missing-plan".into(), home.join("missing-progress.plan.md"));
+    scratchpad_only.replace_session_todos(vec![TodoItem {
+        id: "scratch".into(),
+        content: "keep investigating".into(),
+        status: TodoStatus::InProgress,
+    }]);
+    assert!(matches!(
+        scratchpad_only.control_snapshot(None).progress,
+        Some(ProgressSource::SessionScratchpad { ref todos })
+            if todos.len() == 1 && todos[0].id == "scratch"
+    ));
+
+    let none = PlanRuntime::new("session-c");
+    assert!(none.control_snapshot(None).progress.is_none());
     cleanup_home(&home);
 }
 

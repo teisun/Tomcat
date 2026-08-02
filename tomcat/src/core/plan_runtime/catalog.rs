@@ -10,8 +10,8 @@
 //! - **Planning**：包含 `create_plan` / `ask_question` / `todos` / `update_plan`；
 //!   写工具（`write`/`edit`/`hashline_edit`/`delete`/`bash`）**全部保留**——写盘路径由
 //!   [`safety::enforce_write_path_policy`] 在 `tool_exec` 路径层拦截到 `~/.tomcat/plans/*.plan.md`。
-//! - **Executing { plan_id }**：包含 `update_plan`；**排除** `create_plan` / `ask_question` / `todos`；
-//!   plan 文件全禁写由 `safety` 在路径层守护，推进任务仅走 `update_plan`。
+//! - **Executing { plan_id }**：保留 `todos` / `update_plan`；**排除** `create_plan` / `ask_question`。
+//!   plan 文件全禁写由 `safety` 在路径层守护。
 
 use serde_json::Value;
 
@@ -19,11 +19,7 @@ use super::state::PlanState;
 use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
 
 /// EXEC 模式排除的工具（plan-runtime.md §4.1 R6：EXEC 不允许 create_plan / ask_question）。
-///
-/// `todos` 一并隐藏：EXEC 期有两份进度清单（会话 scratchpad todos 与计划文件 todos）时，
-/// 模型会挑一份写、另一份留在旧状态，最后谁也说不清做到哪了。EXEC 下进度只有一个权威 —— 计划文件，
-/// 也就是只经 `update_plan`。
-const HIDDEN_IN_EXECUTING: &[&str] = &["create_plan", "ask_question", "todos"];
+const HIDDEN_IN_EXECUTING: &[&str] = &["create_plan", "ask_question"];
 
 /// CHAT / Pending / Completed 视图排除的 plan 工具（仅 `create_plan`；`todos` / `update_plan` /
 /// `ask_question` 在这些模式保留）。

@@ -233,6 +233,14 @@ describe("classifyPlanLink", () => {
       path: path.resolve("/workspace/plans", "neighbor.md"),
     });
   });
+
+  it("keeps a local link's first source line while resolving its file path", () => {
+    expect(classifyPlanLink("docs/design.md:59-103", planPath)).toEqual({
+      kind: "file",
+      line: 59,
+      path: path.resolve("/workspace/plans", "docs/design.md"),
+    });
+  });
 });
 
 describe("PlanPreviewEditorProvider.buildState", () => {

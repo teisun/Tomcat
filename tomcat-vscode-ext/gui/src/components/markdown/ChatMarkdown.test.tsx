@@ -107,19 +107,94 @@ describe("ChatMarkdown", () => {
 
   it("linkifies inline file paths and forwards clicks with the parsed line number", async () => {
     const onOpenFile = vi.fn();
+    const resolvePaths = vi.fn().mockResolvedValue([
+      {
+        kind: "file",
+        path: "src/gui/App.tsx",
+        resolvedPath: "/workspace/src/gui/App.tsx",
+      },
+    ]);
     render(
       <ChatMarkdown
         markdown={"Check `src/gui/App.tsx:18` before editing."}
         onOpenFile={onOpenFile}
+        resolvePaths={resolvePaths}
       />,
     );
 
-    const link = screen.getByTestId("assistant-clickable-path");
+    expect(screen.getByTestId("chat-markdown").querySelector("code")?.textContent).toBe(
+      "src/gui/App.tsx:18",
+    );
+    const link = await screen.findByTestId("assistant-clickable-path");
     expect(link.textContent).toContain("App.tsx:18");
     expect(link.textContent).not.toContain("src/gui/");
     expect(link.getAttribute("title")).toBe("src/gui/App.tsx:18");
     fireEvent.click(link);
-    expect(onOpenFile).toHaveBeenCalledWith("src/gui/App.tsx", 18);
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/src/gui/App.tsx", 18);
+  });
+
+  it("keeps unresolved path-shaped code as ordinary inline code", async () => {
+    render(
+      <ChatMarkdown
+        markdown={"Do not link `*.plan.md`."}
+        onOpenFile={() => undefined}
+        resolvePaths={vi.fn().mockResolvedValue([
+          { kind: "missing", path: "*.plan.md", resolvedPath: "/workspace/*.plan.md" },
+        ])}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-markdown").querySelector(".tc-inline-path")).toBeNull();
+      expect(screen.getByTestId("chat-markdown").querySelector("code")?.textContent).toBe(
+        "*.plan.md",
+      );
+    });
+  });
+
+  it("ignores a stale path-resolution result after the Markdown changes", async () => {
+    const pending = new Map<string, (results: Array<{
+      kind: "file";
+      path: string;
+      resolvedPath: string;
+    }>) => void>();
+    const resolvePaths = vi.fn(
+      (paths: string[]) =>
+        new Promise<Array<{ kind: "file"; path: string; resolvedPath: string }>>((resolve) => {
+          pending.set(paths[0], resolve);
+        }),
+    );
+    const { rerender } = render(
+      <ChatMarkdown
+        markdown={"Open `src/old.ts`."}
+        onOpenFile={() => undefined}
+        resolvePaths={resolvePaths}
+      />,
+    );
+    await waitFor(() => {
+      expect(resolvePaths).toHaveBeenCalledWith(["src/old.ts"]);
+    });
+    rerender(
+      <ChatMarkdown
+        markdown={"Open `src/new.ts`."}
+        onOpenFile={() => undefined}
+        resolvePaths={resolvePaths}
+      />,
+    );
+    await waitFor(() => {
+      expect(resolvePaths).toHaveBeenCalledWith(["src/new.ts"]);
+    });
+
+    pending.get("src/old.ts")?.([
+      { kind: "file", path: "src/old.ts", resolvedPath: "/workspace/src/old.ts" },
+    ]);
+    pending.get("src/new.ts")?.([
+      { kind: "file", path: "src/new.ts", resolvedPath: "/workspace/src/new.ts" },
+    ]);
+
+    const link = await screen.findByTestId("assistant-clickable-path");
+    expect(link.textContent).toBe("new.ts");
+    expect(screen.queryByText("old.ts")).toBeNull();
   });
 
   it("forwards ordinary anchor clicks to onOpenLink", () => {

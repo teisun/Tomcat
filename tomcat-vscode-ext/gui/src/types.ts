@@ -3,6 +3,9 @@ import type {
   DraftForkCapture,
   DraftForkResult,
 } from "../../src/shared/draftForkProtocol";
+import type { PathResolution } from "../../src/shared/pathResolution";
+
+export type { PathResolution } from "../../src/shared/pathResolution";
 
 export type WebviewReferenceKind = "selection" | "file";
 
@@ -427,6 +430,11 @@ export type HostToWebviewFrame =
       channel: "event";
       content:
         | {
+            requestId: string;
+            results: PathResolution[];
+            type: "pathsResolved";
+          }
+        | {
             matches: ContextSearchMatch[];
             query: string;
             requestId: string;
@@ -682,6 +690,21 @@ export type WebviewIntent =
       data: {
         line?: number;
         path: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openLink";
+      data: {
+        href: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "resolvePaths";
+      data: {
+        paths: string[];
+        requestId: string;
       };
     }
   | {

@@ -163,19 +163,22 @@ pub(super) async fn run_reasoning_loop(
             })
             .collect();
 
-        // “只思考、不回答”不是成功回合。三个条件必须同时成立：
-        // - 无正文：排除正常文本完成；
+        // “只思考、不回答”不是成功回合。正文为空、与 thinking 完全相同，或只是
+        // thinking 前缀且不足其一半时，都视为上游把推理误当正文后提前截断：
         // - 无工具：排除纯工具调用回合；
         // - 有 thinking：排除 provider 合法的空结构化响应。
         //
         // 不能让它落入 finalize_turn_after_text：那里会把空 assistant 写进
         // transcript 并发 AgentEnd(error=None)，UI 便会静默结束且允许输入下一条。
-        if tool_calls.is_empty()
-            && content_buf.trim().is_empty()
-            && thinking_text
-                .as_deref()
-                .is_some_and(|thinking| !thinking.trim().is_empty())
-        {
+        let thinking_only_or_truncated = thinking_text.as_deref().is_some_and(|thinking| {
+            let content = content_buf.trim();
+            !thinking.trim().is_empty()
+                && (content.is_empty()
+                    || content == thinking
+                    || (thinking.starts_with(content)
+                        && content.len().saturating_mul(2) < thinking.len()))
+        });
+        if tool_calls.is_empty() && thinking_only_or_truncated {
             let thinking_chars = thinking_text.as_deref().map(str::len).unwrap_or_default();
             let _ = agent.persist_custom_entry_if_needed(serde_json::json!({
                 "event": "empty_turn",

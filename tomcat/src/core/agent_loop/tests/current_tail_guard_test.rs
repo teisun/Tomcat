@@ -279,6 +279,9 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     assert!(text.starts_with("<control_state>"));
     assert!(text.contains("mode: plan"));
     assert!(text.contains("<verbatim_user_messages>"));
+    assert!(text.contains("## Progress"));
+    assert!(text.contains("Rendered from the session todo scratchpad"));
+    assert!(text.contains("t2: step active"));
 
     let state = agent.context_state.as_ref().unwrap();
     assert_eq!(state.messages.len(), 1);

@@ -36,6 +36,22 @@ describe("inlinePath helpers", () => {
     });
   });
 
+  it("parses colon line ranges and navigates to their first line", () => {
+    expect(splitInlinePathLocation("src/AnswerCard.tsx:59-103")).toEqual({
+      line: 59,
+      originalText: "src/AnswerCard.tsx:59-103",
+      path: "src/AnswerCard.tsx",
+    });
+  });
+
+  it("parses hash-style line ranges and navigates to their first line", () => {
+    expect(splitInlinePathLocation("src/lib.rs#L10-L20")).toEqual({
+      line: 10,
+      originalText: "src/lib.rs#L10-L20",
+      path: "src/lib.rs",
+    });
+  });
+
   it("detects clickable inline file paths", () => {
     expect(detectInlineFilePath("gui/App.tsx")).toMatchObject({
       originalText: "gui/App.tsx",

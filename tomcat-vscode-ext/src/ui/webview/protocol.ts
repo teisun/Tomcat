@@ -25,6 +25,7 @@ import type {
   PreviewSave,
   PreviewSelect,
 } from "../../shared/imagePreviewProtocol";
+import type { PathResolution } from "../../shared/pathResolution";
 
 export type WebviewMessageSegment = ServeContentSegment;
 export type WebviewReference = Extract<
@@ -419,6 +420,11 @@ export type HostEventFrameContent =
   | ControlRequestFrame
   | ServeEvent
   | {
+      requestId: string;
+      results: PathResolution[];
+      type: "pathsResolved";
+    }
+  | {
       matches: ContextSearchMatch[];
       query: string;
       requestId: string;
@@ -732,6 +738,13 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "openLink";
+      data: {
+        href: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "openDiff";
       data: {
         toolCallId: string;
@@ -754,6 +767,14 @@ export type WebviewIntent =
         query: string;
         requestId: string;
         sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "resolvePaths";
+      data: {
+        paths: string[];
+        requestId: string;
       };
     }
   | {
@@ -1092,6 +1113,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         isString(value.data.path) &&
         (value.data.line === undefined || typeof value.data.line === "number")
       );
+    case "openLink":
+      return isRecord(value.data) && isString(value.data.href);
     case "openDiff":
       return isRecord(value.data) && isString(value.data.toolCallId);
     case "openPlanFile":
@@ -1163,6 +1186,13 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         (value.data.sessionId === undefined ||
           value.data.sessionId === null ||
           isString(value.data.sessionId))
+      );
+    case "resolvePaths":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.requestId) &&
+        Array.isArray(value.data.paths) &&
+        value.data.paths.every(isString)
       );
     case "showWarningMessage":
       return isRecord(value.data) && isString(value.data.message);

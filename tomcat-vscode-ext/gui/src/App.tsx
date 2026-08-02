@@ -31,6 +31,7 @@ import type {
   ContextSearchMatch,
   WebviewAttachmentView,
   HostToWebviewFrame,
+  PathResolution,
   VsCodeApiLike,
   WebviewDomAction,
   WebviewMessageBlock,
@@ -183,6 +184,10 @@ interface PendingRestoreRefill {
   sessionId: string;
 }
 
+type PendingPathResolution = {
+  resolve(results: PathResolution[]): void;
+};
+
 function createMessageId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -322,6 +327,35 @@ function parseContextSearchResultEvent(
     matches: sanitizeContextSearchMatches((content as { matches?: unknown }).matches),
     type: "contextSearchResult",
   };
+}
+
+function parsePathsResolvedEvent(
+  content: HostToWebviewFrame["content"],
+): { requestId: string; results: PathResolution[] } | null {
+  if (
+    !content ||
+    typeof content !== "object" ||
+    !("type" in content) ||
+    content.type !== "pathsResolved" ||
+    !("requestId" in content) ||
+    typeof content.requestId !== "string" ||
+    !("results" in content) ||
+    !Array.isArray(content.results)
+  ) {
+    return null;
+  }
+  const results = content.results.filter(
+    (result): result is PathResolution =>
+      !!result &&
+      typeof result === "object" &&
+      "kind" in result &&
+      (result.kind === "file" || result.kind === "directory" || result.kind === "missing") &&
+      "path" in result &&
+      typeof result.path === "string" &&
+      "resolvedPath" in result &&
+      typeof result.resolvedPath === "string",
+  );
+  return { requestId: content.requestId, results };
 }
 
 function resolvePendingComposerSubmission(
@@ -1297,6 +1331,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const contextSearchRequestSeqRef = useRef(0);
   const latestContextSearchRequestIdRef = useRef<string | null>(null);
   const contextSearchWarningShownRef = useRef(false);
+  const pendingPathResolutionsRef = useRef(new Map<string, PendingPathResolution>());
   const expectedPatchSeqBySessionRef = useRef<Record<string, number>>({});
   const sessionPatchResyncPendingRef = useRef<Set<string>>(new Set());
   const streamRef = useRef<HTMLElement | null>(null);
@@ -1931,6 +1966,16 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           });
           return;
         }
+        const pathsResolved = parsePathsResolvedEvent(frame.content);
+        if (pathsResolved) {
+          const pending = pendingPathResolutionsRef.current.get(pathsResolved.requestId);
+          if (!pending) {
+            return;
+          }
+          pendingPathResolutionsRef.current.delete(pathsResolved.requestId);
+          pending.resolve(pathsResolved.results);
+          return;
+        }
         const contextSearchResult = parseContextSearchResultEvent(frame.content);
         if (contextSearchResult) {
           if (contextSearchResult.requestId !== latestContextSearchRequestIdRef.current) {
@@ -2063,6 +2108,26 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       postIntent(vscodeApi, "openFile", {
         line,
         path,
+      });
+    },
+    [vscodeApi],
+  );
+  const handleOpenLink = useCallback(
+    (href: string) => {
+      postIntent(vscodeApi, "openLink", { href });
+    },
+    [vscodeApi],
+  );
+  const resolvePaths = useCallback(
+    (paths: string[]): Promise<PathResolution[]> => {
+      const uniquePaths = [...new Set(paths.map((path) => path.trim()).filter(Boolean))];
+      if (uniquePaths.length === 0) {
+        return Promise.resolve([]);
+      }
+      const requestId = createMessageId("resolve-paths");
+      return new Promise<PathResolution[]>((resolve) => {
+        pendingPathResolutionsRef.current.set(requestId, { resolve });
+        postIntent(vscodeApi, "resolvePaths", { paths: uniquePaths, requestId });
       });
     },
     [vscodeApi],
@@ -2423,8 +2488,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 checkpoints={activeSession.checkpoints ?? []}
                 onOpenDiff={handleOpenDiff}
                 onOpenFile={handleOpenFile}
+                onOpenLink={handleOpenLink}
                 onOpenImagePreview={handleOpenImagePreview}
                 onOpenPlanFile={handleOpenPlanFile}
+                resolvePaths={resolvePaths}
                 onRecoverErrorTurn={handleRecoverErrorTurn}
                 onRetryUserMessage={handleRetryUserMessage}
                 canBuildPlan={canBuildPlan}

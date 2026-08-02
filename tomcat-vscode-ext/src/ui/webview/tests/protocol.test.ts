@@ -98,6 +98,21 @@ describe("webview protocol helpers", () => {
         type: "pickContext",
       }),
     ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: { paths: ["src/app.ts", "src"], requestId: "paths-1" },
+        messageId: "resolve-paths-1",
+        type: "resolvePaths",
+      }),
+    ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: { href: "https://example.com/docs" },
+        messageId: "open-link-1",
+        type: "openLink",
+      }),
+    ).toBe(true);
     expect(
       isWebviewIntent({
         data: { sessionId: "s1" },
@@ -249,6 +264,13 @@ describe("webview protocol helpers", () => {
   });
 
   it("rejects malformed intents", () => {
+    expect(
+      isWebviewIntent({
+        data: { paths: ["src/app.ts", 42], requestId: "paths-bad" },
+        messageId: "resolve-paths-bad",
+        type: "resolvePaths",
+      }),
+    ).toBe(false);
     expect(
       isWebviewIntent({
         data: {},

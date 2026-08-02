@@ -654,7 +654,7 @@ impl Preheat {
 /// 根据 messages snapshot 生成 LLM 摘要（首次或 UPDATE 模式）。
 ///
 /// 模型只负责中间那段叙述。控制态与用户原话由 [`machine_block`] 在模型返回**之后**
-/// 拼到最前面，`## Progress` 在有 active plan 时也由代码按计划文件重写——
+/// 拼到最前面，`## Progress` 也由控制态快照选定的待办来源重写——
 /// 这三样东西不经过模型，也就不可能被模型编造。
 pub async fn generate_summary(
     snapshot: &[ChatMessage],
@@ -697,11 +697,8 @@ pub async fn generate_summary(
         return Err(AppError::internal("LLM returned empty summary"));
     }
 
-    if let Some(plan) = control
-        .and_then(|c| c.plan_path.as_deref())
-        .and_then(|path| crate::core::plan_runtime::file_store::read_plan(path).ok())
-    {
-        text = machine_block::override_progress_section(&text, &plan);
+    if let Some(progress) = control.and_then(|control| control.progress.as_ref()) {
+        text = machine_block::override_progress_section(&text, progress);
     }
 
     let blocks = machine_block::render(

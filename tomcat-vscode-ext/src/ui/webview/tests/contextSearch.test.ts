@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import {
@@ -102,6 +102,61 @@ describe("fuzzyRank", () => {
 });
 
 describe("ContextSearchService", () => {
+  it("resolves files, directories, and missing paths for Markdown chips", async () => {
+    __testing.registerFile("/workspace/src/app.ts", "export const app = true;\n");
+    __testing.registerDirectory("/workspace/docs");
+    const service = new ContextSearchService();
+
+    await expect(
+      service.resolvePaths({ paths: ["src/app.ts", "docs", "missing.md"] }),
+    ).resolves.toEqual([
+      {
+        kind: "file",
+        path: "src/app.ts",
+        resolvedPath: "/workspace/src/app.ts",
+      },
+      {
+        kind: "directory",
+        path: "docs",
+        resolvedPath: "/workspace/docs",
+      },
+      {
+        kind: "missing",
+        path: "missing.md",
+        resolvedPath: "/workspace/missing.md",
+      },
+    ]);
+    service.dispose();
+  });
+
+  it("uses the warm @-mention index before falling back to stat", async () => {
+    __testing.registerFile("/workspace/src/app.ts", "export const app = true;\n");
+    const service = new ContextSearchService();
+    await service.search({ query: "app" });
+    const stat = vi.spyOn(vscode.workspace.fs, "stat");
+
+    await expect(service.resolvePaths({ paths: ["src/app.ts"] })).resolves.toMatchObject([
+      { kind: "file", path: "src/app.ts" },
+    ]);
+    expect(stat).not.toHaveBeenCalled();
+    stat.mockRestore();
+    service.dispose();
+  });
+
+  it("invalidates direct path results when the workspace watcher sees a create", async () => {
+    const service = new ContextSearchService();
+    await expect(service.resolvePaths({ paths: ["src/new.ts"] })).resolves.toMatchObject([
+      { kind: "missing", path: "src/new.ts" },
+    ]);
+
+    __testing.registerFile("/workspace/src/new.ts", "export const fresh = true;\n");
+
+    await expect(service.resolvePaths({ paths: ["src/new.ts"] })).resolves.toMatchObject([
+      { kind: "file", path: "src/new.ts" },
+    ]);
+    service.dispose();
+  });
+
   it("respects files.exclude when building the cache", async () => {
     __testing.registerFile("/workspace/generated/foo.ts", "export const generated = true;\n");
     __testing.registerFile("/workspace/src/foo.ts", "export const source = true;\n");

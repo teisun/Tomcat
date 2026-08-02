@@ -65,7 +65,7 @@
 | **EXECUTOR_SYSTEM_REMINDER** | 进入 EXEC 模式时注入到 **system 区段尾部**的 `<system_reminder kind="executor">` | 进程内常量 + 装配阶段注入 | 仅在 `Executing` 期间存在；切换后下一轮装配不再注入 | 执行模式提示词。 |
 | **CLI prompt helper** | 基于 `PlanState` 统一渲染 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` 与对应 agent prompt | `src/api/chat/prompt.rs` | `Completed` 对用户侧折叠为 `Chat`；CHAT agent prompt 保持 `agent.<id>>` | 显示层统一走 helper。 |
 | **EXEC 首轮上下文** | `/plan build` 后直接进入执行回合；runtime 依赖当前 PlanFile、system reminder 与工具结果维持上下文 | runtime 装配 | 不再注入 `<plan_meta>` | 进入 EXEC 后靠现有上下文收口，不额外塞一段 plan_meta。 |
-| **catalog 动态过滤** | runtime 在每轮上下文构造前根据 `current_mode()` 决定 LLM 可见工具集 | `src/api/chat/plan_runtime/catalog.rs`（拟定） | CHAT/EXEC：全工具集 + `todos` − `create_plan` − `ask_question`；PLAN：全工具集 + `create_plan` + `ask_question` − `todos` + 写盘路径白名单 | 模式决定可见集。 |
+| **catalog 动态过滤** | runtime 在每轮上下文构造前根据 `current_mode()` 决定 LLM 可见工具集 | `src/core/plan_runtime/catalog.rs` | CHAT/EXEC：全工具集 + `todos` + `update_plan` − `create_plan` − `ask_question`；PLAN：全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单 | 模式决定可见集。 |
 | **写盘路径白名单（PLAN 模式专用）** | PLAN 期 `write/edit` 只能写 `~/.tomcat/plans/*.plan.md` | `tool_exec` 在 PLAN 模式校验 path | 其它路径硬拒；其它模式无此白名单（仅 frontmatter 拦截） | 规划阶段只许动计划文件。 |
 | **`current_mode()`** | 查询当前会话 PLAN 状态的 Rust API | `PlanRuntime::mode(&self) -> PlanState` | UI / catalog / tool_exec / prompt helper / reminder 注入都查这个 | 模式的事实源就是 runtime。 |
 | **mode 指示器（UI）** | 状态行 / 标题栏中的模式标签 | UI 渲染层 | `Chat → [CHAT]`；`Planning → [PLAN]`；`Executing → [EXEC plan_id=…]`；`Completed → [DONE plan_id=…]`；`Pending → [PENDING plan_id=…]` | 让用户一眼看到现在哪个模式。 |
@@ -207,7 +207,7 @@
 - **双保险**：`tool_exec` dispatch 前再查 `current_mode()`。
 
 ```text
-  Planning    →  全工具集 + create_plan + ask_question − todos；write/edit 仅 ~/.tomcat/plans/*.plan.md
+  Planning    →  全工具集 + create_plan + ask_question + todos + update_plan；write/edit 仅 ~/.tomcat/plans/*.plan.md
   Executing   →  全工具集 + todos − create_plan − ask_question；write/edit 任意路径（仅 plan 文件 frontmatter 拦截）
   Chat        →  同 Executing；无 plan body 注入
   Completed   →  同 Chat（只读浏览）
@@ -251,10 +251,10 @@
 | `Completed` | 同 `Chat`（瞬时态，通常不会停留到下一轮） | 同 `Chat` | 计划结束后立即收口回 Chat(retain)。 |
 | `Pending` | 同 `Chat` | 同 `Chat` | 等待 `/plan build` 续跑。 |
 
-> **关键差异（D 方案 / 2026-05 收紧）**：
-> 1. `todos` / `update_plan` / `ask_question` 在 CHAT/Planning/Pending/Completed 全可见；`create_plan` 仅 Planning；
+> **关键差异（D 方案 / 2026-08 收口）**：
+> 1. `todos` / `update_plan` 在 CHAT/Planning/EXEC/Pending/Completed 全可见；`ask_question` 在 CHAT/Planning/Pending/Completed 可见；`create_plan` 仅 Planning；
 > 2. PLAN 模式写工具硬性限制路径（`~/.tomcat/plans/*.plan.md`），离开此目录的任何写一律拒；
-> 3. EXEC 模式 plan 文件全禁写（含正文），推进任务**只能**走 `update_plan`；
+> 3. EXEC 模式 plan 文件全禁写（含正文）；`update_plan` 推进 PlanFile，`todos` 维护独立的 session scratchpad；
 > 4. `state=completed` 自动派生由 `update_plan` 在 EXEC 触发，与 `todos` 无关。
 
 **说人话**：模式一变，模型能看到的工具名单 + 能写的路径就变；不是靠 prompt 提醒，是 catalog + 路径白名单真过滤。

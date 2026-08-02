@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-02 09:00 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-02 20:55 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 提示词整合、链接可点击与摘要待办回归已收口：聊天/计划预览外链走 `openLink`；文件路径改为「预筛候选 → 宿主 `resolvePaths` 存在性校验 → 再渲染可点 chip」，并支持 `path:59-103` / `#L10-L20`；验证规则并入 `system/verification.txt`，planner/executor 去重，S6/S7/S8 字节对齐且 code review 去掉不适用的 S7；EXEC 恢复 `todos`；压缩摘要用 `ProgressSource` 保证 PlanFile 与 session scratchpad 二选一；thinking 截断/误作正文改为显式失败并补日志。版本 CLI `0.1.22 → 0.1.23`、扩展 `0.1.33 → 0.1.34`（`bundledCli=0.1.23`）。验证：Rust 提示词/工具/摘要/agent_loop 分批绿；扩展 `npm test`（core 344 + gui 471）与 `npm run lint` 绿；`node scripts/release-version.mjs check` 通过。完整 `cargo test --lib` 仍有既有无关红测见 BLOCKED。@2026-08-02
 - [✓] **[P0]** smart picker 多选引用竞态已修：`35131f9` 把多选改成并发逐项通知后，旧“仅第一项”的草稿回写会覆盖完整选择，文件夹 chip 偶发消失。现改为一次 draft 替换 + 一次 `insertReferences` 批量事件；Composer 用单次 TipTap 事务插入全部引用且只同步一次完整草稿；本地脏草稿会合并 host 新增引用而不丢 chip。验证：`routes smart picker selections into attachments and context chips` 安装包 E2E 绿；扩展 `npm run gate:full` 全绿。@2026-08-02
 - [✓] **[P1]** release 构建 dead-code/unused-import 告警收口：仅测试使用的 `assert_active_tool_result_integrity`、`run_tool_calls`、`finalize_turn_after_text` 加 `#[cfg(test)]`，生产路径继续走 `*_with_usage`；`cargo check --lib` 无上述 4 条 warning。@2026-08-01
 - [✓] **[P0/P1]** Retry/Resume 失败恢复已按 append-only transcript 收口：Retry 在同一把 transcript 锁内先给源 user 与其后的残留消息盖 `superseded`（源行另带 `turn_failed`），再复制出新 user；重启注水不会重复提示词，也不会留下无归属的半截 assistant。Resume 不复制 user，只在完整 tool-result 活尾巴（含 `[pending]` 自愈占位）时续跑。磁盘继续保留失败 user、auto-retry custom 和 error 供审计；界面则只投影当前尝试——点击 Retry/Resume 或发送新提示后，已了结的错误卡消失；Retry 的旧 user 气泡也随之隐藏，Resume 保留原 user 与工具链。`role:tool` 的自愈占位不误判为对话继续，错误卡仍可给 Resume。压缩按钮位于新建按钮右侧，改用 `codicon-layers`。验证：Rust 定向 copy-forward/幂等盖章与 extension state/provider/flow 回归通过；带截图的 host E2E Retry/Resume 两路径通过；扩展 `gate:full` 全绿。@2026-08-02
@@ -49,11 +50,14 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- Webview↔Host 新增路径解析往返：`resolvePaths{requestId,paths[]}` → `pathsResolved{requestId,resolutions[]}`（`kind: file|directory|missing`）；聊天与 plan preview 共用 `classifyLink` / `PathResolution`。Webview intent 新增 `openLink`；目录目标由 `VsCodeIde.showFile` 降级为 `revealInExplorer`。
+- 压缩摘要：`ControlSnapshot.progress: Option<ProgressSource>`（`PlanFile` / `SessionScratchpad`）；`override_progress_section` 改吃单一来源并带 Progress 条目预算。
+- EXEC catalog：`todos` 重新可见；`HIDDEN_IN_EXECUTING` 仅排除 `create_plan` / `ask_question`。
 - 失败恢复：新增 `ServeCommand::Retry { message_id }`，核心层以「盖章保留 + 复制前进」创建新 user 行，并确保源行与其后残留消息不再进入 hydrate；`Resume` 仅接受完整 tool-result 活尾巴。webview 错误卡保存 retry anchor，按 Retry/Resume 分流并在成功后刷新 transcript；错误与失败 user 行留在 jsonl 审计，界面只保留当前尝试。
 - Host→Webview 新增批量 `insertReferences{sessionId,references[]}`；picker 确认走一次 draft 替换 + 一次批量事件，单条 `insertReference` 路径保留。Composer 暴露 `insertReferences()`，多引用只产生一次 TipTap 事务与一次草稿同步。
 - transcript：公开 `PENDING_TOOL_RESULT_TEXT` / `INTERRUPTED_TOOL_RESULT_TEXT` / `UNKNOWN_RESTART_TOOL_RESULT_TEXT`；扩展侧 `toolResultPlaceholders.ts` 契约对齐；`replace_tool_result_by_tool_call_id` 允许无旧 result 时追加（悬空 ask_question）；非结构性盖章走 `refresh_resume_index_after_nonstructural_rewrite`；新增按 id 盖章 `mark_user_message_entry_superseded_by_id`。
 - 新增 CLI `/compact`（`cmd_compact`）与 serve compact ratio 字段断言；手动 compact 与自动 overflow 路径分工写入 `context-management.md`。
-- 发布版本：CLI `0.1.22`、扩展 `0.1.33`、`bundledCliVersion=0.1.22`；fake-serve E2E 夹具 `serverVersion` 同步。
+- 发布版本：CLI `0.1.23`、扩展 `0.1.34`、`bundledCliVersion=0.1.23`；fake-serve E2E 夹具 `serverVersion` 按需同步。
 - `dispatch_agent` catalog description 与 Planner/Executor 行为合同收紧为条件式 Explorer 派发；工具 schema 与 wire 协议不变。
 - Plan Preview Markdown 列表项新增内部 `_sourceLine` 递归标记；`WebviewReference` wire 类型不变，selection 去重身份改为 `path + range + text hash`。
 - 发布版本接口：根 `release-versions.json` 新增 `cli`、`extension.version`、`extension.bundledCli` 三个权威字段；`scripts/release-version.mjs` 提供 `bump` / `set` / `sync` / `check`；Cargo.toml/Cargo.lock 与扩展 package/package-lock 降为生成镜像；私有 GUI manifest/lock 根包不再含 `version`；CLI/EXT tag guard 在检查 tag 前先验证全仓镜像，EXT guard 的 `bundled_cli_version` / `extension_version` GitHub outputs 保持兼容。
@@ -86,12 +90,13 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| `cargo test --lib` 仍有 13 个既有红测 | 9 个 serve 附件/能力夹具（多模态/content_filter/degrade 请求计数等）在能力校验前拦截、录制 provider 未收到请求；另有 2 个 chat/runtime 与 2 个 ext dispatcher 断言失败。Retry/Resume、replay、guard 的定向回归均通过 | 单独排查附件夹具、chat cleanup/runtime 和 ext dispatcher；不阻塞本轮恢复语义合入 |
+| `cargo test --lib` 仍有既有无关红测 | serve 附件/能力夹具（多模态/content_filter/degrade 请求计数等）在能力校验前拦截、录制 provider 未收到请求；另有 chat cleanup/runtime、ext dispatcher、个别后台 bash lifecycle 偶发断言。本轮提示词/链接/摘要定向回归均通过 | 单独排查附件夹具、chat cleanup/runtime 和 ext dispatcher；不阻塞本轮合入 |
 | 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但真实 `dispatch_agent > 0` 路径仍待授权验证 | 获得明确授权后，在隔离夹具中补跑一次并检查首次是否合并全部独立问题 |
 | `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；与本轮恢复整改无关 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-02 20:55）：提示词整合 / 链接宿主校验 / 摘要 `ProgressSource` / EXEC `todos` 恢复已合入；版本 CLI `0.1.23` / 扩展 `0.1.34`。验证：Rust 分批（prompts、catalog、compaction、agent_loop）绿；扩展 `npm test` + `lint` 绿；`release-version check` 通过。完整 `cargo test --lib` 既有无关红测仍在 BLOCKED；图形化宿主下真实计划文件点击未做人工验收。
 - 最新补充（2026-08-02 09:00）：失败章节整章折叠 + Retry 锚点精确盖章 + smart picker 批量引用事务已合入；扩展版本 `0.1.33`。验证：扩展 `npm run gate:full` 全绿（含安装包 smart-picker E2E）；Rust 定向 copy-forward/幂等盖章与 webview state/provider/flow 回归通过。完整 `cargo test --lib` 既有无关红测仍在 BLOCKED。
 - 最新补充（2026-08-01 11:28）：release 路径 unused/dead_code 四条告警已用 `#[cfg(test)]` 收口；`cargo check --lib` 绿。本机另打纯插件包 `tomcat-vscode-ext-0.1.32.vsix`（不含 CLI，不入库）。
 - 最新补充（2026-08-01 11:04）：卡死机制整改与版本发布合入工作区：CLI `0.1.22` / 扩展 `0.1.32`；错误卡主按钮视觉与真实 Retry/Resume E2E 截图已验收；定向 Rust revive/resume/index 与扩展 MessageBubble/state/provider 测试绿；完整 `cargo test --lib` 仍有既有 serve 附件失败未清。`run-vscode-devhost` 现透传 `TOMCAT_E2E_SCREENSHOT` / `TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR`。

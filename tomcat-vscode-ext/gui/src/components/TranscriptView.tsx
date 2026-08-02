@@ -2,6 +2,7 @@ import { Fragment, type RefObject, useMemo } from "react";
 
 import type {
   AskQuestionResult,
+  PathResolution,
   WebviewCheckpoint,
   WebviewMediaRoot,
   WebviewPlanState,
@@ -123,6 +124,7 @@ export function TranscriptView({
   onBuildPlan,
   onOpenDiff,
   onOpenFile,
+  onOpenLink,
   onOpenImagePreview,
   onOpenPlanFile,
   onRecoverErrorTurn,
@@ -130,6 +132,7 @@ export function TranscriptView({
   onRetryUserMessage,
   onSetBuildModel,
   onZoomImage,
+  resolvePaths,
   planId,
   planState,
   planTodos = [],
@@ -155,6 +158,7 @@ export function TranscriptView({
   onBuildPlan(planId: string | null, path: string): void;
   onOpenDiff?(toolCallId: string): void;
   onOpenFile(path: string, line?: number): void;
+  onOpenLink?(href: string): void;
   onOpenImagePreview?(imageId: string): void;
   onOpenPlanFile(path: string): void;
   onRecoverErrorTurn?(errorId: string, action: "resume" | "retry"): void;
@@ -162,6 +166,7 @@ export function TranscriptView({
   onRetryUserMessage?(messageId: string): void;
   onSetBuildModel?(modelId: string): void;
   onZoomImage?(image: { alt: string; src: string }): void;
+  resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   planId?: string | null;
   planState?: WebviewPlanState | null;
   planTodos?: WebviewTodo[];
@@ -201,10 +206,12 @@ export function TranscriptView({
               key={item.id}
               mediaRoots={mediaRoots}
               onOpenFile={onOpenFile}
+              onOpenLink={onOpenLink}
               onOpenImagePreview={onOpenImagePreview}
               onRecover={onRecoverErrorTurn}
               onRetry={onRetryUserMessage}
               recoveryDisabled={busy}
+              resolvePaths={resolvePaths}
               onZoomImage={onZoomImage}
             />
           );

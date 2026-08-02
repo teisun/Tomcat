@@ -6,6 +6,7 @@ import type {
   PlanPreviewStateSnapshot,
   VsCodeApiLike,
 } from "../../../src/shared/planPreviewProtocol";
+import type { PathResolution } from "../../../src/shared/pathResolution";
 import { PlanPreviewApp } from "./PlanPreviewApp";
 
 function makeState(overrides: Partial<PlanPreviewStateSnapshot> = {}): PlanPreviewStateSnapshot {
@@ -51,6 +52,20 @@ function pushCaptureSelectionEvent(): void {
           channel: "event",
           content: { type: "captureSelectionForChat" },
           messageId: "evt-1",
+        },
+      }),
+    );
+  });
+}
+
+function pushPathsResolvedEvent(requestId: string, results: PathResolution[]): void {
+  act(() => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          channel: "event",
+          content: { requestId, results, type: "pathsResolved" },
+          messageId: "paths-resolved",
         },
       }),
     );
@@ -233,7 +248,7 @@ describe("PlanPreviewApp", () => {
     expect((intents[0] as { data: { modelId: string } }).data.modelId).toBe("claude-opus");
   });
 
-  it("sends openFile for linkified inline file paths in the plan body", () => {
+  it("resolves inline plan paths before sending openFile", async () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);
     pushState(
@@ -241,14 +256,27 @@ describe("PlanPreviewApp", () => {
         bodyMarkdown: "Check `src/test/fixtures/plan-preview.ts:18` before shipping.",
       }),
     );
-    fireEvent.click(screen.getByTestId("assistant-clickable-path"));
+    const resolveIntent = intentsOfType(api, "resolvePaths")[0];
+    expect(resolveIntent).toBeTruthy();
+    const requestId = (resolveIntent as { data: { requestId: string } }).data.requestId;
+    expect(screen.queryByTestId("assistant-clickable-path")).toBeNull();
+
+    pushPathsResolvedEvent(requestId, [
+      {
+        kind: "file",
+        path: "src/test/fixtures/plan-preview.ts",
+        resolvedPath: "/home/u/.tomcat/plans/src/test/fixtures/plan-preview.ts",
+      },
+    ]);
+
+    fireEvent.click(await screen.findByTestId("assistant-clickable-path"));
     const intents = intentsOfType(api, "openFile") as {
       data: { line?: number; path: string };
     }[];
     expect(intents).toHaveLength(1);
     expect(intents[0].data).toEqual({
       line: 18,
-      path: "src/test/fixtures/plan-preview.ts",
+      path: "/home/u/.tomcat/plans/src/test/fixtures/plan-preview.ts",
     });
   });
 

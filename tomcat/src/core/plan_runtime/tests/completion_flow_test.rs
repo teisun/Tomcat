@@ -39,18 +39,19 @@ fn executor_reminder_format_uses_system_reminder_tags() {
 fn runtime_reminders_batch_detailed_todos_without_repeating_final_acceptance() {
     let planner: &str = *reminders::PLANNER_REMINDER;
     let executor = reminders::render_executor_reminder("batch-contract");
+    let verification =
+        crate::core::prompts::load(crate::core::prompts::PromptKey::SystemVerification);
 
     assert!(planner.contains("not\nto the number of todos"));
     assert!(planner.contains("verification batches as shared\n  build/test boundaries"));
     assert!(planner.contains("share a build target"));
     assert!(planner.contains("milestone-level verification"));
-    assert!(planner.contains(
-        "final acceptance, run only checks not covered by a still-valid earlier\n  result"
+    assert!(verification.contains(
+        "For final acceptance, run only checks not covered by a still-valid earlier\nresult"
     ));
+    assert!(verification
+        .contains("Do not schedule the same test family once per todo and again at the end"));
     assert!(
-        planner.contains("Do not schedule the same test family once per todo and again at the end")
-    );
-    assert!(
-        executor.contains("Follow the building plan's verification scope, timing, and batching")
+        executor.contains("system prompt's `## Finishing and verifying` section")
     );
 }

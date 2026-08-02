@@ -996,6 +996,118 @@ async fn reasoning_only_empty_turn_is_fatal_and_never_auto_retries() {
 }
 
 #[tokio::test]
+async fn truncated_thinking_prefix_is_fatal_and_never_auto_retries() {
+    let stream = vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: Some(
+                "I will reason through every implementation detail first.".to_string(),
+            ),
+            reasoning_continuation: None,
+            continuity: None,
+        }),
+        Ok(StreamEvent::ContentDelta {
+            delta: "I will reason".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "s-truncated-thinking".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        1,
+        "the truncated-thinking guard must not retry an unchanged request"
+    );
+}
+
+#[tokio::test]
+async fn duplicated_thinking_as_body_is_fatal_and_never_auto_retries() {
+    let stream = vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: Some("I will inspect the implementation before answering.".to_string()),
+            reasoning_continuation: None,
+            continuity: None,
+        }),
+        Ok(StreamEvent::ContentDelta {
+            delta: "I will inspect the implementation before answering.".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "s-duplicated-thinking".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    assert!(matches!(
+        loop_.run(vec![ChatMessage::user("hi")]).await,
+        AgentRunOutcome::Failed(_)
+    ));
+    assert_eq!(requests.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn short_non_prefix_body_after_thinking_remains_a_valid_reply() {
+    let stream = vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: Some("I will inspect the implementation before answering.".to_string()),
+            reasoning_continuation: None,
+            continuity: None,
+        }),
+        Ok(StreamEvent::ContentDelta {
+            delta: "Done.".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "s-short-final-body".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    assert!(matches!(
+        loop_.run(vec![ChatMessage::user("hi")]).await,
+        AgentRunOutcome::Completed(_)
+    ));
+    assert_eq!(requests.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn final_assistant_message_persists_provider_usage() {
     let stream = vec![
         Ok(StreamEvent::ContentDelta {

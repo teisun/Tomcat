@@ -291,8 +291,7 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
     );
 
     let plan_runtime = PlanRuntime::new("sess-plan-pending");
-    plan_runtime.set_executing_for_test(plan_id.clone());
-    plan_runtime.set_mode_pending(plan_id.clone());
+    plan_runtime.set_mode_pending_with_path(plan_id.clone(), Some(plan_path.clone()));
 
     let system = ChatMessage::system("sys");
     let user = ChatMessage::user("u".repeat(4_000));

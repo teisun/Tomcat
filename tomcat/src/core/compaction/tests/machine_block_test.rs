@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::llm::{ChatMessage, MessageKind};
-use crate::core::plan_runtime::file_store::{PlanFile, PlanFileFrontmatter, PlanFileState};
+use crate::core::plan_runtime::ProgressSource;
 use crate::core::session::AgentMode;
 
 fn snapshot() -> ControlSnapshot {
@@ -10,24 +10,20 @@ fn snapshot() -> ControlSnapshot {
         plan_file_state: Some("executing".to_string()),
         plan_id: Some("demo".to_string()),
         model: Some("gpt-5.6-sol".to_string()),
+        progress: Some(plan_progress(vec![todo(
+            "t1",
+            "snapshot todo",
+            TodoStatus::Pending,
+        )])),
     }
 }
 
-fn plan_with_todos(todos: Vec<TodoItem>) -> PlanFile {
-    PlanFile {
-        frontmatter: PlanFileFrontmatter {
-            plan_id: "demo".to_string(),
-            goal: "demo goal".to_string(),
-            state: PlanFileState::Executing,
-            session_key: None,
-            session_id: None,
-            created_at: "2026-07-27T00:00:00Z".to_string(),
-            schema_version: 1,
-            todos,
-            unknown: Default::default(),
-        },
-        body: String::new(),
-    }
+fn plan_progress(todos: Vec<TodoItem>) -> ProgressSource {
+    ProgressSource::PlanFile { todos }
+}
+
+fn scratchpad_progress(todos: Vec<TodoItem>) -> ProgressSource {
+    ProgressSource::SessionScratchpad { todos }
 }
 
 fn todo(id: &str, content: &str, status: TodoStatus) -> TodoItem {
@@ -128,17 +124,18 @@ fn verbatim_keeps_newest_messages_and_says_how_many_were_dropped() {
 }
 
 #[test]
-fn progress_section_is_rewritten_from_the_plan_file() {
-    let plan = plan_with_todos(vec![
+fn progress_section_is_rewritten_from_the_active_plan_file() {
+    let progress = plan_progress(vec![
         todo("t1", "后端协议", TodoStatus::Completed),
         todo("t2", "缩略图渲染", TodoStatus::InProgress),
         todo("t3", "预览面板", TodoStatus::Pending),
     ]);
     let summary = "## Goal\ng\n\n## Progress\n### Done\n- [x] 全部完成了\n\n## Next Steps\n1. 收工";
 
-    let out = override_progress_section(summary, &plan);
+    let out = override_progress_section(summary, &progress);
 
     assert!(!out.contains("全部完成了"), "模型的说法必须被覆盖");
+    assert!(out.contains("Use `update_plan` to change it"));
     assert!(out.contains("3 total / 1 completed / 1 in_progress / 1 pending"));
     assert!(out.contains("t2: 缩略图渲染"));
     // 其余章节原样保留，且顺序不变。
@@ -149,9 +146,37 @@ fn progress_section_is_rewritten_from_the_plan_file() {
 
 #[test]
 fn progress_section_is_appended_when_the_model_omitted_it() {
-    let plan = plan_with_todos(vec![todo("t1", "唯一一项", TodoStatus::Pending)]);
-    let out = override_progress_section("## Goal\ng", &plan);
+    let progress = plan_progress(vec![todo("t1", "唯一一项", TodoStatus::Pending)]);
+    let out = override_progress_section("## Goal\ng", &progress);
     assert!(out.contains("## Goal"));
     assert!(out.contains("## Progress"));
     assert!(out.contains("t1: 唯一一项"));
+}
+
+#[test]
+fn progress_section_falls_back_to_session_scratchpad_todos() {
+    let progress = scratchpad_progress(vec![todo("s1", "继续排查", TodoStatus::InProgress)]);
+    let out = override_progress_section("## Goal\ng", &progress);
+
+    assert!(out.contains("Rendered from the session todo scratchpad"));
+    assert!(out.contains("Use `todos` to change it"));
+    assert!(out.contains("s1: 继续排查"));
+}
+
+#[test]
+fn progress_budget_summarizes_completed_items_instead_of_listing_them() {
+    let todos = (0..30)
+        .map(|idx| {
+            todo(
+                &format!("done-{idx}"),
+                "already finished",
+                TodoStatus::Completed,
+            )
+        })
+        .collect();
+    let out = override_progress_section("## Goal\ng", &plan_progress(todos));
+
+    assert!(out.contains("30 completed"));
+    assert!(out.contains("30 completed item(s) omitted"));
+    assert!(!out.contains("done-0: already finished"));
 }

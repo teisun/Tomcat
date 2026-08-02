@@ -1,9 +1,9 @@
-import { memo, useEffect, useMemo, useRef, type MouseEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 
 import { buildDecoratedHtml, flashCopyButton } from "./markdownDecorators";
 import { renderMermaidBlocks, splitTopLevelBlocks } from "./markdownRuntime";
 import { logRichRender } from "./richRenderRuntime";
-import type { WebviewMediaRoot } from "../../types";
+import type { PathResolution, WebviewMediaRoot } from "../../types";
 
 function closeOpenFenceIfNeeded(markdown: string): string {
   const lines = markdown.split("\n");
@@ -30,15 +30,60 @@ function closeOpenFenceIfNeeded(markdown: string): string {
 const ChatMarkdownBlock = memo(function ChatMarkdownBlock({
   mediaRoots,
   raw,
+  resolvePaths,
 }: {
   mediaRoots?: WebviewMediaRoot[];
   raw: string;
+  resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const html = useMemo(
-    () => buildDecoratedHtml(closeOpenFenceIfNeeded(raw), { mediaRoots }),
-    [mediaRoots, raw],
+  const [pathResolutions, setPathResolutions] = useState<ReadonlyMap<string, PathResolution>>(
+    () => new Map(),
   );
+  const html = useMemo(
+    () =>
+      buildDecoratedHtml(closeOpenFenceIfNeeded(raw), {
+        mediaRoots,
+        pathResolutions,
+      }),
+    [mediaRoots, pathResolutions, raw],
+  );
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !resolvePaths) {
+      return;
+    }
+    const paths = [
+      ...new Set(
+        Array.from(container.querySelectorAll<HTMLElement>("[data-tc-path-candidate]"))
+          .map((node) => node.dataset.tcPathCandidate)
+          .filter((path): path is string => Boolean(path)),
+      ),
+    ];
+    if (paths.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    void resolvePaths(paths).then(
+      (results) => {
+        if (cancelled) {
+          return;
+        }
+        setPathResolutions((current) => {
+          const next = new Map(current);
+          for (const result of results) {
+            next.set(result.path, result);
+          }
+          return next;
+        });
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [html, resolvePaths]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -73,12 +118,14 @@ function ChatMarkdownComponent({
   mediaRoots,
   onOpenFile,
   onOpenLink,
+  resolvePaths,
   onZoomImage,
 }: {
   markdown: string;
   mediaRoots?: WebviewMediaRoot[];
   onOpenFile(path: string, line?: number): void;
   onOpenLink?(href: string): void;
+  resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   onZoomImage?(image: { alt: string; src: string }): void;
 }) {
   const blocks = useMemo(() => splitTopLevelBlocks(markdown), [markdown]);
@@ -143,7 +190,12 @@ function ChatMarkdownComponent({
       onClick={handleClick}
     >
       {blocks.map((raw, index) => (
-        <ChatMarkdownBlock key={index} mediaRoots={mediaRoots} raw={raw} />
+        <ChatMarkdownBlock
+          key={index}
+          mediaRoots={mediaRoots}
+          raw={raw}
+          resolvePaths={resolvePaths}
+        />
       ))}
     </div>
   );

@@ -60,6 +60,24 @@ describe("MessageBubble", () => {
     expect(onOpenFile).toHaveBeenCalledWith("src/lib.rs", 9);
   });
 
+  it("forwards assistant Markdown links to the transcript link handler", () => {
+    const onOpenLink = vi.fn();
+    render(
+      <MessageBubble
+        item={{
+          id: "a-link",
+          kind: "assistant",
+          text: "See [the docs](https://example.com/docs).",
+          type: "message",
+        }}
+        onOpenLink={onOpenLink}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "the docs" }));
+    expect(onOpenLink).toHaveBeenCalledWith("https://example.com/docs");
+  });
+
   it("keeps left border for error and notice", () => {
     const { rerender } = render(
       <MessageBubble

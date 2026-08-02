@@ -30,6 +30,7 @@ import {
   attachmentResourceRoots,
   resolveAttachmentUris,
 } from "../../shared/attachmentUris";
+import { classifyLink } from "../../shared/linkTarget";
 import {
   ComposerDraftStore,
   isDraftEmpty,
@@ -166,6 +167,7 @@ export interface TomcatWebviewProviderDeps {
   ide: VsCodeIde;
   initialize(): Promise<InitializeResult>;
   messenger: TomcatMessenger;
+  openExternal?(href: string): Promise<void> | void;
   openModelSettings?(route?: "models"): void;
   refreshPlanPreview?(planId: string | null, path: string | null): Promise<void> | void;
   sessionRouter: SessionRouter;
@@ -1233,6 +1235,36 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
   }
 
+  private async handlePathResolution(
+    intent: Extract<WebviewIntent, { type: "resolvePaths" }>,
+  ): Promise<void> {
+    try {
+      const results = await this.contextSearch.resolvePaths({
+        paths: intent.data.paths,
+      });
+      await this.postEvent({
+        requestId: intent.data.requestId,
+        results,
+        type: "pathsResolved",
+      });
+    } catch (error) {
+      console.error("Tomcat path resolution failed", error);
+      await this.postEvent({
+        requestId: intent.data.requestId,
+        results: [],
+        type: "pathsResolved",
+      });
+    }
+  }
+
+  private async openExternal(href: string): Promise<void> {
+    if (this.deps.openExternal) {
+      await this.deps.openExternal(href);
+      return;
+    }
+    await vscode.env.openExternal(vscode.Uri.parse(href));
+  }
+
   private lookupApprovalSessionId(requestId: string): string | null {
     for (const session of Object.values(this.peekState().sessionViews)) {
       const approval = session.timeline.find(
@@ -1467,6 +1499,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
       case "searchContext":
         await this.handleContextSearch(intent);
+        return;
+      case "resolvePaths":
+        await this.handlePathResolution(intent);
         return;
       case "showWarningMessage":
         await vscode.window.showWarningMessage(intent.data.message);
@@ -1802,6 +1837,19 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           );
         }
         return;
+      case "openLink": {
+        const target = classifyLink(intent.data.href);
+        if (target.kind === "external") {
+          await this.openExternal(target.href);
+        } else if (target.kind === "file") {
+          try {
+            await this.deps.ide.showFile(target.path, target.line);
+          } catch {
+            await this.openExternal(intent.data.href);
+          }
+        }
+        return;
+      }
       case "openDiff": {
         const toolInfo = this.findToolCard(intent.data.toolCallId);
         const tool = toolInfo?.tool;

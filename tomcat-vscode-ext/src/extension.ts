@@ -831,6 +831,9 @@ export async function activate(
     ide,
     initialize: ensureInitialized,
     messenger,
+    openExternal: async (href) => {
+      await vscode.env.openExternal(vscode.Uri.parse(href));
+    },
     openModelSettings: (route) => {
       void ensureInitialized().then((result) => {
         if (hasAnyModelAdminCapability(result)) {

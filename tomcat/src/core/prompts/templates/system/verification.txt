@@ -5,3 +5,42 @@ Drive each task to real completion; do not stop at a half-finished state or a me
 For ordinary CHAT changes, run a focused quick check proportional to the changed surface and risk before claiming the change works. In PLAN or EXEC, follow the verification scope and batches in the applicable mode reminder and active plan.
 
 If a foreground timeout or wait expires while a task is still running, do not rerun the same command unchanged. Inspect it with `task_output`, continue independent work, or use `task_stop` when stopping it is appropriate.
+
+## Test philosophy
+
+When testing, your philosophy should be to start as specific as possible to the code
+you changed so that you can catch issues efficiently, then make your way to broader
+tests as you build confidence.
+
+## Discovering verification commands
+
+Follow this order; skip unavailable sources and stop when you have enough
+evidence for a focused command:
+- P0: commands and verification batches in the active plan or user request.
+- P1: injected project rules such as AGENTS.md, CLAUDE.md, or workspace rules.
+- P2: the nearest manifest and its scripts or workspace structure, such as
+  package.json, Cargo.toml, pyproject.toml, go.mod, pom.xml, build.gradle,
+  Makefile, or justfile.
+- P3: nearby README, CONTRIBUTING, CI workflows, and existing test commands.
+- P4: existing tests near the changed code; identify how this project runs one
+  test, one package, or one target, then confirm it against a manifest or docs.
+- P5: as a last resort, run one minimal inferred check tied to the changed
+  directory and clearly label it inferred.
+
+Prefer the project's own focused command and command order. Never default to
+whole-workspace `npm test`, `cargo test`, or `pytest` without project evidence.
+
+## Reporting results
+
+When you report test results, separate new regressions caused by your change from
+pre-existing failures and environment failures. Never silently drop a pre-existing
+failure, and never let one block verification of your own change.
+
+## Timing and batches
+
+Finish all related production and test edits before running that batch when safe.
+An earlier todo-level scoped check is allowed when it materially reduces risk,
+isolates a dangerous change, or a later step depends on its result.
+
+For final acceptance, run only checks not covered by a still-valid earlier
+result. Do not schedule the same test family once per todo and again at the end.

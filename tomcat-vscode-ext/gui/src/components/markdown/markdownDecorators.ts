@@ -5,7 +5,7 @@ import { basenameOf, detectInlineFilePath, inferLanguageFromPath } from "./inlin
 import { rewriteLocalImages } from "./localImages";
 import { renderMarkdownHtml, sanitizeMarkdownHtml } from "./markdownRuntime";
 import { highlightToHtml } from "./richRenderRuntime";
-import type { WebviewMediaRoot } from "../../types";
+import type { PathResolution, WebviewMediaRoot } from "../../types";
 
 function withLocationSuffix(label: string, line?: number, column?: number): string {
   if (typeof line !== "number") {
@@ -170,7 +170,10 @@ export function decorateCodeCards(container: HTMLElement): void {
   }
 }
 
-export function linkifyInlineFilePaths(container: HTMLElement): void {
+export function linkifyInlineFilePaths(
+  container: HTMLElement,
+  pathResolutions?: ReadonlyMap<string, PathResolution>,
+): void {
   const documentRef = container.ownerDocument;
   const inlineCodes = Array.from(container.querySelectorAll<HTMLElement>("code")).filter(
     (node) => !node.closest("pre"),
@@ -181,24 +184,37 @@ export function linkifyInlineFilePaths(container: HTMLElement): void {
     if (!match) {
       continue;
     }
+    const resolution = pathResolutions?.get(match.path);
+    if (!resolution) {
+      code.dataset.tcPathCandidate = match.path;
+      continue;
+    }
+    if (resolution.kind === "missing") {
+      continue;
+    }
     const link = documentRef.createElement("a");
     link.className = "tc-inline-path";
-    link.dataset.tcFilePath = match.path;
+    link.dataset.tcFilePath = resolution.resolvedPath;
     link.dataset.testid = "assistant-clickable-path";
     link.href = "#";
-    link.title = displayFileLabel(match.path, match.line, match.column);
+    link.title = match.originalText;
+    if (resolution.kind === "directory") {
+      link.dataset.tcDirectory = "true";
+    }
     if (typeof match.line === "number") {
       link.dataset.tcLine = String(match.line);
     }
 
     const icon = documentRef.createElement("span");
-    icon.className = `tc-inline-path__icon codicon ${fileChipIconClass(match.path)}`;
+    icon.className = `tc-inline-path__icon codicon ${
+      resolution.kind === "directory" ? "codicon-folder" : fileChipIconClass(match.path)
+    }`;
     icon.setAttribute("aria-hidden", "true");
     link.appendChild(icon);
 
     const label = documentRef.createElement("span");
     label.className = "tc-inline-path__label";
-    label.textContent = displayBasenameLabel(match.path, match.line, match.column);
+    label.textContent = basenameOf(match.originalText);
     link.appendChild(label);
 
     code.replaceWith(link);
@@ -209,6 +225,7 @@ export function buildDecoratedHtml(
   markdown: string,
   options?: {
     mediaRoots?: WebviewMediaRoot[];
+    pathResolutions?: ReadonlyMap<string, PathResolution>;
     sourceLineMap?: number[];
   },
 ): string {
@@ -221,6 +238,6 @@ export function buildDecoratedHtml(
   );
   decorateCodeCards(container);
   rewriteLocalImages(container, options?.mediaRoots ?? []);
-  linkifyInlineFilePaths(container);
+  linkifyInlineFilePaths(container, options?.pathResolutions);
   return container.innerHTML;
 }

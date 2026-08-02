@@ -467,6 +467,20 @@ pub(super) async fn run_chat_stream(
         }
     }
 
+    if finish_reason.is_some() && usage.is_none() {
+        warn!(
+            target: "tomcat_chat_diag",
+            phase = "stream_terminal_usage_missing",
+            model = %request_model,
+            provider = agent.llm.provider_name(),
+            finish_reason = ?finish_reason,
+            input_items = request_input_items,
+            shape = %request_shape,
+            attempt,
+            "terminal stream frame did not include usage"
+        );
+    }
+
     agent.emit_event(AgentEvent::MessageEnd {
         message: Message(serde_json::json!({})),
         assistant_message_id: assistant_message_id.clone(),

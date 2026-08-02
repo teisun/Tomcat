@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { buildDecoratedHtml, flashCopyButton } from "./markdown/markdownDecorators";
 import { renderMermaidBlocks } from "./markdown/markdownRuntime";
+import type { PathResolution } from "../types";
 
 /**
  * Render the plan body markdown as sanitized HTML. Links never navigate the
@@ -11,19 +12,60 @@ export function MarkdownBody({
   markdown,
   onOpenFile,
   onOpenLink,
+  resolvePaths,
   sourceLineMap,
 }: {
   markdown: string;
   onOpenFile?(path: string, line?: number): void;
   onOpenLink(href: string): void;
+  resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   /** 1-based source file line for each line of `markdown` (see planDocument). */
   sourceLineMap?: number[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const html = useMemo(
-    () => buildDecoratedHtml(markdown, { sourceLineMap }),
-    [markdown, sourceLineMap],
+  const [pathResolutions, setPathResolutions] = useState<ReadonlyMap<string, PathResolution>>(
+    () => new Map(),
   );
+  const html = useMemo(
+    () => buildDecoratedHtml(markdown, { pathResolutions, sourceLineMap }),
+    [markdown, pathResolutions, sourceLineMap],
+  );
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !resolvePaths) {
+      return;
+    }
+    const paths = [
+      ...new Set(
+        Array.from(container.querySelectorAll<HTMLElement>("[data-tc-path-candidate]"))
+          .map((node) => node.dataset.tcPathCandidate)
+          .filter((path): path is string => Boolean(path)),
+      ),
+    ];
+    if (paths.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    void resolvePaths(paths).then(
+      (results) => {
+        if (cancelled) {
+          return;
+        }
+        setPathResolutions((current) => {
+          const next = new Map(current);
+          for (const result of results) {
+            next.set(result.path, result);
+          }
+          return next;
+        });
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [html, resolvePaths]);
 
   useEffect(() => {
     const container = containerRef.current;

@@ -1,4 +1,5 @@
 import { acquireVsCodeApiLike, type VsCodeApiLike } from "./settingsProtocol";
+import type { PathResolution } from "./pathResolution";
 
 export { acquireVsCodeApiLike };
 export type { VsCodeApiLike };
@@ -108,6 +109,11 @@ export type PlanPreviewTestEvent =
  */
 export type PlanPreviewEvent =
   | { type: "captureSelectionForChat" }
+  | {
+      requestId: string;
+      results: PathResolution[];
+      type: "pathsResolved";
+    }
   | PlanPreviewTestEvent;
 
 export type PlanPreviewHostFrame =
@@ -151,6 +157,14 @@ export type PlanPreviewIntent =
     }
   | {
       messageId: string;
+      type: "resolvePaths";
+      data: {
+        paths: string[];
+        requestId: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "setBuildModel";
       data: {
         modelId: string;
@@ -189,6 +203,13 @@ export function isPlanPreviewIntent(value: unknown): value is PlanPreviewIntent 
         isRecord(value.data) &&
         typeof value.data.path === "string" &&
         (value.data.line === undefined || typeof value.data.line === "number")
+      );
+    case "resolvePaths":
+      return (
+        isRecord(value.data) &&
+        typeof value.data.requestId === "string" &&
+        Array.isArray(value.data.paths) &&
+        value.data.paths.every((path) => typeof path === "string")
       );
     case "setBuildModel":
       return isRecord(value.data) && typeof value.data.modelId === "string";

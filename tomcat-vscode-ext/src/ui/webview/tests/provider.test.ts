@@ -1484,6 +1484,35 @@ describe("mutation diff stat injection", () => {
     provider.dispose();
   });
 
+  it("routes chat links through the shared external-or-file classifier", async () => {
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const openExternal = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: { showFile } as never,
+      initialize: async () => ({} as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      openExternal,
+      sessionRouter: {} as never,
+    });
+
+    await provider.dispatchTestIntent({
+      data: { href: "src/app.ts:59-103" },
+      messageId: "intent-open-local-link",
+      type: "openLink",
+    });
+    await provider.dispatchTestIntent({
+      data: { href: "https://example.com/docs" },
+      messageId: "intent-open-external-link",
+      type: "openLink",
+    });
+
+    expect(showFile).toHaveBeenCalledWith("src/app.ts", 59);
+    expect(openExternal).toHaveBeenCalledWith("https://example.com/docs");
+    provider.dispose();
+  });
+
   it("shows a toast instead of appending a transcript error when openFile fails", async () => {
     const showFile = vi.fn().mockRejectedValue(new Error("boom"));
     const toastMessages: string[] = [];

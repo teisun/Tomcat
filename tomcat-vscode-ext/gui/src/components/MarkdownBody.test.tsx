@@ -129,7 +129,7 @@ describe("MarkdownBody", () => {
     expect(onOpenFile).not.toHaveBeenCalled();
   });
 
-  it("linkifies inline file paths and routes clicks to onOpenFile", () => {
+  it("linkifies resolved inline file paths and routes clicks to onOpenFile", async () => {
     const onOpenFile = vi.fn();
     const onOpenLink = vi.fn();
     render(
@@ -137,15 +137,74 @@ describe("MarkdownBody", () => {
         markdown={"Review `src/test/fixtures/plan-preview.ts:18` before shipping."}
         onOpenFile={onOpenFile}
         onOpenLink={onOpenLink}
+        resolvePaths={vi.fn().mockResolvedValue([
+          {
+            kind: "file",
+            path: "src/test/fixtures/plan-preview.ts",
+            resolvedPath: "/workspace/src/test/fixtures/plan-preview.ts",
+          },
+        ])}
       />,
     );
-    const link = screen.getByTestId("assistant-clickable-path");
+    const link = await screen.findByTestId("assistant-clickable-path");
     expect(link.textContent).toContain("plan-preview.ts:18");
     expect(link.textContent).not.toContain("src/test/fixtures/");
     expect(link.getAttribute("title")).toBe("src/test/fixtures/plan-preview.ts:18");
     fireEvent.click(link);
-    expect(onOpenFile).toHaveBeenCalledWith("src/test/fixtures/plan-preview.ts", 18);
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/src/test/fixtures/plan-preview.ts", 18);
     expect(onOpenLink).not.toHaveBeenCalled();
+  });
+
+  it("waits for path resolution before turning code into a clickable chip", async () => {
+    let resolveResult: ((value: Array<{ kind: "file"; path: string; resolvedPath: string }>) => void) | undefined;
+    const resolvePaths = vi.fn(
+      () =>
+        new Promise<Array<{ kind: "file"; path: string; resolvedPath: string }>>((resolve) => {
+          resolveResult = resolve;
+        }),
+    );
+    render(
+      <MarkdownBody
+        markdown={"Review `src/app.ts:59-103`."}
+        onOpenLink={() => undefined}
+        resolvePaths={resolvePaths}
+      />,
+    );
+
+    const body = screen.getByTestId("plan-markdown-body");
+    expect(body.querySelector(".tc-inline-path")).toBeNull();
+    expect(body.querySelector("code")?.textContent).toBe("src/app.ts:59-103");
+
+    resolveResult?.([
+      { kind: "file", path: "src/app.ts", resolvedPath: "/workspace/src/app.ts" },
+    ]);
+
+    const link = await screen.findByTestId("assistant-clickable-path");
+    expect(link.textContent).toBe("app.ts:59-103");
+  });
+
+  it("renders resolved directories as folder chips and opens their absolute path", async () => {
+    const onOpenFile = vi.fn();
+    render(
+      <MarkdownBody
+        markdown={"Inspect `src/components`."}
+        onOpenFile={onOpenFile}
+        onOpenLink={() => undefined}
+        resolvePaths={vi.fn().mockResolvedValue([
+          {
+            kind: "directory",
+            path: "src/components",
+            resolvedPath: "/workspace/src/components",
+          },
+        ])}
+      />,
+    );
+
+    const link = await screen.findByTestId("assistant-clickable-path");
+    expect(link.dataset.tcDirectory).toBe("true");
+    expect(link.querySelector(".codicon-folder")).not.toBeNull();
+    fireEvent.click(link);
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/src/components", undefined);
   });
 
   it("strips dangerous script content via DOMPurify", () => {

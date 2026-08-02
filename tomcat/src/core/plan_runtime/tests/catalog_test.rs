@@ -46,14 +46,15 @@ fn planning_mode_hides_whole_file_writers_but_keeps_plan_editing() {
 }
 
 #[test]
-fn executing_mode_leaves_update_plan_as_the_only_progress_authority() {
+fn executing_mode_keeps_session_and_plan_todo_tools() {
     let tools = visible_tools_for_mode(&PlanState::Executing {
         plan_id: "demo".into(),
     });
     let n = names(&tools);
-    assert!(n.contains("update_plan"), "EXEC must keep update_plan");
-    // todos 会开出第二份进度清单，与计划文件互相矛盾；EXEC 下只留 update_plan。
-    for hidden in ["create_plan", "ask_question", "todos"] {
+    for kept in ["todos", "update_plan"] {
+        assert!(n.contains(kept), "EXEC must keep {kept}, got: {n:?}");
+    }
+    for hidden in ["create_plan", "ask_question"] {
         assert!(!n.contains(hidden), "EXEC must hide {hidden}, got: {n:?}");
     }
     assert!(n.contains("write"), "EXEC must keep write at catalog layer");
@@ -61,10 +62,13 @@ fn executing_mode_leaves_update_plan_as_the_only_progress_authority() {
 }
 
 #[test]
-fn todos_stays_available_outside_exec() {
+fn todos_stays_available_in_every_mode() {
     for mode in [
         PlanState::Chat,
         PlanState::Planning,
+        PlanState::Executing {
+            plan_id: "demo".into(),
+        },
         PlanState::Pending {
             plan_id: "demo".into(),
         },

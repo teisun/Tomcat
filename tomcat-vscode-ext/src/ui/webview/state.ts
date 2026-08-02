@@ -2888,6 +2888,7 @@ export class WebviewStateStore {
       frame.type === "__test.capture_dom" ||
       frame.type === "__test.dom_action" ||
       frame.type === "contextSearchResult" ||
+      frame.type === "pathsResolved" ||
       frame.type === "insertReference" ||
       frame.type === "attachFilesResult" ||
       frame.type === "attachmentFeedback" ||

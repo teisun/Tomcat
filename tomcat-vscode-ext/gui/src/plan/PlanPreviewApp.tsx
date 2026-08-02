@@ -10,6 +10,7 @@ import {
   type PlanToolbarStyle,
   type VsCodeApiLike,
 } from "../../../src/shared/planPreviewProtocol";
+import type { PathResolution } from "../../../src/shared/pathResolution";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { PlanActionStrip } from "../components/PlanActionStrip";
 import { TodoList } from "../components/TodoList";
@@ -287,6 +288,9 @@ export function PlanPreviewApp({
   const stateRef = useRef<PlanPreviewStateSnapshot | null>(state);
   const contentRef = useRef<HTMLElement>(null);
   const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
+  const pendingPathResolutionsRef = useRef(
+    new Map<string, { resolve(results: PathResolution[]): void }>(),
+  );
   stateRef.current = state;
 
   const sendSelection = useCallback(
@@ -306,6 +310,21 @@ export function PlanPreviewApp({
     [vscodeApi],
   );
 
+  const resolvePaths = useCallback(
+    (paths: string[]): Promise<PathResolution[]> => {
+      const uniquePaths = [...new Set(paths.map((path) => path.trim()).filter(Boolean))];
+      if (uniquePaths.length === 0) {
+        return Promise.resolve([]);
+      }
+      const requestId = `resolve-paths-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      return new Promise<PathResolution[]>((resolve) => {
+        pendingPathResolutionsRef.current.set(requestId, { resolve });
+        send(vscodeApi, { data: { paths: uniquePaths, requestId }, type: "resolvePaths" });
+      });
+    },
+    [vscodeApi],
+  );
+
   useEffect(() => {
     const handleMessage = (event: MessageEvent<unknown>) => {
       const frame = event.data;
@@ -317,6 +336,14 @@ export function PlanPreviewApp({
           ? captureScrollRestore(contentRef.current)
           : null;
         setState(frame.content);
+        return;
+      }
+      if (frame.content.type === "pathsResolved") {
+        const pending = pendingPathResolutionsRef.current.get(frame.content.requestId);
+        if (pending) {
+          pendingPathResolutionsRef.current.delete(frame.content.requestId);
+          pending.resolve(frame.content.results);
+        }
         return;
       }
       if (frame.content.type === "captureSelectionForChat") {
@@ -387,6 +414,7 @@ export function PlanPreviewApp({
           markdown={state.bodyMarkdown}
           onOpenFile={(path, line) => send(vscodeApi, { data: { line, path }, type: "openFile" })}
           onOpenLink={(href) => send(vscodeApi, { data: { href }, type: "openLink" })}
+          resolvePaths={resolvePaths}
           sourceLineMap={state.bodyLineMap}
         />
         <h2

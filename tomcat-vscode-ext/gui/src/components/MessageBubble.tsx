@@ -8,6 +8,7 @@ import type {
   WebviewMediaRoot,
   WebviewMessageSegment,
   WebviewPendingAttachment,
+  PathResolution,
 } from "../types";
 
 const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
@@ -23,9 +24,11 @@ type MessageBubbleProps = {
   item: WebviewMessageBlock;
   mediaRoots?: WebviewMediaRoot[];
   onOpenFile?: (path: string, line?: number) => void;
+  onOpenLink?: (href: string) => void;
   onOpenImagePreview?: (imageId: string) => void;
   onRecover?: (messageId: string, action: "resume" | "retry") => void;
   onRetry?: (messageId: string) => void;
+  resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   recoveryDisabled?: boolean;
   onZoomImage?: (image: { alt: string; src: string }) => void;
 };
@@ -34,9 +37,11 @@ function MessageBubbleComponent({
   item,
   mediaRoots,
   onOpenFile,
+  onOpenLink,
   onOpenImagePreview,
   onRecover,
   onRetry,
+  resolvePaths,
   recoveryDisabled = false,
   onZoomImage,
 }: MessageBubbleProps) {
@@ -105,6 +110,8 @@ function MessageBubbleComponent({
             markdown={item.text}
             mediaRoots={mediaRoots}
             onOpenFile={onOpenFile ?? NOOP_OPEN_FILE}
+            onOpenLink={onOpenLink}
+            resolvePaths={resolvePaths}
             onZoomImage={onZoomImage}
           />
         ) : (

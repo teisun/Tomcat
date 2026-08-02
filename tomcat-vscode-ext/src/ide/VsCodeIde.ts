@@ -159,8 +159,18 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
 
   async showFile(displayPath: string, line?: number): Promise<void> {
     const uri = vscode.Uri.file(this.resolveWorkspacePath(displayPath));
-    if (!(await this.fileExists(uri))) {
+    let stat: vscode.FileStat;
+    try {
+      stat = await vscode.workspace.fs.stat(uri);
+    } catch (error) {
+      if (!(error instanceof vscode.FileSystemError)) {
+        throw error;
+      }
       throw new Error(`File not found: ${uri.fsPath}`);
+    }
+    if (stat.type & vscode.FileType.Directory) {
+      await vscode.commands.executeCommand("revealInExplorer", uri);
+      return;
     }
     const document = await vscode.workspace.openTextDocument(uri);
     const editor = await vscode.window.showTextDocument(document, { preview: false });

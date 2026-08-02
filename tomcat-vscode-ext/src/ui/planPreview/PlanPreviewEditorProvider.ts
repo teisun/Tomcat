@@ -17,14 +17,17 @@ import {
   type PlanFileState,
   type PlanPreviewDomAction,
   type PlanPreviewDomSnapshot,
+  type PlanPreviewEvent,
   type PlanPreviewHostFrame,
   type PlanPreviewIntent,
   type PlanPreviewStateSnapshot,
   type PlanToolbarStyle,
 } from "../../shared/planPreviewProtocol";
+import { classifyLink } from "../../shared/linkTarget";
 import { resolveWebviewEntryAssets } from "../guiAssets";
 import { parseModelCatalog } from "../webview/provider";
 import { PendingMessageTracker } from "../webview/protocol";
+import { ContextSearchService } from "../webview/contextSearch";
 import { parsePlanDocument } from "./planDocument";
 
 export const PLAN_PREVIEW_VIEW_TYPE = "tomcat.planPreview";
@@ -55,11 +58,7 @@ export function deriveCanBuild(state: PlanFileState | null, hasSetPlanModeCapabi
 export type PlanLinkTarget =
   | { href: string; kind: "external" }
   | { kind: "ignore" }
-  | { kind: "file"; path: string };
-
-function hasUriScheme(value: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:/i.test(value);
-}
+  | { kind: "file"; line?: number; path: string };
 
 function normalizePlanPath(value: string): string {
   const resolved = path.resolve(value);
@@ -76,24 +75,16 @@ function normalizePlanPath(value: string): string {
  * ignored, and everything else resolves relative to the plan file on disk.
  */
 export function classifyPlanLink(href: string, planPath: string): PlanLinkTarget {
-  const trimmed = href.trim();
-  if (!trimmed || trimmed.startsWith("#")) {
-    return { kind: "ignore" };
+  const target = classifyLink(href);
+  if (target.kind !== "file") {
+    return target;
   }
-  if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith("mailto:")) {
-    return { href: trimmed, kind: "external" };
-  }
-  if (hasUriScheme(trimmed)) {
-    return { href: trimmed, kind: "external" };
-  }
-  const withoutAnchor = trimmed.split("#")[0];
-  if (!withoutAnchor) {
-    return { kind: "ignore" };
-  }
-  const resolved = path.isAbsolute(withoutAnchor)
-    ? withoutAnchor
-    : path.resolve(path.dirname(planPath), withoutAnchor);
-  return { kind: "file", path: resolved };
+  const resolvedPath = path.isAbsolute(target.path)
+    ? target.path
+    : path.resolve(path.dirname(planPath), target.path);
+  return target.line === undefined
+    ? { kind: "file", path: resolvedPath }
+    : { kind: "file", line: target.line, path: resolvedPath };
 }
 
 export interface PlanPreviewDocumentLike {
@@ -150,6 +141,7 @@ export class PlanPreviewEditorProvider
   private activePanelPath: string | null = null;
   private readonly domSnapshots = new PendingMessageTracker<PlanPreviewDomSnapshot>();
   private readonly activeEmitter = new vscode.EventEmitter<PlanActivePanelInfo | null>();
+  private readonly pathResolver = new ContextSearchService();
 
   /** Fires whenever the focused plan editor (or its mode/canBuild) changes. */
   readonly onDidChangeActivePlan = this.activeEmitter.event;
@@ -158,6 +150,7 @@ export class PlanPreviewEditorProvider
 
   dispose(): void {
     this.activeEmitter.dispose();
+    this.pathResolver.dispose();
   }
 
   resolveCustomTextEditor(
@@ -195,7 +188,14 @@ export class PlanPreviewEditorProvider
       if (!isPlanPreviewIntent(message)) {
         return;
       }
-      void this.handleIntent(message, doc, post);
+      void this.handleIntent(message, doc, post, async (event) => {
+        const frame: PlanPreviewHostFrame = {
+          channel: "event",
+          content: event,
+          messageId: `plan-event-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        };
+        await webviewPanel.webview.postMessage(frame);
+      });
     });
     const changeSub = vscode.workspace.onDidChangeTextDocument((event) => {
       if (event.document.uri.toString() === document.uri.toString()) {
@@ -448,6 +448,7 @@ export class PlanPreviewEditorProvider
     intent: PlanPreviewIntent,
     doc: PlanPreviewDocumentLike,
     postState: () => Promise<void>,
+    postEvent: (event: PlanPreviewEvent) => Promise<void> = async () => undefined,
   ): Promise<void> {
     switch (intent.type) {
       case "plan.ready":
@@ -459,7 +460,11 @@ export class PlanPreviewEditorProvider
           await this.deps.openExternal(target.href);
         } else if (target.kind === "file") {
           try {
-            await this.deps.openFile(target.path);
+            if (target.line === undefined) {
+              await this.deps.openFile(target.path);
+            } else {
+              await this.deps.openFile(target.path, target.line);
+            }
           } catch {
             await this.deps.openExternal(intent.data.href);
           }
@@ -475,6 +480,18 @@ export class PlanPreviewEditorProvider
           );
         }
         return;
+      case "resolvePaths": {
+        const results = await this.pathResolver.resolvePaths({
+          paths: intent.data.paths,
+          relativeBase: path.dirname(doc.path),
+        });
+        await postEvent({
+          requestId: intent.data.requestId,
+          results,
+          type: "pathsResolved",
+        });
+        return;
+      }
       case "setBuildModel":
         await this.deps.setBuildModel(intent.data.modelId);
         await postState();

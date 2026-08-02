@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import { VsCodeIde } from "../VsCodeIde";
@@ -7,6 +7,7 @@ const __testing = (
   vscode as typeof vscode & {
     __testing: {
       deleteFile(filePath: string): void;
+      registerDirectory(dirPath: string): void;
       lastDiffCommand?: { modified: vscode.Uri; original: vscode.Uri; title?: string };
       lastRevealRange?: { range: vscode.Range; revealType?: number };
       readFile(filePath: string): string | undefined;
@@ -132,6 +133,20 @@ describe("VsCodeIde diff/apply", () => {
     expect(vscode.window.activeTextEditor?.selection.start.line).toBe(1);
     expect(vscode.window.activeTextEditor?.selection.end.line).toBe(1);
     expect(__testing.lastRevealRange?.range.start.line).toBe(1);
+  });
+
+  it("reveals a resolved directory in the explorer instead of opening it as text", async () => {
+    const ide = new VsCodeIde();
+    __testing.registerDirectory("/workspace/src/components");
+    const executeCommand = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+
+    await ide.showFile("src/components");
+
+    expect(executeCommand).toHaveBeenCalledWith(
+      "revealInExplorer",
+      vscode.Uri.file("/workspace/src/components"),
+    );
+    executeCommand.mockRestore();
   });
 
   it("preserves mixed-case tool ids when reconstructing diff documents", async () => {

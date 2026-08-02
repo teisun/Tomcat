@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WebviewCheckpoint, WebviewTimelineItem } from "../types";
@@ -293,7 +293,7 @@ describe("TranscriptView", () => {
     expect(screen.queryByTestId("tool-row")).toBeNull();
   });
 
-  it("keeps assistant rich rendering while showing thinking as plain text", () => {
+  it("keeps assistant rich rendering while showing thinking as plain text", async () => {
     const timeline: WebviewTimelineItem[] = [
       {
         assistantMessageId: "assistant-rich",
@@ -325,13 +325,16 @@ describe("TranscriptView", () => {
         onBuildPlan={vi.fn()}
         onOpenFile={vi.fn()}
         onOpenPlanFile={vi.fn()}
+        resolvePaths={async (paths) => paths.map((path) => ({ kind: "file", path }))}
         timeline={timeline}
       />,
     );
 
     const assistantMessage = screen.getByTestId("message-block");
     expect(within(assistantMessage).getByTestId("assistant-code-card")).toBeTruthy();
-    expect(within(assistantMessage).getByTestId("assistant-clickable-path")).toBeTruthy();
+    await waitFor(() =>
+      expect(within(assistantMessage).getByTestId("assistant-clickable-path")).toBeTruthy(),
+    );
 
     expect(screen.queryByTestId("thinking-body")).toBeNull();
     fireEvent.click(screen.getByTestId("thinking-toggle"));
