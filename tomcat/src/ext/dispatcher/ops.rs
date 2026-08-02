@@ -1,7 +1,7 @@
 use super::helpers::{parse_chat_request, parse_tool, plugin_id_from_instance};
 use super::types::HostApiDispatcher;
 use crate::core::tools::primitive::{BashTaskOutputChunk, BashTaskRegistry};
-use crate::core::{ChatRequest, EditOperation, LlmProvider, LlmScene, StreamEvent};
+use crate::core::{ChatRequest, EditOperation, LlmScene, ResolvedCall, StreamEvent};
 use crate::ext::host_binding::HostResponse;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventListenerId, ScopedEventEmitter};
@@ -79,16 +79,16 @@ fn chunk_with_wake_reason(
 }
 
 impl HostApiDispatcher {
-    fn llm_for_request(&self, req: &ChatRequest) -> Result<Arc<dyn LlmProvider>, AppError> {
+    fn resolve_chat_call(&self, req: &ChatRequest) -> Result<ResolvedCall, AppError> {
         let resolver = self
             .llm_resolver
             .as_ref()
             .ok_or_else(|| AppError::Plugin("LlmResolver not configured (007)".into()))?;
         let model = req.model.trim();
         if !model.is_empty() && model != "default" {
-            return Ok(resolver.resolve(LlmScene::Main, Some(model))?.provider_impl);
+            return resolver.resolve(LlmScene::Main, Some(model));
         }
-        Ok(resolver.resolve(LlmScene::Main, None)?.provider_impl)
+        resolver.resolve(LlmScene::Main, None)
     }
 
     pub(super) async fn do_read_file(
@@ -256,9 +256,10 @@ impl HostApiDispatcher {
             .acquire()
             .await
             .map_err(|_| AppError::Plugin("LLM semaphore closed".into()))?;
-        let req = parse_chat_request(params)?;
-        let llm = self.llm_for_request(&req)?;
-        let resp = llm.chat(req).await?;
+        let mut req = parse_chat_request(params)?;
+        let call = self.resolve_chat_call(&req)?;
+        req.model = call.model.clone();
+        let resp = call.provider_impl.chat(req).await?;
         Ok(HostResponse::ok(
             serde_json::to_value(resp).map_err(AppError::Serialize)?,
         ))
@@ -274,9 +275,10 @@ impl HostApiDispatcher {
             .acquire()
             .await
             .map_err(|_| AppError::Plugin("LLM semaphore closed".into()))?;
-        let req = parse_chat_request(params)?;
-        let llm = self.llm_for_request(&req)?;
-        let mut stream = llm.chat_stream(req).await?;
+        let mut req = parse_chat_request(params)?;
+        let call = self.resolve_chat_call(&req)?;
+        req.model = call.model.clone();
+        let mut stream = call.provider_impl.chat_stream(req).await?;
         let mut content = String::new();
         while let Some(ev) = stream.next().await {
             let ev = ev?;

@@ -8,6 +8,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::BackgroundCompletionRoutes;
+use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::SharedModelCatalog;
 use crate::core::plan_runtime;
 use crate::core::tools::contract::registry::ToolRegistry;
@@ -74,6 +75,9 @@ pub struct SessionRuntime {
     pub delivered_completion: Arc<Mutex<HashSet<BashTaskId>>>,
     pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
+    /// Files cleanup queue is session-scoped. Reusing this runtime lets uploads
+    /// and session-end cleanup observe the same in-memory queue.
+    pub openai_files_runtime: Arc<Mutex<Option<(String, Arc<OpenAiFilesRuntime>)>>>,
     pub thinking_display: Arc<std::sync::atomic::AtomicU8>,
     pub todos_runtime: Arc<plan_runtime::todo_runtime::TodosRuntime>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,

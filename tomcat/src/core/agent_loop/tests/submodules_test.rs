@@ -1277,8 +1277,13 @@ async fn tool_exec_bash_background_full_lifecycle() {
     assert!(!stop_err, "task_stop 必须成功：{}", stop_msg);
     assert!(stop_msg.contains(&task_id));
 
-    // 给 wait 任务 reap 留点时间。
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        registry.wait_for_finish(&task_id),
+    )
+    .await
+    .expect("stop 后必须在限定时间内完成 drain")
+    .expect("task finish");
 
     // list：返回 1 条且 status.state == "stopped"。
     let list_tc = ToolCallInfo {

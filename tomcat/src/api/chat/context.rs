@@ -26,13 +26,13 @@ use crate::infra::{
 use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_model_thinking_path,
     resolve_plugins_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
-    session_key_for_agent, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider,
+    session_key_for_agent, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry,
     ModelThinkingStore, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode,
     ThinkingLevel, Tool, ToolExecutor, ToolRegistry,
 };
 
 use crate::core::llm::thinking_policy::clamp_reasoning_level;
-use crate::core::llm::LlmScene;
+use crate::core::llm::{LlmScene, ResolvedCall};
 use crate::core::plan_runtime;
 
 use super::session_runtime::{GlobalServices, ScopeContainer, ScopeServices, SessionRuntime};
@@ -800,6 +800,7 @@ impl ChatContext {
             delivered_completion: delivered_completion.clone(),
             completion_subscriber_handle: completion_subscriber_handle.clone(),
             read_file_state: read_file_state.clone(),
+            openai_files_runtime: Arc::new(Mutex::new(None)),
             thinking_display: thinking_display.clone(),
             todos_runtime: todos_runtime.clone(),
             plan_runtime: plan_runtime.clone(),
@@ -849,7 +850,7 @@ impl ChatContext {
 
     pub(crate) fn openai_files_runtime_for(
         &self,
-        provider: &dyn LlmProvider,
+        call: &ResolvedCall,
     ) -> Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>> {
         let session_id = self
             .session_runtime
@@ -857,13 +858,28 @@ impl ChatContext {
             .current_session_id()
             .ok()
             .flatten()?;
-        crate::core::llm::openai_files::build_runtime_for_provider(
-            provider,
+        let runtime_key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            call.provider,
+            call.api,
+            call.base_url.as_deref().unwrap_or_default(),
+            call.key_source,
+        );
+        let mut cached = self.session_runtime.openai_files_runtime.lock();
+        if let Some((cached_key, runtime)) = cached.as_ref() {
+            if cached_key == &runtime_key {
+                return Some(runtime.clone());
+            }
+        }
+        let runtime = crate::core::llm::openai_files::build_runtime_for_provider(
+            call.provider_impl.as_ref(),
             &self.config.llm.files,
             self.session_runtime.session.sessions_dir(),
             &session_id,
         )
-        .map(Arc::new)
+        .map(Arc::new)?;
+        *cached = Some((runtime_key, runtime.clone()));
+        Some(runtime)
     }
 
     pub(crate) fn shutdown_completion_subscriber(&self) {
@@ -1617,8 +1633,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("models.toml");
         let mut cfg = AppConfig::default();
-        cfg.llm.default_model = "deepseek-v4-pro".to_string();
-        cfg.context.compaction_model = "gpt-5.4".to_string();
+        cfg.llm.default_model = "missing-compaction-model".to_string();
+        cfg.context.compaction_model = "missing-compaction-model".to_string();
         let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
         let resolver: Arc<dyn LlmResolver> =
             Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
@@ -1643,7 +1659,7 @@ mod tests {
             "无法解析 pair 时应保留兼容回退边界"
         );
         assert_eq!(
-            runtime.context_config.compaction_model, "gpt-5.4",
+            runtime.context_config.compaction_model, "missing-compaction-model",
             "未解析成功时不应偷偷改写 compaction_model"
         );
 

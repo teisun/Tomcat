@@ -287,10 +287,9 @@ impl LlmResolver for FixedResolver {
         let entry = self
             .catalog
             .lookup_explicit(session_override.unwrap_or(&self.default_model))?;
-        Ok(ResolvedCall::from_parts_unchecked(
+        Ok(ResolvedCall::from_provider_and_entry_unchecked(
             Arc::clone(&self.provider),
-            entry.id.clone(),
-            entry.request_model_name().to_string(),
+            &entry,
         ))
     }
 }

@@ -1698,7 +1698,7 @@ async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
         .resolve_call(crate::core::llm::LlmScene::Main, Some(&entry))
         .expect("main model should resolve");
     let runtime = ctx
-        .openai_files_runtime_for(resolved.provider_impl.as_ref())
+        .openai_files_runtime_for(&resolved)
         .expect("openai-responses should expose files runtime");
     runtime.enqueue_delete("file-chat-cleanup".to_string(), Some(10), Some(1), "test");
     assert!(runtime.pending_cleanup_count() >= 1);

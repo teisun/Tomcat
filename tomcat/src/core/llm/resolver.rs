@@ -69,6 +69,8 @@ impl ResolvedCall {
     /// 仅测试与 provider 适配层可用；生产路径必须经 [`LlmResolver`]。
     ///
     /// 该工厂绕过密封构造，允许在单测里装配 `ResolvedCall`，**不得**在生产派发路径使用。
+    /// 它默认关闭 vision/files 等能力；需要模拟 catalog 模型的测试应使用
+    /// [`Self::from_provider_and_entry_unchecked`]，或显式构造所需能力。
     #[doc(hidden)]
     pub fn from_parts_unchecked(
         provider_impl: Arc<dyn LlmProvider>,
@@ -85,6 +87,29 @@ impl ResolvedCall {
             key_source: String::new(),
             thinking_format: ThinkingFormat::default(),
             capabilities: Capabilities::default(),
+            sealed: Sealed,
+        }
+    }
+
+    /// 从 catalog entry 组装测试用调用绑定，保留模型声明的能力与 wire model。
+    ///
+    /// 仅测试与 provider 适配层可用；生产路径必须经 [`LlmResolver`]。
+    #[doc(hidden)]
+    pub fn from_provider_and_entry_unchecked(
+        provider_impl: Arc<dyn LlmProvider>,
+        entry: &ModelEntry,
+    ) -> Self {
+        Self {
+            provider_impl,
+            model: entry.request_model_name().to_string(),
+            catalog_id: entry.id.clone(),
+            api: entry.api.clone(),
+            provider: entry.provider.clone(),
+            base_url: entry.base_url.clone(),
+            key_source: entry.api_key_env.clone().unwrap_or_default(),
+            thinking_format: ThinkingFormat::parse_or_auto(entry.thinking_format.as_deref())
+                .resolve_for_api(entry.api.as_str()),
+            capabilities: entry.capabilities.clone(),
             sealed: Sealed,
         }
     }

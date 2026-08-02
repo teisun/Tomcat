@@ -51,7 +51,5 @@ fn runtime_reminders_batch_detailed_todos_without_repeating_final_acceptance() {
     ));
     assert!(verification
         .contains("Do not schedule the same test family once per todo and again at the end"));
-    assert!(
-        executor.contains("system prompt's `## Finishing and verifying` section")
-    );
+    assert!(executor.contains("system prompt's `## Finishing and verifying` section"));
 }

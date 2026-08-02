@@ -589,13 +589,12 @@ pub async fn run_chat_turn_with_message(
     // 会话标题优先走 title_model；若其未配置/未解析，则降级到主模型。
     // turn 折叠标题仍维持 title_call 语义，不在此处一起降级。
     let title_call = ctx.resolve_call(LlmScene::Title, entry.as_ref()).ok();
-    let main_provider = main_call.provider_impl.clone();
     let compaction_provider = compaction_call.provider_impl.clone();
     let title_provider = title_call.as_ref().map(|c| c.provider_impl.clone());
     let (session_title_provider, session_title_model) = title_call
         .as_ref()
         .map(|c| (c.provider_impl.clone(), c.model.clone()))
-        .unwrap_or_else(|| (main_provider.clone(), main_call.model.clone()));
+        .unwrap_or_else(|| (main_call.provider_impl.clone(), main_call.model.clone()));
     let title_model = title_call
         .as_ref()
         .map(|c| c.model.clone())
@@ -732,7 +731,7 @@ pub async fn run_chat_turn_with_message(
             .to_string_lossy()
             .to_string(),
         read_file_state: ctx.session_runtime.read_file_state.clone(),
-        openai_files_runtime: ctx.openai_files_runtime_for(main_provider.as_ref()),
+        openai_files_runtime: ctx.openai_files_runtime_for(&main_call),
         checkpoint_store: ctx.scope_services.checkpoint_store.clone(),
         message_append_sink: Some(ctx.session_runtime.message_append_sink.clone()),
         parent_session_id: None,
