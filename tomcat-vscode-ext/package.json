@@ -232,6 +232,12 @@
           "scope": "application",
           "description": "Model used when building a plan from the plan preview or a plan card. Empty means the session's current model is used."
         },
+        "tomcat.plan.autoSave": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Automatically save modified .plan.md files after a short pause so the agent and editor use the same plan."
+        },
         "tomcat.plan.toolbarStyle": {
           "type": "string",
           "enum": [

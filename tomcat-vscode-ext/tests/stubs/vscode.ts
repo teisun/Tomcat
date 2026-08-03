@@ -10,6 +10,7 @@ const configurationListeners = new Set<
   (event: { affectsConfiguration(section: string): boolean }) => void
 >();
 const textDocumentChangeListeners = new Set<(event: { document: TextDocument }) => void>();
+const textDocumentSaveListeners = new Set<(document: TextDocument) => void>();
 const fileWatchers = new Set<{
   createListeners: Set<(uri: Uri) => void>;
   deleteListeners: Set<(uri: Uri) => void>;
@@ -386,6 +387,9 @@ class TextDocument {
 
   async save(): Promise<boolean> {
     files.set(this.uri.toString(), { text: this.text, type: FileType.File });
+    for (const listener of textDocumentSaveListeners) {
+      listener(this);
+    }
     return true;
   }
 }
@@ -627,6 +631,12 @@ export const workspace = {
       textDocumentChangeListeners.delete(listener);
     });
   },
+  onDidSaveTextDocument(listener: (document: TextDocument) => void): Disposable {
+    textDocumentSaveListeners.add(listener);
+    return new Disposable(() => {
+      textDocumentSaveListeners.delete(listener);
+    });
+  },
   openTextDocument: async (uri: Uri): Promise<TextDocument> => {
     const existing = textDocuments.find((document) => document.uri.toString() === uri.toString());
     if (existing) {
@@ -774,6 +784,7 @@ export const __testing = {
     configuration.clear();
     configurationListeners.clear();
     textDocumentChangeListeners.clear();
+    textDocumentSaveListeners.clear();
     quickPickHandler = undefined;
     inputBoxHandler = undefined;
     errorMessageHandler = undefined;
@@ -800,6 +811,11 @@ export const __testing = {
   fireDidChangeTextDocument(document: TextDocument): void {
     for (const listener of textDocumentChangeListeners) {
       listener({ document });
+    }
+  },
+  fireDidSaveTextDocument(document: TextDocument): void {
+    for (const listener of textDocumentSaveListeners) {
+      listener(document);
     }
   },
   setErrorMessageHandler(handler: typeof errorMessageHandler): void {

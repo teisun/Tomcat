@@ -517,7 +517,7 @@ async fn test_failed_turn_append_invariant_rehydrates_context_and_allows_next_tu
     Ok(())
 }
 
-/// [Layer 1 + Layer 3 全链路] compact_tool_results 后仍超 ratio 时 force_drop_oldest_to_target 兜底
+/// [Layer 1 + Layer 3 全链路] confirmed overflow 后，L3 兜底删除最旧完整 turn
 #[test]
 fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     common::setup_logging();
@@ -562,7 +562,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     assert!(reduced > 0);
 
     if state.usage_ratio() >= 0.50 {
-        tomcat::core::compaction::force_drop_oldest_to_target(&mut state);
+        tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(&mut state);
     }
 
     assert!(state.usage_ratio() < 0.50);
@@ -700,12 +700,32 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     let mut old_tool = ChatMessage::tool("tc1", &"x".repeat(50_000));
     old_tool.timestamp = Some(TEST_TS.to_string());
 
-    let mut recent_user = ChatMessage::user("recent question");
+    let mut old_assistant = ChatMessage::assistant("old answer");
+    old_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut recent_user = ChatMessage::user("previous question");
     recent_user.timestamp = Some(TEST_TS.to_string());
+    let mut recent_assistant = ChatMessage::assistant("previous answer");
+    recent_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut current_user = ChatMessage::user("current question");
+    current_user.timestamp = Some(TEST_TS.to_string());
+    let system_text = "system prompt";
+    let historical_messages = vec![
+        old_user,
+        old_tool,
+        old_assistant,
+        recent_user,
+        recent_assistant,
+    ];
+    let estimated_chars = system_text.len()
+        + historical_messages
+            .iter()
+            .map(estimate_msg_chars)
+            .sum::<usize>()
+        + estimate_msg_chars(&current_user);
 
     let ctx_state = ContextState {
-        messages: vec![old_user, old_tool, recent_user],
-        estimate_context_chars: 60_000,
+        messages: historical_messages,
+        estimate_context_chars: estimated_chars,
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
         last_api_usage: None,
@@ -717,9 +737,10 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = vec![ChatMessage::system(system_text)];
+    messages.extend(build_context_from_state(&ctx_state));
+    messages.push(current_user);
     agent.set_context_state(Some(ctx_state));
-
-    let messages = vec![ChatMessage::user("trigger overflow")];
 
     info!("Act: 调用 AgentLoop::run()，期望 context overflow → compaction → retry → 成功");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -1455,10 +1476,29 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
     old_user.timestamp = Some(TEST_TS.to_string());
     let mut old_tool = ChatMessage::tool("tc1", &"x".repeat(50_000));
     old_tool.timestamp = Some(TEST_TS.to_string());
+    let mut old_assistant = ChatMessage::assistant("old answer");
+    old_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut recent_user = ChatMessage::user("previous question");
+    recent_user.timestamp = Some(TEST_TS.to_string());
+    let mut recent_assistant = ChatMessage::assistant("previous answer");
+    recent_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut trigger_user = ChatMessage::user("trigger overflow");
+    trigger_user.timestamp = Some(TEST_TS.to_string());
 
-    let big_chars: usize = estimate_msg_chars(&old_user) + estimate_msg_chars(&old_tool);
+    let historical_messages = vec![
+        old_user,
+        old_tool,
+        old_assistant,
+        recent_user,
+        recent_assistant,
+    ];
+    let big_chars: usize = historical_messages
+        .iter()
+        .map(estimate_msg_chars)
+        .sum::<usize>()
+        + estimate_msg_chars(&trigger_user);
     let ctx_state = ContextState {
-        messages: vec![old_user, old_tool],
+        messages: historical_messages,
         estimate_context_chars: system_text.len() + big_chars,
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
@@ -1471,12 +1511,10 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = vec![ChatMessage::system(system_text)];
+    messages.extend(build_context_from_state(&ctx_state));
+    messages.push(trigger_user);
     agent.set_context_state(Some(ctx_state));
-
-    let messages = vec![
-        ChatMessage::system(system_text),
-        ChatMessage::user("trigger overflow"),
-    ];
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
@@ -1575,7 +1613,7 @@ fn test_force_drop_estimate_consistent_after_l3() {
         live: Default::default(),
     };
 
-    tomcat::core::compaction::force_drop_oldest_to_target(&mut state);
+    tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(&mut state);
 
     let remaining_msg_chars: usize = state.messages.iter().map(estimate_msg_chars).sum();
     let expected = system_chars + remaining_msg_chars;
@@ -2064,9 +2102,9 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
 
     // Step 3: L3 force drop (if still over budget)
     if state.usage_ratio() >= 0.50 {
-        info!("Act Step 3: force_drop_oldest_to_target");
+        info!("Act Step 3: force_drop_oldest_after_confirmed_overflow");
         let (turns_removed, chars_removed) =
-            tomcat::core::compaction::force_drop_oldest_to_target(&mut state);
+            tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(&mut state);
         info!(
             "L3: turns_removed={}, chars_removed={}, ratio={:.3}",
             turns_removed,
@@ -2146,13 +2184,24 @@ async fn test_context_overflow_trim_events_have_correct_payload(
     let old_content = "old ".repeat(10_000); // ~40K chars
     let mut old_user = ChatMessage::user(old_content);
     old_user.timestamp = Some(TEST_TS.to_string());
-    let mut recent_user = ChatMessage::user("recent");
+    let mut old_assistant = ChatMessage::assistant("old answer");
+    old_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut recent_user = ChatMessage::user("previous");
     recent_user.timestamp = Some(TEST_TS.to_string());
+    let mut recent_assistant = ChatMessage::assistant("previous answer");
+    recent_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut current_user = ChatMessage::user("current");
+    current_user.timestamp = Some(TEST_TS.to_string());
 
-    let estimate = 40_000usize;
+    let historical_messages = vec![old_user, old_assistant, recent_user, recent_assistant];
+    let estimate = historical_messages
+        .iter()
+        .map(estimate_msg_chars)
+        .sum::<usize>()
+        + estimate_msg_chars(&current_user);
     let budget_tokens = (estimate / 4) + 100; // ~10_100 — ratio will be ~0.99
     let ctx_state = ContextState {
-        messages: vec![old_user, recent_user],
+        messages: historical_messages,
         estimate_context_chars: estimate,
         context_budget_chars: estimate * 4,
         context_budget_tokens: budget_tokens,
@@ -2165,15 +2214,14 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = build_context_from_state(&ctx_state);
+    messages.push(current_user);
     agent.set_context_state(Some(ctx_state));
 
     info!("Act: run AgentLoop");
-    let _result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(vec![ChatMessage::user("trigger")]),
-    )
-    .await
-    .map_err(|_| "timeout")?;
+    let _result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "timeout")?;
 
     info!("Assert: trim event payloads");
     let starts = trim_start_payloads.lock().unwrap();

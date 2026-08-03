@@ -135,8 +135,8 @@ __pi_start_event_loop();
     .expect("write plugin main");
 }
 
-// T2-P1-002 PR-PLA：build_tool_definitions 现在需要 &ChatContext 才能按 PlanState 过滤。
-// 这三个测试改为直接读 catalog 默认视图（与 build_tool_definitions 在 PlanState::Chat 时等价）。
+// T2-P1-002 PR-PLA：build_tool_definitions 现在需要 &ChatContext 才能按 AgentMode 过滤。
+// 这三个测试改为直接读 catalog 默认视图（与 build_tool_definitions 在 Chat 时等价）。
 fn build_tool_definitions_default_view() -> Vec<serde_json::Value> {
     crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
 }
@@ -1505,34 +1505,79 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
 }
 
 #[test]
-fn user_prompt_for_mode_formats_all_states() {
-    use crate::core::plan_runtime::PlanState;
+fn user_prompt_for_mode_separates_session_mode_from_plan_lifecycle() {
+    use crate::core::plan_runtime::{file_store::PlanFileState, ActivePlan};
+    use crate::core::session::AgentMode;
 
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Chat),
+        super::super::prompt::user_prompt_for_mode(AgentMode::Chat, None),
         "u[Chat]> "
     );
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Planning),
-        "u[Plan:planning]> "
+        super::super::prompt::user_prompt_for_mode(AgentMode::Plan, None),
+        "u[Plan]> "
     );
+    let executing = ActivePlan {
+        id: "p1".into(),
+        path: std::path::PathBuf::from("/tmp/p1.plan.md"),
+        state: PlanFileState::Executing,
+    };
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Executing {
-            plan_id: "p1".into(),
-        }),
-        "u[Plan:executing]> "
+        super::super::prompt::user_prompt_for_mode(AgentMode::Chat, Some(&executing)),
+        "u[Chat·plan:executing]> "
     );
+}
+
+#[test]
+fn plan_reminders_follow_session_mode_and_active_plan_lifecycle() {
+    use crate::api::chat::run_loop::system_text_with_plan_reminder;
+    use crate::core::plan_runtime::{file_store::PlanFileState, PlanRuntime};
+
+    let runtime = PlanRuntime::new("plan-reminder-test");
+    let base = "BASE_SYSTEM\n";
+
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Pending {
-            plan_id: "p1".into(),
-        }),
-        "u[Plan:pending]> "
+        system_text_with_plan_reminder(base, &runtime),
+        base,
+        "plain Chat must not receive a plan reminder"
     );
+
+    runtime.enter_plan().expect("enter Plan mode");
+    let planner = system_text_with_plan_reminder(base, &runtime);
+    assert!(planner.starts_with(base));
+    assert!(planner.contains("<system_reminder"));
+    assert!(
+        planner.to_lowercase().contains("plan"),
+        "Plan mode must receive planner guidance"
+    );
+
+    runtime.exit_plan().expect("return to Chat mode");
+    runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Executing);
+    let executor = system_text_with_plan_reminder(base, &runtime);
+    assert!(executor.contains("plan-1"));
+    assert!(
+        executor.contains("<system_reminder"),
+        "an executing plan must receive executor guidance"
+    );
+
+    runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Completed);
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Completed {
-            plan_id: "p1".into(),
-        }),
-        "u[Chat]> "
+        system_text_with_plan_reminder(base, &runtime),
+        base,
+        "completion removes executor guidance without a separate drop action"
+    );
+
+    runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Pending);
+    assert_eq!(
+        system_text_with_plan_reminder(base, &runtime),
+        base,
+        "parking to pending removes executor guidance"
+    );
+
+    runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Executing);
+    assert!(
+        system_text_with_plan_reminder(base, &runtime).contains("plan-1"),
+        "resuming execution restores executor guidance"
     );
 }
 
@@ -1645,20 +1690,21 @@ async fn validate_capabilities_rejects_image_before_appending_user_message() {
 
 #[test]
 fn agent_prompt_for_mode_uses_agent_prefix_and_hides_plan_id() {
-    use crate::core::plan_runtime::PlanState;
+    use crate::core::plan_runtime::{file_store::PlanFileState, ActivePlan};
+    use crate::core::session::AgentMode;
 
     assert_eq!(
-        super::super::prompt::agent_prompt_for_mode("main", &PlanState::Chat),
+        super::super::prompt::agent_prompt_for_mode("main", AgentMode::Chat, None),
         "agent.main> "
     );
+    let executing = ActivePlan {
+        id: "ship-001".into(),
+        path: std::path::PathBuf::from("/tmp/ship-001.plan.md"),
+        state: PlanFileState::Executing,
+    };
     assert_eq!(
-        super::super::prompt::agent_prompt_for_mode(
-            "main",
-            &PlanState::Executing {
-                plan_id: "ship-001".into(),
-            }
-        ),
-        "agent.main[Plan:executing]> "
+        super::super::prompt::agent_prompt_for_mode("main", AgentMode::Chat, Some(&executing)),
+        "agent.main[Chat·plan:executing]> "
     );
 }
 

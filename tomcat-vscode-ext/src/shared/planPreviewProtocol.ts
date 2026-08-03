@@ -87,6 +87,16 @@ export interface PlanPreviewDomSnapshot {
   toolbarStyle: PlanToolbarStyle;
   /** Random id created once per webview document, used to prove Find does not reload it. */
   webviewInstanceId: string;
+  /**
+   * Test-only counters for locating a broken Plan Preview refresh. The first
+   * three come from the extension host; the last comes from this webview.
+   */
+  refreshCounters: {
+    hostPostAttempts: number;
+    hostPostDeliveries: number;
+    hostRefreshCalls: number;
+    webviewStateFrames: number;
+  };
 }
 
 /** Test-only DOM drive actions issued by the host during E2E tests. */

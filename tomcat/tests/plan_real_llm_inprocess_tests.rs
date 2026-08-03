@@ -21,8 +21,8 @@
 //! 1. `~/.tomcat/plans/<plan_id>.plan.md` 存在且 `frontmatter.state == Completed`
 //! 2. 所有 `frontmatter.todos[].status == Completed`
 //! 3. workdir 中真实生成 `counter.py`，且 `python3 counter.py` 输出严格为 `0\n`
-//! 4. 内存 `PlanRuntime::mode()` 与磁盘同步
-//! 5. code review 通过后 `update_plan` 会自动 `finalize_completed_to_chat()`；最终 mode = Chat
+//! 4. 会话 `AgentMode` 与计划文件生命周期相互独立
+//! 5. code review 通过后 `update_plan` 只把计划文件推进到 completed；会话仍是 Chat
 //! 6. transcript 至少有一条 `plan.review` 自定义事件
 //! 7. transcript 至少有一条 `plan.code_review` 自定义事件
 //! 8. transcript 不应再出现 `plan.verify` 自定义事件（链路已掐断）
@@ -50,8 +50,7 @@ use tomcat::core::llm::system_prompt::{
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, PlanFileState, TodoStatus,
 };
-use tomcat::core::plan_runtime::state::PlanState;
-use tomcat::core::session::ContextState;
+use tomcat::core::session::{AgentMode, ContextState};
 use tomcat::{
     init_context_state, load_config_toml_file, resolve_sessions_dir, run_chat_turn,
     AgentRunOutcome, ChatContext, SessionManager,
@@ -619,15 +618,12 @@ async fn inprocess_full_plan_path_with_real_llm() {
         )
         .expect("init_context_state 失败");
 
-        // 1) /plan → Planning
+        // 1) /plan → Plan
         ctx.session_runtime
             .plan_runtime
-            .enter_planning()
-            .expect("enter_planning 失败");
-        assert!(matches!(
-            ctx.session_runtime.plan_runtime.mode(),
-            PlanState::Planning
-        ));
+            .enter_plan()
+            .expect("enter_plan 失败");
+        assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Plan);
 
         // 2) 用真 LLM 跑 PLANNING_PROMPT；期望它调 create_plan
         let planning_prompt = build_counter_planning_prompt(COUNTER_PLAN_GOAL, &workdir);
@@ -688,15 +684,19 @@ async fn inprocess_full_plan_path_with_real_llm() {
             "planning 阶段 create_plan 不应绑定 session_key/session_id"
         );
 
-        // 4) /plan build <plan_id/path> → Executing
+        // 4) /plan build <plan_id/path> → Chat + executing plan file
         ctx.session_runtime
             .plan_runtime
             .build_plan(&plan_id, Some(fresh_session.session_id.clone()))
             .expect("build_plan 失败");
-        match ctx.session_runtime.plan_runtime.mode() {
-            PlanState::Executing { plan_id: pid } => assert_eq!(pid, plan_id),
-            other => panic!("build_plan 后期望 Executing，实际：{other:?}"),
-        }
+        assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
+        assert_eq!(
+            ctx.session_runtime
+                .plan_runtime
+                .executing_plan_id()
+                .as_deref(),
+            Some(plan_id.as_str())
+        );
 
         // 5) 用真 LLM 跑 EXEC_PROMPT，最多 3 轮兜底（每轮跑完读盘判断是否 completed）
         let mut exec_rounds = 0;
@@ -785,19 +785,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
         );
         assert_counter_artifact(&workdir);
 
-        // 6) update_plan 已在 code review 通过后自动 finalize_completed_to_chat → Chat
-        let finalized = ctx
-            .session_runtime
-            .plan_runtime
-            .finalize_completed_to_chat();
-        assert!(
-            finalized.is_none(),
-            "completed 已在 update_plan 收口时自动 finalize；此处不应再次拿到 plan_id"
-        );
-        assert!(matches!(
-            ctx.session_runtime.plan_runtime.mode(),
-            PlanState::Chat
-        ));
+        // 6) 完成计划只改变文件生命周期；会话模式在 build 时已回到 Chat。
+        assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
 
         // 7) transcript 软断言：至少一条 plan.review + plan.code_review，
         //    且 verify 链路已被掐断，不应再出现 plan.verify。

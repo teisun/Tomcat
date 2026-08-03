@@ -12,6 +12,7 @@ import type {
   PlanPreviewEditorProviderDeps,
 } from "../PlanPreviewEditorProvider";
 import {
+  PLAN_AUTO_SAVE_DELAY_MS,
   PlanPreviewEditorProvider,
   classifyPlanLink,
   deriveCanBuild,
@@ -20,12 +21,14 @@ import type {
   PlanPreviewHostFrame,
   PlanPreviewStateSnapshot,
 } from "../../../shared/planPreviewProtocol";
+import { ContextSearchService } from "../../webview/contextSearch";
 
 const __testing = (
   vscode as typeof vscode & {
     __testing: {
       reset(): void;
       setConfiguration(key: string, value: unknown): void;
+      setWarningMessageHandler(handler: (message: string, items: string[]) => unknown): void;
     };
   }
 ).__testing;
@@ -81,8 +84,27 @@ class FakeWebviewPanel {
   }
 }
 
-function fakeDocument(text: string, docPath: string) {
-  return { getText: () => text, uri: vscode.Uri.file(docPath) };
+function fakeDocument(
+  text: string,
+  docPath: string,
+  options: { isDirty?: boolean; save?: () => Promise<boolean> } = {},
+) {
+  return {
+    getText: () => text,
+    isDirty: options.isDirty ?? false,
+    save: options.save ?? (async () => true),
+    uri: vscode.Uri.file(docPath),
+  };
+}
+
+function hostRefreshCounters(provider: PlanPreviewEditorProvider): {
+  hostStatePostAttempts: number;
+  hostStatePostDeliveries: number;
+} {
+  return provider as unknown as {
+    hostStatePostAttempts: number;
+    hostStatePostDeliveries: number;
+  };
 }
 
 async function flush(): Promise<void> {
@@ -95,14 +117,15 @@ async function resolveEditor(
   text: string,
   docPath: string,
   active = true,
-): Promise<{ panel: FakeWebviewPanel }> {
+  document = fakeDocument(text, docPath),
+): Promise<{ document: ReturnType<typeof fakeDocument>; panel: FakeWebviewPanel }> {
   const panel = new FakeWebviewPanel(active);
   provider.resolveCustomTextEditor(
-    fakeDocument(text, docPath) as unknown as vscode.TextDocument,
+    document as unknown as vscode.TextDocument,
     panel as unknown as vscode.WebviewPanel,
   );
   await flush();
-  return { panel };
+  return { document, panel };
 }
 
 const PLAN_TEXT = `---
@@ -174,6 +197,7 @@ async function createTempPlanFile(text: string): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     refreshTempDirs.map((dir) => fsPromises.rm(dir, { force: true, recursive: true })),
   );
@@ -444,6 +468,48 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
       undefined,
     );
   });
+
+  it("resolves inline plan paths from the workspace instead of plan storage", async () => {
+    const resolvePaths = vi
+      .spyOn(ContextSearchService.prototype, "resolvePaths")
+      .mockResolvedValue([
+        {
+          kind: "file",
+          path: "src/app.ts",
+          resolvedPath: "/workspace/src/app.ts",
+        },
+      ]);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const postEvent = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      await provider.handleIntent(
+        {
+          data: { paths: ["src/app.ts"], requestId: "paths-1" },
+          messageId: "resolve-1",
+          type: "resolvePaths",
+        },
+        makeDoc(PLAN_TEXT, "/home/user/.tomcat/plans/plan.plan.md"),
+        vi.fn(),
+        postEvent,
+      );
+
+      expect(resolvePaths).toHaveBeenCalledWith({ paths: ["src/app.ts"] });
+      expect(postEvent).toHaveBeenCalledWith({
+        requestId: "paths-1",
+        results: [
+          {
+            kind: "file",
+            path: "src/app.ts",
+            resolvedPath: "/workspace/src/app.ts",
+          },
+        ],
+        type: "pathsResolved",
+      });
+    } finally {
+      resolvePaths.mockRestore();
+    }
+  });
 });
 
 describe("PlanPreviewEditorProvider.buildState UI fields", () => {
@@ -567,6 +633,56 @@ describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
     expect(panel.webview.lastState()?.bodyMarkdown).toContain("Disk refreshed paragraph.");
   });
 
+  it("keeps dirty buffer text while applying the event's non-text plan state", async () => {
+    const bufferedText = PLAN_TEXT.replace("Body paragraph.", "Unsaved editor paragraph.");
+    const diskText = PLAN_TEXT.replace("Body paragraph.", "Agent-written disk paragraph.");
+    const planPath = await createTempPlanFile(diskText);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const document = fakeDocument(bufferedText, planPath, { isDirty: true });
+    const { panel } = await resolveEditor(provider, bufferedText, planPath, true, document);
+
+    await provider.refreshFromServeEvent("plan-xyz", null, "executing");
+
+    expect(panel.webview.lastState()).toMatchObject({
+      bodyMarkdown: expect.stringContaining("Unsaved editor paragraph."),
+      canBuild: false,
+      state: "executing",
+    });
+  });
+
+  it("records a state-post attempt before asynchronous snapshot construction settles", async () => {
+    const planPath = await createTempPlanFile(PLAN_TEXT);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, PLAN_TEXT, planPath);
+    const initialSnapshot = panel.webview.lastState();
+    expect(initialSnapshot).toBeDefined();
+    const before = { ...hostRefreshCounters(provider) };
+
+    let resolveSnapshot!: (snapshot: PlanPreviewStateSnapshot) => void;
+    const deferredSnapshot = new Promise<PlanPreviewStateSnapshot>((resolve) => {
+      resolveSnapshot = resolve;
+    });
+    vi.spyOn(provider, "buildState").mockReturnValue(deferredSnapshot);
+    const postSnapshot = (
+      provider as unknown as {
+        postSnapshot(
+          path: string,
+          text: string,
+          ui: { toolbarStyle: "hybrid" },
+        ): Promise<void>;
+      }
+    ).postSnapshot(planPath, PLAN_TEXT, { toolbarStyle: "hybrid" });
+
+    expect(hostRefreshCounters(provider).hostStatePostAttempts).toBe(before.hostStatePostAttempts + 1);
+    expect(hostRefreshCounters(provider).hostStatePostDeliveries).toBe(before.hostStatePostDeliveries);
+
+    resolveSnapshot(initialSnapshot!);
+    await postSnapshot;
+    expect(hostRefreshCounters(provider).hostStatePostDeliveries).toBe(
+      before.hostStatePostDeliveries + 1,
+    );
+  });
+
   it("falls back to the canonicalized path hint when the event has no planId", async () => {
     const oldText = PLAN_TEXT.replace("Body paragraph.", "Old buffered paragraph.");
     const newText = PLAN_TEXT.replace("Body paragraph.", "Canonical refresh paragraph.");
@@ -604,6 +720,75 @@ describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
     await provider.refreshFromServeEvent("plan-xyz");
 
     expect(panel.webview.stateFrames()).toHaveLength(frameCount);
+  });
+});
+
+describe("PlanPreviewEditorProvider plan auto-save", () => {
+  function scheduleAutoSave(provider: PlanPreviewEditorProvider, document: ReturnType<typeof fakeDocument>): void {
+    (
+      provider as unknown as {
+        scheduleAutoSave(document: vscode.TextDocument): void;
+      }
+    ).scheduleAutoSave(document as unknown as vscode.TextDocument);
+  }
+
+  it("debounces plan saves into one write", async () => {
+    vi.useFakeTimers();
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const save = vi.fn().mockResolvedValue(true);
+    const document = fakeDocument(PLAN_TEXT, "/workspace/plans/auto-save.plan.md", {
+      isDirty: true,
+      save,
+    });
+
+    scheduleAutoSave(provider, document);
+    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS - 1);
+    expect(save).not.toHaveBeenCalled();
+
+    scheduleAutoSave(provider, document);
+    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS);
+    expect(save).toHaveBeenCalledTimes(1);
+    provider.dispose();
+  });
+
+  it("does not save when tomcat.plan.autoSave is disabled", async () => {
+    vi.useFakeTimers();
+    __testing.setConfiguration("tomcat.plan.autoSave", false);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const save = vi.fn().mockResolvedValue(true);
+    const document = fakeDocument(PLAN_TEXT, "/workspace/plans/manual-save.plan.md", {
+      isDirty: true,
+      save,
+    });
+
+    scheduleAutoSave(provider, document);
+    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS);
+    expect(save).not.toHaveBeenCalled();
+
+    __testing.setConfiguration("tomcat.plan.autoSave", true);
+    provider.dispose();
+  });
+
+  it("warns once and does not retry after a save conflict", async () => {
+    vi.useFakeTimers();
+    const warning = vi.fn().mockResolvedValue(undefined);
+    __testing.setWarningMessageHandler(warning);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const save = vi.fn().mockResolvedValue(false);
+    const document = fakeDocument(PLAN_TEXT, "/workspace/plans/conflict.plan.md", {
+      isDirty: true,
+      save,
+    });
+
+    scheduleAutoSave(provider, document);
+    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS);
+    await Promise.resolve();
+    scheduleAutoSave(provider, document);
+    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS);
+
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledTimes(1);
+    provider.dispose();
   });
 });
 

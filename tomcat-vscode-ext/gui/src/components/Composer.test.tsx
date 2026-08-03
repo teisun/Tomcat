@@ -101,7 +101,7 @@ function renderComposer({
   onResolveDrop?: (uris: string[]) => void;
   onInterrupt?: () => void;
   onSubmit?: () => void;
-  planState?: "chat" | "planning" | "executing";
+  planState?: "planning" | "pending" | "executing" | "completed" | null;
   supportedReasoningLevels?: string[];
   thinkingLevelValue?: string;
   onThinkingLevelChange?: (value: string) => void;
@@ -335,8 +335,8 @@ describe("Composer", () => {
     expect(onThinkingLevelChange).toHaveBeenCalledWith("off");
   });
 
-  it("omits the plan notice when chat mode is active", () => {
-    renderComposer({ planState: "chat" });
+  it("omits the plan notice when no plan is attached", () => {
+    renderComposer({ planState: null });
 
     expect(screen.queryByTestId("composer-notice-plan")).toBeNull();
   });

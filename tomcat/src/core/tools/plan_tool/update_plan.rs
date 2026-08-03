@@ -22,9 +22,7 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{update_plan_locked, write_plan, PlanFileState, TodoStatus},
-    ops,
-    state::PlanState,
-    PlanRuntime,
+    ops, PlanRuntime,
 };
 
 use super::shared_todo_ops::{apply_shared_todo_ops, items_json};
@@ -32,7 +30,7 @@ use super::ToolError;
 
 #[derive(Debug, Deserialize)]
 pub struct UpdatePlanArgs {
-    /// 目标 plan_id；EXEC 模式可省略（默认 active_plan_id）。
+    /// 目标 plan_id；执行中计划可省略（默认当前 active plan）。
     #[serde(default)]
     pub plan_id: Option<String>,
     /// 可选直接路径；仅在未传 plan_id 时生效。
@@ -261,6 +259,7 @@ pub async fn execute_for_tool(
     };
 
     let panel_snapshot_id = crate::core::plan_runtime::panels::next_panel_snapshot_id();
+    runtime.refresh_active_plan_after_write(path.clone(), &plan);
 
     // E：fanout UI 刷新——advisory lock 在 write_plan 内已 release，这里仅同步通知
     // 已注册 panel；panel 自行决定如何渲染（CLI/IDE/noop）。
@@ -275,7 +274,12 @@ pub async fn execute_for_tool(
     if matches!(plan_state_before, PlanFileState::Completed)
         && matches!(plan_state_after, PlanFileState::Pending)
     {
-        runtime.set_mode_pending_with_path(target_plan_id.clone(), Some(path.clone()));
+        runtime.write_transcript_custom(serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_PENDING,
+            "plan_id": target_plan_id,
+            "path": crate::infra::platform::format_home_path(&path),
+            "state": PlanFileState::Pending.as_str(),
+        }));
     }
 
     let event_payload = crate::infra::events::PlanEventPayload {
@@ -344,8 +348,13 @@ fn finalize_plan_completed(
 ) -> Result<(), ToolError> {
     plan.frontmatter.state = PlanFileState::Completed;
     write_plan(path, plan, runtime.lock_timeout_ms())?;
-    runtime.set_mode_completed_with_path(target_plan_id.to_string(), Some(path.to_path_buf()));
-    let _ = runtime.finalize_completed_to_chat();
+    runtime.refresh_active_plan_after_write(path.to_path_buf(), plan);
+    runtime.write_transcript_custom(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_COMPLETE,
+        "plan_id": target_plan_id,
+        "path": crate::infra::platform::format_home_path(path),
+        "state": PlanFileState::Completed.as_str(),
+    }));
     Ok(())
 }
 
@@ -379,16 +388,8 @@ fn resolve_target_plan_path(
         return crate::infra::platform::normalize_path(&path)
             .map_err(|e| ToolError::BadArgs(format!("update_plan path 非法：{e}")));
     }
-    if let Some(path) = runtime.active_plan_path() {
-        return Ok(path);
-    }
-    if let PlanState::Executing { plan_id } | PlanState::Pending { plan_id } = runtime.mode() {
-        return runtime
-            .resolved_plan_path(&plan_id)
-            .map_err(ToolError::BadArgs);
-    }
-    if let Some(id) = runtime.active_planning_plan_id() {
-        return runtime.resolved_plan_path(&id).map_err(ToolError::BadArgs);
+    if let Some(plan) = runtime.active_plan() {
+        return Ok(plan.path);
     }
     Err(ToolError::BadArgs(
         "update_plan 需要 plan_id 或 path；当前模式无 active plan".into(),

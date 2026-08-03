@@ -745,24 +745,9 @@ pub(crate) async fn handle_command(
             let entry = slot.ctx.session_runtime.session.current_session_entry()?;
             let model = slot.ctx.effective_model(entry.as_ref());
             let thinking_level = slot.ctx.resolve_thinking_level(&model);
-            let plan_state = slot.ctx.session_runtime.plan_runtime.mode();
-            let active_plan_id = plan_state
-                .active_plan_id()
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    slot.ctx
-                        .session_runtime
-                        .plan_runtime
-                        .active_planning_plan_id()
-                });
-            let active_plan_path_raw = if plan_state.is_plan_attached() {
-                slot.ctx.session_runtime.plan_runtime.active_plan_path()
-            } else {
-                None
-            };
-            let active_plan_path = active_plan_path_raw
-                .as_ref()
-                .map(|path| crate::infra::platform::format_home_path(path));
+            let agent_mode = slot.ctx.session_runtime.plan_runtime.mode();
+            let active_plan = slot.ctx.session_runtime.plan_runtime.active_plan();
+            let active_plan_path_raw = active_plan.as_ref().map(|plan| plan.path.clone());
             let context_utilization_ratio = entry
                 .as_ref()
                 .and_then(|session| session.context_utilization_ratio);
@@ -789,13 +774,16 @@ pub(crate) async fn handle_command(
                     "sessionId": slot.session_id,
                     "busy": slot.is_busy(),
                     "interrupted": slot.is_interrupted(),
-                    "mode": match slot.mode { crate::SessionMode::Code => "code", crate::SessionMode::Claw => "claw" },
+                    "workspaceMode": match slot.mode { crate::SessionMode::Code => "code", crate::SessionMode::Claw => "claw" },
                     "cwd": slot.cwd,
                     "model": model,
                     "thinkingLevel": thinking_level.as_str(),
-                    "planState": plan_state.as_str(),
-                    "planId": active_plan_id,
-                    "planPath": active_plan_path,
+                    "agentMode": agent_mode.as_str(),
+                    "activePlan": active_plan.map(|plan| serde_json::json!({
+                        "id": plan.id,
+                        "path": crate::infra::platform::format_home_path(&plan.path),
+                        "state": plan.state.as_str(),
+                    })),
                     "planTodos": plan_todos,
                     "sessionTodos": session_todos,
                     "contextUtilizationRatio": context_utilization_ratio,
@@ -911,7 +899,7 @@ pub(crate) async fn handle_command(
             }
             match action {
                 SetPlanModeAction::Enter => {
-                    match slot.ctx.session_runtime.plan_runtime.enter_planning() {
+                    match slot.ctx.session_runtime.plan_runtime.enter_plan() {
                         Ok(()) => {
                             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                                 id,
@@ -930,25 +918,7 @@ pub(crate) async fn handle_command(
                     }
                 }
                 SetPlanModeAction::Exit => {
-                    let exit_result = if matches!(
-                        slot.ctx.session_runtime.plan_runtime.mode(),
-                        crate::core::plan_runtime::PlanState::Executing { .. }
-                    ) {
-                        match slot
-                            .ctx
-                            .session_runtime
-                            .plan_runtime
-                            .demote_to_pending_on_cancel()
-                        {
-                            Ok(Some(_)) | Ok(None) => {
-                                slot.ctx.session_runtime.plan_runtime.exit_to_chat()
-                            }
-                            Err(error) => Err(error),
-                        }
-                    } else {
-                        slot.ctx.session_runtime.plan_runtime.exit_to_chat()
-                    };
-                    match exit_result {
+                    match slot.ctx.session_runtime.plan_runtime.exit_plan() {
                         Ok(()) => {
                             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                                 id,
@@ -958,8 +928,7 @@ pub(crate) async fn handle_command(
                         }
                         Err(error) => {
                             let error_code = match error {
-                                PlanRuntimeError::AlreadyInMode(_)
-                                | PlanRuntimeError::NotInPlanning(_) => "plan_state_conflict",
+                                PlanRuntimeError::AlreadyInMode(_) => "plan_state_conflict",
                                 _ => normalize_plan_runtime_error_code(&error),
                             };
                             send_error(&state, id, Some(slot.session_id.clone()), error_code)?;
@@ -995,14 +964,22 @@ pub(crate) async fn handle_command(
                                 &slot,
                                 Some(outcome.plan_path.to_string_lossy().to_string()),
                             );
+                            let mut input_message = ChatMessage::user(format!(
+                                "start building {}",
+                                outcome.plan_path.to_string_lossy()
+                            ));
+                            input_message.kind = crate::core::llm::MessageKind::PlanBuild;
+                            let persisted = persist_turn_input_message(
+                                &slot,
+                                &input_message,
+                                &ServeMessageParams::default(),
+                            )?;
+                            input_message.msg_id = Some(persisted.row_id);
                             start_turn(
                                 Arc::clone(&state),
                                 slot,
                                 id,
-                                Some(ChatMessage::user(format!(
-                                    "start building {}",
-                                    outcome.plan_path.to_string_lossy()
-                                ))),
+                                Some(input_message),
                                 TurnAck::Payload(response_payload),
                             )
                             .await?;
@@ -1379,21 +1356,20 @@ fn plan_state_payload(
     plan_path_override: Option<String>,
 ) -> serde_json::Value {
     let plan_runtime = &slot.ctx.session_runtime.plan_runtime;
-    let plan_state = plan_runtime.mode();
-    let plan_id = plan_state
-        .active_plan_id()
-        .map(ToOwned::to_owned)
-        .or_else(|| plan_runtime.active_planning_plan_id());
-    let plan_path = plan_path_override.or_else(|| {
-        plan_runtime
-            .active_plan_path()
-            .map(|path| crate::infra::platform::format_home_path(&path))
+    let active_plan = plan_runtime.active_plan().map(|plan| {
+        let path = plan_path_override
+            .clone()
+            .unwrap_or_else(|| crate::infra::platform::format_home_path(&plan.path));
+        serde_json::json!({
+            "id": plan.id,
+            "path": path,
+            "state": plan.state.as_str(),
+        })
     });
     serde_json::json!({
         "sessionId": slot.session_id,
-        "planState": plan_state.as_str(),
-        "planId": plan_id,
-        "planPath": plan_path,
+        "agentMode": plan_runtime.mode().as_str(),
+        "activePlan": active_plan,
         "sessionKey": slot.ctx.session_runtime.session.current_session_key(),
     })
 }
@@ -1488,7 +1464,6 @@ fn restore_core_payload(report: RestoreCoreReport) -> serde_json::Value {
 fn normalize_plan_runtime_error_code(error: &PlanRuntimeError) -> &'static str {
     match error {
         PlanRuntimeError::AlreadyInMode(_) => "plan_already_in_mode",
-        PlanRuntimeError::NotInPlanning(_) => "plan_state_conflict",
         PlanRuntimeError::UnsafePlanId(_) | PlanRuntimeError::Io(_) => "plan_io_error",
         PlanRuntimeError::BuildBlocked(_) => "plan_build_blocked",
         PlanRuntimeError::BuildPlanNotFound { .. }
@@ -1557,8 +1532,21 @@ pub(crate) async fn start_turn(
         .catch_unwind()
         .await;
         match result {
-            Ok(Ok(crate::AgentRunOutcome::Completed(_)))
-            | Ok(Ok(crate::AgentRunOutcome::Interrupted(_))) => {}
+            Ok(Ok(crate::AgentRunOutcome::Completed(_))) => {}
+            Ok(Ok(crate::AgentRunOutcome::Interrupted(_))) => {
+                if let Err(error) = slot_for_task
+                    .ctx
+                    .session_runtime
+                    .plan_runtime
+                    .park_executing_plan()
+                {
+                    tracing::warn!(
+                        session_id = %slot_for_task.session_id,
+                        error = %error,
+                        "failed to park executing plan after serve interruption"
+                    );
+                }
+            }
             Ok(Ok(crate::AgentRunOutcome::Failed(error))) => {
                 emit_agent_end_once(
                     &state_for_task,

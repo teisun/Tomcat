@@ -132,9 +132,10 @@ fn describe_message_shape(message: &ChatMessage) -> String {
             if has_text {
                 tokens.push("output_text");
             }
-            for _ in message.tool_calls.as_deref().unwrap_or(&[]) {
-                tokens.push("function_call");
-            }
+            tokens.extend(std::iter::repeat_n(
+                "function_call",
+                message.tool_calls.as_deref().unwrap_or(&[]).len(),
+            ));
         }
         ChatMessageRole::Tool => tokens.push("function_call_output"),
     }

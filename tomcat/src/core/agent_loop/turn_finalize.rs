@@ -19,8 +19,8 @@ use crate::core::compaction::run_layer0_cleanup;
 use crate::core::llm::{
     ChatMessage, ContinuityMetadata, MessageKind, ReasoningContinuation, TokenUsage,
 };
-use crate::core::plan_runtime::file_store::{self, PlanFileState, TodoStatus};
-use crate::core::plan_runtime::{PlanRuntime, PlanState};
+use crate::core::plan_runtime::file_store::{self, TodoStatus};
+use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::estimated_tokens_from_chars;
 use crate::infra::events::{AgentEvent, Message};
 
@@ -43,15 +43,10 @@ pub(super) enum TurnOutcome {
 /// 判据用计划文件的 `state` 而不是"还有没有未完成的 todo"：
 /// todo 可能全勾完了但 code review 打回，此时 state 仍是 `executing`，活儿也确实没干完。
 fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
-    let PlanState::Executing { plan_id } = plan_runtime.mode() else {
-        return None;
-    };
+    let plan_id = plan_runtime.executing_plan_id()?;
     let plan = plan_runtime
         .active_plan_path()
         .and_then(|path| file_store::read_plan(&path).ok())?;
-    if plan.frontmatter.state != PlanFileState::Executing {
-        return None;
-    }
 
     let unfinished: Vec<&file_store::TodoItem> = plan
         .frontmatter

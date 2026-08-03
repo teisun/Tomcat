@@ -71,7 +71,7 @@ async fn code_review_pass_completes_without_verifier() {
     );
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert_eq!(persisted.frontmatter.state, PlanFileState::Completed);
-    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(rt.mode(), AgentMode::Plan);
     let events = captured.lock();
     let code_review_event = events
         .iter()
@@ -538,7 +538,7 @@ async fn rebuild_resets_code_review_rounds() {
     let mut plan = read_plan(&path).unwrap();
     plan.frontmatter.state = PlanFileState::Pending;
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_mode_pending_with_path(plan_id.clone(), Some(path.clone()));
+    rt.refresh_active_plan_after_write(path.clone(), &plan);
     rt.build_plan(&plan_id, Some("sid-session-a".into()))
         .expect("二次 build 失败");
 

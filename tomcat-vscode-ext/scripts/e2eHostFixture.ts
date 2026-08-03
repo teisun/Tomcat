@@ -128,6 +128,7 @@ let historyCounter = 1;
 let assistantMessageCounter = 1;
 let pendingApproval = null;
 let pendingInterrupt = null;
+let pendingPlanCompletion = null;
 let activeSessionId = null;
 const RESUME_STATE_PATH = path.join(path.dirname(setupMarkerPath), "fake-serve-resume.json");
 const debugGetMessages = process.env.TOMCAT_E2E_DEBUG_GET_MESSAGES === "1";
@@ -139,7 +140,7 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.22";
+const serverVersion = "0.1.23";
 
 function persistPendingApproval() {
   if (!pendingApproval || pendingApproval.kind !== "answer-card") {
@@ -390,6 +391,7 @@ function createSession() {
   const sessionId = \`session-\${sessionCounter++}\`;
   sessions.set(sessionId, touchSession({
     busy: false,
+    agentMode: "chat",
     contextRatio: null,
     cwd: process.cwd(),
     history: [],
@@ -416,6 +418,33 @@ if (sessions.size === 0) {
 
 function send(frame) {
   process.stdout.write(JSON.stringify(frame) + "\\n");
+}
+
+function activePlanForSession(session) {
+  if (!session.planId || !session.planPath || session.planState === "chat") {
+    return null;
+  }
+  return {
+    id: session.planId,
+    path: session.planPath,
+    state: session.planState,
+  };
+}
+
+function planControlPayload(session) {
+  return {
+    activePlan: activePlanForSession(session),
+    agentMode: session.agentMode || "chat",
+  };
+}
+
+function emitAgentModeChanged(sessionId) {
+  const session = ensureSession(sessionId);
+  send({
+    agentMode: session.agentMode || "chat",
+    sessionId,
+    type: "session.agent_mode.changed",
+  });
 }
 
 function deriveSessionTitleFromText(text) {
@@ -2032,9 +2061,17 @@ function handleInterrupt(frame) {
     clearTimeout(pendingInterrupt);
     pendingInterrupt = null;
   }
+  if (pendingPlanCompletion) {
+    clearTimeout(pendingPlanCompletion);
+    pendingPlanCompletion = null;
+  }
 
   const session = ensureSession(sessionId);
   if (session.busy) {
+    if (session.planState === "executing") {
+      session.planState = "pending";
+      emitPlanEvent(sessionId, "plan.pending");
+    }
     send({
       sessionId,
       type: "agent_interrupted",
@@ -2074,7 +2111,7 @@ function handleCommand(frame) {
             "set_thinking_level",
               "set_plan_mode",
             ],
-            protocolVersion: 1,
+            protocolVersion: 2,
             serverVersion,
             sessionId,
           },
@@ -2158,15 +2195,14 @@ function handleCommand(frame) {
           busy: session.busy,
           contextUtilizationRatio: session.contextRatio,
           cwd: session.cwd,
-          mode: session.mode,
+          activePlan: activePlanForSession(session),
+          agentMode: session.agentMode || "chat",
           model: session.model,
-          planId: session.planId,
-          planPath: session.planPath,
-          planState: session.planState,
           planTodos: session.planTodos ?? [],
           sessionId,
           sessionKey: session.sessionKey,
           sessionTodos: session.sessionTodos ?? [],
+          workspaceMode: session.mode,
           thinkingLevel:
             session.thinkingByModel && typeof session.thinkingByModel === "object"
               ? session.thinkingByModel[session.model] || null
@@ -2361,62 +2397,78 @@ function handleCommand(frame) {
       const sessionId = frame.sessionId || activeSessionId || createSession();
       const session = touchSession(ensureSession(sessionId));
       if (frame.action === "enter") {
+        session.agentMode = "plan";
         session.planState = "planning";
-        session.planId = session.planId || "fake-plan";
+        session.planId = frame.planId || session.planId || "fake-plan";
         session.planPath = path.join(process.cwd(), "plans", \`\${session.planId}.plan.md\`);
         fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
         fs.writeFileSync(session.planPath, "# Fake plan\\n\\n- Step 1\\n", "utf8");
         send({
           id: frame.id,
-          payload: { planId: session.planId, planState: session.planState },
+          payload: planControlPayload(session),
           sessionId,
           success: true,
           type: "response",
         });
-        emitPlanEvent(sessionId, "plan.enter");
+        emitAgentModeChanged(sessionId);
         break;
       }
       if (frame.action === "exit") {
-        const lastPlanId = session.planId;
-        const lastPlanPath = session.planPath;
-        session.planState = "chat";
+        session.agentMode = "chat";
         send({
           id: frame.id,
-          payload: { planId: null, planState: "chat" },
+          payload: planControlPayload(session),
           sessionId,
           success: true,
           type: "response",
         });
-        emitCustomPlanEvent(sessionId, "plan.exit", {
-          path: lastPlanPath,
-          planId: lastPlanId,
-          state: "chat",
-        });
-        session.planId = null;
-        session.planPath = null;
+        emitAgentModeChanged(sessionId);
         break;
       }
 
+      const resumesPendingPlan = session.planState === "pending";
       session.planId = frame.planId || session.planId || "fake-plan";
       session.planPath = session.planPath || path.join(process.cwd(), "plans", \`\${session.planId}.plan.md\`);
       fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
       fs.writeFileSync(session.planPath, "# Fake plan\\n\\n- Step 1\\n- Build\\n", "utf8");
       session.planState = "executing";
+      session.agentMode = "chat";
+      // Mirror production ordering: persist the user-visible kickoff before
+      // acknowledging build, so the immediate history refresh can render it.
+      session.history.push({
+        id: "h-" + historyCounter++,
+        message: {
+          content: "start building " + session.planPath,
+          kind: "plan_build",
+          role: "user",
+        },
+        type: "message",
+      });
       send({
         id: frame.id,
-        payload: {
-          planId: session.planId,
-          planPath: session.planPath,
-          planState: session.planState,
-        },
+        payload: planControlPayload(session),
         sessionId,
         success: true,
         type: "response",
       });
+      startTurn(sessionId);
       emitPlanEvent(sessionId, "plan.build");
-      setTimeout(() => {
+      emitAgentModeChanged(sessionId);
+      const finishPlanRun = () => {
+        pendingPlanCompletion = null;
+        if (session.planId === "fake-plan-complete") {
+          session.planState = "completed";
+          emitPlanEvent(sessionId, "plan.complete");
+        }
         finishTurn(sessionId, null);
-      }, 10);
+      };
+      const completionDelayMs =
+        session.planId === "fake-plan-interrupt" && !resumesPendingPlan
+          ? 5_000
+          : resumesPendingPlan
+            ? 250
+            : 10;
+      pendingPlanCompletion = setTimeout(finishPlanRun, completionDelayMs);
       break;
     }
     case "retain_attachment_leases": {

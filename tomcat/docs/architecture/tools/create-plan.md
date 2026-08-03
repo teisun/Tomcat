@@ -2,17 +2,18 @@
 
 本文档是内置工具 **`create_plan`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 与 [`planner.md`](./planner.md)：**仅在 PLAN 模式可见**，是唯一**创建/重写** `PlanFile` 文件的内置 LLM 工具，并在写入完成后**同步**通过 `internal subagent dispatch`（见 [`reviewer.md`](./reviewer.md)）派发 reviewer 子 Agent，把审稿结果一并塞回工具结果。**实现以仓库代码为准**；本文只保留**已定稿的行为与契约**。
 
-## 2026-05 Active Binding 补充
+## 2026-08 生效契约：创建后刷新 ActivePlan
 
-当前实现对 `create_plan` 的 active-plan 约束已收敛为：
+`create_plan` 的会话模式与计划文件职责已拆分：
 
-- `create_plan` 写盘成功后，只更新 `active_planning_plan_id`；
-- `create_plan` **不再**写 `active_plan_path`，因此它不会建立 active binding；
+- 仅 `AgentMode::Plan` 时可调用；
+- 写盘成功后用该文件刷新 `ActivePlan { id, path, state: planning }` 缓存；
+- 缓存是文件的已读视图，文件仍是计划生命周期的权威来源；
 - 写盘与 reviewer 之间仍保持“先盘、再释锁、后事件/派发”顺序；
 - transcript 事件固定写为 `event = "plan.create"`，payload 为 `{ plan_id, path, state: "planning" }`；
-- 同一 Planning 会话内允许连续多次 `create_plan`，后一次只覆盖 `active_planning_plan_id`，不会阻止显式 `/plan build <其它 plan_id>`。
+- 同一 Plan 会话内允许连续多次 `create_plan`，后一次替换当前 `ActivePlan`，不会阻止显式 `/plan build <其它 plan_id>`。
 
-下文若仍出现 `active_plan_id`、`mode=planning` 作为运行态字段、或 `create_plan` 建立 active binding 等历史草稿描述，均以上述稳定契约与仓库代码为准。
+下文若仍出现 `active_planning_plan_id`、`PlanState` 或 `mode=planning` 作为运行态字段，均为历史草稿，以上述契约与仓库代码为准。
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 

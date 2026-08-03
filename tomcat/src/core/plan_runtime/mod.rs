@@ -1,35 +1,24 @@
 //! # PlanRuntime — per-session PLAN 模式编排器（T2-P1-002/003/004）
 //!
 //! `PlanRuntime` 与 `TodosRuntime` 是 PLAN/CHAT 相关的两条 per-session 运行态：前者持有当前
-//! `PlanState`、active plan id、reviewer 派发逻辑，以及 session-local todos 的内存态；
+//! 会话模式、active plan 缓存、reviewer 派发逻辑，以及 session-local todos 的内存态；
 //! 后者只负责把这份 session-local todos 持久化到 agent 级 `.todo.md`。
 //! 它们都挂在 `ChatContext` 上，与 chat session 同生命周期（**不**每轮重建，否则 `mode`
-//! 会被重置回 Chat，丢失 PLAN/EXEC 的持续语义）。
+//! 会被重置回 Chat，丢失 PLAN 的持续语义）。
 //!
-//! ## 状态机（plan-runtime.md §4.1 R3 / R11）
+//! ## 正交状态
 //!
 //! ```text
-//!                    /plan
-//!         Chat ─────────────────────► Planning
-//!          ▲                              │
-//!          │                  /plan exit  │
-//!          │  /plan exit                  ▼
-//!          ├────────────── Pending { plan_id }
-//!          │                  ▲       │
-//!          │  cancel_token    │       │ /plan build <plan_id/path>
-//!          │  / Ctrl+C        │       ▼
-//!          │              Executing { plan_id }
-//!          │                      │
-//!          │ all todos completed  │
-//!          ▼                      ▼
-//!         Chat ◄────────── Completed { plan_id }
+//! AgentMode:       Chat ── /plan ──► Plan ── /plan exit ──► Chat
+//! PlanFile.state:  Planning ─ build ─► Executing ─ complete ─► Completed
+//!                                      │
+//!                                      └─ cancel ─► Pending ─ build ─► Executing
 //! ```
 //!
 //! ## 模块组织
 //!
-//! - [`state`]：`PlanState` 枚举 + 派生 helper（`as_str` / `active_plan_id` 等）
-//! - [`catalog`]：`visible_tools_for_mode(PlanState, base) -> Vec<Value>`，
-//!   PLAN/EXEC 时合入 plan_only 工具；CHAT 时排除
+//! - [`active_plan`]：当前绑定计划的标识、路径和最后同步的文件生命周期状态
+//! - [`catalog`]：会话可用工具目录
 //! - [`reminders`]：PLANNER / EXECUTOR `<system_reminder>` 常量
 //! - [`safety`]：`assert_plan_id_safe`（防穿越 `../` / `/` / 控制字符）
 //!
@@ -37,6 +26,7 @@
 //! `tools::ask_question`；P6 起补 `/plan build` 五件事；P7 起补 `panel` / `checkpoint` /
 //! `cancel`。
 
+pub mod active_plan;
 pub mod catalog;
 pub mod code_reviewer;
 pub mod explorer;
@@ -48,7 +38,6 @@ pub mod prod_reviewer;
 pub mod reminders;
 pub mod review;
 pub mod safety;
-pub mod state;
 pub mod todo_runtime;
 pub mod verify;
 
@@ -65,6 +54,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::session::manager::{AgentMode, ResumeControlState};
 
+pub use active_plan::ActivePlan;
 pub use code_reviewer::CodeReviewSummary;
 pub use panels::{
     Answer, AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
@@ -73,7 +63,6 @@ pub use panels::{
 };
 pub use plan_reviewer::{PlanReviewSummary, REVIEWER_ALLOW_REVIEW_EDIT};
 pub use review::Finding;
-pub use state::PlanState;
 pub use verify::VerifySummary;
 
 /// The single authoritative todo source preserved in a compaction summary.
@@ -92,7 +81,7 @@ pub enum ProgressSource {
 /// 保证"UI 看到的模式"和"喂给模型的模式"永远来自同一个地方。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlSnapshot {
-    /// chat | plan | exec
+    /// chat | plan
     pub mode: AgentMode,
     pub plan_path: Option<PathBuf>,
     /// 计划文件 frontmatter 里的 state；读不到计划文件时为 None。
@@ -128,22 +117,11 @@ fn read_plan_for_restore(path: &std::path::Path) -> Option<file_store::PlanFile>
     }
 }
 
-/// EXEC 内部由计划文件状态细分；文件说还在 planning 就按 planning 恢复（更严格的一侧）。
-fn plan_state_from_file(plan: &file_store::PlanFile) -> PlanState {
-    let plan_id = plan.frontmatter.plan_id.clone();
-    match plan.frontmatter.state {
-        file_store::PlanFileState::Planning => PlanState::Planning,
-        file_store::PlanFileState::Pending => PlanState::Pending { plan_id },
-        file_store::PlanFileState::Executing => PlanState::Executing { plan_id },
-        file_store::PlanFileState::Completed => PlanState::Completed { plan_id },
-    }
-}
-
 /// PLAN 模式 per-session 编排器骨架（P1）。
 ///
 /// 当前 PR-PLA 范围只支持：
-/// - `/plan` → `enter_planning`
-/// - `/plan exit` → `exit_to_chat`
+/// - `/plan` → `enter_plan`
+/// - `/plan exit` → `exit_plan`
 /// - `recover()`（启动时扫描 `~/.tomcat/plans/`）— 占位实现，P2 起接入 file_store
 ///
 /// 后续 PR：`build_plan` / `cancel_to_pending` / `dispatch_reviewer` / `attach_cancel_hook` /
@@ -152,12 +130,17 @@ fn plan_state_from_file(plan: &file_store::PlanFile) -> PlanState {
 pub struct PlanRuntime {
     /// 当前模式。每轮 `chat_loop` 装配 `tool_definitions` / system reminder / user prefix
     /// 都基于此值；跨 turn 持久（**禁止**每轮重建 `PlanRuntime`）。
-    mode: RwLock<PlanState>,
+    mode: RwLock<AgentMode>,
+    /// 串行化“append transcript → 修改 mode → 通知”的提交窗口。
+    ///
+    /// 单独的 `mode` 读写锁无法保护先验检查与 append 之间的间隙；没有这把锁，两个并发
+    /// `/plan` 都可能读到 Chat 并重复写出 mode changed 事件。
+    agent_mode_transition_lock: Mutex<()>,
     /// 本 PlanRuntime 绑定的 session_key（来自 `SessionManager::current_session_key`）。
     /// 用于 `build_plan` / todos id 等固定 key 语义；当前实现里是 `DEFAULT_SESSION_KEY`。
     session_key: String,
     /// 当前 chat run 的真实 session_id。
-    /// `recover()` / `reload_active_plan_from_disk()` 优先按这个字段判断 executing plan
+    /// `recover()` / `sync_active_plan_from_disk()` 优先按这个字段判断 executing plan
     /// 是否属于本次 run，避免仅凭固定的 session_key 误认旧盘。
     current_session_id: Mutex<Option<String>>,
     /// 本回合 `CancellationToken` 的弱引用。chat_loop 每轮 readline 后重建 token，
@@ -169,13 +152,8 @@ pub struct PlanRuntime {
     /// **绝不**写入 `PlanFile.frontmatter.todos[]`。plan 文件推进统一由 `update_plan`
     /// 负责；`.todo.md` 的持久化由独立的 `TodosRuntime` 接管。
     session_todos: Mutex<Vec<file_store::TodoItem>>,
-    /// Planning 状态的 active plan_id。P1 的 `PlanState::Planning` 没有携带 plan_id 字段；
-    /// 这里用辅助字段保留 `create_plan` 写盘后的 plan_id，供后续 `update_plan` /
-    /// `/plan build` 默认路由使用。EXEC/Pending 状态请直接读 `mode().active_plan_id()`。
-    active_planning_plan_id: Mutex<Option<String>>,
-    /// 当前 active plan 的真实路径镜像。用于 EXEC/Planning 缺省目标解析，
-    /// 尤其覆盖 `/plan build <plan_id/path>` 中的显式 path 场景。
-    active_plan_path: Mutex<Option<PathBuf>>,
+    /// 当前绑定计划的文件状态缓存。计划文件是唯一权威；写盘后和每回合开始前刷新。
+    active_plan: RwLock<Option<ActivePlan>>,
     /// `[plan] lock_timeout_ms`：write_plan / dispatch_reviewer 共享。默认 2000。
     lock_timeout_ms: u64,
     /// 可选 plan reviewer 派发器。未注入时 `create_plan` 返回 `aborted=true` 占位摘要。
@@ -228,17 +206,21 @@ pub struct PlanRuntime {
     /// `SessionManager::append_custom_entry` 的闭包。`None` 时 dispatch_reviewer 等不写
     /// transcript（单元测试 / 早期阶段）。
     transcript_appender: Mutex<Option<TranscriptAppender>>,
+    /// 将已落盘 transcript 自定义事件广播给宿主。单独保存是为了让 mode transition
+    /// 坚持「先落盘 → 改内存 → 广播」而不是让 appender 把三个动作混在一起。
+    transcript_event_notifier: Mutex<Option<TranscriptEventNotifier>>,
 }
 
 /// 由 PlanRuntime 调用，把 `serde_json::Value` 写入当前 transcript 的 `Custom` 行。
 pub type TranscriptAppender =
     Arc<dyn Fn(serde_json::Value) -> Result<(), crate::infra::error::AppError> + Send + Sync>;
+pub type TranscriptEventNotifier = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 
 impl PlanRuntime {
     /// 构造一个绑定到 session_key 的 PlanRuntime。
     ///
     /// session_key 在 `ChatContext::from_config` 装配阶段已知（chat session 同生命周期）。
-    /// 当前 P1 实现：`mode = Chat`，等待 `enter_planning` 或 `recover` 改写。
+    /// 运行时初始为 Chat；只有 `enter_plan` 或恢复的侧车状态会改写会话模式。
     pub fn new(session_key: impl Into<String>) -> Arc<Self> {
         Self::with_session_identity(
             session_key,
@@ -270,13 +252,13 @@ impl PlanRuntime {
         lock_timeout_ms: u64,
     ) -> Arc<Self> {
         Arc::new(Self {
-            mode: RwLock::new(PlanState::Chat),
+            mode: RwLock::new(AgentMode::Chat),
+            agent_mode_transition_lock: Mutex::new(()),
             session_key: session_key.into(),
             current_session_id: Mutex::new(current_session_id),
             cancel_token: Mutex::new(None),
             session_todos: Mutex::new(Vec::new()),
-            active_planning_plan_id: Mutex::new(None),
-            active_plan_path: Mutex::new(None),
+            active_plan: RwLock::new(None),
             lock_timeout_ms,
             plan_reviewer: Mutex::new(None),
             code_reviewer: Mutex::new(None),
@@ -295,6 +277,7 @@ impl PlanRuntime {
             auto_checkpoint_on_build: AtomicBool::new(false),
             expose_skills_to_reviewer: AtomicBool::new(false),
             transcript_appender: Mutex::new(None),
+            transcript_event_notifier: Mutex::new(None),
         })
     }
 
@@ -310,14 +293,31 @@ impl PlanRuntime {
         *self.transcript_appender.lock() = Some(appender);
     }
 
+    /// 注入已落盘 transcript 事件的宿主广播器。
+    pub fn attach_transcript_event_notifier(&self, notifier: TranscriptEventNotifier) {
+        *self.transcript_event_notifier.lock() = Some(notifier);
+    }
+
+    fn append_transcript_custom(&self, extra: serde_json::Value) -> Result<(), PlanRuntimeError> {
+        if let Some(appender) = self.transcript_appender.lock().clone() {
+            appender(extra).map_err(|error| PlanRuntimeError::Io(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn notify_transcript_event(&self, extra: serde_json::Value) {
+        if let Some(notifier) = self.transcript_event_notifier.lock().clone() {
+            notifier(extra);
+        }
+    }
+
     /// 写一条 transcript 自定义事件；appender 未注入时静默忽略（不阻塞主流程）。
     pub(crate) fn write_transcript_custom(&self, extra: serde_json::Value) {
-        let appender = self.transcript_appender.lock().clone();
-        if let Some(f) = appender {
-            if let Err(e) = f(extra) {
-                tracing::warn!(error = %e, "PlanRuntime::write_transcript_custom failed");
-            }
+        if let Err(error) = self.append_transcript_custom(extra.clone()) {
+            tracing::warn!(error = %error, "PlanRuntime::write_transcript_custom failed");
+            return;
         }
+        self.notify_transcript_event(extra);
     }
 
     fn emit_plan_state_event(
@@ -350,6 +350,43 @@ impl PlanRuntime {
             payload.insert("path".to_string(), serde_json::Value::String(path));
         }
         self.write_transcript_custom(serde_json::Value::Object(payload));
+    }
+
+    fn transition_agent_mode(
+        &self,
+        expected: AgentMode,
+        next: AgentMode,
+    ) -> Result<(), PlanRuntimeError> {
+        let _transition = self.agent_mode_transition_lock.lock();
+        if self.mode() != expected {
+            return Err(PlanRuntimeError::AlreadyInMode(self.mode().as_str().into()));
+        }
+        let event = serde_json::json!({
+            "event": crate::infra::wire::WIRE_SESSION_AGENT_MODE_CHANGED,
+            "agentMode": next.as_str(),
+        });
+        self.append_transcript_custom(event.clone())?;
+        *self.mode.write() = next;
+        self.notify_transcript_event(event);
+        Ok(())
+    }
+
+    /// Build completes the Plan → Chat part of the mode transition only when Plan is still the
+    /// current mode. A concurrent exit may have already performed it; that is a valid no-op and
+    /// must not fail a plan file that was successfully promoted to executing.
+    fn leave_plan_for_build(&self) -> Result<bool, PlanRuntimeError> {
+        let _transition = self.agent_mode_transition_lock.lock();
+        if self.mode() != AgentMode::Plan {
+            return Ok(false);
+        }
+        let event = serde_json::json!({
+            "event": crate::infra::wire::WIRE_SESSION_AGENT_MODE_CHANGED,
+            "agentMode": AgentMode::Chat.as_str(),
+        });
+        self.append_transcript_custom(event.clone())?;
+        *self.mode.write() = AgentMode::Chat;
+        self.notify_transcript_event(event);
+        Ok(true)
     }
 
     /// 注入 checkpoint store（生产 ShadowGit / 测试 Noop / Spy）。
@@ -424,139 +461,50 @@ impl PlanRuntime {
         &self.session_key
     }
 
-    /// 读当前 mode（轻量 RwLock 读锁；不分配）。
-    pub fn mode(&self) -> PlanState {
-        self.mode.read().clone()
+    /// 读当前会话模式（轻量 RwLock 读锁；不分配）。
+    pub fn mode(&self) -> AgentMode {
+        *self.mode.read()
     }
 
-    /// `/plan` → 进入 Planning 模式。
-    ///
-    /// 在 P2 接入 `file_store` 前，本方法只做内存状态切换：`Chat | Completed { .. } → Planning`。
-    /// 已在 `Planning` / `Executing` / `Pending` 时返回 `Err`（用户须先 `/plan exit` 或 `/plan build`）。
-    pub fn enter_planning(&self) -> Result<(), PlanRuntimeError> {
-        let mut mode = self.mode.write();
-        let entered = match &*mode {
-            PlanState::Chat | PlanState::Completed { .. } => {
-                *mode = PlanState::Planning;
-                true
-            }
-            PlanState::Planning => {
-                return Err(PlanRuntimeError::AlreadyInMode("planning".into()));
-            }
-            PlanState::Executing { plan_id } => {
-                return Err(PlanRuntimeError::AlreadyInMode(format!(
-                    "executing(plan_id={plan_id})"
-                )));
-            }
-            PlanState::Pending { plan_id } => {
-                return Err(PlanRuntimeError::AlreadyInMode(format!(
-                    "pending(plan_id={plan_id})"
-                )));
-            }
-        };
-        drop(mode);
-        if entered {
-            self.write_transcript_custom(serde_json::json!({
-                "event": crate::infra::wire::WIRE_PLAN_ENTER,
-                "state": PlanState::Planning.as_str(),
-            }));
-        }
-        Ok(())
+    /// 当前会话绑定的计划文件缓存。
+    pub fn active_plan(&self) -> Option<ActivePlan> {
+        self.active_plan.read().clone()
     }
 
-    /// `/plan exit` → 退回 Chat。
-    ///
-    /// v4-g：允许 `Planning | Pending -> Chat`；`Executing` 仍拒绝。
-    /// 该动作只切 state，不清任何 plan runtime 字段，也不写事件。
-    pub fn exit_to_chat(&self) -> Result<(), PlanRuntimeError> {
-        let mut mode = self.mode.write();
-        let plan_id = match &*mode {
-            PlanState::Planning | PlanState::Pending { .. } => {
-                let plan_id = match &*mode {
-                    PlanState::Planning => self.active_planning_plan_id.lock().clone(),
-                    PlanState::Pending { plan_id } => Some(plan_id.clone()),
-                    _ => None,
-                };
-                *mode = PlanState::Chat;
-                plan_id
-            }
-            PlanState::Chat => {
-                return Err(PlanRuntimeError::AlreadyInMode("chat".into()));
-            }
-            other => {
-                return Err(PlanRuntimeError::NotInPlanning(other.as_str().into()));
-            }
-        };
-        drop(mode);
-        self.emit_plan_state_event(
-            crate::infra::wire::WIRE_PLAN_EXIT,
-            PlanState::Chat.as_str(),
-            plan_id.as_deref(),
-            self.active_plan_path(),
-        );
-        Ok(())
+    /// 仅当绑定计划的磁盘状态为 executing 时返回其 id。
+    pub fn executing_plan_id(&self) -> Option<String> {
+        self.active_plan()
+            .filter(ActivePlan::is_executing)
+            .map(|plan| plan.id)
     }
 
-    /// 启动恢复：模式由 resume-index sidecar 记录的 `agent_mode` 直接决定，
-    /// 计划文件的 `frontmatter.state` 只用来在 EXEC 内部区分 pending / executing / completed。
-    ///
-    /// 兜底顺序（A1-d）：
-    /// 1. sidecar 有 `agent_mode` → 直接采信；
-    /// 2. 没有（旧 sidecar 或全量扫描路径）→ 用 `plan_path` 指向的计划文件状态推断；
-    /// 3. 仍判定不了 → 回落 chat，并写一条 `plan.restore` 事件说明依据。
+    /// `/plan` → 进入 Plan 会话模式。
+    pub fn enter_plan(&self) -> Result<(), PlanRuntimeError> {
+        self.transition_agent_mode(AgentMode::Chat, AgentMode::Plan)
+    }
+
+    /// `/plan exit` → 退回 Chat 会话模式。计划文件保持原样。
+    pub fn exit_plan(&self) -> Result<(), PlanRuntimeError> {
+        self.transition_agent_mode(AgentMode::Plan, AgentMode::Chat)
+    }
+
+    /// 启动恢复：模式只来自 sidecar；计划文件只恢复 active plan 缓存。
     pub fn attach_from_resume_state(
         &self,
         state: ResumeControlState,
     ) -> Result<(), PlanRuntimeError> {
-        *self.mode.write() = PlanState::Chat;
-        *self.active_planning_plan_id.lock() = None;
-        *self.active_plan_path.lock() = None;
-
-        let plan_on_disk = state.plan_path.as_ref().and_then(|path| {
-            let plan = read_plan_for_restore(path)?;
-            *self.active_plan_path.lock() = Some(path.clone());
-            Some(plan)
+        *self.mode.write() = state.mode.unwrap_or(AgentMode::Chat);
+        let active_plan = state.plan_path.as_ref().and_then(|path| {
+            read_plan_for_restore(path).map(|plan| ActivePlan::from_file(path.clone(), &plan))
         });
-
-        let (restored, basis) = match state.mode {
-            Some(AgentMode::Chat) => (PlanState::Chat, "sidecar:chat"),
-            Some(AgentMode::Plan) => {
-                *self.active_planning_plan_id.lock() = state
-                    .plan_id
-                    .clone()
-                    .or_else(|| plan_on_disk.as_ref().map(|p| p.frontmatter.plan_id.clone()));
-                (PlanState::Planning, "sidecar:plan")
-            }
-            Some(AgentMode::Exec) => match plan_on_disk.as_ref() {
-                Some(plan) => (plan_state_from_file(plan), "sidecar:exec+plan_file"),
-                None => (PlanState::Chat, "sidecar:exec+plan_file_unreadable"),
-            },
-            None => match plan_on_disk.as_ref() {
-                Some(plan) => (plan_state_from_file(plan), "inferred:plan_file"),
-                None => (PlanState::Chat, "inferred:none"),
-            },
-        };
-
-        let degraded = state.mode == Some(AgentMode::Exec) && plan_on_disk.is_none();
-        if degraded {
-            tracing::warn!(
-                target: "plan_runtime::recover",
-                path = ?state.plan_path,
-                "sidecar 记录为 exec 但计划文件不可读；回落 chat"
-            );
-        }
-        // 只在"本可以更精确、但只能靠推断"时留痕。干净的 chat 会话没什么可说的，
-        // 不该每次启动都往 transcript 里塞一条事件。
-        let inferred = state.mode.is_none() && state.plan_path.is_some();
-        if degraded || inferred {
+        if state.plan_path.is_some() && active_plan.is_none() {
             self.write_transcript_custom(serde_json::json!({
                 "event": crate::infra::wire::WIRE_PLAN_RESTORE,
-                "state": restored.as_str(),
-                "basis": basis,
+                "state": "unavailable",
+                "basis": "resume_plan_file_unreadable",
             }));
         }
-
-        *self.mode.write() = restored;
+        *self.active_plan.write() = active_plan;
         Ok(())
     }
 
@@ -576,7 +524,8 @@ impl PlanRuntime {
     /// 当前控制态快照。`model` 由调用方注入（PlanRuntime 不持有模型信息）。
     pub fn control_snapshot(&self, model: Option<&str>) -> ControlSnapshot {
         let mode = self.mode();
-        let plan_path = self.active_plan_path();
+        let active_plan = self.active_plan();
+        let plan_path = active_plan.as_ref().map(|plan| plan.path.clone());
         let plan = plan_path.as_deref().and_then(read_plan_for_restore);
         let plan_file_state = plan
             .as_ref()
@@ -589,12 +538,9 @@ impl PlanRuntime {
             let todos = self.snapshot_session_todos();
             (!todos.is_empty()).then_some(ProgressSource::SessionScratchpad { todos })
         };
-        let plan_id = mode
-            .active_plan_id()
-            .map(str::to_string)
-            .or_else(|| self.active_planning_plan_id());
+        let plan_id = active_plan.map(|plan| plan.id);
         ControlSnapshot {
-            mode: mode.agent_mode(),
+            mode,
             plan_path,
             plan_file_state,
             plan_id,
@@ -608,12 +554,22 @@ impl PlanRuntime {
         self.attach_from_resume_state(ResumeControlState::default())
     }
 
-    /// E7：`/restore` 命令完成 git 树恢复后，重新读取磁盘上的 active plan
-    /// （优先 `session_id == current_session_id`；测试旧入口无 session_id 时回退 session_key）
-    /// 并把内存 EXEC 状态对齐。
+    /// 从磁盘刷新 active plan 缓存。
     ///
-    /// 返回还原后的 `plan_id`（若未发现 active plan 返回 None）。
-    pub fn reload_active_plan_from_disk(&self) -> Result<Option<String>, PlanRuntimeError> {
+    /// 已绑定路径时只刷新该文件；尚未绑定时为 `/restore` 扫描当前 session 所属的 executing
+    /// plan。无论哪条路径，都不会改会话模式。
+    pub fn sync_active_plan_from_disk(&self) -> Result<Option<String>, PlanRuntimeError> {
+        if let Some(active) = self.active_plan() {
+            let Some(plan) = read_plan_for_restore(&active.path) else {
+                *self.active_plan.write() = None;
+                return Ok(None);
+            };
+            let refreshed = ActivePlan::from_file(active.path, &plan);
+            let plan_id = refreshed.id.clone();
+            *self.active_plan.write() = Some(refreshed);
+            return Ok(Some(plan_id));
+        }
+
         let plans_dir = file_store::plans_dir().map_err(|e| PlanRuntimeError::Io(e.to_string()))?;
         let entries = match std::fs::read_dir(&plans_dir) {
             Ok(e) => e,
@@ -632,15 +588,10 @@ impl PlanRuntime {
                 && self.owns_executing_plan(&plan)
             {
                 let plan_id = plan.frontmatter.plan_id.clone();
-                *self.mode.write() = PlanState::Executing {
-                    plan_id: plan_id.clone(),
-                };
-                *self.active_plan_path.lock() = Some(path.clone());
+                *self.active_plan.write() = Some(ActivePlan::from_file(path, &plan));
                 return Ok(Some(plan_id));
             }
         }
-        // 无 active executing plan：保持当前内存 mode 不变（/restore 只是树恢复，
-        // 并不强制改变 plan_runtime 状态机）。
         Ok(None)
     }
 
@@ -661,75 +612,42 @@ impl PlanRuntime {
         *self.session_todos.lock() = todos;
     }
 
-    /// Planning 模式下记 active plan_id 便利字段。
-    ///
-    /// create_plan 成功后同时记录 plan_id 与真实 path，供 get_state / reload 恢复同一张 plan 卡。
-    pub fn set_active_planning_plan(&self, plan_id: String, path: PathBuf) {
-        *self.active_planning_plan_id.lock() = Some(plan_id);
-        *self.active_plan_path.lock() = Some(path);
+    /// After a successful plan-file write, synchronize the cache with the exact file that was
+    /// committed. The caller must not invoke this before the write succeeds.
+    pub(crate) fn refresh_active_plan_after_write(
+        &self,
+        path: PathBuf,
+        plan: &file_store::PlanFile,
+    ) {
+        *self.active_plan.write() = Some(ActivePlan::from_file(path, plan));
     }
 
-    /// 读 Planning 模式下的 active_plan_id。EXEC/Pending 应直接看 `mode().active_plan_id()`。
-    pub fn active_planning_plan_id(&self) -> Option<String> {
-        self.active_planning_plan_id.lock().clone()
+    #[cfg(test)]
+    pub(crate) fn bind_plan_file_for_test(&self, path: PathBuf) {
+        let plan = file_store::read_plan(&path).expect("test plan file must be readable");
+        self.refresh_active_plan_after_write(path, &plan);
+    }
+
+    /// Unit-test-only cache fixture for tests that exercise a consumer without a plan-file write
+    /// path. Production code must populate this cache through a successful plan-file read/write.
+    #[cfg(test)]
+    pub(crate) fn seed_active_plan_for_test(
+        &self,
+        plan_id: String,
+        state: file_store::PlanFileState,
+    ) {
+        let path = file_store::plan_path_for_id(&plan_id)
+            .unwrap_or_else(|_| PathBuf::from(format!("{plan_id}.plan.md")));
+        *self.active_plan.write() = Some(ActivePlan {
+            id: plan_id,
+            path,
+            state,
+        });
     }
 
     /// 当前 active plan 的真实路径；若本 session 还未绑定任何 plan，则返回 None。
     pub fn active_plan_path(&self) -> Option<PathBuf> {
-        self.active_plan_path.lock().clone()
-    }
-
-    /// 内存切到 `Completed { plan_id }`；由 update_plan / todos 在所有 todo 完成时调用。
-    pub fn set_mode_completed(&self, plan_id: String) {
-        self.set_mode_completed_with_path(plan_id, None);
-    }
-
-    pub fn set_mode_completed_with_path(&self, plan_id: String, path: Option<PathBuf>) {
-        let event_plan_id = plan_id.clone();
-        *self.mode.write() = PlanState::Completed { plan_id };
-        if let Some(path) = path.clone() {
-            *self.active_plan_path.lock() = Some(path);
-        }
-        self.emit_plan_state_event(
-            crate::infra::wire::WIRE_PLAN_COMPLETE,
-            "completed",
-            Some(event_plan_id.as_str()),
-            path,
-        );
-    }
-
-    /// 内存切到 `Pending { plan_id }`；供 update_plan reopen completed 时同步 runtime state。
-    pub fn set_mode_pending(&self, plan_id: String) {
-        self.set_mode_pending_with_path(plan_id, None);
-    }
-
-    pub fn set_mode_pending_with_path(&self, plan_id: String, path: Option<PathBuf>) {
-        let event_plan_id = plan_id.clone();
-        *self.mode.write() = PlanState::Pending { plan_id };
-        if let Some(path) = path.clone() {
-            *self.active_plan_path.lock() = Some(path);
-        }
-        self.emit_plan_state_event(
-            crate::infra::wire::WIRE_PLAN_PENDING,
-            "pending",
-            Some(event_plan_id.as_str()),
-            path,
-        );
-    }
-
-    /// 测试辅助：直接把内存 mode 切到 `Executing { plan_id }`，
-    /// **不**做任何 frontmatter / disk 校验。仅供集成单测短路 `/plan build` 路径。
-    /// 真实路径请等待 P6 PR-PLC 的 `build_plan` API。
-    #[doc(hidden)]
-    pub fn set_executing_for_test(&self, plan_id: String) {
-        *self.mode.write() = PlanState::Executing { plan_id };
-        if let Some(path) = self
-            .mode()
-            .active_plan_id()
-            .and_then(|id| file_store::plan_path_for_id(id).ok())
-        {
-            *self.active_plan_path.lock() = Some(path);
-        }
+        self.active_plan().map(|plan| plan.path)
     }
 
     // ─── P4 reviewer 派发 API（plan-runtime.md §P4） ──────────────────────
@@ -841,7 +759,7 @@ impl PlanRuntime {
         // 这里刻意仍走 `plan_path_for_id(plan_id)`，不复用 `resolved_plan_path()`：
         // 当前 `dispatch_reviewer()` 仅由 `create_plan` 在写盘成功后立即调用，而
         // `create_plan` 总是先把 plan 写到 canonical `~/.tomcat/plans/<plan_id>.plan.md`，
-        // 再设置 `active_planning_plan_id/active_plan_path`。也就是说，Planning 阶段当前
+        // 再刷新 active plan 缓存。也就是说，Planning 阶段当前
         // 不存在“disk 真正路径与 plan_id 推导路径不一致”的合法场景。
         //
         // 若未来 planner 支持“从外部草稿导入后直接进入 Planning 并派发 reviewer”，
@@ -963,18 +881,9 @@ impl PlanRuntime {
     }
 
     pub(crate) fn resolved_plan_path(&self, plan_id: &str) -> Result<PathBuf, String> {
-        let mode = self.mode.read();
-        let active_id = mode.active_plan_id();
-        let planning_id = self.active_planning_plan_id.lock().clone();
-        let prefers_active_path =
-            active_id == Some(plan_id) || planning_id.as_deref() == Some(plan_id);
-
-        if prefers_active_path {
-            if let Some(path) = self.active_plan_path.lock().clone() {
-                return Ok(path);
-            }
+        if let Some(active) = self.active_plan().filter(|plan| plan.id == plan_id) {
+            return Ok(active.path);
         }
-
         file_store::plan_path_for_id(plan_id).map_err(|e| format!("plan_id 非法: {e}"))
     }
 
@@ -1263,17 +1172,15 @@ impl PlanRuntime {
         Ok((path, None))
     }
 
-    /// `/plan build` 不带参数时的默认目标：
-    /// `active_planning_plan_id -> Pending { id } -> active_plan_path`。
+    /// `/plan build` 不带参数时的默认目标：当前绑定计划（planning 或 pending）。
     pub fn default_build_target(&self) -> Result<String, PlanRuntimeError> {
-        if let Some(plan_id) = self.active_planning_plan_id() {
-            return Ok(plan_id);
-        }
-        if let PlanState::Pending { plan_id } = self.mode() {
-            return Ok(plan_id);
-        }
-        if let Some(path) = self.active_plan_path() {
-            return Ok(crate::infra::platform::format_home_path(&path));
+        if let Some(plan) = self.active_plan().filter(|plan| {
+            matches!(
+                plan.state,
+                file_store::PlanFileState::Planning | file_store::PlanFileState::Pending
+            )
+        }) {
+            return Ok(plan.id);
         }
         Err(PlanRuntimeError::BuildBlocked(
             "`/plan build` 需要 plan_id 或 path".into(),
@@ -1297,7 +1204,7 @@ impl PlanRuntime {
     ///    （pending 续跑时若 `prev_session_key != self.session_key` → push warning，仍执行）
     /// 2. 改 frontmatter.state = `executing`
     /// 3. `write_plan`（atomic + advisory lock）；**失败时内存不动**，返回 PlanFile error
-    /// 4. 写盘成功后切内存 `mode = Executing { plan_id }`、清 `active_planning_plan_id`
+    /// 4. 写盘成功后刷新 active plan 缓存，并在必要时从 Plan 会话模式回到 Chat
     /// 5. 更新 `active_plan_path`，供后续 `/plan build` 自动开跑时生成真实 user turn 文本
     ///
     /// **原子性**：盘 write 失败 → 内存不变；盘 write 成功后才动内存——
@@ -1331,20 +1238,11 @@ impl PlanRuntime {
                 .map_err(|e| PlanRuntimeError::Io(e.to_string()))?;
             let plan_id = plan.frontmatter.plan_id.clone();
 
-            // ─── 闸门 1：内存 mode ─────────────────────────────────────
-            {
-                let mode = self.mode.read();
-                match &*mode {
-                    PlanState::Chat
-                    | PlanState::Planning
-                    | PlanState::Pending { .. }
-                    | PlanState::Completed { .. } => { /* 允许 */ }
-                    PlanState::Executing { plan_id: cur } => {
-                        return Err(PlanRuntimeError::BuildBlocked(format!(
-                            "当前 session 已在 EXEC（plan_id={cur}）；先等结束或 cancel→pending"
-                        )));
-                    }
-                }
+            // ─── 闸门 1：同一 session 不得同时执行两份计划 ─────────────
+            if let Some(cur) = self.executing_plan_id() {
+                return Err(PlanRuntimeError::BuildBlocked(format!(
+                    "当前 session 已在执行计划（plan_id={cur}）；先中断使其变为 pending"
+                )));
             }
 
             // ─── 读 PlanFile + 闸门 4/5：存在 + 合法 state ────────────────
@@ -1417,12 +1315,12 @@ impl PlanRuntime {
             );
         }
         let prev_disk_state = build.prev_disk_state;
-        // 4: 切内存（写盘成功后才动）
-        *self.mode.write() = PlanState::Executing {
-            plan_id: plan_id.to_string(),
-        };
-        *self.active_planning_plan_id.lock() = None;
-        *self.active_plan_path.lock() = Some(path.clone());
+        // 4: 写盘成功后刷新 active-plan 缓存；Build 离开 Plan 会话模式。
+        *self.active_plan.write() = Some(ActivePlan {
+            id: plan_id.clone(),
+            path: path.clone(),
+            state: file_store::PlanFileState::Executing,
+        });
         // 一次 build 就是一次交付尝试，code review 轮数预算按次发放而不是按计划终身发放。
         // 少了这一步，同一进程里二次 build 同一个计划会因为计数器没清而直接跳过 review。
         self.reset_code_review_rounds(&plan_id);
@@ -1461,6 +1359,7 @@ impl PlanRuntime {
             "path": event_payload.path,
             "state": event_payload.state,
         }));
+        self.leave_plan_for_build()?;
 
         Ok(BuildPlanOutcome {
             plan_id: plan_id.to_string(),
@@ -1472,28 +1371,24 @@ impl PlanRuntime {
 
     // ─── P7 PR-PLF cancel→pending + 释放锁（plan-runtime.md §5.6） ───────
 
-    /// 当 cancel_token 触发 / Ctrl+C 时调；只在 EXEC 模式生效。
+    /// 当用户取消当前执行回合时调；只在 active plan 为 executing 时生效。
     ///
     /// **副作用**（事务序）：
     /// 1. 读当前 plan 文件
     /// 2. 写 frontmatter.state = pending（atomic + advisory lock；写完即释放，防 D1）
-    /// 3. 内存 mode 切 `Pending { plan_id }`
+    /// 3. 刷新 active-plan 缓存为 pending
     /// 4. 返回 plan_id 给上层做 transcript `plan.cancel.demote_to_pending`
     ///
-    /// **幂等**：非 EXEC 模式直接返回 Ok(None)。
-    /// **错误**：磁盘读/写失败不修改内存 mode，返回 `Io`；上层应仅 warning（D8）。
-    pub fn demote_to_pending_on_cancel(&self) -> Result<Option<String>, PlanRuntimeError> {
-        // ① snapshot 当前 mode
-        let plan_id = match &*self.mode.read() {
-            PlanState::Executing { plan_id } => plan_id.clone(),
-            _ => return Ok(None),
+    /// **幂等**：没有 executing plan 时直接返回 Ok(None)。
+    /// **错误**：磁盘读/写失败不修改缓存，返回 `Io`；上层应仅 warning（D8）。
+    pub fn park_executing_plan(&self) -> Result<Option<String>, PlanRuntimeError> {
+        let active = match self.active_plan().filter(ActivePlan::is_executing) {
+            Some(active) => active,
+            None => return Ok(None),
         };
+        let plan_id = active.id;
         // ② 改写磁盘
-        let path = match self.active_plan_path() {
-            Some(path) => path,
-            None => file_store::plan_path_for_id(&plan_id)
-                .map_err(|e| PlanRuntimeError::Io(e.to_string()))?,
-        };
+        let path = active.path;
         file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
             plan.frontmatter.state = file_store::PlanFileState::Pending;
             Ok::<(), PlanRuntimeError>(())
@@ -1502,17 +1397,25 @@ impl PlanRuntime {
             file_store::LockedPlanMutationError::Plan(err) => PlanRuntimeError::from_plan_io(err),
             file_store::LockedPlanMutationError::Callback(err) => err,
         })?;
-        // ③ 内存切 Pending
-        *self.mode.write() = PlanState::Pending {
-            plan_id: plan_id.clone(),
-        };
+        // ③ 刷新缓存并记录纯计划文件事件（会话模式从头到尾仍是 Chat）。
+        *self.active_plan.write() = Some(ActivePlan {
+            id: plan_id.clone(),
+            path: path.clone(),
+            state: file_store::PlanFileState::Pending,
+        });
+        self.emit_plan_state_event(
+            crate::infra::wire::WIRE_PLAN_PENDING,
+            file_store::PlanFileState::Pending.as_str(),
+            Some(&plan_id),
+            Some(path),
+        );
         Ok(Some(plan_id))
     }
 
     /// 挂接当前回合的 cancel_token；chat_loop 每轮 readline 后必须调（D2 防御）。
     ///
     /// 该 API 仅保存 token；真正的 cancel→pending 由 chat_loop 在 `select! cancel_token.cancelled()`
-    /// 分支显式调 `demote_to_pending_on_cancel()` 触发——避免后台 spawn task 持 Arc<Self>
+    /// 分支显式调 `park_executing_plan()` 触发——避免后台 spawn task 持 Arc<Self>
     /// 导致 PlanRuntime 生命周期跨 turn 泄漏。
     pub fn attach_cancel_hook(&self, token: CancellationToken) {
         *self.cancel_token.lock() = Some(token);
@@ -1524,36 +1427,16 @@ impl PlanRuntime {
         self.cancel_token.lock().clone()
     }
 
-    // ─── P7 PR-PLE all-completed → CHAT 派生（plan-runtime.md §5.7） ─────
-
-    /// 当 mode 已是 `Completed { plan_id }` 时，把内存复位到 CHAT；
-    /// 通常由 chat_loop 在下一轮装配前调用，等价于"自然收口"。
-    ///
-    /// `update_plan` 写盘成功后会 `set_mode_completed`；本方法是从 Completed → Chat 的最后一跳；
-    /// 也可在 chat_loop 收到 `plan.complete` 事件后立即调用，避免下一轮仍带 EXEC reminder。
-    pub fn finalize_completed_to_chat(&self) -> Option<String> {
-        let mut mode = self.mode.write();
-        match &*mode {
-            PlanState::Completed { plan_id } => {
-                let pid = plan_id.clone();
-                *mode = PlanState::Chat;
-                Some(pid)
-            }
-            _ => None,
-        }
-    }
-
     // ─── P7 PR-PLF raw edit 拦截（plan-runtime.md §5.6） ─────────────────
 
-    /// PLAN/EXEC 模式下，`tool_exec::write`/`edit` 等 raw 写入路径调用此 helper
+    /// Plan 会话模式或存在执行中计划时，`tool_exec::write`/`edit` 等 raw 写入路径调用此 helper
     /// 判断该路径是否允许写入。
     ///
     /// **规则**：
     /// - 不是 `~/.tomcat/plans/*.plan.md` → 允许（其他文件不归本 runtime 管）
     /// - 是 `~/.tomcat/plans/*.plan.md`：
-    ///   - CHAT 模式 → 允许（无 PLAN/EXEC 守卫）
-    ///   - Planning/Executing/Pending/Completed → 拒（必须走 `create_plan`/`update_plan`/`todos` 工具，
-    ///     由 runtime 做 frontmatter diff / 锁等保护）
+    ///   - Chat 模式且没有 pending / executing active plan → 允许
+    ///   - Plan 模式、或计划处于 pending / executing → 拒
     ///
     /// 调用方负责把返回 false 的写入请求转成 ToolError，并提示"请使用 update_plan"。
     pub fn allow_raw_edit_to_path(&self, path: &std::path::Path) -> bool {
@@ -1568,7 +1451,11 @@ impl PlanRuntime {
         if !canon_path.starts_with(&canon_plans) {
             return true;
         }
-        matches!(*self.mode.read(), PlanState::Chat)
+        self.mode() == AgentMode::Chat
+            && !matches!(
+                self.active_plan().map(|plan| plan.state),
+                Some(file_store::PlanFileState::Executing | file_store::PlanFileState::Pending)
+            )
     }
 }
 
@@ -1640,9 +1527,6 @@ pub trait VerifierDispatcher: Send + Sync {
 pub enum PlanRuntimeError {
     #[error("当前已经在 {0} 模式，无法重复进入")]
     AlreadyInMode(String),
-    /// N3（2026-05）：`/plan exit` 只允许在 Planning 模式下使用。
-    #[error("/plan exit 仅在 Planning 模式可用；当前模式 = {0}")]
-    NotInPlanning(String),
     #[error("plan_id 非法或不安全：{0}")]
     UnsafePlanId(String),
     /// PlanFile 文件 IO / serde 错误（P2 起细化）。

@@ -142,7 +142,8 @@ pub struct AgentLoopConfig {
     pub subagent_type: SubagentType,
     /// PlanRuntime 共享句柄（B1 / 2026-05）。透传给 `tool_exec` 用于：
     /// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 工具
-    /// - 读取当前 `PlanState` 做写路径策略 (`safety::enforce_write_path_policy`) 守卫
+    /// - 读取 `AgentMode` 与 active plan 生命周期做写路径策略
+    ///   (`safety::enforce_write_path_policy`) 守卫
     ///
     /// 顶层 chat_loop 必填；只有会真正写 plan 的 PlanReviewer 应保留 `Some`。
     /// CodeReviewer / Verifier / Explorer 与脱离 PlanRuntime 的单测/独立 AgentLoop

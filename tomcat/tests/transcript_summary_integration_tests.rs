@@ -27,6 +27,7 @@ use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFileState, TodoStatus,
 };
 use tomcat::core::plan_runtime::{PlanRuntime, TranscriptAppender};
+use tomcat::core::session::{AgentMode, ResumeControlState};
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
 use tomcat::{
     init_context_state, run_chat_turn, wire, AgentLoop, AgentLoopConfig, AgentRunOutcome,
@@ -544,7 +545,12 @@ fn promote_to_exec(rt: &PlanRuntime, plan_id: &str) {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.to_string());
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Chat),
+        plan_path: Some(path),
+        plan_id: Some(plan_id.to_string()),
+    })
+    .expect("bind executing plan");
 }
 
 /// 挂一个 transcript appender spy，记录所有 `write_transcript_custom` 入参。
@@ -821,7 +827,7 @@ async fn update_plan_emits_plan_todos_event() {
     let rt = PlanRuntime::new("session-a");
     let captured = attach_transcript_spy(&rt);
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {

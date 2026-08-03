@@ -2861,6 +2861,32 @@
               "type"
             ],
             "properties": {
+              "agentMode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session.agent_mode.changed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
               "path": {
                 "type": [
                   "string",

@@ -411,7 +411,8 @@ async fn execute_tool_tuple_full(
                     _ => crate::core::plan_runtime::safety::SubagentKind::Other,
                 };
                 if let Err(denied) = crate::core::plan_runtime::safety::enforce_write_path_policy(
-                    &mode,
+                    mode,
+                    rt.executing_plan_id().is_some(),
                     subagent_kind,
                     std::path::Path::new(path_arg),
                 ) {

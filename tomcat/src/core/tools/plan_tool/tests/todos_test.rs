@@ -222,7 +222,7 @@ fn todos_in_exec_writes_session_not_plan_file() {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id);
+    rt.bind_plan_file_for_test(path.clone());
 
     todos::execute(
         &rt,

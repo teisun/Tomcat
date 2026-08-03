@@ -12,7 +12,7 @@ async fn create_plan_internally_dispatches_reviewer_with_real_summary() {
     rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         ok_review(),
     ])));
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -30,7 +30,7 @@ async fn create_plan_succeeds_even_when_reviewer_aborts() {
     rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         PlanReviewSummary::aborted_with("simulated parse error"),
     ])));
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -53,7 +53,7 @@ async fn create_plan_without_reviewer_returns_placeholder() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -103,7 +103,7 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
     }
 
     rt.attach_plan_reviewer(std::sync::Arc::new(LockAcquiringMock));
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -131,7 +131,7 @@ fn create_plan_writes_transcript_plan_create_event() {
         }));
     }
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(&rt, good_args_with_todo()).expect("create_plan OK");
     let plan_id = out["plan_id"].as_str().unwrap().to_string();
 
@@ -176,7 +176,7 @@ async fn reviewer_summary_lands_in_transcript_plan_review() {
     rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         summary,
     ])));
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let _ = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -215,7 +215,7 @@ async fn reviewer_writes_warning_event_on_second_round() {
         ok_review(),
         ok_review(),
     ])));
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out1 = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -256,7 +256,7 @@ async fn reviewer_dispatch_invokes_mock_without_abort_param() {
     rt.attach_plan_reviewer(std::sync::Arc::new(CallTrackingMock {
         called: std::sync::Arc::clone(&called),
     }));
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -274,7 +274,7 @@ async fn reviewer_round_count_warns_after_threshold() {
         ok_review(),
         ok_review(),
     ])));
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
 
     let out1 = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await

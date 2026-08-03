@@ -3,13 +3,10 @@
 //! 三个子命令均在 chat 层处理，**不**进 LLM、**不**入 tool catalog：
 //!
 //! ```text
-//! /plan                      → PlanRuntime::enter_planning  → mode=Planning
-//! /plan exit                 → PlanRuntime::exit_to_chat   → mode=Chat
-//! /plan build [plan_id/path] → PlanRuntime::build_plan     → mode=Executing { plan_id }
+//! /plan                      → PlanRuntime::enter_plan → mode=Plan
+//! /plan exit                 → PlanRuntime::exit_plan  → mode=Chat
+//! /plan build [plan_id/path] → PlanRuntime::build_plan     → mode=Chat + plan.state=executing
 //! ```
-//!
-//! P1 只闭环 `enter_planning` / `exit_to_chat` 两条；`build` 在 P6 接入
-//! （P1 阶段 `build` 命中会返回结构化提示「P6 落地」）。
 
 use crate::api::chat::ChatContext;
 
@@ -18,11 +15,11 @@ use super::parse::{ChatCommand, ChatCommandOutcome};
 /// `/plan` 子命令解析结果（仅在 chat 层使用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanCommand {
-    /// `/plan`，进入 Planning。
+    /// `/plan`，进入 Plan 会话模式。
     Enter,
     /// `/plan exit`，退回 Chat。
     Exit,
-    /// `/plan build [plan_id/path]`，进入 EXEC（省略参数时走 runtime 默认源）。
+    /// `/plan build [plan_id/path]`，让计划文件进入 executing 并回到 Chat。
     Build { plan_target: Option<String> },
     /// J2：`/plan list`，列出 `~/.tomcat/plans/` 下所有 plan 文件的 id / state / goal。
     List,
@@ -53,10 +50,10 @@ fn usage_text() -> String {
 pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
     let rt = ctx.session_runtime.plan_runtime.clone();
     match cmd {
-        PlanCommand::Enter => match rt.enter_planning() {
+        PlanCommand::Enter => match rt.enter_plan() {
             Ok(()) => {
                 println!(
-                    "[plan] 已进入 PLAN 模式。\n[plan] 先与模型讨论目标；用 /plan exit 退回 Chat；用 /plan build <plan_id/path> 进入 EXEC。"
+                    "[plan] 已进入 Plan 模式。\n[plan] 先与模型讨论目标；用 /plan exit 退回 Chat；用 /plan build <plan_id/path> 开始执行计划并回到 Chat。"
                 );
                 ChatCommandOutcome::Handled
             }
@@ -65,7 +62,7 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                 ChatCommandOutcome::Handled
             }
         },
-        PlanCommand::Exit => match rt.exit_to_chat() {
+        PlanCommand::Exit => match rt.exit_plan() {
             Ok(()) => {
                 println!("[plan] 已退回 Chat 模式。");
                 ChatCommandOutcome::Handled

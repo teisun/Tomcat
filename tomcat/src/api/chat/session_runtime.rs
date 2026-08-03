@@ -61,6 +61,8 @@ pub struct ScopeServices {
         Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<crate::core::skill::SkillSet>>>>,
 }
 
+type OpenAiFilesRuntimeSlot = Arc<Mutex<Option<(String, Arc<OpenAiFilesRuntime>)>>>;
+
 pub struct SessionRuntime {
     pub session: SessionManager,
     pub message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink>,
@@ -77,7 +79,7 @@ pub struct SessionRuntime {
     pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
     /// Files cleanup queue is session-scoped. Reusing this runtime lets uploads
     /// and session-end cleanup observe the same in-memory queue.
-    pub openai_files_runtime: Arc<Mutex<Option<(String, Arc<OpenAiFilesRuntime>)>>>,
+    pub openai_files_runtime: OpenAiFilesRuntimeSlot,
     pub thinking_display: Arc<std::sync::atomic::AtomicU8>,
     pub todos_runtime: Arc<plan_runtime::todo_runtime::TodosRuntime>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,

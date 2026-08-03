@@ -3,6 +3,31 @@ import { describe, expect, it } from "vitest";
 import { WebviewStateStore } from "../state";
 
 describe("webview dual-channel state store", () => {
+  it("applies one agent-mode broadcast consistently in two webview stores", () => {
+    const first = new WebviewStateStore();
+    const second = new WebviewStateStore();
+    const snapshot = {
+      activePlan: null,
+      agentMode: "chat" as const,
+      busy: false,
+      model: "gpt-5.4",
+      sessionId: "shared-session",
+    };
+    first.applySessionState(snapshot);
+    second.applySessionState(snapshot);
+
+    const event = {
+      agentMode: "plan" as const,
+      sessionId: "shared-session",
+      type: "session.agent_mode.changed" as const,
+    };
+    first.applyEvent(event);
+    second.applyEvent(event);
+
+    expect(first.snapshot().sessionViews["shared-session"]?.agentMode).toBe("plan");
+    expect(second.snapshot().sessionViews["shared-session"]?.agentMode).toBe("plan");
+  });
+
   it("maps state snapshots, history, and live events into timeline state", () => {
     const store = new WebviewStateStore();
 
@@ -23,10 +48,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -202,7 +227,7 @@ describe("webview dual-channel state store", () => {
     expect(liveThinkingIndex).toBeGreaterThanOrEqual(0);
     expect(liveAssistantIndex).toBeGreaterThan(liveThinkingIndex);
     expect(snapshot.sessionViews.s1.timeline.some((item) => item.type === "plan")).toBe(false);
-    expect(snapshot.sessionViews.s1.planFile).toMatchObject({
+    expect(snapshot.sessionViews.s1.activePlan).toMatchObject({
       path: "/workspace/login.plan.md",
       planId: "plan-1",
       state: "planning",
@@ -437,10 +462,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: true,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -504,10 +529,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -588,10 +613,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -704,10 +729,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: true,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -893,10 +918,10 @@ describe("webview dual-channel state store", () => {
 
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -922,10 +947,14 @@ describe("webview dual-channel state store", () => {
     store.removePendingAttachment("s1", "att-1");
     store.applySessionState(
       {
+        activePlan: {
+          id: "plan-1",
+          path: "/workspace/plan-a.plan.md",
+          state: "executing",
+        },
+        agentMode: "chat",
         busy: true,
         model: "claude-4.6-sonnet",
-        planId: "plan-1",
-        planState: "executing",
         sessionId: "s1",
       },
     );
@@ -933,13 +962,11 @@ describe("webview dual-channel state store", () => {
     expect(store.snapshot().sessionViews.s1).toMatchObject({
       busy: true,
       model: "claude-4.6-sonnet",
-      planFile: {
+      activePlan: {
         path: "/workspace/plan-a.plan.md",
         planId: "plan-1",
         state: "executing",
       },
-      planId: "plan-1",
-      planState: "executing",
     });
     expect(store.snapshot().sessionViews.s1.pendingAttachments).toHaveLength(0);
   });

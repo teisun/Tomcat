@@ -1,7 +1,7 @@
 //! `create_plan` 工具实现（plan-runtime.md §P2 / [create-plan.md]）。
 //!
 //! 语义：
-//! - 仅 `Planning` 模式可见；EXEC/CHAT/Pending/Completed 调用 → `InvisibleInMode`。
+//! - 仅 Plan 会话模式可用；Chat 会话模式调用 → `InvisibleInMode`。
 //! - 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md`；runtime 拼 frontmatter（state/session/created_at/schema_version）。
 //! - P4 前 `review` 字段返回 `aborted: true` 占位（reviewer 子 Agent 在 P4 接入）。
 //! - 写盘后 PlanRuntime 内存切换为 `Planning`（已是 Planning 时不变），保持 active_plan_id。
@@ -19,9 +19,9 @@ use crate::core::plan_runtime::{
     },
     ops,
     safety::assert_plan_id_safe,
-    state::PlanState,
     PlanRuntime,
 };
+use crate::core::session::AgentMode;
 
 use super::ToolError;
 
@@ -130,7 +130,7 @@ pub fn execute(
     args: CreatePlanArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
-    if !matches!(mode, PlanState::Planning) {
+    if mode != AgentMode::Plan {
         return Err(ToolError::InvisibleInMode {
             tool: "create_plan",
             mode: mode.as_str().to_string(),
@@ -184,7 +184,7 @@ pub fn execute(
     let path = plan_path_for_id(&plan_id)?;
     write_plan(&path, &plan, runtime.lock_timeout_ms())?;
 
-    runtime.set_active_planning_plan(plan_id.clone(), path.clone());
+    runtime.refresh_active_plan_after_write(path.clone(), &plan);
     let event_payload = crate::infra::events::PlanEventPayload {
         plan_id: plan_id.clone(),
         path: crate::infra::platform::format_home_path(&path),
@@ -224,8 +224,7 @@ pub async fn execute_with_reviewer(
     let plan_id = out["plan_id"].as_str().unwrap_or("").to_string();
     // 由 PlanRuntime 自洽派发；advisory lock 已在 write_plan 内 drop。
     let summary = runtime.dispatch_reviewer(&plan_id, allow_review_edit).await;
-    // 若 reviewer 通过 update_plan / edit 改了 plan 文件 → reload 内存视图
-    // （目前 P2 内存仅持 active_planning_plan_id；具体 reload 字段在 P7 PR-PLE 接 panel 时扩展）
+    // 若 reviewer 通过 update_plan / edit 改了计划文件，刷新 active plan 缓存。
     if summary.applied_changes {
         let _ = reload_after_review(runtime, &plan_id);
     }
@@ -233,12 +232,11 @@ pub async fn execute_with_reviewer(
     Ok(out)
 }
 
-fn reload_after_review(_runtime: &PlanRuntime, plan_id: &str) -> Result<(), ToolError> {
+fn reload_after_review(runtime: &PlanRuntime, plan_id: &str) -> Result<(), ToolError> {
     use crate::core::plan_runtime::file_store::{plan_path_for_id, read_plan};
     let path = plan_path_for_id(plan_id)?;
-    // 当前 PlanRuntime 不缓存 plan 内容（todos 直接在 disk 上读改）；
-    // 这里仅做 read 一次以验证仍可解析（防御 D7：reviewer 写坏文件）。
-    let _ = read_plan(&path)?;
+    let plan = read_plan(&path)?;
+    runtime.refresh_active_plan_after_write(path, &plan);
     Ok(())
 }
 

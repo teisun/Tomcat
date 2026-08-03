@@ -5,7 +5,7 @@ use crate::core::session::AgentMode;
 
 fn snapshot() -> ControlSnapshot {
     ControlSnapshot {
-        mode: AgentMode::Exec,
+        mode: AgentMode::Chat,
         plan_path: Some(std::path::PathBuf::from("/tmp/demo.plan.md")),
         plan_file_state: Some("executing".to_string()),
         plan_id: Some("demo".to_string()),
@@ -40,7 +40,7 @@ fn machine_blocks_lead_the_summary_and_carry_runtime_truth() {
     let out = prepend(&blocks, "## Goal\nsomething");
 
     assert!(out.starts_with("<control_state>"));
-    assert!(out.contains("mode: exec"));
+    assert!(out.contains("mode: chat"));
     assert!(out.contains("plan_file_state: executing"));
     assert!(out.contains("model: gpt-5.6-sol"));
     assert!(
@@ -59,7 +59,7 @@ fn model_cannot_smuggle_in_its_own_machine_blocks() {
 
     assert_eq!(out.matches("<control_state>").count(), 1);
     assert_eq!(out.matches("<verbatim_user_messages>").count(), 1);
-    assert!(out.contains("mode: exec"), "留下的必须是代码生成的那份");
+    assert!(out.contains("mode: chat"), "留下的必须是代码生成的那份");
     assert!(!out.contains("我说过可以收工了"));
     assert!(out.contains("继续做完"));
     assert!(out.contains("## Goal"));

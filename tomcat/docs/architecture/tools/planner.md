@@ -4,7 +4,25 @@
 
 本文档是 **B 类**：`docs/architecture/tools/`，承接 [`plan-runtime.md`](../plan-runtime.md) 的运行时编排，与 [`create-plan.md`](./create-plan.md) / [`ask-question.md`](./ask-question.md) / [`todos.md`](./todos.md) / [`reviewer.md`](./reviewer.md) 协同。**实现以仓库代码为准**。
 
-## 2026-05 Active Binding 补充
+## 2026-08 生效契约：没有 EXEC 会话模式
+
+> 本节优先于后文遗留的 `PlanState` / EXEC 历史设计；后文只保留为演进记录。
+
+`AgentMode` 只有 `Chat | Plan`。`planning / pending / executing / completed` 是计划文件的生命周期，绝不表示会话模式。
+
+| 命令 / 事件 | 会话模式 | 计划文件 | transcript |
+|---|---|---|---|
+| `/plan` | `Chat → Plan` | 不改 | `session.agent_mode.changed { agentMode: "plan" }` |
+| `/plan exit` | `Plan → Chat` | 不改 | `session.agent_mode.changed { agentMode: "chat" }` |
+| `/plan build [target]` | 若当前 Plan，则 `Plan → Chat` | `planning|pending → executing` | `plan.build`；必要时一条 mode changed |
+| 用户取消执行 | 保持 Chat | `executing → pending` | `plan.pending` |
+| 所有 todo 收口 | 保持 Chat | `executing → completed` | `plan.complete` |
+
+Build 不再“进入 EXEC”。它是从 Plan 回到 Chat、并开始推进一份执行中计划。执行提醒的判据是 `executing_plan_id()`，不是会话模式；planner reminder 的判据才是 `mode() == AgentMode::Plan`。两份 reminder 目前都在 system prompt；接入 prompt-prefix cache 时必须一起移到 request-local ephemeral tail。
+
+CLI 显示 `u[Chat]>` 或 `u[Plan]>`，Chat 绑定 executing/pending 计划时显示 `u[Chat·plan:executing]>` / `u[Chat·plan:pending]>`。
+
+## 2026-05 Active Binding 补充（历史）
 
 当前 `/plan` 命令族的稳定契约如下：
 

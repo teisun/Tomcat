@@ -1,4 +1,4 @@
-use super::super::{compact_tool_results, force_drop_oldest_to_target};
+use super::super::{compact_tool_results, force_drop_oldest_after_confirmed_overflow};
 use super::mocks::*;
 use crate::core::llm::MessageKind;
 use crate::core::session::manager::estimate_msg_chars;
@@ -119,7 +119,7 @@ fn l3_drop_oldest_with_compaction_summary_as_first() {
         state.usage_ratio()
     );
 
-    let (turns_removed, chars_removed) = force_drop_oldest_to_target(&mut state);
+    let (turns_removed, chars_removed) = force_drop_oldest_after_confirmed_overflow(&mut state);
 
     assert!(turns_removed >= 1, "should drop at least one turn");
     assert!(chars_removed > 0, "should free some chars");

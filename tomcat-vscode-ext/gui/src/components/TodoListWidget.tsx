@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { useActiveTodoProgress } from "../hooks/useActiveTodoProgress";
-import type { WebviewPlanState, WebviewTodo } from "../types";
+import type { WebviewPlanFileState, WebviewTodo } from "../types";
 
 function statusIconClass(status: WebviewTodo["status"]): string {
   switch (status) {
@@ -35,7 +35,7 @@ export function TodoListWidget({
   sessionTodos,
 }: {
   busy: boolean;
-  planState?: WebviewPlanState | null;
+  planState?: WebviewPlanFileState | null;
   planTodos: WebviewTodo[];
   sessionTodos: WebviewTodo[];
 }) {

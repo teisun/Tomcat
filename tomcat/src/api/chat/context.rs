@@ -710,18 +710,19 @@ impl ChatContext {
 
         {
             let appender_session = session.clone();
+            plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
+                appender_session.append_custom_entry(extra)
+            }));
+
             let plan_event_bus = event_bus.clone();
             let plan_event_session_id = current_session_entry.session_id.clone();
-            plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
-                let bus_payload = extra.clone();
-                appender_session.append_custom_entry(extra)?;
-                if let Some(event_name) = bus_payload
+            plan_runtime.attach_transcript_event_notifier(Arc::new(move |mut payload| {
+                if let Some(event_name) = payload
                     .get("event")
                     .and_then(serde_json::Value::as_str)
                     .filter(|name| name.starts_with("plan.") || name.starts_with("session."))
                 {
                     let event_name = event_name.to_string();
-                    let mut payload = bus_payload;
                     if let Some(obj) = payload.as_object_mut() {
                         obj.remove("event");
                         if let Some(plan_id) = obj.remove("plan_id") {
@@ -748,7 +749,6 @@ impl ChatContext {
                         );
                     }
                 }
-                Ok(())
             }));
         }
 

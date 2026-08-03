@@ -40,7 +40,7 @@ fn serve_parse_error_does_not_break_following_initialize() {
     assert_eq!(
         init.last()
             .and_then(|value| value["payload"]["protocolVersion"].as_i64()),
-        Some(1)
+        Some(2)
     );
 }
 

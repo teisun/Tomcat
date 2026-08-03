@@ -169,7 +169,11 @@ export interface TomcatWebviewProviderDeps {
   messenger: TomcatMessenger;
   openExternal?(href: string): Promise<void> | void;
   openModelSettings?(route?: "models"): void;
-  refreshPlanPreview?(planId: string | null, path: string | null): Promise<void> | void;
+  refreshPlanPreview?(
+    planId: string | null,
+    path: string | null,
+    state?: string | null,
+  ): Promise<void> | void;
   sessionRouter: SessionRouter;
   showOpenDialog?(
     options: vscode.OpenDialogOptions,
@@ -194,18 +198,20 @@ function parseCapabilityNames(value: unknown): string[] {
 
 function extractPlanPreviewRefreshArgs(
   event: ServeEvent,
-): { path: string | null; planId: string | null } | null {
+): { path: string | null; planId: string | null; state: string | null } | null {
   switch (event.type) {
     case "plan.create":
     case "plan.update":
       return {
         path: typeof event.path === "string" ? event.path : null,
         planId: typeof event.planId === "string" ? event.planId : null,
+        state: typeof event.state === "string" ? event.state : null,
       };
     case "plan.todos":
       return {
         path: null,
         planId: typeof event.planId === "string" ? event.planId : null,
+        state: null,
       };
     default:
       return null;
@@ -1988,11 +1994,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.maybeAutoOpenPlanPreview(event);
     const previewRefresh = extractPlanPreviewRefreshArgs(event);
     if (previewRefresh && this.deps.refreshPlanPreview) {
-      void Promise.resolve(
-        this.deps.refreshPlanPreview(previewRefresh.planId, previewRefresh.path),
-      ).catch((error) => {
+      try {
+        await this.deps.refreshPlanPreview(
+          previewRefresh.planId,
+          previewRefresh.path,
+          previewRefresh.state,
+        );
+      } catch (error) {
         console.warn("Tomcat webview failed to refresh the plan preview", error);
-      });
+      }
     }
     let requiresSessionView = false;
     if (event.sessionId) {
@@ -2551,6 +2561,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.refreshModels();
     }
     await this.refreshSessionState(sessionId, { trustBusy: true });
+    await this.refreshSessionHistory(sessionId);
     await this.postState();
   }
 

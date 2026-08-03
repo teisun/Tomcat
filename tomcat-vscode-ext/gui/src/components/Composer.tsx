@@ -25,7 +25,7 @@ import { referenceIdentity } from "../contextReferences";
 import { isSupportedAttachmentMime } from "../../../src/shared/attachmentProtocol";
 import type {
   ContextSearchMatch,
-  WebviewPlanState,
+  WebviewPlanFileState,
   WebviewMessageSegment,
   WebviewReference,
 } from "../types";
@@ -36,8 +36,8 @@ import {
 import { createMentionSuggestion } from "./mentionSuggestion";
 import { ReferenceChip } from "./ReferenceChip";
 
-function formatPlanStatus(planState?: WebviewPlanState | null): string | null {
-  if (!planState || planState === "chat") {
+function formatPlanStatus(planState?: WebviewPlanFileState | null): string | null {
+  if (!planState) {
     return null;
   }
   return `Plan: ${planState}`;
@@ -519,7 +519,7 @@ interface ComposerProps {
   onThinkingLevelChange(value: string): void;
   onInterrupt?(): void;
   onSubmit(): void;
-  planState?: WebviewPlanState | null;
+  planState?: WebviewPlanFileState | null;
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({

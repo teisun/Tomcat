@@ -4,6 +4,12 @@
 
 # 上下文管理技术方案
 
+## 2026-08 Plan reminder 规则
+
+计划执行不再是第三种会话模式。请求装配按两个正交事实派生提醒：`AgentMode::Plan` 注入 planner reminder；`PlanRuntime::executing_plan_id().is_some()` 注入 executor reminder。两段内容目前都追加在 system prompt，且都不写入 transcript。
+
+将来接入 prompt-prefix cache 时，必须把两段 reminder 一起迁到请求级 ephemeral tail：它只能在 compaction 已恢复持久消息之后附加，绝不能进入 `ContextState.messages` 或 JSONL。否则既污染可回放历史，也会破坏稳定的缓存前缀。
+
 ## 2026-05 Plan Recover 增补
 
 chat 启动期的 transcript 物理读取、sidecar schema、`latest_plan_event` 快路径、`MAX_PLAN_SCAN` 脱钩、`reverse-chunk` / cold rebuild / kill switch / trace 现在统一收口到 [`chat-resume-hydration.md`](./chat-resume-hydration.md)。

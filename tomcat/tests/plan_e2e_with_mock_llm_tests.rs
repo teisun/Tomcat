@@ -35,7 +35,6 @@ use tomcat::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
 use tomcat::core::plan_runtime::prod_reviewer::{
     ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher, ProdReviewerDeps,
 };
-use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::verify::{
     ProdVerifierDeps, ProdVerifierDispatcher, VerifyCheck, VerifySummary,
 };
@@ -43,6 +42,7 @@ use tomcat::core::plan_runtime::{
     CodeReviewSummary, CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime,
     VerifierDispatcher,
 };
+use tomcat::core::session::{AgentMode, ResumeControlState};
 use tomcat::core::skill::SkillSet;
 use tomcat::core::tools::pipeline::read_state::ReadFileState;
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
@@ -537,7 +537,12 @@ fn promote_to_exec(rt: &PlanRuntime, plan_id: &str) {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.to_string());
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Chat),
+        plan_path: Some(path),
+        plan_id: Some(plan_id.to_string()),
+    })
+    .expect("bind executing plan");
 }
 
 async fn complete_all_plan_todos(rt: &PlanRuntime, plan_id: &str) -> serde_json::Value {
@@ -574,7 +579,7 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
     let (rt, panel, _ckpt) = build_runtime_with_spies();
 
     // PLAN：LLM → create_plan
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -632,7 +637,7 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
     }
 
     // 全 completed → 瞬时 Completed 后立即回 Chat(retain)
-    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(rt.mode(), AgentMode::Chat);
     assert_eq!(
         rt.active_plan_path(),
         Some(plan_path_for_id(&plan_id).unwrap())
@@ -657,7 +662,7 @@ fn h3_plan_mode_raw_edit_outside_plans_dir_is_blocked_only_for_plan_files() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
 
     let plan_path = home.join(".tomcat").join("plans").join("p.plan.md");
     std::fs::write(&plan_path, "stub").unwrap();
@@ -683,7 +688,7 @@ fn h4_exec_mode_raw_edit_on_plan_file_is_blocked() {
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -716,7 +721,7 @@ async fn h6_cancel_during_exec_demotes_plan_to_pending() {
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -733,12 +738,10 @@ async fn h6_cancel_during_exec_demotes_plan_to_pending() {
     let plan_id = out["plan_id"].as_str().unwrap().to_string();
     promote_to_exec(&rt, &plan_id);
 
-    let demoted = rt.demote_to_pending_on_cancel().unwrap();
+    let demoted = rt.park_executing_plan().unwrap();
     assert_eq!(demoted.as_deref(), Some(plan_id.as_str()));
-    match rt.mode() {
-        PlanState::Pending { plan_id: pid } => assert_eq!(pid, plan_id),
-        other => panic!("expected Pending, got {other:?}"),
-    }
+    assert_eq!(rt.mode(), AgentMode::Chat);
+    assert_eq!(rt.active_plan().unwrap().id, plan_id);
 
     let path = plan_path_for_id(&plan_id).unwrap();
     let plan = read_plan(&path).unwrap();
@@ -754,7 +757,7 @@ async fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -802,7 +805,7 @@ fn h2_chat_mode_todos_tool_persists_and_emits_session_panel() {
     let home = setup_home();
     let (rt, panel, _ckpt) = build_runtime_with_spies();
 
-    // CHAT 模式下直接调用 todos（无需 enter_planning）。
+    // Chat 模式下直接调用 todos（无需进入 Plan）。
     let _ = todos::execute(
         &rt,
         None,
@@ -834,7 +837,7 @@ async fn h5_reviewer_aborted_summary_used_when_dispatcher_returns_aborted() {
     let home = setup_home();
     let rt = PlanRuntime::new("session-a");
     // 不挂 reviewer dispatcher → 走 placeholder_pending 路径（plan-runtime §RV14）。
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -867,7 +870,7 @@ async fn h8_code_review_pass_completes_without_verifier() {
     rt.attach_code_reviewer(reviewer.clone());
     rt.attach_verifier(verifier.clone());
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -922,7 +925,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_ba
     rt.attach_code_reviewer(reviewer.clone());
     rt.attach_verifier(verifier.clone());
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -1035,7 +1038,7 @@ async fn h10_code_review_long_multibyte_summary_round_trips_without_truncation()
     rt.attach_code_reviewer(reviewer);
     rt.attach_verifier(verifier.clone());
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {

@@ -48,6 +48,22 @@ fn chat_message_kind_persists_non_normal_values_and_defaults_legacy_rows() {
 }
 
 #[test]
+fn message_kind_plan_build_roundtrips_and_starts_a_turn() {
+    let mut build = ChatMessage::user("start building /tmp/plan.plan.md");
+    build.kind = MessageKind::PlanBuild;
+
+    let persisted = serde_json::to_value(&build).unwrap();
+    assert_eq!(persisted["kind"], "plan_build");
+    let restored: ChatMessage = serde_json::from_value(persisted).unwrap();
+    assert_eq!(restored.kind, MessageKind::PlanBuild);
+    assert!(MessageKind::PlanBuild.is_replay_input());
+    assert!(
+        !MessageKind::PlanBuild.is_non_turn_start(),
+        "the kickoff message must remain a real user turn"
+    );
+}
+
+#[test]
 fn chat_message_tool() {
     let t = ChatMessage::tool("call_1", "result");
     assert!(matches!(t.role, ChatMessageRole::Tool));

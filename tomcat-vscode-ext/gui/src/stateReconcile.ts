@@ -129,25 +129,24 @@ export function reconcileSessionSnapshot(
       nextPendingAttachments,
       (entry: WebviewPendingAttachment) => entry.id,
     ) ?? nextPendingAttachments;
-  const planFile = reconcileValue(previous?.planFile, next.planFile);
+  const activePlan = reconcileValue(previous?.activePlan, next.activePlan);
   if (
     previous &&
     previous.busy === next.busy &&
+    previous.agentMode === next.agentMode &&
     previous.contextRatio === next.contextRatio &&
     previous.hasMoreHistory === next.hasMoreHistory &&
     previous.historyLoading === next.historyLoading &&
     previous.model === next.model &&
     previous.thinkingLevel === next.thinkingLevel &&
     previous.ownedByThisFrontend === next.ownedByThisFrontend &&
-    previous.planId === next.planId &&
-    previous.planState === next.planState &&
     previous.sessionId === next.sessionId &&
     previous.timeline === timeline &&
     previous.checkpoints === checkpoints &&
     previous.planTodos === planTodos &&
     previous.sessionTodos === sessionTodos &&
     previous.pendingAttachments === pendingAttachments &&
-    previous.planFile === planFile
+    previous.activePlan === activePlan
   ) {
     return previous;
   }
@@ -155,7 +154,7 @@ export function reconcileSessionSnapshot(
     ...next,
     checkpoints,
     pendingAttachments,
-    planFile,
+    activePlan,
     planTodos,
     sessionTodos,
     timeline,

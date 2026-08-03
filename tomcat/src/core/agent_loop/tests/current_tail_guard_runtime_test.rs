@@ -202,7 +202,7 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
     .unwrap();
 
     let plan_runtime = PlanRuntime::new("sess-plan-exec");
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
     let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("u".repeat(4_000));
@@ -260,7 +260,7 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
     let text = summary.text_content().unwrap_or("");
     assert_eq!(summary.kind, MessageKind::CompactionSummary);
     assert!(text.starts_with("<control_state>"));
-    assert!(text.contains("mode: exec"));
+    assert!(text.contains("mode: chat"));
     assert!(text.contains("plan_file_state: executing"));
     // Progress 由计划文件渲染，模型说什么都覆盖不掉。
     assert!(text.contains("step active"));
@@ -291,7 +291,7 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
     );
 
     let plan_runtime = PlanRuntime::new("sess-plan-pending");
-    plan_runtime.set_mode_pending_with_path(plan_id.clone(), Some(plan_path.clone()));
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
     let system = ChatMessage::system("sys");
     let user = ChatMessage::user("u".repeat(4_000));
@@ -337,7 +337,7 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         .unwrap();
 
     let text = messages[1].text_content().unwrap_or("");
-    assert!(text.contains("mode: exec"));
+    assert!(text.contains("mode: chat"));
     assert!(text.contains("plan_file_state: pending"));
     assert!(text.contains("first pending"));
 

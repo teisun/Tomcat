@@ -177,7 +177,7 @@ async fn guard_blocks_handback_while_todos_remain() {
         ],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
 
     let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
@@ -203,7 +203,7 @@ async fn guard_persists_nudge_with_its_distinct_kind() {
         vec![todo("t1", TodoStatus::Pending)],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.set_executing_for_test(plan_id);
+    plan_runtime.seed_active_plan_for_test(plan_id, PlanFileState::Executing);
     let sink = Arc::new(RecordingMessageSink::default());
     let sink_for_agent: Arc<dyn MessageAppendSink> = sink.clone();
 
@@ -244,7 +244,7 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
         ],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     let findings = vec![
         Finding::new(
             "concern".into(),
@@ -278,7 +278,8 @@ async fn guard_stops_after_the_injection_cap_and_hands_back() {
         vec![todo("t1", TodoStatus::Pending)],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
     let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
@@ -308,7 +309,8 @@ async fn guard_does_not_fire_once_the_plan_file_leaves_executing() {
         vec![todo("t1", TodoStatus::Completed)],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
     let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
@@ -331,7 +333,7 @@ async fn guard_never_fires_outside_exec() {
     );
 
     let planning = PlanRuntime::new("sess-guard");
-    planning.enter_planning().unwrap();
+    planning.enter_plan().unwrap();
     let mut agent = build_agent(Some(planning), SubagentType::User);
     let mut messages = vec![ChatMessage::user("write me a plan")];
     assert_eq!(
@@ -351,7 +353,7 @@ async fn guard_never_fires_for_non_root_subagents() {
         vec![todo("t1", TodoStatus::Pending)],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
 
     for subagent_type in [
         SubagentType::PlanReviewer,
@@ -407,7 +409,7 @@ async fn guard_cap_survives_tool_rounds_between_text_turns() {
         vec![todo("t1", TodoStatus::Pending)],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
 
     let mut streams = Vec::new();
     for idx in 0..MAX_COMPLETION_GUARD_INJECTIONS {

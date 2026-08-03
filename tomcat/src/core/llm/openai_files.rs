@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,7 +25,6 @@ use crate::infra::error::{
     LlmErrorStage,
 };
 
-static NEXT_FILES_CLIENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 const PROVIDER_NAME: &str = "openai-files";
 
 /// `< 1MiB`：默认走 inline（A 通道）。
@@ -96,8 +94,6 @@ pub struct OpenAiFilesClient {
     api_key: String,
     retry_count: u32,
     expires_after_seconds: u64,
-    #[cfg_attr(not(test), allow(dead_code))]
-    instance_id: u64,
 }
 
 impl OpenAiFilesClient {
@@ -108,7 +104,6 @@ impl OpenAiFilesClient {
             api_key: ctx.api_key,
             retry_count: ctx.retry_count,
             expires_after_seconds: files_cfg.expires_after_seconds,
-            instance_id: NEXT_FILES_CLIENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -126,17 +121,11 @@ impl OpenAiFilesClient {
             api_key,
             retry_count,
             expires_after_seconds,
-            instance_id: NEXT_FILES_CLIENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
     pub fn expires_after_seconds(&self) -> u64 {
         self.expires_after_seconds
-    }
-
-    #[cfg(test)]
-    pub(crate) fn instance_id(&self) -> u64 {
-        self.instance_id
     }
 
     fn files_base_url(&self) -> String {

@@ -1977,6 +1977,7 @@ describe("plan build orchestration", () => {
   function stubBuildInternals(provider: TomcatWebviewViewProvider): {
     postState: ReturnType<typeof vi.spyOn>;
     refreshModels: ReturnType<typeof vi.spyOn>;
+    refreshSessionHistory: ReturnType<typeof vi.spyOn>;
     refreshSessionState: ReturnType<typeof vi.spyOn>;
   } {
     vi.spyOn(provider as any, "ensureInitialized").mockResolvedValue({ sessionId: "s1" } as never);
@@ -1987,8 +1988,11 @@ describe("plan build orchestration", () => {
     const refreshSessionState = vi
       .spyOn(provider as any, "refreshSessionState")
       .mockResolvedValue(undefined);
+    const refreshSessionHistory = vi
+      .spyOn(provider as any, "refreshSessionHistory")
+      .mockResolvedValue(undefined);
     const postState = vi.spyOn(provider as any, "postState").mockResolvedValue(undefined);
-    return { postState, refreshModels, refreshSessionState };
+    return { postState, refreshModels, refreshSessionHistory, refreshSessionState };
   }
 
   afterEach(() => {
@@ -2001,7 +2005,7 @@ describe("plan build orchestration", () => {
     const sendSetModel = vi.fn().mockResolvedValue({ success: true });
     const sendSetPlanMode = vi.fn().mockResolvedValue({ success: true });
     const provider = createBuildProvider({ sendSetModel, sendSetPlanMode });
-    const { refreshModels } = stubBuildInternals(provider);
+    const { refreshModels, refreshSessionHistory } = stubBuildInternals(provider);
 
     await provider.buildPlan("plan-1");
 
@@ -2015,6 +2019,7 @@ describe("plan build orchestration", () => {
       sendSetPlanMode.mock.invocationCallOrder[0],
     );
     expect(refreshModels).toHaveBeenCalled();
+    expect(refreshSessionHistory).toHaveBeenCalledWith("s1");
 
     provider.dispose();
   });
@@ -2109,7 +2114,13 @@ describe("plan preview auto-open after review", () => {
     // Repeated create/review + later update for the same path must NOT steal focus again.
     await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.create" });
     await emit(provider, { planId: "p1", sessionId: "s1", summary: "still good", type: "plan.review" });
-    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.update" });
+    await emit(provider, {
+      path: planPath,
+      planId: "p1",
+      sessionId: "s1",
+      state: "executing",
+      type: "plan.update",
+    });
     expect(openWith).toHaveBeenCalledTimes(1);
 
     provider.dispose();
@@ -2157,7 +2168,13 @@ describe("plan preview auto-open after review", () => {
     const planPath = "/workspace/plans/live.plan.md";
 
     await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.create" });
-    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.update" });
+    await emit(provider, {
+      path: planPath,
+      planId: "p1",
+      sessionId: "s1",
+      state: "executing",
+      type: "plan.update",
+    });
     await emit(provider, {
       planId: "p1",
       sessionId: "s1",
@@ -2165,9 +2182,9 @@ describe("plan preview auto-open after review", () => {
       type: "plan.todos",
     });
 
-    expect(refreshPlanPreview).toHaveBeenNthCalledWith(1, "p1", planPath);
-    expect(refreshPlanPreview).toHaveBeenNthCalledWith(2, "p1", planPath);
-    expect(refreshPlanPreview).toHaveBeenNthCalledWith(3, "p1", null);
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(1, "p1", planPath, null);
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(2, "p1", planPath, "executing");
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(3, "p1", null, null);
 
     provider.dispose();
   });

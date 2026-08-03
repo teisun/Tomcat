@@ -1,6 +1,6 @@
 use super::super::truncation::TOOL_RESULT_PLACEHOLDER;
 use super::super::{
-    compact_tool_results, force_drop_oldest_to_target, layer0_persist_large_results,
+    compact_tool_results, force_drop_oldest_after_confirmed_overflow, layer0_persist_large_results,
 };
 use super::mocks::*;
 use crate::core::llm::ChatMessageRole;
@@ -172,11 +172,11 @@ fn layer0_persist_file_readable() {
 }
 
 #[test]
-fn force_drop_oldest_to_target_invalidates_usage() {
+fn confirmed_overflow_drop_invalidates_usage() {
     let mut state = make_state(4000, 4000, 1000);
     state.update_api_usage(900, 0);
     state.messages = vec![user_msg(&"x".repeat(3000)), user_msg(&"y".repeat(500))];
-    force_drop_oldest_to_target(&mut state);
+    force_drop_oldest_after_confirmed_overflow(&mut state);
     assert!(
         state.last_api_usage.is_none(),
         "usage should be invalidated after force drop"
@@ -186,13 +186,13 @@ fn force_drop_oldest_to_target_invalidates_usage() {
 /// 回归：上一轮 `last_api_usage` 很大时，L3 仍应按**字符估算**与 messages 同步删 oldest，
 /// 不得因 ratio 长期虚高而删空 `messages`（否则 `build_context_from_state` 为空 → API `messages: []`）。
 #[test]
-fn force_drop_oldest_respects_chars_not_stale_api_usage() {
+fn confirmed_overflow_drop_respects_chars_not_stale_api_usage() {
     let t_big = user_msg(&"a".repeat(30_000));
     let t_small = user_msg(&"b".repeat(15_000));
     let mut state = make_state(45_000, 200_000, 20_000);
     state.messages = vec![t_big, t_small];
     state.update_api_usage(500_000, 0);
-    force_drop_oldest_to_target(&mut state);
+    force_drop_oldest_after_confirmed_overflow(&mut state);
     assert_eq!(
         state.messages.len(),
         1,

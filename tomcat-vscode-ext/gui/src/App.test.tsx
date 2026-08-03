@@ -1369,6 +1369,12 @@ describe("Tomcat webview App", () => {
           s1: {
             busy: false,
             contextRatio: 0.42,
+            activePlan: {
+              path: "/workspace/login-refactor.plan.md",
+              planId: "plan-1",
+              state: "planning",
+            },
+            agentMode: "plan",
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [
@@ -1392,13 +1398,6 @@ describe("Tomcat webview App", () => {
                 status: "pending",
               },
             ],
-            planFile: {
-              path: "/workspace/login-refactor.plan.md",
-              planId: "plan-1",
-              state: "planning",
-            },
-            planId: null,
-            planState: "planning",
             sessionId: "s1",
             timeline: [
               {

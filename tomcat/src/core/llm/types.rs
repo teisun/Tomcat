@@ -558,6 +558,8 @@ pub enum MessageKind {
     Nudge,
     /// Background task completion signal; preserves the old normal-user turn-boundary semantics.
     Signal,
+    /// Synthetic user message written when the user starts or resumes a plan from the UI.
+    PlanBuild,
     /// Compaction summary replacing older messages; LLM sees `role: user`.
     CompactionSummary,
 }
@@ -572,6 +574,7 @@ impl MessageKind {
             Some("steering") => Self::Steering,
             Some("nudge") => Self::Nudge,
             Some("signal") => Self::Signal,
+            Some("plan_build") => Self::PlanBuild,
             Some("compaction_summary") => Self::CompactionSummary,
             _ => Self::Normal,
         }
@@ -582,7 +585,7 @@ impl MessageKind {
     }
 
     pub const fn is_replay_input(self) -> bool {
-        matches!(self, Self::Normal | Self::Signal)
+        matches!(self, Self::Normal | Self::Signal | Self::PlanBuild)
     }
 }
 

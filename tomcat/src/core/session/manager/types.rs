@@ -132,14 +132,18 @@ impl PlanEventRef {
 // AgentMode / 控制态恢复
 // ---------------------------------------------------------------------------
 
-/// 用户可见的三种模式。`PlanState` 的 Pending / Executing / Completed 都属于 `Exec`，
-/// 它们之间的区别由计划文件的 `frontmatter.state` 决定，不在这里重复表达。
+/// 用户可见的会话模式。
+///
+/// 计划文件的 `planning` / `pending` / `executing` / `completed` 生命周期不属于会话
+/// 模式；它由计划文件 frontmatter 的 `state` 表达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMode {
+    /// `exec` 是 v2 sidecar 里已经落盘的旧值。它在新模型里等价于 Chat：
+    /// 执行中的事实由计划文件恢复，而不是一个第三会话模式。
+    #[serde(alias = "exec")]
     Chat,
     Plan,
-    Exec,
 }
 
 impl AgentMode {
@@ -147,7 +151,6 @@ impl AgentMode {
         match self {
             Self::Chat => "chat",
             Self::Plan => "plan",
-            Self::Exec => "exec",
         }
     }
 }
@@ -171,8 +174,12 @@ impl PlanModeTransition {
             wire::WIRE_PLAN_ENTER => Some(AgentMode::Plan),
             wire::WIRE_PLAN_EXIT => Some(AgentMode::Chat),
             wire::WIRE_PLAN_BUILD | wire::WIRE_PLAN_PENDING | wire::WIRE_PLAN_COMPLETE => {
-                Some(AgentMode::Exec)
+                Some(AgentMode::Chat)
             }
+            wire::WIRE_SESSION_AGENT_MODE_CHANGED => obj
+                .get("agentMode")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|raw| serde_json::from_value(serde_json::Value::String(raw.into())).ok()),
             // create / update 只绑定计划，不改模式。
             wire::WIRE_PLAN_CREATE | wire::WIRE_PLAN_UPDATE => None,
             _ => return None,

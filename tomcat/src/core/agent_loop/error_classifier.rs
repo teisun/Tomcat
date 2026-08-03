@@ -6,7 +6,7 @@
 //!    [`LoopError::Retryable`] 或 [`LoopError::Fatal`]，供第二层循环决定
 //!    "指数退避重试"或"立即终止"。
 //! 2. [`handle_overflow_retry`]：当 Attempt Loop 捕获 `Retryable(context_overflow)`
-//!    时，对 `context_state` 做一次 L3 强制截断（`force_drop_oldest_to_target`）并
+//!    时，对 `context_state` 做一次 L3 强制截断（`force_drop_oldest_after_confirmed_overflow`）并
 //!    用 `build_context_from_state` 重建 `messages`，发送 `ContextOverflowTrimStart/End`
 //!    事件，更新压缩计数，供下一轮 Attempt 重试。
 //!
@@ -18,7 +18,7 @@
 use tracing::info;
 
 use crate::core::agent_loop::current_tail_guard::collapse_to_branch_summary;
-use crate::core::compaction::force_drop_oldest_to_target;
+use crate::core::compaction::force_drop_oldest_after_confirmed_overflow;
 use crate::core::llm::{
     degrade_unsupported_multimodal, Capabilities, ChatMessage, ChatMessageRole,
 };
@@ -145,7 +145,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
 ///   `snippet`）——**无论是否命中 overflow 都写**，便于观测哪种路径被触发。
 /// - 命中 overflow + `context_state` 存在：
 ///   1. 发 `ContextOverflowTrimStart { ratio: ratio_before }`
-///   2. `force_drop_oldest_to_target` 截断 → 累计 `compaction_tokens_freed` / `+1 compaction_count`
+///   2. `force_drop_oldest_after_confirmed_overflow` 截断 → 累计 `compaction_tokens_freed` / `+1 compaction_count`
 ///   3. 用 System prompt（若有）+ `build_context_from_state(ctx_state)` + 原 `messages[tail_start..]`
 ///      重建 `*messages`；同步 `agent.start_idx = tail_start_in_rebuilt`（治本约束，防 T-017 类幽灵）
 ///   4. 发 `ContextOverflowTrimEnd { ratio_before, ratio_after, will_retry: true, .. }`
@@ -224,7 +224,7 @@ pub(super) async fn handle_overflow_retry(
             collapse_failed = Some(error);
         }
     } else if let Some(ref mut ctx_state) = agent.context_state {
-        let (turns_removed, chars_removed) = force_drop_oldest_to_target(ctx_state);
+        let (turns_removed, chars_removed) = force_drop_oldest_after_confirmed_overflow(ctx_state);
         trim_turns = turns_removed;
         trim_tokens = estimated_tokens_from_chars(chars_removed);
         ctx_state.session_obs.compaction_tokens_freed += trim_tokens;

@@ -147,6 +147,10 @@ export type ServePlanEvent = {
   type: "plan.verify";
   verdict?: null | string;
 } | {
+  agentMode?: null | string;
+  sessionId?: null | string;
+  type: "session.agent_mode.changed";
+} | {
   childSessionId?: null | string;
   planId?: null | string;
   reviewAttemptId?: null | string;

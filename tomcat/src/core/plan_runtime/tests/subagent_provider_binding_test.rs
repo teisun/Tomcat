@@ -432,7 +432,7 @@ fn build_fixture(
     let plan_id = "binding_plan";
     let path = write_planning_plan(plan_id, "## Goal\nbinding\n");
     let plan_runtime = PlanRuntime::new("session-a");
-    plan_runtime.set_active_planning_plan(plan_id.to_string(), path);
+    plan_runtime.bind_plan_file_for_test(path);
     plan_runtime.set_session_model("fcodex/gpt-5.6-sol");
 
     let agent_trail_dir = home.path.join(".tomcat/agents/main");

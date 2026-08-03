@@ -94,7 +94,7 @@ async fn serve_initialize_control_request_sets_ready_state() {
         payload
             .get("protocolVersion")
             .and_then(serde_json::Value::as_i64),
-        Some(1)
+        Some(2)
     );
     assert_eq!(
         payload

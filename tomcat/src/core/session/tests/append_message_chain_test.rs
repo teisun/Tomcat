@@ -177,7 +177,7 @@ fn outbound_guard_detects_unpaired_tool_calls_but_accepts_paired_or_pending_resu
         })],
     );
     assert!(
-        has_dangling_tool_calls_in_messages(&[declaration.clone()]),
+        has_dangling_tool_calls_in_messages(std::slice::from_ref(&declaration)),
         "unpaired declaration must never reach provider"
     );
     assert!(

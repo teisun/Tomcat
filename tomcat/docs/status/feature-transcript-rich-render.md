@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-02 21:53 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-03 14:05 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** PlanState 五态拆成会话模式与计划文件态：`AgentMode` 仅 `Chat|Plan`，`ActivePlan{id,path,state}` 承载 planning/pending/executing/completed；Build 回到 Chat 且不因计划完成改模式；取消 executing 降为 pending；`session.agent_mode.changed` + `activePlan` 载荷（protocol v2 / resume schema 3）；executor reminder 按 `executing_plan_id()` 注入；`MessageKind::PlanBuild` 摘要渲染与 pending→Resume 文案。门禁修复同轮落地：预览 dirty 缓冲权威 + `tomcat.plan.autoSave`；confirmed-overflow 至少删一 turn；恢复占位符对齐 PENDING/UNKNOWN_RESTART；E2E 补 interrupt→Resume 与完成后仍在 Chat。验证：`cargo fmt/clippy`、`gate-fast`、`npm run check:wire`/`gate:fast`、`test:e2e:vscode-devhost` 全绿。@2026-08-03
 - [✓] **[P0]** resolver 迁移后的 14 条 Rust 红测已按根因收口：serve `FixedResolver` 经 `from_provider_and_entry_unchecked` 保留 catalog capabilities；`HostApiDispatcher` 用同一次 `ResolvedCall` 盖章 wire model；会话级缓存 `OpenAiFilesRuntime` 让 enqueue/cleanup 共享队列；compaction 未解析夹具、bash `wait_for_finish`、dispatcher `007` 断言对齐。验证：`cargo test --lib`（2479 passed, 1 ignored）。@2026-08-02
 - [✓] **[P0]** 提示词整合、链接可点击与摘要待办回归已收口：聊天/计划预览外链走 `openLink`；文件路径改为「预筛候选 → 宿主 `resolvePaths` 存在性校验 → 再渲染可点 chip」，并支持 `path:59-103` / `#L10-L20`；验证规则并入 `system/verification.txt`，planner/executor 去重，S6/S7/S8 字节对齐且 code review 去掉不适用的 S7；EXEC 恢复 `todos`；压缩摘要用 `ProgressSource` 保证 PlanFile 与 session scratchpad 二选一；thinking 截断/误作正文改为显式失败并补日志。版本 CLI `0.1.22 → 0.1.23`、扩展 `0.1.33 → 0.1.34`（`bundledCli=0.1.23`）。验证：Rust 提示词/工具/摘要/agent_loop 分批绿；扩展 `npm test`（core 344 + gui 471）与 `npm run lint` 绿；`node scripts/release-version.mjs check` 通过；完整 `cargo test --lib`（2479 passed, 1 ignored）通过。@2026-08-02
 - [✓] **[P0]** smart picker 多选引用竞态已修：`35131f9` 把多选改成并发逐项通知后，旧“仅第一项”的草稿回写会覆盖完整选择，文件夹 chip 偶发消失。现改为一次 draft 替换 + 一次 `insertReferences` 批量事件；Composer 用单次 TipTap 事务插入全部引用且只同步一次完整草稿；本地脏草稿会合并 host 新增引用而不丢 chip。验证：`routes smart picker selections into attachments and context chips` 安装包 E2E 绿；扩展 `npm run gate:full` 全绿。@2026-08-02
@@ -51,6 +52,10 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- 会话/计划状态拆分：删除五态 `PlanState`；`AgentMode`=`chat|plan`；`ActivePlan`/`PlanFileState`；`get_state` 用 `agentMode`+`activePlan`，旧 `mode` 改名 `workspaceMode`；新增 `session.agent_mode.changed`；`RESUME_INDEX_SCHEMA_VERSION=3` 公开导出。
+- Build 用户消息：`MessageKind::PlanBuild`（`plan_build`）；扩展渲染为「开始执行计划」折叠摘要；pending 计划 Build 按钮文案 `Resume`。
+- Plan 预览：`refreshFromServeEvent` dirty 时用缓冲文本、非文本态可跟事件；设置 `tomcat.plan.autoSave`（默认 true，~1s 防抖）；`PlanPreviewDomSnapshot.refreshCounters` 保留热更新诊断四计数器。
+- Overflow 恢复：`force_drop_oldest_after_confirmed_overflow`（服务端确认溢出至少删一完整 turn，不删空）。
 - `ResolvedCall::from_provider_and_entry_unchecked(provider, &ModelEntry)`：测试/适配层工厂，从 catalog entry 复制 wire model 与 capabilities；`from_parts_unchecked` 仍默认关闭 vision/files。
 - `SessionRuntime.openai_files_runtime`：会话级缓存 `(provider_key, Arc<OpenAiFilesRuntime>)`；`ChatContext::openai_files_runtime_for(&ResolvedCall)` 按 resolve 身份复用，避免 cleanup 与 enqueue 队列分裂。
 - `HostApiDispatcher::resolve_chat_call`：`do_chat` / `do_chat_stream` 写入 `req.model = call.model` 后再调用 provider；未配置 resolver 错误码保持 `007`。
@@ -99,6 +104,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-03 14:05）：PlanState teardown + 门禁修复合入。会话模式与计划文件生命周期拆分；预览 dirty/autosave、overflow confirmed-drop、恢复占位符与剩余 Plan E2E 已绿。验证口径：Rust `fmt`/`clippy -D warnings`/`run-integration-tests.sh gate-fast`；扩展 `check:wire`/`gate:fast`/`test:e2e:vscode-devhost`。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-02 21:55）：14 条 Rust 红测已按根因收口：serve `FixedResolver` 从 catalog 保留 capabilities；dispatcher 以同一次 `ResolvedCall` 的 wire model 盖章请求；OpenAI FilesRuntime 改为会话级缓存；未解析 compaction 夹具、bash drain 等待及 resolver 错误码断言已对齐。`cargo test --lib`（2479 passed, 1 ignored）通过；图形化宿主下真实计划文件点击未做人工验收。
 - 最新补充（2026-08-02 09:00）：失败章节整章折叠 + Retry 锚点精确盖章 + smart picker 批量引用事务已合入；扩展版本 `0.1.33`。验证：扩展 `npm run gate:full` 全绿（含安装包 smart-picker E2E）；Rust 定向 copy-forward/幂等盖章与 webview state/provider/flow 回归通过。完整 `cargo test --lib` 既有无关红测仍在 BLOCKED。
 - 最新补充（2026-08-01 11:28）：release 路径 unused/dead_code 四条告警已用 `#[cfg(test)]` 收口；`cargo check --lib` 绿。本机另打纯插件包 `tomcat-vscode-ext-0.1.32.vsix`（不含 CLI，不入库）。

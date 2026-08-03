@@ -23,20 +23,25 @@ export interface SessionListPayload {
 }
 
 export interface SessionStatePayload {
+  activePlan?: ActivePlanPayload | null;
+  agentMode?: "chat" | "plan" | null;
   busy: boolean;
   contextRatio?: number | null;
   cwd?: string | null;
   interrupted?: boolean;
-  mode?: string | null;
   model?: string | null;
-  planId?: string | null;
-  planPath?: string | null;
-  planState?: string | null;
   planTodos?: WebviewTodo[];
   sessionId: string;
   sessionKey?: string | null;
   sessionTodos?: WebviewTodo[];
   thinkingLevel?: string | null;
+  workspaceMode?: string | null;
+}
+
+export interface ActivePlanPayload {
+  id: string;
+  path: string;
+  state: "completed" | "executing" | "pending" | "planning";
 }
 
 export interface WebviewTodo {
@@ -140,6 +145,21 @@ function parseCheckpoints(value: unknown): SessionCheckpointPayload[] {
           : null,
     }];
   });
+}
+
+function parseActivePlan(value: unknown): ActivePlanPayload | null {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.path !== "string") {
+    return null;
+  }
+  switch (value.state) {
+    case "completed":
+    case "executing":
+    case "pending":
+    case "planning":
+      return { id: value.id, path: value.path, state: value.state };
+    default:
+      return null;
+  }
 }
 
 export class SessionRouter {
@@ -288,12 +308,12 @@ export class SessionRouter {
           : null,
       cwd: typeof payload.cwd === "string" ? payload.cwd : null,
       interrupted: payload.interrupted === true,
-      mode: typeof payload.mode === "string" ? payload.mode : null,
+      activePlan: parseActivePlan(payload.activePlan),
+      agentMode:
+        payload.agentMode === "chat" || payload.agentMode === "plan"
+          ? payload.agentMode
+          : null,
       model: typeof payload.model === "string" ? payload.model : null,
-      planId: typeof payload.planId === "string" ? payload.planId : null,
-      planPath: typeof payload.planPath === "string" ? payload.planPath : null,
-      planState:
-        typeof payload.planState === "string" ? payload.planState : null,
       planTodos: parseTodos(payload.planTodos),
       sessionId: payload.sessionId,
       sessionKey:
@@ -301,6 +321,8 @@ export class SessionRouter {
       sessionTodos: parseTodos(payload.sessionTodos),
       thinkingLevel:
         typeof payload.thinkingLevel === "string" ? payload.thinkingLevel : null,
+      workspaceMode:
+        typeof payload.workspaceMode === "string" ? payload.workspaceMode : null,
     };
   }
 

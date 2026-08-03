@@ -677,6 +677,13 @@ impl ServeCommand {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ServePlanEvent {
+    #[serde(rename = "session.agent_mode.changed")]
+    SessionAgentModeChanged {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "agentMode", skip_serializing_if = "Option::is_none")]
+        agent_mode: Option<String>,
+    },
     #[serde(rename = "plan.create")]
     PlanCreate {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]

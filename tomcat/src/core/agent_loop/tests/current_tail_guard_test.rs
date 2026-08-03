@@ -12,7 +12,7 @@ use crate::core::compaction::TOOL_RESULT_PLACEHOLDER;
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, StreamEvent,
 };
-use crate::core::plan_runtime::file_store::{TodoItem, TodoStatus};
+use crate::core::plan_runtime::file_store::{PlanFileState, TodoItem, TodoStatus};
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
     estimate_msg_chars, ApiUsage, ContextState, PlanEventKind, PlanEventRef,
@@ -200,11 +200,8 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     write_session_header(&transcript);
 
     let plan_runtime = PlanRuntime::new("sess-plan");
-    plan_runtime.enter_planning().unwrap();
-    plan_runtime.set_active_planning_plan(
-        "plan_123".to_string(),
-        PathBuf::from("/tmp/ignored.plan.md"),
-    );
+    plan_runtime.enter_plan().unwrap();
+    plan_runtime.seed_active_plan_for_test("plan_123".to_string(), PlanFileState::Planning);
     plan_runtime.replace_session_todos(vec![
         TodoItem {
             id: "t1".to_string(),

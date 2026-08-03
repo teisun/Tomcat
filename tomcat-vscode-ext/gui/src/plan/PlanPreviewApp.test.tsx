@@ -58,6 +58,20 @@ function pushCaptureSelectionEvent(): void {
   });
 }
 
+function pushCaptureDomEvent(messageId = "dom-1"): void {
+  act(() => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          channel: "event",
+          content: { type: "__test.capture_dom" },
+          messageId,
+        },
+      }),
+    );
+  });
+}
+
 function pushPathsResolvedEvent(requestId: string, results: PathResolution[]): void {
   act(() => {
     window.dispatchEvent(
@@ -108,6 +122,19 @@ describe("PlanPreviewApp", () => {
     render(<PlanPreviewApp vscodeApi={api} />);
     expect(screen.getByTestId("plan-loading")).toBeTruthy();
     expect(intentsOfType(api, "plan.ready")).toHaveLength(1);
+  });
+
+  it("reports each received state frame in a test DOM snapshot", () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(makeState());
+    pushState(makeState({ bodyMarkdown: "# Updated" }));
+    pushCaptureDomEvent();
+
+    const snapshotReply = api.postMessage.mock.calls
+      .map((call) => call[0] as { data?: { refreshCounters?: { webviewStateFrames?: number } }; type?: string })
+      .find((message) => message.type === "__test.dom_snapshot");
+    expect(snapshotReply?.data?.refreshCounters?.webviewStateFrames).toBe(2);
   });
 
   it("renders body → N To-dos → divider → four-state checklist in that order", () => {

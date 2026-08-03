@@ -20,12 +20,12 @@ use tomcat::core::plan_runtime::panels::{
     Answer, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination,
     MockAskQuestionPanel, Question, QuestionOption, CUSTOM_OPTION_ID,
 };
-use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 use tomcat::core::plan_runtime::{
     CodeReviewSummary, CodeReviewerDispatcher, PlanReviewSummary, PlanReviewerDispatcher,
     PlanRuntime, VerifierDispatcher,
 };
+use tomcat::core::session::AgentMode;
 use tomcat::core::tools::plan_tool::{ask_question, create_plan, todos, update_plan};
 use tomcat::normalize_path;
 
@@ -168,10 +168,10 @@ async fn full_plan_lifecycle_create_build_complete() {
 
     let body = tokio::time::timeout(DEFAULT_TIMEOUT, async {
         // 1) /plan → Planning
-        rt.enter_planning().unwrap();
-        assert!(matches!(rt.mode(), PlanState::Planning));
+        rt.enter_plan().unwrap();
+        assert_eq!(rt.mode(), AgentMode::Plan);
 
-        // 2) create_plan → PlanFile 落盘 + active_planning_plan_id（G4：runtime 派生 plan_id）
+        // 2) create_plan → PlanFile 落盘 + active plan 缓存（G4：runtime 派生 plan_id）
         let out = create_plan::execute(
             &rt,
             create_plan::CreatePlanArgs {
@@ -198,13 +198,14 @@ async fn full_plan_lifecycle_create_build_complete() {
             .to_string();
         assert!(plan_id.starts_with("plan_"));
         assert_eq!(
-            rt.active_planning_plan_id().as_deref(),
+            rt.active_plan().as_ref().map(|plan| plan.id.as_str()),
             Some(plan_id.as_str())
         );
 
         // 3) /plan build → EXEC + active plan path
         let outcome = rt.build_plan(&plan_id, Some("uuid-1".into())).unwrap();
-        assert!(matches!(rt.mode(), PlanState::Executing { .. }));
+        assert_eq!(rt.mode(), AgentMode::Chat);
+        assert_eq!(rt.executing_plan_id().as_deref(), Some(plan_id.as_str()));
         assert!(matches!(outcome.prev_disk_state, PlanFileState::Planning));
         assert_eq!(
             rt.active_plan_path(),
@@ -260,7 +261,7 @@ async fn full_plan_lifecycle_create_build_complete() {
         .await
         .unwrap();
         assert_eq!(out_final["plan_state_after"], "completed");
-        assert!(matches!(rt.mode(), PlanState::Chat));
+        assert_eq!(rt.mode(), AgentMode::Chat);
         assert_eq!(
             rt.active_plan_path(),
             Some(plan_path_for_id(&plan_id).unwrap())
@@ -282,7 +283,7 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
     let rt = PlanRuntime::new("ses-cancel");
 
     tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        rt.enter_planning().unwrap();
+        rt.enter_plan().unwrap();
         let out = create_plan::execute(
             &rt,
             create_plan::CreatePlanArgs {
@@ -299,14 +300,16 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
         let plan_id = out["plan_id"].as_str().unwrap().to_string();
         rt.build_plan(&plan_id, None).unwrap();
         // 模拟 Ctrl+C
-        rt.demote_to_pending_on_cancel().unwrap();
-        assert!(matches!(rt.mode(), PlanState::Pending { .. }));
+        rt.park_executing_plan().unwrap();
+        assert_eq!(rt.mode(), AgentMode::Chat);
+        assert_eq!(rt.active_plan().unwrap().state, PlanFileState::Pending);
 
         // 续跑（N3 2026-05）：Pending 状态下，本盘 plan_id 直接 build 即可恢复 EXEC，
         // 不再需要 /plan exit 中转。
         let out = rt.build_plan(&plan_id, None).unwrap();
         assert!(matches!(out.prev_disk_state, PlanFileState::Pending));
-        assert!(matches!(rt.mode(), PlanState::Executing { .. }));
+        assert_eq!(rt.mode(), AgentMode::Chat);
+        assert_eq!(rt.executing_plan_id().as_deref(), Some(plan_id.as_str()));
     })
     .await
     .expect("cancel→resume 超时");
@@ -331,7 +334,11 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
             .unwrap();
         assert_eq!(out.plan_id, "external_path_plan");
         assert_eq!(rt.active_plan_path(), Some(expected_path.clone()));
-        assert!(matches!(rt.mode(), PlanState::Executing { .. }));
+        assert_eq!(rt.mode(), AgentMode::Chat);
+        assert_eq!(
+            rt.executing_plan_id().as_deref(),
+            Some("external_path_plan")
+        );
 
         let out_final = update_plan::execute(
             &rt,
@@ -356,7 +363,7 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
             final_plan.frontmatter.state,
             PlanFileState::Completed
         ));
-        assert!(matches!(rt.mode(), PlanState::Chat));
+        assert_eq!(rt.mode(), AgentMode::Chat);
         assert_eq!(rt.active_plan_path(), Some(expected_path.clone()));
     })
     .await
@@ -371,7 +378,7 @@ async fn ask_question_returns_recommended_then_custom_text() {
     let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-aq");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
         answers: vec![
             Answer {
@@ -433,7 +440,7 @@ async fn ask_question_user_ctrl_c_during_wait_returns_interrupted_not_err() {
     let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-cancel");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
 
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
         answers: vec![],
@@ -475,7 +482,7 @@ async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-rv");
     rt.attach_plan_reviewer(Arc::new(AcceptPlanReviewer));
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
         create_plan::execute_with_reviewer(
@@ -513,7 +520,7 @@ async fn raw_edit_to_plan_file_blocked_in_planning_and_executing() {
     let arbitrary = home.join(".tomcat").join("plans").join("any_plan.plan.md");
     assert!(rt.allow_raw_edit_to_path(&arbitrary));
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -589,7 +596,7 @@ async fn todos_always_writes_session_never_plan_file() {
     .unwrap();
 
     // 进 EXEC：todos 应继续写 session，PlanFile 不动
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {

@@ -1,5 +1,6 @@
 import {
   assertPlanPreviewCustomEditorFlow,
+  assertWebviewCompletedPlanStaysInChat,
   assertWebviewPlanModeSwitchFlow,
   assertWebviewCompactControlFlow,
   assertWebviewPersistedMessageKindFlow,
@@ -33,9 +34,14 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
-  test("switches an executing plan back to chat in the webview", async () => {
+  test("interrupts an executing plan and resumes it in Chat", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewPlanModeSwitchFlow(api);
+  });
+
+  test("keeps the Composer in Chat after plan completion", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewCompletedPlanStaysInChat(api);
   });
 
   test("renders the .plan.md custom editor (hybrid default), mode switch, hot reload, and selection-to-chat", async () => {

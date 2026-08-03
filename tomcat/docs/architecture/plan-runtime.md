@@ -7,7 +7,37 @@
 
 本文按 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。
 
-## 2026-05 Active Binding v4-g 生效说明
+## 2026-08 v5 生效说明：会话模式与计划生命周期已拆分
+
+> 本节优先级高于本文后续所有 v4-g / `PlanState` 历史描述。历史内容暂保留用于追溯，不能作为实现依据。
+
+系统不再有 `PlanState`。过去一个五态枚举同时表示“用户正在规划”“计划正在执行”“文件是否完成”，导致计划完成后还需要额外把会话切回 Chat。现在三件事各有唯一事实源：
+
+```text
+会话模式       AgentMode::Chat | AgentMode::Plan
+会话忙闲       SessionSlot.busy
+计划生命周期   PlanFile.frontmatter.state
+                 planning | pending | executing | completed
+```
+
+`PlanRuntime` 只缓存一个从计划文件读出的 `ActivePlan { id, path, state }`；文件始终是权威。`executing_plan_id()` 是派生查询，只有缓存状态为 `executing` 时才有值。
+
+```text
+会话模式：Chat -- /plan --> Plan -- build 或 exit --> Chat
+计划文件：             planning -- build --> executing -- finish --> completed
+                                           \-- cancel --> pending -- build --> executing
+```
+
+- `/plan` 与 `/plan exit` 仅写 `session.agent_mode.changed`，且顺序固定为：先落 transcript，再改内存，最后广播。
+- Build 先把文件写为 `executing`，缓存刷新成功后；仅当当前会话还在 Plan 时，才发一次 `agentMode: "chat"`。从 Chat 卡片直接 Build 不产生重复模式事件。
+- `plan.create` / `plan.build` / `plan.update` / `plan.pending` / `plan.complete` 只描述计划文件，绝不推导或改变会话模式。旧 `plan.enter` / `plan.exit` 只为回放旧 transcript 保留。
+- 用户中断执行会把文件停在 `pending` 并发 `plan.pending`；steering 是消息注入而非取消，不触发停靠。
+- 提示词规则：`AgentMode::Plan` 注入 planner reminder；`executing_plan_id().is_some()` 注入 executor reminder。两者目前仍在 system prompt。等 prompt-prefix caching 落地时，两个 reminder 应一起移到 request-local ephemeral tail，且不得写入 transcript 或 `ContextState.messages`。
+- CLI 标签是 `u[Chat]>` / `u[Plan]>`；绑定 executing 或 pending 计划时额外显示 `·plan:<state>`，例如 `u[Chat·plan:executing]>`。
+
+恢复时，sidecar schema v3 的 `agent_mode` 是会话模式的唯一来源；没有该字段（含旧 `"exec"`）时按 Chat 处理。计划路径能读到时只恢复 `ActivePlan`，不会因为文件状态再次改变会话模式。
+
+## 2026-05 Active Binding v4-g 生效说明（历史）
 
 以下规则已在仓库实现，优先级高于本文较早阶段的草稿描述：
 

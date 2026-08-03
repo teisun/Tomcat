@@ -5015,7 +5015,7 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_to_chat() {
+async fn serve_set_plan_mode_exit_returns_plan_mode_to_chat_without_changing_plan_file() {
     use crate::core::plan_runtime::file_store::{
         read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
         PLAN_FILE_SCHEMA_VERSION,
@@ -5027,14 +5027,14 @@ async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_t
     slot.ctx
         .session_runtime
         .plan_runtime
-        .enter_planning()
-        .expect("enter planning");
-    let plan_path = temp.path().join("exit-executing.plan.md");
+        .enter_plan()
+        .expect("enter plan");
+    let plan_path = temp.path().join("exit-pending.plan.md");
     let plan = PlanFile {
         frontmatter: PlanFileFrontmatter {
             plan_id: "plan-exit".into(),
-            goal: "leave executing safely".into(),
-            state: PlanFileState::Planning,
+            goal: "leave plan mode safely".into(),
+            state: PlanFileState::Pending,
             session_key: None,
             session_id: None,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -5057,15 +5057,7 @@ async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_t
     slot.ctx
         .session_runtime
         .plan_runtime
-        .set_active_planning_plan("plan-exit".into(), plan_path.clone());
-    slot.ctx
-        .session_runtime
-        .plan_runtime
-        .build_plan(
-            plan_path.to_str().expect("utf8 plan path"),
-            Some(slot.session_id.clone()),
-        )
-        .expect("build plan into executing");
+        .bind_plan_file_for_test(plan_path.clone());
 
     handle_command(
         Arc::clone(&state),
@@ -5092,23 +5084,102 @@ async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_t
         Some(true)
     );
     assert_eq!(
-        response["payload"]["planState"].as_str(),
+        response["payload"]["agentMode"].as_str(),
         Some("chat"),
-        "executing+idle 退出后应回到 chat"
+        "退出后会话应回到 chat"
     );
 
-    let disk_plan = read_plan(&plan_path).expect("read demoted plan");
+    let disk_plan = read_plan(&plan_path).expect("read plan");
     assert_eq!(
         disk_plan.frontmatter.state,
         PlanFileState::Pending,
-        "退出 chat 前必须先把盘上的 executing 降级成 pending"
+        "退出会话模式不得改写计划文件生命周期"
     );
-    assert!(
-        matches!(
-            slot.ctx.session_runtime.plan_runtime.mode(),
-            crate::core::plan_runtime::PlanState::Chat
-        ),
+    assert_eq!(
+        slot.ctx.session_runtime.plan_runtime.mode(),
+        crate::core::session::AgentMode::Chat,
         "runtime 也应回到 Chat"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_build_persists_kickoff_message_before_responding() {
+    use crate::core::plan_runtime::file_store::{
+        write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+        PLAN_FILE_SCHEMA_VERSION,
+    };
+
+    let _api_key = install_test_api_key();
+    let stream = vec![Ok(StreamEvent::FinishReason {
+        reason: "stop".to_string(),
+    })];
+    let (state, buffer, temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    let plan_path = temp.path().join("build-persist.plan.md");
+    let plan = PlanFile {
+        frontmatter: PlanFileFrontmatter {
+            plan_id: "build-persist".into(),
+            goal: "persist the build kickoff".into(),
+            state: PlanFileState::Planning,
+            session_key: None,
+            session_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            schema_version: PLAN_FILE_SCHEMA_VERSION,
+            todos: vec![TodoItem {
+                id: "todo-1".into(),
+                content: "run the build".into(),
+                status: TodoStatus::Pending,
+            }],
+            unknown: serde_yaml::Mapping::new(),
+        },
+        body: "## Plan\n- build".into(),
+    };
+    write_plan(
+        &plan_path,
+        &plan,
+        slot.ctx.session_runtime.plan_runtime.lock_timeout_ms(),
+    )
+    .expect("write external plan");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetPlanMode {
+            id: Some("build-persist".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            action: SetPlanModeAction::Build,
+            plan_id: Some(plan_path.to_string_lossy().to_string()),
+        },
+    )
+    .await
+    .expect("build command");
+
+    let persisted = session_message_entries(&slot)
+        .into_iter()
+        .find(|entry| {
+            entry.message["kind"].as_str() == Some("plan_build")
+                && entry.message["role"].as_str() == Some("user")
+        })
+        .expect("kickoff message must be persisted before the response is observable");
+    assert!(
+        persisted
+            .message
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|content| content.contains("start building")),
+        "persisted message = {:?}",
+        persisted.message
+    );
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("build-persist")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("build-persist")
+                && line.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+        }),
+        "build response missing: {lines:?}"
     );
 }
 
@@ -5155,16 +5226,16 @@ async fn serve_get_state_contains_plan_and_session_todos() {
     tracing::info!(target: "test", phase = "assert", test = "serve_get_state_contains_plan_and_session_todos");
     assert_eq!(response["success"].as_bool(), Some(true));
     assert!(
-        payload.get("planPath").is_some(),
-        "get_state payload must include planPath"
+        payload.get("activePlan").is_some(),
+        "get_state payload must include activePlan"
     );
     assert!(
         payload.get("contextUtilizationRatio").is_some(),
         "get_state payload must include contextUtilizationRatio"
     );
     assert!(
-        payload["planPath"].is_null(),
-        "no active plan => planPath null"
+        payload["activePlan"].is_null(),
+        "no active plan => activePlan null"
     );
     assert!(
         payload["contextUtilizationRatio"].is_null(),
@@ -5207,7 +5278,7 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     slot.ctx
         .session_runtime
         .plan_runtime
-        .enter_planning()
+        .enter_plan()
         .expect("enter planning");
     let plan_path = temp.path().join("active.plan.md");
     let plan = PlanFile {
@@ -5237,7 +5308,7 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     slot.ctx
         .session_runtime
         .plan_runtime
-        .set_active_planning_plan("plan-1".into(), plan_path.clone());
+        .refresh_active_plan_after_write(plan_path.clone(), &plan);
 
     handle_command(
         Arc::clone(&state),
@@ -5262,11 +5333,13 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     let payload = response["payload"].clone();
 
     assert_eq!(
-        payload["planPath"].as_str(),
+        payload["activePlan"]["path"].as_str(),
         Some(plan_path.to_string_lossy().as_ref())
     );
     assert_eq!(payload["contextUtilizationRatio"].as_f64(), Some(0.42));
-    assert_eq!(payload["planState"].as_str(), Some("planning"));
+    assert_eq!(payload["agentMode"].as_str(), Some("plan"));
+    assert_eq!(payload["activePlan"]["id"].as_str(), Some("plan-1"));
+    assert_eq!(payload["activePlan"]["state"].as_str(), Some("planning"));
     let plan_todos = payload["planTodos"]
         .as_array()
         .expect("get_state payload must include planTodos array");
@@ -6263,18 +6336,20 @@ async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
             .any(|entry| matches!(entry, crate::core::session::TranscriptEntry::BranchSummary(summary) if summary.is_boundary == Some(true))),
         "compact must persist a durable boundary"
     );
-    let turn_state = slot.turn_state.lock();
-    assert!(
+    let uses_compacted_context = {
+        let turn_state = slot.turn_state.lock();
         turn_state
             .as_ref()
             .expect("idle slot")
             .context_state
             .messages
             .iter()
-            .any(|message| message.kind == crate::core::llm::MessageKind::CompactionSummary),
+            .any(|message| message.kind == crate::core::llm::MessageKind::CompactionSummary)
+    };
+    assert!(
+        uses_compacted_context,
         "serve must use the compacted context immediately, without a restart"
     );
-    drop(turn_state);
 
     handle_command(
         Arc::clone(&state),

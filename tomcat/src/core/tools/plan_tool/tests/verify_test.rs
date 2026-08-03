@@ -42,7 +42,7 @@ async fn update_plan_does_not_dispatch_dormant_verifier_even_when_attached() {
         "update_plan 不应再返回 verify 字段"
     );
     assert_eq!(out["plan_state_after"], "completed");
-    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(rt.mode(), AgentMode::Plan);
     assert_eq!(verifier.call_count.load(Ordering::Relaxed), 0);
     cleanup_home(&home);
 }

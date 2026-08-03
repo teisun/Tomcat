@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::super::catalog::{visible_tools_for_mode, visible_tools_for_mode_with_policy};
-use super::super::state::PlanState;
+use crate::core::session::AgentMode;
 
 fn names(values: &[Value]) -> std::collections::BTreeSet<String> {
     values
@@ -12,7 +12,7 @@ fn names(values: &[Value]) -> std::collections::BTreeSet<String> {
 
 #[test]
 fn chat_mode_excludes_create_plan_only() {
-    let tools = visible_tools_for_mode(&PlanState::Chat);
+    let tools = visible_tools_for_mode(AgentMode::Chat, false);
     let n = names(&tools);
     assert!(
         !n.contains("create_plan"),
@@ -25,7 +25,7 @@ fn chat_mode_excludes_create_plan_only() {
 
 #[test]
 fn planning_mode_hides_whole_file_writers_but_keeps_plan_editing() {
-    let tools = visible_tools_for_mode(&PlanState::Planning);
+    let tools = visible_tools_for_mode(AgentMode::Plan, false);
     let n = names(&tools);
     for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
         assert!(
@@ -47,9 +47,7 @@ fn planning_mode_hides_whole_file_writers_but_keeps_plan_editing() {
 
 #[test]
 fn executing_mode_keeps_session_and_plan_todo_tools() {
-    let tools = visible_tools_for_mode(&PlanState::Executing {
-        plan_id: "demo".into(),
-    });
+    let tools = visible_tools_for_mode(AgentMode::Chat, true);
     let n = names(&tools);
     for kept in ["todos", "update_plan"] {
         assert!(n.contains(kept), "EXEC must keep {kept}, got: {n:?}");
@@ -63,49 +61,71 @@ fn executing_mode_keeps_session_and_plan_todo_tools() {
 
 #[test]
 fn todos_stays_available_in_every_mode() {
-    for mode in [
-        PlanState::Chat,
-        PlanState::Planning,
-        PlanState::Executing {
-            plan_id: "demo".into(),
-        },
-        PlanState::Pending {
-            plan_id: "demo".into(),
-        },
-        PlanState::Completed {
-            plan_id: "demo".into(),
-        },
+    for (mode, executing) in [
+        (AgentMode::Chat, false),
+        (AgentMode::Plan, false),
+        (AgentMode::Chat, true),
     ] {
-        let n = names(&visible_tools_for_mode(&mode));
+        let n = names(&visible_tools_for_mode(mode, executing));
         assert!(
             n.contains("todos"),
-            "{mode:?} must expose todos, got: {n:?}"
+            "{mode:?}/{executing} must expose todos, got: {n:?}"
         );
     }
 }
 
 #[test]
-fn pending_mode_view_equals_chat_view() {
-    let pending = visible_tools_for_mode(&PlanState::Pending {
-        plan_id: "demo".into(),
-    });
-    let chat = visible_tools_for_mode(&PlanState::Chat);
+fn parked_plan_view_equals_chat_view() {
+    let pending = visible_tools_for_mode(AgentMode::Chat, false);
+    let chat = visible_tools_for_mode(AgentMode::Chat, false);
     assert_eq!(names(&pending), names(&chat));
 }
 
 #[test]
-fn completed_mode_view_equals_chat_view() {
-    let done = visible_tools_for_mode(&PlanState::Completed {
-        plan_id: "demo".into(),
-    });
-    let chat = visible_tools_for_mode(&PlanState::Chat);
+fn completed_plan_view_equals_chat_view() {
+    let done = visible_tools_for_mode(AgentMode::Chat, false);
+    let chat = visible_tools_for_mode(AgentMode::Chat, false);
     assert_eq!(names(&done), names(&chat));
 }
 
 #[test]
+fn old_plan_state_equivalents_preserve_the_tool_visibility_matrix() {
+    let cases = [
+        ("chat", AgentMode::Chat, false, &["create_plan"][..]),
+        ("planning", AgentMode::Plan, false, &["write", "delete"][..]),
+        (
+            "executing",
+            AgentMode::Chat,
+            true,
+            &["create_plan", "ask_question"][..],
+        ),
+        ("pending", AgentMode::Chat, false, &["create_plan"][..]),
+        ("completed", AgentMode::Chat, false, &["create_plan"][..]),
+    ];
+
+    for (old_state, mode, executing, hidden) in cases {
+        let visible = names(&visible_tools_for_mode(mode, executing));
+        for tool in hidden {
+            assert!(
+                !visible.contains(*tool),
+                "{old_state} equivalent must hide {tool}; visible={visible:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn load_skill_can_be_hidden_by_policy() {
-    let with_skill = names(&visible_tools_for_mode_with_policy(&PlanState::Chat, true));
-    let without_skill = names(&visible_tools_for_mode_with_policy(&PlanState::Chat, false));
+    let with_skill = names(&visible_tools_for_mode_with_policy(
+        AgentMode::Chat,
+        false,
+        true,
+    ));
+    let without_skill = names(&visible_tools_for_mode_with_policy(
+        AgentMode::Chat,
+        false,
+        false,
+    ));
     assert!(with_skill.contains("load_skill"));
     assert!(!without_skill.contains("load_skill"));
 }

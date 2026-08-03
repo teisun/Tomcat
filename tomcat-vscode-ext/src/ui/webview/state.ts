@@ -13,9 +13,9 @@ import type {
 import { isRecord, parseTodos } from "../../shared/todos";
 import type { ServeEvent, ServePlanEvent } from "../../serveClient/wire";
 import {
-  normalizePlanState,
+  normalizePlanFileState,
   planEventState,
-  type ParticipantPlanState,
+  type WebviewPlanFileState,
 } from "../../shared/planState";
 import {
   INTERRUPTED_TOOL_RESULT_TEXT,
@@ -183,6 +183,8 @@ function parseAskQuestionRequest(
 
 function createEmptySession(sessionId: string): WebviewSessionSnapshot {
   return {
+    activePlan: null,
+    agentMode: "chat",
     busy: false,
     checkpoints: [],
     composerDraft: {
@@ -198,9 +200,6 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
     thinkingLevel: null,
     ownedByThisFrontend: true,
     pendingAttachments: [],
-    planFile: null,
-    planId: null,
-    planState: "chat",
     sessionId,
     timeline: [],
   };
@@ -378,6 +377,8 @@ function systemNoteTitle(message: Record<string, unknown>): string | null {
       return "计划未收口，已要求继续";
     case "signal":
       return "后台任务已结束";
+    case "plan_build":
+      return "开始执行计划";
     default:
       return null;
   }
@@ -534,7 +535,7 @@ function planEventMessageId(
 }
 
 function activePlanId(session: WebviewSessionSnapshot): string | null {
-  return session.planId ?? session.planFile?.planId ?? null;
+  return session.activePlan?.planId ?? null;
 }
 
 function parseReviewVerdict(
@@ -1468,7 +1469,7 @@ export function derivePlanActivity(
 
   if (toolName === "create_plan") {
     const counts = countTodosFromArgs(args?.todos);
-    const stateAfter = normalizePlanState(parsed.state);
+    const stateAfter = normalizePlanFileState(parsed.state);
     return {
       completed: counts?.completed,
       kind: "create",
@@ -1480,8 +1481,8 @@ export function derivePlanActivity(
 
   const counts = countCompletedItems(parsed.items);
   const applied = asFiniteNumber(parsed.applied);
-  const stateBefore = normalizePlanState(parsed.plan_state_before);
-  const stateAfter = normalizePlanState(parsed.plan_state_after);
+  const stateBefore = normalizePlanFileState(parsed.plan_state_before);
+  const stateAfter = normalizePlanFileState(parsed.plan_state_after);
   if (applied === undefined && !counts && !stateBefore && !stateAfter) {
     return undefined;
   }
@@ -1543,27 +1544,20 @@ function applyHistoryPlanCustomEntry(
   const planId = typeof entry.plan_id === "string" ? entry.plan_id : null;
   const path = typeof entry.path === "string" ? entry.path : null;
   const state =
-    normalizePlanState(entry.state) ??
+    normalizePlanFileState(entry.state) ??
     planEventState({ type: eventName } as ServePlanEvent);
 
-  if (state) {
-    session.planState = state;
-  }
-  if (planId) {
-    session.planId = planId;
-  }
-
   const syncHistoryPlanRef = () => {
-    const nextState = state ?? session.planState ?? null;
+    const nextState = state ?? session.activePlan?.state ?? null;
     if (path) {
-      syncPlanRef(session, path, nextState, planId ?? session.planId ?? null);
+      syncPlanRef(session, path, nextState, planId ?? session.activePlan?.planId ?? null);
       return;
     }
-    if (session.planFile) {
-      session.planFile = {
-        ...session.planFile,
-        planId: planId ?? session.planFile.planId ?? null,
-        state: nextState ?? session.planFile.state ?? null,
+    if (session.activePlan) {
+      session.activePlan = {
+        ...session.activePlan,
+        planId: planId ?? session.activePlan.planId ?? null,
+        state: nextState ?? session.activePlan.state ?? null,
       };
     }
   };
@@ -1839,6 +1833,13 @@ function applyHistoryEntry(
     ) {
       return;
     }
+    if (
+      entry.event === "session.agent_mode.changed" &&
+      (entry.agentMode === "chat" || entry.agentMode === "plan")
+    ) {
+      session.agentMode = entry.agentMode;
+      return;
+    }
     applyHistoryPlanCustomEntry(session, entry);
   }
 }
@@ -1951,12 +1952,12 @@ function clearActiveAssistant(runtime: SessionRuntimeState): void {
 function syncPlanRef(
   session: WebviewSessionSnapshot,
   path: string,
-  state: ParticipantPlanState | null,
+  state: WebviewPlanFileState | null,
   planId?: string | null,
 ): void {
-  session.planFile = {
+  session.activePlan = {
     path,
-    planId: planId ?? session.planId ?? null,
+    planId: planId ?? session.activePlan?.planId ?? null,
     state,
   } satisfies WebviewPlanFileRef;
 }
@@ -2570,29 +2571,19 @@ export class WebviewStateStore {
     }
     session.model = payload.model ?? null;
     session.thinkingLevel = payload.thinkingLevel ?? null;
-    session.planId = payload.planId ?? null;
-    session.planState = normalizePlanState(payload.planState) ?? "chat";
+    session.agentMode = payload.agentMode ?? "chat";
     session.planTodos = payload.planTodos ?? session.planTodos;
     session.sessionTodos = payload.sessionTodos ?? session.sessionTodos;
     if (payload.contextRatio !== undefined) {
       session.contextRatio = payload.contextRatio ?? null;
     }
-    if (typeof payload.planPath === "string" && payload.planPath.length > 0) {
-      syncPlanRef(
-        session,
-        payload.planPath,
-        session.planState ?? null,
-        session.planId ?? null,
-      );
-    } else if (session.planFile) {
-      const nextState = session.planState ?? session.planFile.state ?? null;
-      const nextPlanId = session.planId ?? session.planFile.planId ?? null;
-      session.planFile = {
-        ...session.planFile,
-        planId: nextPlanId,
-        state: nextState,
-      };
-    }
+    session.activePlan = payload.activePlan
+      ? {
+        path: payload.activePlan.path,
+        planId: payload.activePlan.id,
+        state: payload.activePlan.state,
+      }
+      : null;
     session.ownedByThisFrontend = true;
     this.syncTabOwnedByFrontend(payload.sessionId);
   }
@@ -3196,10 +3187,9 @@ export class WebviewStateStore {
         const todos = parseTodos("todos" in frame ? frame.todos : undefined);
         session.planTodos = todos;
         if ("planId" in frame && typeof frame.planId === "string") {
-          session.planId = frame.planId;
-          if (session.planFile) {
-            session.planFile = {
-              ...session.planFile,
+          if (session.activePlan) {
+            session.activePlan = {
+              ...session.activePlan,
               planId: frame.planId,
             };
           }
@@ -3289,6 +3279,17 @@ export class WebviewStateStore {
         const tool = applyBackgroundTaskFinished(session, taskId, exitCode);
         const op = buildUpsertPatchOpForItem(session, tool);
         return patchRenderMutation(session.sessionId, op ? [op] : []);
+      }
+      case "session.agent_mode.changed": {
+        const agentMode =
+          "agentMode" in frame && (frame.agentMode === "chat" || frame.agentMode === "plan")
+            ? frame.agentMode
+            : null;
+        if (!agentMode) {
+          return NO_SESSION_RENDER_MUTATION;
+        }
+        session.agentMode = agentMode;
+        return sessionRenderMutation(session.sessionId);
       }
       default:
         if (isPlanEvent(frame as any)) {
@@ -3416,32 +3417,22 @@ export class WebviewStateStore {
     }
     runtime.localUserMessageIds = nextLocalUserMessageIds;
     session.timeline = historySession.timeline;
-    if (!session.planFile && historySession.planFile) {
-      session.planFile = historySession.planFile;
+    if (!session.activePlan && historySession.activePlan) {
+      session.activePlan = historySession.activePlan;
     } else if (
-      session.planFile &&
-      historySession.planFile &&
-      session.planFile.path === historySession.planFile.path
+      session.activePlan &&
+      historySession.activePlan &&
+      session.activePlan.path === historySession.activePlan.path
     ) {
-      session.planFile = {
-        ...session.planFile,
+      session.activePlan = {
+        ...session.activePlan,
         planId:
-          session.planFile.planId ?? historySession.planFile.planId ?? null,
-        state: session.planFile.state ?? historySession.planFile.state ?? null,
+          session.activePlan.planId ?? historySession.activePlan.planId ?? null,
+        state: session.activePlan.state ?? historySession.activePlan.state ?? null,
       };
-    }
-    if (!session.planId && historySession.planId) {
-      session.planId = historySession.planId;
     }
     if (session.planTodos.length === 0 && historySession.planTodos.length > 0) {
       session.planTodos = historySession.planTodos;
-    }
-    if (
-      (!session.planState || session.planState === "chat") &&
-      historySession.planState &&
-      historySession.planState !== "chat"
-    ) {
-      session.planState = historySession.planState;
     }
     session.hasMoreHistory = runtime.hasMoreHistory;
     session.historyLoading = runtime.historyLoading;
@@ -3505,34 +3496,28 @@ export class WebviewStateStore {
       "planId" in event && typeof event.planId === "string" && event.planId.length > 0
         ? event.planId
         : null;
-    if (state) {
-      session.planState = state;
-    }
-    if (planId) {
-      session.planId = planId;
-    }
     if (
       "path" in event &&
       typeof event.path === "string" &&
       event.path.length > 0
     ) {
-      const nextState = state ?? session.planState ?? null;
+      const nextState = state ?? session.activePlan?.state ?? null;
       syncPlanRef(
         session,
         event.path,
         nextState,
-        planId ?? session.planId ?? null,
+        planId ?? session.activePlan?.planId ?? null,
       );
       stampRunningCreatePlan(
         session,
         event.path,
-        planId ?? session.planId ?? null,
+        planId ?? session.activePlan?.planId ?? null,
       );
-    } else if (session.planFile) {
-      session.planFile = {
-        ...session.planFile,
-        planId: planId ?? session.planFile.planId ?? null,
-        state: state ?? session.planFile.state ?? null,
+    } else if (session.activePlan) {
+      session.activePlan = {
+        ...session.activePlan,
+        planId: planId ?? session.activePlan.planId ?? null,
+        state: state ?? session.activePlan.state ?? null,
       };
     }
 

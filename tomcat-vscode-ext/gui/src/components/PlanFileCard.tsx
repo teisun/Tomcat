@@ -140,7 +140,7 @@ function PlanFileCardComponent({
           onClick={() => onBuild(item.planId ?? null, item.path)}
           type="button"
         >
-          Build
+          {item.state === "pending" ? "Resume" : "Build"}
         </button>
       </div>
     </section>

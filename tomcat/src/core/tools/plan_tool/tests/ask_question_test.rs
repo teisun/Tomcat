@@ -5,7 +5,7 @@ use crate::core::plan_runtime::panels::{
 
 fn rt_planning() -> std::sync::Arc<PlanRuntime> {
     let rt = PlanRuntime::new("s1");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     rt
 }
 
@@ -74,7 +74,7 @@ async fn ask_question_emits_transcript_event_on_answer() {
         guard[0]["event"],
         crate::infra::wire::WIRE_PLAN_ASK_QUESTION
     );
-    assert_eq!(guard[0]["mode"], "planning");
+    assert_eq!(guard[0]["mode"], "plan");
     assert_eq!(guard[0]["questions"][0]["id"], "q1");
     assert_eq!(guard[0]["result"]["answers"][0]["question_id"], "q1");
 }
@@ -113,7 +113,7 @@ async fn ask_question_emits_transcript_event_on_cancelled() {
 #[tokio::test]
 async fn ask_question_invisible_in_exec_returns_tool_error() {
     let rt = PlanRuntime::new("s1");
-    rt.set_executing_for_test("plan_x".into());
+    rt.seed_active_plan_for_test("plan_x".into(), PlanFileState::Executing);
     let panel = MockAskQuestionPanel::new(vec![]);
     let err = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
@@ -121,7 +121,7 @@ async fn ask_question_invisible_in_exec_returns_tool_error() {
     match err {
         ToolError::InvisibleInMode { tool, mode } => {
             assert_eq!(tool, "ask_question");
-            assert_eq!(mode, "executing");
+            assert_eq!(mode, "chat");
         }
         other => panic!("expected InvisibleInMode, got {other:?}"),
     }

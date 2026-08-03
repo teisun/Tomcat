@@ -67,7 +67,11 @@ async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
     let mut tools = plan_runtime::catalog::visible_tools_for_mode_with_policy(
-        &ctx.session_runtime.plan_runtime.mode(),
+        ctx.session_runtime.plan_runtime.mode(),
+        ctx.session_runtime
+            .plan_runtime
+            .executing_plan_id()
+            .is_some(),
         allow_load_skill,
     );
     match ctx.global_services.tool_registry.list_tools(None).await {
@@ -139,6 +143,36 @@ pub(crate) async fn build_system_text(ctx: &ChatContext, context_budget_chars: u
     )
 }
 
+/// Adds the reminder derived from the session mode and active plan file.
+///
+/// Plan mode enables planning guidance; an executing plan enables execution
+/// guidance. A parked or completed plan must leave no executor reminder in
+/// Chat, even though it remains the active plan.
+pub(crate) fn system_text_with_plan_reminder(
+    system_text: &str,
+    plan_runtime: &crate::core::plan_runtime::PlanRuntime,
+) -> String {
+    match plan_runtime.mode() {
+        crate::core::session::AgentMode::Plan => {
+            format!(
+                "{}{}",
+                system_text,
+                *plan_runtime::reminders::PLANNER_REMINDER
+            )
+        }
+        crate::core::session::AgentMode::Chat => plan_runtime
+            .executing_plan_id()
+            .map(|plan_id| {
+                format!(
+                    "{}{}",
+                    system_text,
+                    plan_runtime::reminders::render_executor_reminder(&plan_id)
+                )
+            })
+            .unwrap_or_else(|| system_text.to_string()),
+    }
+}
+
 pub(crate) fn sync_context_state_system_prompt_len(
     context_state: &mut crate::core::ContextState,
     old_len: usize,
@@ -166,8 +200,10 @@ fn current_user_prompt(ctx: &ChatContext) -> String {
         .get_session(ctx.session_runtime.session.current_session_key())
         .ok()
         .flatten();
+    let active_plan = ctx.session_runtime.plan_runtime.active_plan();
     user_prompt_for_mode_with_model(
-        &ctx.session_runtime.plan_runtime.mode(),
+        ctx.session_runtime.plan_runtime.mode(),
+        active_plan.as_ref(),
         &ctx.effective_model(entry.as_ref()),
     )
 }
@@ -491,6 +527,12 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         match outcome {
             AgentRunOutcome::Completed(_) => {}
             AgentRunOutcome::Interrupted(_) => {
+                if let Err(error) = ctx.session_runtime.plan_runtime.park_executing_plan() {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to park executing plan after user interruption"
+                    );
+                }
                 if ctx
                     .session_runtime
                     .hard_exit_requested
@@ -615,22 +657,8 @@ pub async fn run_chat_turn_with_message(
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
-    let plan_mode = ctx.session_runtime.plan_runtime.mode();
-    let system_text_with_reminder = match &plan_mode {
-        plan_runtime::PlanState::Planning => {
-            format!(
-                "{}{}",
-                system_text,
-                *plan_runtime::reminders::PLANNER_REMINDER
-            )
-        }
-        plan_runtime::PlanState::Executing { plan_id } => format!(
-            "{}{}",
-            system_text,
-            plan_runtime::reminders::render_executor_reminder(plan_id)
-        ),
-        _ => system_text.to_string(),
-    };
+    let system_text_with_reminder =
+        system_text_with_plan_reminder(system_text, &ctx.session_runtime.plan_runtime);
     let planned_messages = drain_planned_turn_messages(ctx, input_message);
     if let Err(error) = ctx.global_services.model_catalog.with_catalog(|catalog| {
         validate_capabilities(
@@ -794,11 +822,13 @@ pub async fn run_chat_turn_with_message(
     };
 
     if render_cli_output {
+        let active_plan = ctx.session_runtime.plan_runtime.active_plan();
         print!(
             "\n{}",
             agent_prompt_for_mode(
                 &ctx.config.agent.id,
-                &ctx.session_runtime.plan_runtime.mode()
+                ctx.session_runtime.plan_runtime.mode(),
+                active_plan.as_ref(),
             )
         );
         io::stdout().flush().map_err(AppError::Io)?;

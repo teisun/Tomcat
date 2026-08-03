@@ -71,10 +71,10 @@ fn validate_tool_result_replacement(
         return Ok(prospective);
     }
     if active_results.iter().any(|message| {
-        !message
+        message
             .get("content")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|content| classify_resumable_ask_question_result(content).is_some())
+            .is_none_or(|content| classify_resumable_ask_question_result(content).is_none())
     }) {
         return Err(AppError::invariant(
             "ask_question_resume",

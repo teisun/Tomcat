@@ -1659,10 +1659,10 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// [边界：空消息列表] 传入空消息列表时 run() 不崩溃，返回 Ok 且 final_text 为空
+/// [边界：空消息列表] 传入空消息列表时，出站不变量必须拒绝畸形 LLM 请求
 ///
-/// 验证：run([]) 返回 Ok("")（鲁棒性边界：不触发 panic，符合 INTEGRATION_TEST_ROBUSTNESS §2）
-/// 意义：防御性边界——空上下文不应导致 AgentLoop 崩溃
+/// 验证：run([]) 返回 Failed(llm_request invariant)，且不会把空请求发给 LLM。
+/// 意义：防御性边界——拒绝不完整 transcript 比伪造一个空回合安全。
 #[tokio::test]
 async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -1685,19 +1685,18 @@ async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn s
     );
 
     info!("Act: run([]) 调用");
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(vec![]))
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(vec![]))
         .await
-        .map_err(|_| "run() 超时 10s")?
-        .unwrap();
+        .map_err(|_| "run() 超时 10s")?;
 
-    info!(
-        "Assert: 返回 Ok，final_text 为空字符串: {:?}",
-        result.final_text
-    );
+    info!("Assert: 出站守卫拒绝空 messages");
     assert!(
-        result.final_text.is_empty(),
-        "空消息时 final_text 应为空，实际: {:?}",
-        result.final_text
+        matches!(
+            &outcome,
+            tomcat::AgentRunOutcome::Failed(error)
+                if error.to_string().contains("tail is not a user input or completed tool result")
+        ),
+        "空 messages 应在 llm_request 出站守卫处失败，实际: {outcome:?}"
     );
 
     Ok(())

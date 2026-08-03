@@ -566,7 +566,7 @@ export async function assertWebviewPlanModeSwitchFlow(
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
-      data: { action: "enter", sessionId },
+      data: { action: "enter", planId: "fake-plan-interrupt", sessionId },
       messageId: "webview-plan-mode-enter",
       type: "setPlanMode",
     }),
@@ -575,16 +575,33 @@ export async function assertWebviewPlanModeSwitchFlow(
     api,
     (state) => {
       const session = state.sessionViews[sessionId];
-      return session?.planState === "planning" ? session : undefined;
+      return session?.agentMode === "plan" ? session : undefined;
     },
     20_000,
   );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
-      data: { action: "build", planId: "fake-plan", sessionId },
+      data: { action: "build", planId: "fake-plan-interrupt", sessionId },
       messageId: "webview-plan-mode-build",
       type: "setPlanMode",
+    }),
+  );
+  await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionId];
+      return session?.agentMode === "chat" && session.activePlan?.state === "executing" && session.busy
+        ? session
+        : undefined;
+    },
+    20_000,
+  );
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId },
+      messageId: "webview-plan-mode-interrupt",
+      type: "interrupt",
     }),
   );
   await waitForEvent(api, { sessionId, type: "agent_end" });
@@ -592,35 +609,94 @@ export async function assertWebviewPlanModeSwitchFlow(
     api,
     (snapshot) =>
       snapshot.activeSessionId === sessionId &&
-      snapshot.planStateText === "Plan: executing"
+      snapshot.planStateText === "Plan: pending"
         ? snapshot
         : undefined,
+    20_000,
+  );
+  await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionId];
+      return session?.agentMode === "chat" && session.activePlan?.state === "pending" && !session.busy
+        ? session
+        : undefined;
+    },
     20_000,
   );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
-      data: { action: "exit", sessionId },
-      messageId: "webview-plan-mode-exit",
+      data: { action: "build", planId: "fake-plan-interrupt", sessionId },
+      messageId: "webview-plan-mode-resume",
       type: "setPlanMode",
     }),
   );
-
-  const settled = await waitForWebviewDomSnapshot(
+  const resumed = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
       snapshot.activeSessionId === sessionId &&
-      snapshot.html.includes('data-testid="send-button"') &&
-      !snapshot.html.includes('data-testid="stop-button"') &&
-      snapshot.planStateText === null
+      snapshot.html.includes('data-testid="stop-button"') &&
+      snapshot.html.includes("开始执行计划") &&
+      snapshot.planStateText === "Plan: executing"
         ? snapshot
         : undefined,
     20_000,
   );
   assert.ok(
-    !settled.timelineKinds.includes("error"),
-    "executing 切回 Chat 后不应出现 error 气泡/错误消息"
+    !resumed.timelineKinds.includes("error"),
+    "Resume 回到 Chat 且绑定 executing 计划后不应出现 error 气泡/错误消息"
   );
+  await waitForEvent(api, { sessionId, type: "agent_end" });
+}
+
+export async function assertWebviewCompletedPlanStaysInChat(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const sessionId = await claimActiveWebviewSession(
+    api,
+    "webview-plan-completion-claim",
+    20_000,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { action: "enter", planId: "fake-plan-complete", sessionId },
+      messageId: "webview-plan-completion-enter",
+      type: "setPlanMode",
+    }),
+  );
+  await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionId];
+      return session?.agentMode === "plan" ? session : undefined;
+    },
+    20_000,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { action: "build", planId: "fake-plan-complete", sessionId },
+      messageId: "webview-plan-completion-build",
+      type: "setPlanMode",
+    }),
+  );
+  await waitForEvent(api, { sessionId, type: "agent_end" });
+  const completed = await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionId];
+      return session?.agentMode === "chat" && session.activePlan?.state === "completed"
+        ? session
+        : undefined;
+    },
+    20_000,
+  );
+  assert.equal(completed.agentMode, "chat");
+  assert.equal(completed.activePlan?.state, "completed");
 }
 
 /**
@@ -2178,9 +2254,12 @@ export async function assertWebviewReviewProgressFlow(
   await api.__testing.applyWebviewSessionState({
     busy: true,
     model: "gpt-5.4",
-    planId: "plan-review-progress",
-    planPath: path.join(workspaceDir, "plans", "review-progress.plan.md"),
-    planState: "executing",
+    activePlan: {
+      id: "plan-review-progress",
+      path: path.join(workspaceDir, "plans", "review-progress.plan.md"),
+      state: "executing",
+    },
+    agentMode: "chat",
     sessionId,
   });
 
@@ -4261,6 +4340,7 @@ export async function assertTranscriptRichRenderingFlow(
   assert.ok(workspaceRoot, "expected a workspace root for transcript rich-render E2E");
 
   const richFilePath = path.join(workspaceRoot, "src", "test", "fixtures", "rich-render.ts");
+  const inlineLinkPath = path.join(workspaceRoot, "src", "test", "fixtures", "inline-link.ts");
   await fs.mkdir(path.dirname(richFilePath), { recursive: true });
   await fs.writeFile(
     richFilePath,
@@ -4276,6 +4356,7 @@ export async function assertTranscriptRichRenderingFlow(
     ].join("\n"),
     "utf8",
   );
+  await fs.writeFile(inlineLinkPath, "export const inlineLink = true;\n", "utf8");
 
   await api.__testing.hydrateWebviewHistory({
     messages: [
@@ -4298,7 +4379,7 @@ export async function assertTranscriptRichRenderingFlow(
 
   const contentDeltas = [
     "## Fix ",
-    "plan\n\nStart with `src/test/fixtures/missing-link.ts:9`, ",
+    "plan\n\nStart with `src/test/fixtures/inline-link.ts:1`, ",
     "then compare the snippet below.\n\n```ts src/test/fixtures/rich-render.ts:6\n",
     "export function otherLine() {\n  return 42;\n}\n```\n\n```text\n",
     "A --> B --> C\n```\n\n```mermaid\nflowchart LR\n",
@@ -4379,8 +4460,8 @@ export async function assertTranscriptRichRenderingFlow(
   assert.match(snapshot.html, /assistant-code-copy/u);
   assert.match(snapshot.html, />rich-render\.ts:6</u);
   assert.match(snapshot.html, /title="src\/test\/fixtures\/rich-render\.ts:6"/u);
-  assert.match(snapshot.html, />missing-link\.ts:9</u);
-  assert.match(snapshot.html, /title="src\/test\/fixtures\/missing-link\.ts:9"/u);
+  assert.match(snapshot.html, />inline-link\.ts:1</u);
+  assert.match(snapshot.html, /title="src\/test\/fixtures\/inline-link\.ts:1"/u);
   assert.match(snapshot.html, /A --&gt; B --&gt; C/u);
   assert.match(snapshot.html, /tc-code-card--bare/u);
   assert.doesNotMatch(snapshot.html, /tc-code-card__lang/u);
@@ -4435,7 +4516,7 @@ export async function assertTranscriptRichRenderingFlow(
     kind: "clickTestId",
     testId: "assistant-clickable-path",
   });
-  const afterBrokenInlinePath = await waitForWebviewDomSnapshot(
+  const afterInlinePath = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId && candidate.fileChipOpen
@@ -4444,15 +4525,15 @@ export async function assertTranscriptRichRenderingFlow(
     10_000,
   );
   assert.equal(
-    afterBrokenInlinePath.messageTexts.length,
+    afterInlinePath.messageTexts.length,
     settledSnapshot.messageTexts.length,
-    "expected a broken assistant inline path to avoid appending a new transcript error message",
+    "expected opening an assistant inline path to avoid appending a transcript error message",
   );
-  assert.doesNotMatch(afterBrokenInlinePath.html, /Unable to open file/u);
+  assert.doesNotMatch(afterInlinePath.html, /Unable to open file/u);
   assert.equal(
-    afterBrokenInlinePath.assistantClickablePathCount,
+    afterInlinePath.assistantClickablePathCount,
     settledSnapshot.assistantClickablePathCount,
-    "expected broken-link handling to leave clickable-path structure unchanged",
+    "expected opening an inline path to leave clickable-path structure unchanged",
   );
 
   await api.__testing.focusWebview();
@@ -4622,13 +4703,13 @@ export async function assertWebviewPlanToolUxFlow(
     toolName: "update_plan",
     type: "tool_execution_end",
   });
+  await fs.writeFile(planPath, renderPlanMarkdown(afterFirstUpdateTodos), "utf8");
   await api.__testing.injectServeEvent({
     planId,
     sessionId,
     todos: afterFirstUpdateTodos,
     type: "plan.todos",
   });
-  await fs.writeFile(planPath, renderPlanMarkdown(afterFirstUpdateTodos), "utf8");
 
   await api.__testing.injectServeEvent({
     args: {
@@ -4660,13 +4741,13 @@ export async function assertWebviewPlanToolUxFlow(
     toolName: "update_plan",
     type: "tool_execution_end",
   });
+  await fs.writeFile(planPath, renderPlanMarkdown(afterSecondUpdateTodos), "utf8");
   await api.__testing.injectServeEvent({
     planId,
     sessionId,
     todos: afterSecondUpdateTodos,
     type: "plan.todos",
   });
-  await fs.writeFile(planPath, renderPlanMarkdown(afterSecondUpdateTodos), "utf8");
 
   const settled = await waitForWebviewDomSnapshot(
     api,
@@ -4713,6 +4794,16 @@ export async function assertWebviewPlanToolUxFlow(
     "expected View Plan to return after the plan tool finishes",
   );
   await api.__testing.openPlanPreview(planPath);
+  // The preview can be opened after both disk writes have coalesced. Re-emit the
+  // terminal plan update now that its panel exists, exercising the production
+  // plan-event refresh path instead of relying on a filesystem-watch race.
+  await api.__testing.injectServeEvent({
+    path: planPath,
+    planId,
+    sessionId,
+    state: "planning",
+    type: "plan.update",
+  });
   const preview = await waitForPlanPreviewDom(
     api,
     planPath,
@@ -5124,9 +5215,9 @@ export async function assertPlanPreviewCustomEditorFlow(
       () =>
         api.__testing
           .getObservedFileOpens()
-          .some((entry) => entry.path === linkedDisplayPath && entry.line === 2),
+          .some((entry) => entry.path === linkedFilePath && entry.line === 2),
       20_000,
-      `expected the inline path click to call ide.showFile(${linkedDisplayPath}, 2)`,
+      `expected the inline path click to call ide.showFile(${linkedFilePath}, 2)`,
     );
     const linkedEditor = await waitForActiveTextEditor(
       (editor) => editor?.document.uri.fsPath === linkedFilePath,
@@ -5167,7 +5258,7 @@ export async function assertPlanPreviewCustomEditorFlow(
 
     const updatedText = initialText.replace(
       "---\n\n# E2E heading",
-      ["- id: t4", "  content: Fourth task", "  status: cancelled", "---", "", "# E2E heading"].join(
+      ["- id: t4", "  content: Fourth task", "  status: pending", "---", "", "# E2E heading"].join(
         "\n",
       ),
     );
@@ -5179,6 +5270,29 @@ export async function assertPlanPreviewCustomEditorFlow(
       state: "planning",
       type: "plan.update",
     });
+
+    const refreshed = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) =>
+        snapshot.refreshCounters.hostRefreshCalls
+          > scrollBeforeHotUpdate.refreshCounters.hostRefreshCalls,
+    );
+    assert.ok(
+      refreshed.refreshCounters.hostPostAttempts
+        > scrollBeforeHotUpdate.refreshCounters.hostPostAttempts,
+      `expected the host to attempt a state frame after refresh; before=${JSON.stringify(scrollBeforeHotUpdate.refreshCounters)} after=${JSON.stringify(refreshed.refreshCounters)}`,
+    );
+    assert.ok(
+      refreshed.refreshCounters.hostPostDeliveries
+        > scrollBeforeHotUpdate.refreshCounters.hostPostDeliveries,
+      `expected the host to deliver a state frame after refresh; before=${JSON.stringify(scrollBeforeHotUpdate.refreshCounters)} after=${JSON.stringify(refreshed.refreshCounters)}`,
+    );
+    assert.ok(
+      refreshed.refreshCounters.webviewStateFrames
+        > scrollBeforeHotUpdate.refreshCounters.webviewStateFrames,
+      `expected the visible webview to receive a state frame after refresh; before=${JSON.stringify(scrollBeforeHotUpdate.refreshCounters)} after=${JSON.stringify(refreshed.refreshCounters)}`,
+    );
 
     // Expected 1-based source lines of the rendered blocks, derived from the
     // (post hot-update) document so the assertions can't drift.

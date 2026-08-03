@@ -8,7 +8,10 @@ import type {
   ServeContentSegment,
   ServeEvent,
 } from "../../serveClient/wire";
-import type { ParticipantPlanState } from "../../shared/planState";
+import type {
+  WebviewAgentMode,
+  WebviewPlanFileState,
+} from "../../shared/planState";
 import type {
   AttachmentCandidate,
   AttachmentResultItem,
@@ -212,8 +215,8 @@ export interface WebviewPlanActivity {
   completed?: number;
   kind: "create" | "update";
   overview?: string | null;
-  stateAfter?: ParticipantPlanState | null;
-  stateBefore?: ParticipantPlanState | null;
+  stateAfter?: WebviewPlanFileState | null;
+  stateBefore?: WebviewPlanFileState | null;
   title?: string | null;
   total?: number;
 }
@@ -250,7 +253,7 @@ export interface WebviewToolCard {
 export interface WebviewPlanFileRef {
   path: string;
   planId?: string | null;
-  state: ParticipantPlanState | null;
+  state: WebviewPlanFileState | null;
 }
 
 export interface WebviewPlanFileCard extends WebviewPlanFileRef {
@@ -343,6 +346,8 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  activePlan?: WebviewPlanFileRef | null;
+  agentMode: WebviewAgentMode;
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
   composerDraft?: WebviewComposerDraft;
@@ -355,9 +360,6 @@ export interface WebviewSessionSnapshot {
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
   pendingAttachments: WebviewPendingAttachment[];
-  planFile?: WebviewPlanFileRef | null;
-  planId?: string | null;
-  planState?: ParticipantPlanState | null;
   sessionId: string;
   timeline: WebviewTimelineItem[];
 }

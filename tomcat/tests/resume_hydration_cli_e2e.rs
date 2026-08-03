@@ -363,8 +363,10 @@ fn resume_cli_corrupt_index_rebuilds_on_startup() {
     );
     let repaired: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
-    // 重建写的是当前版本；随 resume_index.rs 的 RESUME_INDEX_SCHEMA_VERSION 一起改。
-    assert_eq!(repaired["schema_version"], serde_json::json!(2));
+    assert_eq!(
+        repaired["schema_version"],
+        serde_json::json!(tomcat::core::session::RESUME_INDEX_SCHEMA_VERSION)
+    );
 }
 
 #[test]
@@ -412,9 +414,10 @@ fn resume_cli_heals_dangling_tool_call_tail_without_llm() {
             TranscriptEntry::Message(me)
                 if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
                     && me.message.get("tool_call_id").and_then(|v| v.as_str()) == Some("call_1")
-                    && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+                    && me.message.get("content").and_then(|v| v.as_str())
+                        == Some(tomcat::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
         )),
-        "resume CLI should heal dangling tool call tail"
+        "resume CLI must require verification for a dangling read: read-only does not prove it never ran"
     );
 }
 

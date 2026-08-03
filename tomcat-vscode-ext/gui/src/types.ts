@@ -193,8 +193,8 @@ export interface WebviewPlanActivity {
   completed?: number;
   kind: "create" | "update";
   overview?: string | null;
-  stateAfter?: WebviewPlanState | null;
-  stateBefore?: WebviewPlanState | null;
+  stateAfter?: WebviewPlanFileState | null;
+  stateBefore?: WebviewPlanFileState | null;
   title?: string | null;
   total?: number;
 }
@@ -228,13 +228,15 @@ export interface WebviewToolCard {
   type: "tool";
 }
 
-export type WebviewPlanState =
-  "chat" | "planning" | "executing" | "pending" | "completed";
+export type WebviewPlanFileState =
+  "planning" | "executing" | "pending" | "completed";
+
+export type WebviewAgentMode = "chat" | "plan";
 
 export interface WebviewPlanFileRef {
   path: string;
   planId?: string | null;
-  state: WebviewPlanState | null;
+  state: WebviewPlanFileState | null;
 }
 
 export interface WebviewPlanFileCard extends WebviewPlanFileRef {
@@ -352,6 +354,8 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  activePlan?: WebviewPlanFileRef | null;
+  agentMode: WebviewAgentMode;
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
   composerDraft?: WebviewComposerDraft;
@@ -364,9 +368,6 @@ export interface WebviewSessionSnapshot {
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
   pendingAttachments: WebviewPendingAttachment[];
-  planFile?: WebviewPlanFileRef | null;
-  planId?: string | null;
-  planState?: WebviewPlanState | null;
   sessionId: string;
   timeline: WebviewTimelineItem[];
 }

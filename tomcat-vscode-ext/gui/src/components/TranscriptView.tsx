@@ -5,7 +5,7 @@ import type {
   PathResolution,
   WebviewCheckpoint,
   WebviewMediaRoot,
-  WebviewPlanState,
+  WebviewPlanFileState,
   WebviewTimelineItem,
   WebviewTodo,
 } from "../types";
@@ -168,7 +168,7 @@ export function TranscriptView({
   onZoomImage?(image: { alt: string; src: string }): void;
   resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   planId?: string | null;
-  planState?: WebviewPlanState | null;
+  planState?: WebviewPlanFileState | null;
   planTodos?: WebviewTodo[];
   sessionModel?: string;
   sessionTodos?: WebviewTodo[];

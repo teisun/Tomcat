@@ -1237,8 +1237,8 @@ function buildContextLabel(contextRatio?: number | null): string {
   return `Ctx ${Math.round(contextRatio * 100)}%`;
 }
 
-function currentModeValue(planState?: string | null): "chat" | "plan" {
-  return planState && planState !== "chat" ? "plan" : "chat";
+function currentModeValue(agentMode?: string | null): "chat" | "plan" {
+  return agentMode === "plan" ? "plan" : "chat";
 }
 
 function submitPrompt(
@@ -2228,13 +2228,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     if (!activeSession) {
       return;
     }
-    const current = currentModeValue(activeSession.planState);
+    const current = currentModeValue(activeSession.agentMode);
     if (value === current) {
       return;
     }
     postIntent(vscodeApi, "setPlanMode", {
       action: value === "plan" ? "enter" : "exit",
-      planId: activeSession.planId ?? null,
+      planId: activeSession.activePlan?.planId ?? null,
       sessionId: activeSession.sessionId,
     });
   };
@@ -2496,8 +2496,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onRetryUserMessage={handleRetryUserMessage}
                 canBuildPlan={canBuildPlan}
                 onBuildPlan={handleBuildPlan}
-                planId={activeSession.planId}
-                planState={activeSession.planState}
+                planId={activeSession.activePlan?.planId}
+                planState={activeSession.activePlan?.state}
                 planTodos={activeSession.planTodos ?? []}
                 onRestoreCheckpoint={handleOpenRestoreDialog}
                 sessionModel={activeSession.model ?? ""}
@@ -2567,7 +2567,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       <TodoListWidget
         busy={!!activeSession?.busy}
-        planState={activeSession?.planState}
+        planState={activeSession?.activePlan?.state}
         planTodos={activeSession?.planTodos ?? []}
         sessionTodos={activeSession?.sessionTodos ?? []}
       />
@@ -2635,7 +2635,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         contextSearchTruncated={contextSearch.truncated}
         contextLabel={buildContextLabel(activeSession?.contextRatio)}
         modelCapabilities={activeModelCapabilities}
-        modeValue={currentModeValue(activeSession?.planState)}
+        modeValue={currentModeValue(activeSession?.agentMode)}
         modelValue={activeSession?.model ?? ""}
         supportedReasoningLevels={activeModelReasoningLevels}
         thinkingLevelValue={activeSession?.thinkingLevel ?? ""}
@@ -2730,7 +2730,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             },
           );
         }}
-        planState={activeSession?.planState}
+        planState={activeSession?.activePlan?.state}
       />
     </main>
   );

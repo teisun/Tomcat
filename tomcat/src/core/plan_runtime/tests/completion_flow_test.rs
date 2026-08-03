@@ -36,6 +36,15 @@ fn executor_reminder_format_uses_system_reminder_tags() {
 }
 
 #[test]
+fn executor_reminder_contains_no_legacy_mode_wording() {
+    let reminder = reminders::render_executor_reminder("migration-plan");
+    assert!(
+        !reminder.contains("EXEC") && !reminder.contains("CHAT"),
+        "executor reminder must describe the plan lifecycle, not retired session modes: {reminder}"
+    );
+}
+
+#[test]
 fn runtime_reminders_batch_detailed_todos_without_repeating_final_acceptance() {
     let planner: &str = *reminders::PLANNER_REMINDER;
     let executor = reminders::render_executor_reminder("batch-contract");

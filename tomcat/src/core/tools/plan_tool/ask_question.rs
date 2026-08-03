@@ -1,7 +1,7 @@
 //! `ask_question` 工具实现（plan-runtime.md §AQ-A/B/C/E, [ask-question.md]）。
 //!
 //! 语义：
-//! - 仅 `Planning` 模式可见；EXEC/CHAT/Pending/Completed 调用 → `InvisibleInMode`。
+//! - 计划执行时不可用；其它会话阶段均可调用。
 //! - 入参校验：
 //!   - `questions.len() ∈ [1, 4]`
 //!   - 每题 `options.len() ∈ [2, 4]`、`option.id` 唯一、保留 `__custom__` 拒
@@ -17,7 +17,6 @@ use crate::core::plan_runtime::{
         AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
         AskQuestionTermination, Question, CUSTOM_OPTION_ID,
     },
-    state::PlanState,
     PlanRuntime,
 };
 
@@ -42,8 +41,8 @@ pub async fn execute_for_tool(
     tool_call_id: Option<&str>,
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
-    // B11：CHAT / Planning / Pending / Completed 都可见；EXEC 隐藏（防止 agent loop 阻塞）。
-    if matches!(mode, PlanState::Executing { .. }) {
+    // 执行计划时隐藏（防止 agent loop 阻塞）。
+    if runtime.executing_plan_id().is_some() {
         return Err(ToolError::InvisibleInMode {
             tool: "ask_question",
             mode: mode.as_str().to_string(),
@@ -262,11 +261,7 @@ fn write_ask_question_transcript(
         "result": payload,
         "mode": runtime.mode().as_str(),
     });
-    let plan_id = runtime
-        .mode()
-        .active_plan_id()
-        .map(ToOwned::to_owned)
-        .or_else(|| runtime.active_planning_plan_id());
+    let plan_id = runtime.active_plan().map(|plan| plan.id);
     if let (Some(obj), Some(plan_id)) = (extra.as_object_mut(), plan_id) {
         obj.insert("plan_id".into(), serde_json::Value::String(plan_id));
     }

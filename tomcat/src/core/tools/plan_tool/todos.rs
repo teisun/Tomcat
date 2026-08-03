@@ -10,7 +10,6 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::TodoStatus,
-    state::PlanState,
     todo_runtime::{TodoFile, TodosRuntime},
     PlanRuntime,
 };
@@ -53,15 +52,13 @@ pub fn execute(
     todos_runtime: Option<&TodosRuntime>,
     args: TodosArgs,
 ) -> Result<serde_json::Value, ToolError> {
-    let mode = runtime.mode();
-    session_path(runtime, todos_runtime, args, mode)
+    session_path(runtime, todos_runtime, args)
 }
 
 fn session_path(
     runtime: &PlanRuntime,
     todos_runtime: Option<&TodosRuntime>,
     args: TodosArgs,
-    mode: PlanState,
 ) -> Result<serde_json::Value, ToolError> {
     let mut todos = if args.new_todos {
         Vec::new()
@@ -98,7 +95,7 @@ fn session_path(
         .map(|t| t.id.clone());
     let mut out = serde_json::json!({
         "scope": "session",
-        "mode": mode.as_str(),
+        "mode": runtime.mode().as_str(),
         "applied": args.ops.len(),
         "replace": args.replace,
         "new_todos": args.new_todos,

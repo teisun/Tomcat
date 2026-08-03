@@ -138,10 +138,14 @@ pub mod wire {
     pub const WIRE_PLAN_CREATE: &str = "plan.create";
     /// `/plan build` 成功把 plan 绑定到当前 runtime 并把盘 state 切到 `executing`。
     pub const WIRE_PLAN_BUILD: &str = "plan.build";
-    /// `/plan` 进入 Planning 模式。
+    /// `/plan` 进入 Planning 模式。仅为兼容旧 transcript 保留读取，不再写入。
     pub const WIRE_PLAN_ENTER: &str = "plan.enter";
-    /// `/plan exit` 退回 Chat 模式。
+    /// `/plan exit` 退回 Chat 模式。仅为兼容旧 transcript 保留读取，不再写入。
     pub const WIRE_PLAN_EXIT: &str = "plan.exit";
+    /// 会话交互模式发生变化。payload 带 `agentMode: "chat" | "plan"`。
+    ///
+    /// 计划文件事件不得再借用这一职责；它们只描述计划文件的生命周期。
+    pub const WIRE_SESSION_AGENT_MODE_CHANGED: &str = "session.agent_mode.changed";
     /// `update_plan` 成功写盘（普通更新 / reopen / finalize 收口都复用此事件）。
     pub const WIRE_PLAN_UPDATE: &str = "plan.update";
     /// 已完成 / 中断后的 plan 被 reopen 到 `pending`。

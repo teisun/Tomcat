@@ -5412,9 +5412,9 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
     assert!(
         state.messages.iter().any(|m| {
             m.tool_call_id.as_deref() == Some("call_tail")
-                && m.text_content() == Some("[interrupted]")
+                && m.text_content() == Some(tomcat::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
         }),
-        "自愈后 state 应包含补齐的 `[interrupted]` tool 结果"
+        "可产生副作用的 bash 在重启后应标记为需核实的 tool 结果"
     );
 
     let transcript_path = ctx
@@ -5424,7 +5424,7 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
         .expect("current_transcript_path")
         .expect("transcript path should exist");
     let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
-    let mut interrupted_idx = None;
+    let mut healed_idx = None;
     let mut continued_idx = None;
     for (idx, line) in transcript.lines().enumerate() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -5437,20 +5437,20 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
         let content = message.get("content").and_then(|v| v.as_str());
         if role == Some("tool")
             && message.get("tool_call_id").and_then(|v| v.as_str()) == Some("call_tail")
-            && content == Some("[interrupted]")
+            && content == Some(tomcat::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
         {
-            interrupted_idx = Some(idx);
+            healed_idx = Some(idx);
         }
         if role == Some("user") && content == Some("继续") {
             continued_idx = Some(idx);
         }
     }
-    let interrupted_idx =
-        interrupted_idx.expect("transcript should contain healed interrupted tool result");
+    let healed_idx =
+        healed_idx.expect("transcript should contain the healed unknown-after-restart result");
     let continued_idx = continued_idx.expect("transcript should contain continued user input");
     assert!(
-        interrupted_idx < continued_idx,
-        "补齐的 `[interrupted]` 应先于用户输入落盘，actual transcript: {}",
+        healed_idx < continued_idx,
+        "补齐的 unknown-after-restart 结果应先于用户输入落盘，actual transcript: {}",
         trunc(&transcript, 800)
     );
 

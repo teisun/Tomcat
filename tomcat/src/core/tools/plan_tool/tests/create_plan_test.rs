@@ -30,7 +30,7 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "为 chat 补齐 plan 闭环".into(),
         draft: "step 1; step 2; step 3".into(),
@@ -50,8 +50,12 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(true));
 
     assert_eq!(
-        rt.active_planning_plan_id().as_deref(),
+        rt.active_plan().as_ref().map(|plan| plan.id.as_str()),
         Some(plan_id.as_str())
+    );
+    assert_eq!(
+        rt.active_plan().as_ref().map(|plan| plan.state),
+        Some(PlanFileState::Planning)
     );
     let path = home
         .join(".tomcat")
@@ -68,11 +72,11 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
 }
 
 #[test]
-fn create_plan_multiple_times_overrides_active_planning_id_and_binding_path() {
+fn create_plan_multiple_times_overrides_the_active_plan() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
 
     let first = create_plan::execute(
         &rt,
@@ -104,7 +108,10 @@ fn create_plan_multiple_times_overrides_active_planning_id_and_binding_path() {
     let first_id = first["plan_id"].as_str().unwrap();
     let second_id = second["plan_id"].as_str().unwrap();
     assert_ne!(first_id, second_id);
-    assert_eq!(rt.active_planning_plan_id().as_deref(), Some(second_id));
+    assert_eq!(
+        rt.active_plan().as_ref().map(|plan| plan.id.as_str()),
+        Some(second_id)
+    );
     assert_eq!(
         rt.active_plan_path(),
         Some(plan_path_for_id(second_id).unwrap()),
@@ -120,7 +127,7 @@ fn create_plan_normalizes_legacy_heading_wrapped_draft() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "Draft a minimal internal plan with two clear next steps.".into(),
         draft: "## Goal\n\nDraft a minimal internal plan.\n\n## Notes\n\nKeep scope small and actionable.\n"
@@ -153,7 +160,7 @@ fn create_plan_rejects_empty_goal() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "".into(),
         draft: "d".into(),
@@ -173,7 +180,7 @@ fn create_plan_rejects_empty_draft_or_todos() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let err = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {

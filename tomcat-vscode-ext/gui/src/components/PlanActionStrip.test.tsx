@@ -8,6 +8,7 @@ function renderStrip(overrides: Partial<Parameters<typeof PlanActionStrip>[0]> =
     availableModels: ["gpt-5.6", "claude-opus"],
     buildModel: "",
     canBuild: true,
+    fileState: "planning" as const,
     onBuild: vi.fn(),
     onSetBuildModel: vi.fn(),
     ...overrides,
@@ -31,6 +32,11 @@ describe("PlanActionStrip", () => {
     const props = renderStrip();
     fireEvent.click(screen.getByTestId("plan-build"));
     expect(props.onBuild).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels a pending plan action as Resume", () => {
+    renderStrip({ fileState: "pending" });
+    expect(screen.getByTestId("plan-build").textContent).toBe("Resume");
   });
 
   it("disables Build when canBuild is false", () => {

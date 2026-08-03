@@ -11,8 +11,8 @@ pub(crate) use crate::core::plan_runtime::review::Finding;
 pub(crate) use crate::core::plan_runtime::todo_runtime::TodosRuntime;
 pub(crate) use crate::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 pub(crate) use crate::core::plan_runtime::{
-    state::PlanState, CodeReviewSummary, CodeReviewerDispatcher, PlanReviewSummary,
-    PlanReviewerDispatcher, PlanRuntime, PlanRuntimeError, VerifierDispatcher,
+    CodeReviewSummary, CodeReviewerDispatcher, PlanReviewSummary, PlanReviewerDispatcher,
+    PlanRuntime, PlanRuntimeError, VerifierDispatcher,
 };
 pub(crate) use crate::core::session::manager::{AgentMode, ResumeControlState};
 pub(crate) use crate::core::tools::plan_tool::{
@@ -53,7 +53,7 @@ pub fn cleanup_home(p: &std::path::Path) {
 
 pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
     rt.set_max_code_review_rounds(0);
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         rt,
         create_plan::CreatePlanArgs {
@@ -85,7 +85,7 @@ pub fn mark_plan_executing(rt: &PlanRuntime, plan_id: &str, session_key: &str) {
     plan.frontmatter.session_id = Some(format!("sid-{session_key}"));
     write_plan(&path, &plan, 2000).unwrap();
     rt.set_max_code_review_rounds(0);
-    rt.set_executing_for_test(plan_id.to_string());
+    rt.bind_plan_file_for_test(path);
 }
 
 pub struct MockPlanReviewerDispatcher {

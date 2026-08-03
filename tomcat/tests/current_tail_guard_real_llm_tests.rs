@@ -17,10 +17,9 @@ use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
     TodoItem, TodoStatus, PLAN_FILE_SCHEMA_VERSION,
 };
-use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::PlanRuntime;
 use tomcat::core::session::transcript::append_entry;
-use tomcat::core::session::{PlanEventKind, PlanEventRef};
+use tomcat::core::session::{AgentMode, ResumeControlState};
 use tomcat::core::tools::contract::catalog::builtin_tool_by_name;
 use tomcat::core::tools::plan_tool::update_plan::{self, UpdatePlanArgs};
 use tomcat::{
@@ -147,7 +146,6 @@ struct PlanFixture {
     plan_id: String,
     plan_path: PathBuf,
     plan_runtime: Arc<PlanRuntime>,
-    latest_plan_event: PlanEventRef,
     active_id: String,
     active_content: String,
     next_id: String,
@@ -207,14 +205,15 @@ Verify that the model can continue execution after keepalive collapse.
 
     let plan_runtime = PlanRuntime::new_with_session_id(SESSION_KEY, SESSION_ID);
     plan_runtime.set_max_code_review_rounds(0);
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime
+        .attach_from_resume_state(ResumeControlState {
+            mode: Some(AgentMode::Chat),
+            plan_path: Some(plan_path.clone()),
+            plan_id: Some(plan_id.clone()),
+        })
+        .expect("bind plan fixture");
 
     PlanFixture {
-        latest_plan_event: PlanEventRef {
-            kind: PlanEventKind::Build,
-            plan_id: plan_id.clone(),
-            path: plan_path.clone(),
-        },
         plan_id,
         plan_path,
         plan_runtime,
@@ -588,11 +587,10 @@ async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
     restored_runtime
         .attach_from_resume_state(state.resume_control.clone())
         .expect("attach_from_resume_state 失败");
+    assert_eq!(restored_runtime.mode(), AgentMode::Chat);
     assert_eq!(
-        restored_runtime.mode(),
-        PlanState::Executing {
-            plan_id: fixture.plan_id.clone()
-        }
+        restored_runtime.executing_plan_id().as_deref(),
+        Some(fixture.plan_id.as_str())
     );
 
     let mut reloaded_messages = state.messages.clone();
@@ -605,11 +603,10 @@ async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
         .await
         .expect("执行 reload 后的 update_plan 失败");
     assert_eq!(result["plan_state_after"].as_str(), Some("executing"));
+    assert_eq!(restored_runtime.mode(), AgentMode::Chat);
     assert_eq!(
-        restored_runtime.mode(),
-        PlanState::Executing {
-            plan_id: fixture.plan_id.clone()
-        }
+        restored_runtime.executing_plan_id().as_deref(),
+        Some(fixture.plan_id.as_str())
     );
     let plan = read_plan(&fixture.plan_path).expect("读取 reload 后 plan 失败");
     let active = plan

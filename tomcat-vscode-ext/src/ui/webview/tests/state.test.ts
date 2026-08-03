@@ -266,7 +266,7 @@ describe("WebviewStateStore wire routing", () => {
       "plan-tool-ux",
     );
     expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
-    expect(session.planFile).toMatchObject({
+    expect(session.activePlan).toMatchObject({
       path: "/workspace/plan-tool-ux.plan.md",
       planId: "plan-tool-ux",
       state: "planning",
@@ -279,11 +279,14 @@ describe("WebviewStateStore wire routing", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
+      activePlan: {
+        id: "plan-1",
+        path: "/workspace/plans/plan-1.plan.md",
+        state: "executing",
+      },
+      agentMode: "chat",
       busy: true,
       model: "gpt-5.4",
-      planId: "plan-1",
-      planPath: "/workspace/plans/plan-1.plan.md",
-      planState: "executing",
       sessionId: "s1",
     });
 
@@ -408,10 +411,9 @@ describe("WebviewStateStore wire routing", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
+      agentMode: "chat",
       busy: true,
       model: "gpt-5.4",
-      planId: "plan-1",
-      planState: "executing",
       sessionId: "s1",
     });
     store.applyEvent({
@@ -1557,13 +1559,16 @@ describe("session state hydration", () => {
 
     store.applySessionState(
       {
+        activePlan: {
+          id: "plan-1",
+          path: "/workspace/plan-a.plan.md",
+          state: "executing",
+        },
+        agentMode: "chat",
         busy: false,
         contextRatio: 0.42,
         interrupted: false,
         model: "gpt-5.4",
-        planId: "plan-1",
-        planPath: "/workspace/plan-a.plan.md",
-        planState: "executing",
         sessionId: "s1",
         thinkingLevel: "high",
       },
@@ -1574,8 +1579,8 @@ describe("session state hydration", () => {
     expect(session.busy).toBe(true);
     expect(session.contextRatio).toBe(0.42);
     expect(session.model).toBe("gpt-5.4");
-    expect(session.planId).toBe("plan-1");
-    expect(session.planState).toBe("executing");
+    expect(session.activePlan?.planId).toBe("plan-1");
+    expect(session.activePlan?.state).toBe("executing");
   });
 
   it("treats agent_idle as the only event that returns the session to idle", () => {
@@ -1756,12 +1761,15 @@ describe("session state hydration", () => {
     store.setActiveSession("s1");
 
     store.applySessionState({
+      activePlan: {
+        id: "plan-1",
+        path: "/workspace/plan-a.plan.md",
+        state: "planning",
+      },
+      agentMode: "plan",
       busy: false,
       contextRatio: 0.42,
       model: "gpt-5.4",
-      planId: "plan-1",
-      planPath: "/workspace/plan-a.plan.md",
-      planState: "planning",
       sessionId: "s1",
     });
 
@@ -1773,19 +1781,21 @@ describe("session state hydration", () => {
       type: "plan.build",
     });
     store.applySessionState({
+      activePlan: {
+        id: "plan-1",
+        path: "/workspace/plan-a.plan.md",
+        state: "pending",
+      },
+      agentMode: "chat",
       busy: false,
       model: "gpt-5.4",
-      planId: "plan-1",
-      planPath: "/workspace/plan-a.plan.md",
-      planState: "pending",
       sessionId: "s1",
     });
     store.applySessionState({
+      activePlan: null,
+      agentMode: "chat",
       busy: false,
       model: "gpt-5.4",
-      planId: null,
-      planPath: null,
-      planState: "chat",
       sessionId: "s1",
     });
 
@@ -1793,11 +1803,7 @@ describe("session state hydration", () => {
     const planCards = session.timeline.filter((item) => item.type === "plan");
     expect(planCards).toEqual([]);
     expect(session.contextRatio).toBe(0.42);
-    expect(session.planFile).toMatchObject({
-      path: "/workspace/plan-a.plan.md",
-      planId: "plan-1",
-      state: "chat",
-    });
+    expect(session.activePlan).toBeNull();
   });
 
   it("keeps live create_plan cards in chronological order when rebuilding against stale history", () => {
@@ -1926,11 +1932,14 @@ describe("session state hydration", () => {
     ];
 
     store.applySessionState({
+      activePlan: {
+        id: "plan-1",
+        path: "/workspace/active.plan.md",
+        state: "pending",
+      },
+      agentMode: "chat",
       busy: false,
       model: "gpt-5.4",
-      planId: "plan-1",
-      planPath: "/workspace/active.plan.md",
-      planState: "pending",
       sessionId: "s1",
     });
 
@@ -1940,7 +1949,7 @@ describe("session state hydration", () => {
       "tool-plan-create",
       "user-2",
     ]);
-    expect(store.snapshot().sessionViews.s1.planFile).toMatchObject({
+    expect(store.snapshot().sessionViews.s1.activePlan).toMatchObject({
       path: "/workspace/active.plan.md",
       planId: "plan-1",
       state: "pending",
@@ -1986,15 +1995,18 @@ describe("session state hydration", () => {
 });
 
 describe("custom history replay", () => {
-  it("replays plan custom entries into ambient plan state without timeline cards", () => {
+  it("keeps the current active plan authoritative over replayed plan history", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
+      activePlan: {
+        id: "plan-1",
+        path: "/workspace/plan-a.plan.md",
+        state: "executing",
+      },
+      agentMode: "chat",
       busy: false,
       model: "gpt-5.4",
-      planId: "plan-1",
-      planPath: "/workspace/plan-a.plan.md",
-      planState: "executing",
       sessionId: "s1",
     });
 
@@ -2095,12 +2107,12 @@ describe("custom history replay", () => {
     );
     const reviewRow = session.timeline.find((item) => item.type === "review");
     expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
-    expect(session.planFile).toMatchObject({
+    expect(session.activePlan).toMatchObject({
       path: "/workspace/plan-a.plan.md",
       planId: "plan-1",
       state: "executing",
     });
-    expect(session.planState).toBe("executing");
+    expect(session.activePlan?.state).toBe("executing");
     expect(notices).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ text: "Tomcat plan review: looks good" }),
@@ -2416,11 +2428,14 @@ describe("custom history replay", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
+      activePlan: {
+        id: "plan-1",
+        path: "/workspace/plan-a.plan.md",
+        state: "executing",
+      },
+      agentMode: "chat",
       busy: false,
       model: "gpt-5.4",
-      planId: "plan-1",
-      planPath: "/workspace/plan-a.plan.md",
-      planState: "executing",
       sessionId: "s1",
     });
 
@@ -2456,7 +2471,7 @@ describe("custom history replay", () => {
       (item) => item.type === "message" && item.kind === "notice",
     );
     expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
-    expect(session.planFile).toMatchObject({
+    expect(session.activePlan).toMatchObject({
       path: "/workspace/plan-a.plan.md",
       planId: "plan-1",
       state: "executing",
@@ -2511,11 +2526,14 @@ describe("plan.todos routing", () => {
     store.setActiveSession("s1");
 
     store.applySessionState({
+      activePlan: {
+        id: "plan-a",
+        path: "/workspace/plan-a.plan.md",
+        state: "planning",
+      },
+      agentMode: "plan",
       busy: false,
       model: "gpt-5.4",
-      planId: "plan-a",
-      planPath: "/workspace/plan-a.plan.md",
-      planState: "planning",
       sessionId: "s1",
     });
     store.applyEvent({
@@ -2533,8 +2551,8 @@ describe("plan.todos routing", () => {
       { content: "A step 1", id: "a1", status: "pending" },
       { content: "A step 2", id: "a2", status: "in_progress" },
     ]);
-    expect(session.planId).toBe("plan-a");
-    expect(session.planFile).toMatchObject({
+    expect(session.activePlan?.planId).toBe("plan-a");
+    expect(session.activePlan).toMatchObject({
       path: "/workspace/plan-a.plan.md",
       planId: "plan-a",
       state: "planning",
@@ -2545,11 +2563,14 @@ describe("plan.todos routing", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
+      activePlan: {
+        id: "plan-a",
+        path: "/workspace/plan-a.plan.md",
+        state: "planning",
+      },
+      agentMode: "plan",
       busy: false,
       model: "gpt-5.4",
-      planId: "plan-a",
-      planPath: "/workspace/plan-a.plan.md",
-      planState: "planning",
       sessionId: "s1",
     });
 
@@ -2585,11 +2606,14 @@ describe("plan.todos routing", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
+      activePlan: {
+        id: "plan-a",
+        path: "/workspace/plan-a.plan.md",
+        state: "planning",
+      },
+      agentMode: "plan",
       busy: false,
       model: "gpt-5.4",
-      planId: "plan-a",
-      planPath: "/workspace/plan-a.plan.md",
-      planState: "planning",
       sessionId: "s1",
     });
     store.applyEvent({
@@ -2800,10 +2824,10 @@ describe("local user message delivery state", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
+      activePlan: null,
+      agentMode: "chat",
       busy: false,
       model: "gpt-5.4",
-      planId: null,
-      planState: "chat",
       sessionId: "s1",
     });
 
@@ -3926,7 +3950,7 @@ describe("openFile intent protocol", () => {
 });
 
 describe("persisted system note history", () => {
-  it("renders nudge and background signals as folded system notes but keeps steering as a user bubble", () => {
+  it("renders plan-build, nudge, and background signals as folded system notes but keeps steering as a user bubble", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.hydrateHistory("s1", {
@@ -3934,6 +3958,15 @@ describe("persisted system note history", () => {
         {
           id: "steering-1",
           message: { content: "请用中文", kind: "steering", role: "user" },
+          type: "message",
+        },
+        {
+          id: "plan-build-1",
+          message: {
+            content: "Start building plan `plan-1`.",
+            kind: "plan_build",
+            role: "user",
+          },
           type: "message",
         },
         {
@@ -3957,6 +3990,12 @@ describe("persisted system note history", () => {
     const timeline = store.snapshot().sessionViews.s1.timeline;
     expect(timeline).toEqual([
       expect.objectContaining({ id: "steering-1", kind: "user", type: "message" }),
+      expect.objectContaining({
+        id: "plan-build-1",
+        summary: "Start building plan `plan-1`.",
+        title: "开始执行计划",
+        type: "boundary",
+      }),
       expect.objectContaining({
         id: "nudge-1",
         summary: "Continue the active plan.",

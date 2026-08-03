@@ -1,17 +1,17 @@
 import type { ServePlanEvent } from "../serveClient/wire";
 
-export type ParticipantPlanState =
-  | "chat"
+export type WebviewPlanFileState =
   | "planning"
   | "executing"
   | "pending"
   | "completed";
 
-export function normalizePlanState(
+export type WebviewAgentMode = "chat" | "plan";
+
+export function normalizePlanFileState(
   value: unknown,
-): ParticipantPlanState | null {
+): WebviewPlanFileState | null {
   switch (value) {
-    case "chat":
     case "planning":
     case "executing":
     case "pending":
@@ -22,8 +22,8 @@ export function normalizePlanState(
   }
 }
 
-export function planStateProgressLabel(
-  state: ParticipantPlanState | null,
+export function planFileStateProgressLabel(
+  state: WebviewPlanFileState | null,
   planId?: string | null,
 ): string {
   const suffix = planId ? ` (${planId})` : "";
@@ -36,8 +36,6 @@ export function planStateProgressLabel(
       return `Tomcat plan pending${suffix}`;
     case "completed":
       return `Tomcat completed plan${suffix}`;
-    case "chat":
-      return "Tomcat chat mode";
     default:
       return "Tomcat plan state updated";
   }
@@ -45,8 +43,8 @@ export function planStateProgressLabel(
 
 export function planEventState(
   event: ServePlanEvent,
-): ParticipantPlanState | null {
-  const explicit = normalizePlanState(
+): WebviewPlanFileState | null {
+  const explicit = normalizePlanFileState(
     "state" in event ? event.state : undefined,
   );
   if (explicit) {
@@ -60,12 +58,9 @@ export function planEventState(
       return "completed";
     case "plan.pending":
       return "pending";
-    case "plan.enter":
     case "plan.create":
     case "plan.update":
       return "planning";
-    case "plan.exit":
-      return "chat";
     default:
       return null;
   }

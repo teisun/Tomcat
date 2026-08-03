@@ -140,7 +140,41 @@ fn sidecar_schema_version_mismatch_falls_back_and_rebuilds() {
 
     let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
     assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
-    assert_eq!(rebuilt.index.schema_version, 2);
+    assert_eq!(rebuilt.index.schema_version, 3);
+}
+
+#[test]
+fn legacy_exec_sidecar_heals_to_chat_on_first_hydrate() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    mgr.append_custom_entry(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_BUILD,
+        "plan_id": "legacy-plan",
+        "path": "/tmp/legacy-plan.plan.md",
+        "state": "executing",
+    }))
+    .unwrap();
+    let sidecar_path = resume_index_path(&transcript_path);
+    let _ = load_or_rebuild_resume_index(&transcript_path).unwrap();
+
+    let mut old_sidecar: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    old_sidecar["schema_version"] = serde_json::json!(2);
+    old_sidecar["agent_mode"] = serde_json::json!("exec");
+    std::fs::write(
+        &sidecar_path,
+        serde_json::to_vec_pretty(&old_sidecar).unwrap(),
+    )
+    .unwrap();
+
+    let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
+    assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
+    assert_eq!(rebuilt.index.schema_version, 3);
+    assert_eq!(
+        rebuilt.index.resume_control_state().mode,
+        Some(AgentMode::Chat),
+        "an old exec sidecar is replaced by the event-derived Chat mode"
+    );
 }
 
 #[test]

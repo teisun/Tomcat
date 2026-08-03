@@ -4,7 +4,7 @@ import type {
   AskQuestionResult,
   WebviewApprovalQuestion,
   WebviewPlanFileCard,
-  WebviewPlanState,
+  WebviewPlanFileState,
   WebviewTodo,
   WebviewToolCard,
   WebviewToolDisplayFileEntry,
@@ -124,7 +124,7 @@ function createPlanCardFromTool(
   item: WebviewToolCard,
   options: {
     currentPlanId?: string | null;
-    currentPlanState?: WebviewPlanState | null;
+    currentPlanState?: WebviewPlanFileState | null;
     planTodos?: WebviewTodo[];
   },
 ): WebviewPlanFileCard | null {
@@ -1232,7 +1232,7 @@ type ToolRowProps = {
   buildModel?: string;
   canBuildPlan?: boolean;
   currentPlanId?: string | null;
-  currentPlanState?: WebviewPlanState | null;
+  currentPlanState?: WebviewPlanFileState | null;
   item: WebviewToolCard;
   onBuildPlan?(planId: string | null, path: string): void;
   onOpenFile(path: string): void;

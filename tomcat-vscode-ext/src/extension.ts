@@ -841,7 +841,8 @@ export async function activate(
         }
       });
     },
-    refreshPlanPreview: (planId, path) => planPreviewProvider.refreshFromServeEvent(planId, path),
+    refreshPlanPreview: (planId, path, state) =>
+      planPreviewProvider.refreshFromServeEvent(planId, path, state),
     sessionRouter,
     showOpenDialog: (options) =>
       testOpenDialogHandler?.(options) ?? vscode.window.showOpenDialog(options),

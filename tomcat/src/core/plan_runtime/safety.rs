@@ -3,7 +3,7 @@
 //! 写路径策略（plan-runtime.md §4.1 R6 / §5.6）：
 //! - **PLAN**：`write/edit/hashline_edit/delete` **仅允许** `~/.tomcat/plans/*.plan.md`；
 //!   离开此目录的任何写一律拒。
-//! - **EXEC**：`~/.tomcat/plans/*` **全拒**（含 plan 文件正文与 frontmatter）；推进任务仅走 `update_plan`。
+//! - **执行中的计划**：`~/.tomcat/plans/*` **全拒**（含 plan 文件正文与 frontmatter）；推进任务仅走 `update_plan`。
 //! - **CHAT / Pending / Completed**：plan 文件经 plan 工具间接写；外部路径按常规权限。
 //! - **Reviewer subagent**：`edit` 仅允许作用于 `~/.tomcat/plans/*.plan.md`，且 raw edit
 //!   不能改 frontmatter（在 tool_exec 的 edit 分支内做 diff 检查）。
@@ -11,8 +11,8 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use super::state::PlanState;
 use super::PlanRuntimeError;
+use crate::core::session::AgentMode;
 
 /// 校验 `plan_id` 仅含 `a-z 0-9 _ -` 字符，且不为空。
 ///
@@ -63,11 +63,11 @@ pub enum WritePathDenied {
     #[error(
         "PLAN 模式下 write/edit/delete 仅允许写入 ~/.tomcat/plans/*.plan.md；目标 {target:?} 不在白名单内"
     )]
-    PlanStateOnlyPlanFiles { target: PathBuf },
+    PlanModeOnlyPlanFiles { target: PathBuf },
     #[error(
-        "EXEC 模式下 ~/.tomcat/plans/* 全部禁写（含正文与 frontmatter）；推进任务请使用 update_plan 工具。目标 {target:?}"
+        "计划正在执行时 ~/.tomcat/plans/* 全部禁写（含正文与 frontmatter）；推进任务请使用 update_plan 工具。目标 {target:?}"
     )]
-    ExecModePlanFilesReadOnly { target: PathBuf },
+    ExecutingPlanFilesReadOnly { target: PathBuf },
     #[error("reviewer 子 Agent 只能写 ~/.tomcat/plans/*.plan.md（frontmatter raw edit 仍由 edit 守卫具体检查）")]
     ReviewerOnlyPlanFiles,
     #[error("code reviewer 是严格只读子 Agent；禁止调用任何 write/edit/delete 类工具")]
@@ -94,7 +94,8 @@ pub enum SubagentKind {
 /// 这里只做**路径维度**的拒绝；reviewer 的 frontmatter raw-edit 守卫由 edit 分支再做
 /// diff 检查（因为它需要新旧两份内容，无法在路径层判断）。
 pub fn enforce_write_path_policy(
-    mode: &PlanState,
+    mode: AgentMode,
+    executing: bool,
     subagent: SubagentKind,
     target_path: &Path,
 ) -> Result<(), WritePathDenied> {
@@ -135,11 +136,11 @@ pub fn enforce_write_path_policy(
     }
 
     match mode {
-        PlanState::Planning if !is_plan_file => Err(WritePathDenied::PlanStateOnlyPlanFiles {
+        AgentMode::Plan if !is_plan_file => Err(WritePathDenied::PlanModeOnlyPlanFiles {
             target: canon_target,
         }),
-        PlanState::Executing { .. } if in_plans_dir => {
-            Err(WritePathDenied::ExecModePlanFilesReadOnly {
+        AgentMode::Chat if executing && in_plans_dir => {
+            Err(WritePathDenied::ExecutingPlanFilesReadOnly {
                 target: canon_target,
             })
         }

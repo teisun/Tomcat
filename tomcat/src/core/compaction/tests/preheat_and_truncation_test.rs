@@ -1,6 +1,6 @@
 use super::super::truncation::floor_char_boundary;
 use super::super::{
-    compact_tool_results, force_drop_oldest_to_target, layer0_persist_large_results,
+    compact_tool_results, force_drop_oldest_after_confirmed_overflow, layer0_persist_large_results,
 };
 use super::mocks::*;
 use crate::core::compaction::preheat::{Preheat, PreheatOutcome};
@@ -105,15 +105,30 @@ fn compact_tool_results_skips_small() {
 }
 
 #[test]
-fn force_drop_oldest_to_target_below_half() {
+fn confirmed_overflow_drops_a_turn_even_when_local_estimate_is_low() {
     let mut state = make_state(4000, 4000, 1000);
     state.messages = vec![
         user_msg(&"x".repeat(2000)),
         user_msg(&"y".repeat(1000)),
         user_msg(&"z".repeat(500)),
     ];
-    force_drop_oldest_to_target(&mut state);
+    state.context_budget_tokens = 100_000;
+    let (turns_removed, _) = force_drop_oldest_after_confirmed_overflow(&mut state);
+    assert_eq!(turns_removed, 1);
+    assert_eq!(state.messages.len(), 2);
     assert!(state.usage_ratio() < 0.50);
+}
+
+#[test]
+fn confirmed_overflow_never_empties_the_last_turn() {
+    let mut state = make_state(4000, 4000, 1000);
+    state.messages = vec![user_msg(&"x".repeat(3000))];
+
+    let (turns_removed, chars_removed) = force_drop_oldest_after_confirmed_overflow(&mut state);
+
+    assert_eq!(turns_removed, 0);
+    assert_eq!(chars_removed, 0);
+    assert_eq!(state.messages.len(), 1);
 }
 
 #[test]

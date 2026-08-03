@@ -158,7 +158,10 @@ function computedFontSize(element: Element | null): number | null {
 }
 
 /** Read the rendered DOM for E2E assertions (test-only). */
-function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDomSnapshot {
+function readDomSnapshot(
+  state: PlanPreviewStateSnapshot | null,
+  webviewStateFrames: number,
+): PlanPreviewDomSnapshot {
   const strip = document.querySelector('[data-testid="plan-action-strip"]');
   const select = document.querySelector<HTMLSelectElement>(
     '[data-testid="plan-build-model-select"]',
@@ -229,6 +232,12 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
     topVisibleSourceLine,
     toolbarStyle,
     webviewInstanceId: PLAN_PREVIEW_WEBVIEW_INSTANCE_ID,
+    refreshCounters: {
+      hostPostAttempts: 0,
+      hostPostDeliveries: 0,
+      hostRefreshCalls: 0,
+      webviewStateFrames,
+    },
   };
 }
 
@@ -288,6 +297,7 @@ export function PlanPreviewApp({
   const stateRef = useRef<PlanPreviewStateSnapshot | null>(state);
   const contentRef = useRef<HTMLElement>(null);
   const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
+  const stateFrameCountRef = useRef(0);
   const pendingPathResolutionsRef = useRef(
     new Map<string, { resolve(results: PathResolution[]): void }>(),
   );
@@ -332,6 +342,7 @@ export function PlanPreviewApp({
         return;
       }
       if (frame.channel === "state") {
+        stateFrameCountRef.current += 1;
         pendingScrollRestoreRef.current = stateRef.current
           ? captureScrollRestore(contentRef.current)
           : null;
@@ -353,7 +364,7 @@ export function PlanPreviewApp({
       }
       if (frame.content.type === "__test.capture_dom") {
         vscodeApi.postMessage({
-          data: readDomSnapshot(stateRef.current),
+          data: readDomSnapshot(stateRef.current, stateFrameCountRef.current),
           messageId: frame.messageId,
           type: "__test.dom_snapshot",
         } as unknown as PlanPreviewIntent);
@@ -397,6 +408,7 @@ export function PlanPreviewApp({
           availableModels={state.availableModels}
           buildModel={state.buildModel}
           canBuild={state.canBuild}
+          fileState={state.state}
           onBuild={() => send(vscodeApi, { type: "build" })}
           onSetBuildModel={(modelId) =>
             send(vscodeApi, { data: { modelId }, type: "setBuildModel" })

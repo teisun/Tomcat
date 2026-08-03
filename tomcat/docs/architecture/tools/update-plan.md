@@ -9,7 +9,20 @@
 最后一个 todo 完成时，`update_plan` 保持 running，并按 `plan.update + plan.todos -> plan.code_review.started -> plan.code_review -> tool_execution_end` 同步收口。started/result 都以父 session 发出，共享 `<planId>:<round>` attempt 身份和触发工具的 `toolCallId`；child-scoped `sub_agent_start/end` 只作审计，不驱动 ReviewRow。
 
 
-## 2026-05 Active Binding 补充
+## 2026-08 生效契约：只推进文件，不切会话模式
+
+`update_plan` 写成功后会用刚提交的 `PlanFile` 刷新 `ActivePlan` 缓存，再发送纯计划文件事件。它从不修改 `AgentMode`：
+
+```text
+completed 计划 reopen:  completed → pending   （会话保持 Chat）
+全部 todo 收口:          executing → completed （会话保持 Chat）
+```
+
+因此不再有 `Pending { id }`、`Completed { id }` 或 `finalize_completed_to_chat()` 之类的运行时跳转。调用者通过 `activePlan.state` 观察文件状态；执行中计划的默认路由由 `executing_plan_id()` 和 `active_plan()` 派生。
+
+`plan.update` / `plan.pending` / `plan.complete` 只说明文件发生了什么，不能被 UI 或 sidecar 当作模式切换。模式只由 `session.agent_mode.changed` 表示。
+
+## 2026-05 Active Binding 补充（历史）
 
 当前实现对 `update_plan` 的运行时契约已更新为：
 

@@ -32,11 +32,11 @@ fn plan_build_rejects_active_executing_plan() {
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
     write_disk_plan("blockee", PlanFileState::Planning);
-
-    rt.set_executing_for_test("other_plan".into());
+    write_disk_plan("other_plan", PlanFileState::Planning);
+    rt.build_plan("other_plan", None).unwrap();
     let err = rt.build_plan("blockee", None).unwrap_err();
     match err {
-        PlanRuntimeError::BuildBlocked(s) => assert!(s.contains("已在 EXEC"), "{s}"),
+        PlanRuntimeError::BuildBlocked(s) => assert!(s.contains("已在执行计划"), "{s}"),
         other => panic!("expected BuildBlocked, got {other:?}"),
     }
     cleanup_home(&home);
@@ -59,10 +59,8 @@ fn plan_build_warns_but_continues_with_active_session_todos() {
     assert_eq!(outcome.plan_id, "blockee");
     assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
     assert!(outcome.warnings[0].contains("scratchpad todos"));
-    match rt.mode() {
-        PlanState::Executing { plan_id } => assert_eq!(plan_id, "blockee"),
-        other => panic!("expected Executing, got {other:?}"),
-    }
+    assert_eq!(rt.mode(), AgentMode::Chat);
+    assert_eq!(rt.executing_plan_id().as_deref(), Some("blockee"));
     let plan = read_plan(&plan_path_for_id("blockee").unwrap()).unwrap();
     assert!(matches!(plan.frontmatter.state, PlanFileState::Executing));
     cleanup_home(&home);
@@ -197,11 +195,9 @@ fn plan_build_enters_exec_and_binds_active_plan_path() {
         .build_plan("five_things", Some("new-session-uuid".into()))
         .expect("build 成功");
 
-    match rt.mode() {
-        PlanState::Executing { plan_id } => assert_eq!(plan_id, "five_things"),
-        other => panic!("expected Executing, got {other:?}"),
-    }
-    assert!(rt.active_planning_plan_id().is_none());
+    assert_eq!(rt.mode(), AgentMode::Chat);
+    assert_eq!(rt.executing_plan_id().as_deref(), Some("five_things"));
+    assert_eq!(rt.active_plan().unwrap().id, "five_things");
 
     let plan = read_plan(&plan_path_for_id("five_things").unwrap()).unwrap();
     assert!(matches!(plan.frontmatter.state, PlanFileState::Executing));
@@ -231,10 +227,7 @@ fn pending_plan_resumable_via_build() {
     let outcome = rt.build_plan("resumable", None).expect("续跑 build 成功");
     assert!(matches!(outcome.prev_disk_state, PlanFileState::Pending));
     assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
-    match rt.mode() {
-        PlanState::Executing { plan_id } => assert_eq!(plan_id, "resumable"),
-        other => panic!("expected Executing, got {other:?}"),
-    }
+    assert_eq!(rt.executing_plan_id().as_deref(), Some("resumable"));
     cleanup_home(&home);
 }
 
@@ -261,9 +254,7 @@ fn pending_session_can_build_another_explicit_plan() {
     write_disk_plan("old_pending", PlanFileState::Planning);
     rt.build_plan("old_pending", Some("sid-old".into()))
         .expect("old plan build should succeed");
-    let demoted = rt
-        .demote_to_pending_on_cancel()
-        .expect("demote should succeed");
+    let demoted = rt.park_executing_plan().expect("demote should succeed");
     assert_eq!(demoted.as_deref(), Some("old_pending"));
 
     let old_path = plan_path_for_id("old_pending").unwrap();
@@ -278,10 +269,7 @@ fn pending_session_can_build_another_explicit_plan() {
     assert_eq!(outcome.plan_id, "new_plan");
     assert!(matches!(outcome.prev_disk_state, PlanFileState::Planning));
     assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
-    match rt.mode() {
-        PlanState::Executing { plan_id } => assert_eq!(plan_id, "new_plan"),
-        other => panic!("expected Executing, got {other:?}"),
-    }
+    assert_eq!(rt.executing_plan_id().as_deref(), Some("new_plan"));
     assert_eq!(
         rt.active_plan_path(),
         Some(plan_path_for_id("new_plan").unwrap())
@@ -313,7 +301,7 @@ fn completed_session_can_build_another_explicit_plan() {
         todo.status = TodoStatus::Completed;
     });
     write_plan(&old_path, &old_plan, 1000).unwrap();
-    rt.set_mode_completed("old_done".into());
+    rt.refresh_active_plan_after_write(old_path.clone(), &old_plan);
 
     write_disk_plan("new_plan", PlanFileState::Planning);
     let outcome = rt
@@ -321,10 +309,7 @@ fn completed_session_can_build_another_explicit_plan() {
         .expect("completed session should build another explicit plan");
 
     assert_eq!(outcome.plan_id, "new_plan");
-    match rt.mode() {
-        PlanState::Executing { plan_id } => assert_eq!(plan_id, "new_plan"),
-        other => panic!("expected Executing, got {other:?}"),
-    }
+    assert_eq!(rt.executing_plan_id().as_deref(), Some("new_plan"));
     assert_eq!(
         rt.active_plan_path(),
         Some(plan_path_for_id("new_plan").unwrap())
@@ -348,7 +333,7 @@ fn default_build_target_prefers_planning_pending_then_path() {
     let home = setup_isolated_home();
 
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let first = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -383,7 +368,9 @@ fn default_build_target_prefers_planning_pending_then_path() {
 
     let rt = PlanRuntime::new("session-a");
     write_disk_plan("pending-default", PlanFileState::Pending);
-    rt.set_mode_pending("pending-default".into());
+    let pending_path = plan_path_for_id("pending-default").unwrap();
+    let pending_plan = read_plan(&pending_path).unwrap();
+    rt.refresh_active_plan_after_write(pending_path, &pending_plan);
     assert_eq!(rt.default_build_target().unwrap(), "pending-default");
 
     let rt = PlanRuntime::new("session-a");
@@ -391,20 +378,14 @@ fn default_build_target_prefers_planning_pending_then_path() {
     std::fs::create_dir_all(&external_dir).unwrap();
     let external_path = external_dir.join("external.plan.md");
     write_plan_file_at(&external_path, "external_default", PlanFileState::Planning);
-    let normalized =
-        crate::infra::platform::normalize_path(&external_path.to_string_lossy()).unwrap();
     rt.build_plan(&external_path.to_string_lossy(), Some("sid-path".into()))
         .unwrap();
-    rt.set_mode_completed("external_default".into());
-    assert_eq!(
-        rt.default_build_target().unwrap(),
-        crate::infra::platform::format_home_path(&normalized)
-    );
-    let _ = rt.finalize_completed_to_chat();
-    assert_eq!(
-        rt.default_build_target().unwrap(),
-        crate::infra::platform::format_home_path(&normalized)
-    );
+    let completed_plan = read_plan(&external_path).unwrap();
+    rt.refresh_active_plan_after_write(external_path.clone(), &completed_plan);
+    assert!(matches!(
+        rt.default_build_target().unwrap_err(),
+        PlanRuntimeError::BuildBlocked(_)
+    ));
 
     cleanup_home(&home);
 }

@@ -17,7 +17,7 @@ use crate::core::session::transcript::{
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
-const RESUME_INDEX_SCHEMA_VERSION: u32 = 2;
+pub const RESUME_INDEX_SCHEMA_VERSION: u32 = 3;
 const RECENT_TURN_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

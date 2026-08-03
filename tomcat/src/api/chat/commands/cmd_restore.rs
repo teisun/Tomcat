@@ -224,7 +224,7 @@ fn restore_core_with_paths(
         match ctx
             .session_runtime
             .plan_runtime
-            .reload_active_plan_from_disk()
+            .sync_active_plan_from_disk()
         {
             Ok(Some(plan_id)) => {
                 reloaded_plan_id = Some(plan_id);

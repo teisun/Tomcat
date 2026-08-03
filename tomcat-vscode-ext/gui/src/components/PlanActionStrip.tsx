@@ -1,4 +1,5 @@
 import { PlanBuildModelSelect } from "./PlanBuildModelSelect";
+import type { PlanFileState } from "../../../src/shared/planPreviewProtocol";
 
 /**
  * Hybrid (B) in-body action strip: the model dropdown plus the yellow Build
@@ -10,6 +11,7 @@ export function PlanActionStrip({
   availableModels,
   buildModel,
   canBuild,
+  fileState,
   onBuild,
   onSetBuildModel,
   sessionModel,
@@ -17,6 +19,7 @@ export function PlanActionStrip({
   availableModels: string[];
   buildModel: string;
   canBuild: boolean;
+  fileState: PlanFileState | null;
   onBuild(): void;
   onSetBuildModel(modelId: string): void;
   sessionModel: string;
@@ -36,7 +39,7 @@ export function PlanActionStrip({
         onClick={onBuild}
         type="button"
       >
-        Build
+        {fileState === "pending" ? "Resume" : "Build"}
       </button>
     </div>
   );

@@ -57,11 +57,12 @@ pub struct BuiltinToolCatalogEntry {
     /// [`render_tool_guidelines_with_policy`] 聚合去重后注入 `tool_instructions.txt`，
     /// 避免在 `description` 里逐工具重复。空切片表示该工具无额外跨工具规则。
     pub prompt_guidelines: &'static [&'static str],
-    /// PLAN 模式专属工具（`create_plan` / `update_plan` / `todos` / `ask_question`）。
+    /// 计划相关工具（`create_plan` / `update_plan` / `todos` / `ask_question`）。
     /// 默认 `false`：进入 chat_loop 默认 LLM 工具集；`true` 时：
     /// - 工具仍在 `BUILTIN_TOOL_CATALOG` 中（保持单一事实源、`tool-catalog.md` 文档完整）；
     /// - 不进 `build_function_definitions_for_chat_default()`（chat_loop 默认视图）；
-    /// - 由 `PlanRuntime::visible_tools_for_mode(PlanState)` 在 PLAN/EXEC 模式时显式合入。
+    /// - 由 `PlanRuntime::visible_tools_for_mode(AgentMode, executing)` 依会话模式和计划文件
+    ///   生命周期决定是否可见。
     ///   详见 [`plan-runtime.md`](../../../../docs/architecture/plan-runtime.md) §4.1 R6。
     pub plan_only: bool,
     /// 调用本工具是否需要等待用户交互（如 `ask_question` 在 CLI/IDE panel 阻塞 await）。
@@ -468,7 +469,7 @@ pub fn build_function_definitions() -> Vec<Value> {
 /// chat_loop 默认 LLM 工具集（不含 `plan_only` 工具）。
 ///
 /// PLAN 模式专属工具（`create_plan` / `update_plan` / `todos` / `ask_question`）依据 plan-runtime.md
-/// §4.1 R6 在 PLAN/EXEC 模式由 `PlanRuntime::visible_tools_for_mode` 显式合入；
+/// §4.1 R6 由 `PlanRuntime::visible_tools_for_mode` 根据 Plan 会话模式和执行中计划显式合入；
 /// 未启用 `PlanRuntime` 时（or `mode == Chat`），chat_loop 用本 helper 装配 `tool_definitions`，
 /// 避免 plan 工具暴露给 CHAT 期 LLM。
 ///

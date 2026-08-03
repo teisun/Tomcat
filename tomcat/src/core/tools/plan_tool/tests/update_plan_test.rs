@@ -39,7 +39,7 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
+    rt.bind_plan_file_for_test(path.clone());
 
     let out = update_plan::execute(
         &rt,
@@ -78,7 +78,7 @@ async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
     plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some("session-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
+    rt.bind_plan_file_for_test(path.clone());
 
     let err = update_plan::execute(
         &rt,
@@ -113,7 +113,7 @@ async fn update_plan_cross_session_allowed_for_planning_pending() {
     let rt_a = PlanRuntime::new("session-a");
     let plan_id = fresh_planning_plan(&rt_a);
     let rt_b = PlanRuntime::new("session-b");
-    rt_b.enter_planning().unwrap();
+    rt_b.enter_plan().unwrap();
     let out = update_plan::execute(
         &rt_b,
         update_plan::UpdatePlanArgs {
@@ -236,7 +236,7 @@ async fn update_plan_in_exec_promotes_completed() {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
+    rt.bind_plan_file_for_test(path.clone());
 
     let out = update_plan::execute(
         &rt,
@@ -262,7 +262,7 @@ async fn update_plan_in_exec_promotes_completed() {
     .unwrap();
     assert_eq!(out["plan_state_before"], "executing");
     assert_eq!(out["plan_state_after"], "completed");
-    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(rt.mode(), AgentMode::Plan);
     assert_eq!(rt.active_plan_path(), Some(path));
     cleanup_home(&home);
 }
@@ -290,9 +290,7 @@ async fn update_plan_reopen_completed_to_pending_and_emits_plan_pending() {
         todo.status = TodoStatus::Completed;
     }
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
-    rt.set_mode_completed(plan_id.clone());
-    let _ = rt.finalize_completed_to_chat();
+    rt.bind_plan_file_for_test(path.clone());
 
     let out = update_plan::execute(
         &rt,
@@ -312,10 +310,8 @@ async fn update_plan_reopen_completed_to_pending_and_emits_plan_pending() {
 
     assert_eq!(out["plan_state_before"], "completed");
     assert_eq!(out["plan_state_after"], "pending");
-    match rt.mode() {
-        PlanState::Pending { plan_id: cur } => assert_eq!(cur, plan_id),
-        other => panic!("expected Pending, got {other:?}"),
-    }
+    assert_eq!(rt.mode(), AgentMode::Plan);
+    assert_eq!(rt.active_plan().unwrap().id, plan_id);
     assert_eq!(rt.active_plan_path(), Some(path.clone()));
     let persisted = read_plan(&path).unwrap();
     assert_eq!(persisted.frontmatter.state, PlanFileState::Pending);
