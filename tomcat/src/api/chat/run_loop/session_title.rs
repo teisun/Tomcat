@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider};
+use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider, PromptCacheKeyFamily};
 use crate::core::session::manager::{is_rule_derived_title, SessionManager};
-use crate::core::summary::generate_session_title;
+use crate::core::summary::generate_session_title_with_cache_key;
 use crate::infra::events::wire;
 use crate::infra::ScopedEventEmitter;
 
@@ -45,7 +45,7 @@ pub(crate) fn maybe_spawn_semantic_session_title(
     title_provider: Arc<dyn LlmProvider>,
     title_model: String,
     emitter: Arc<ScopedEventEmitter>,
-    _session_id: String,
+    session_id: String,
 ) {
     for (message, _) in appended_messages {
         if message.role != ChatMessageRole::User {
@@ -68,9 +68,15 @@ pub(crate) fn maybe_spawn_semantic_session_title(
         }
         let user_text = text;
         let session = session.clone();
+        let cache_key = PromptCacheKeyFamily::Title.key_for(&session_id);
         tokio::spawn(async move {
-            let Ok(generated) =
-                generate_session_title(&user_text, title_provider.as_ref(), &title_model).await
+            let Ok(generated) = generate_session_title_with_cache_key(
+                &user_text,
+                title_provider.as_ref(),
+                &title_model,
+                cache_key.as_deref(),
+            )
+            .await
             else {
                 return;
             };

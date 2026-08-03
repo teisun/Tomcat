@@ -119,7 +119,7 @@
 |--------|------|--------|
 | reviewer 作为 LLM 工具 | 见 [`reviewer.md`](./reviewer.md) §4 | 模型看不见 reviewer。 |
 | 通用任意路径 write | 写域固定 `~/.tomcat/plans/` | 不能当万能写文件工具。 |
-| 执行态调用 | catalog 已不可见 | build 之后不能再 `create_plan` 重写。 |
+| 执行态调用 | catalog 保持可见；handler 返回 `RejectedInMode` | build 之后不能再 `create_plan` 重写。 |
 | LLM 写 frontmatter YAML | 由 `create_plan` 入参组装，runtime 拼接其余字段 | LLM 不背 schema。 |
 | `/plan build` 之外自动进执行态 | 即使 reviewer accepted 也只是建议，用户拍板 | 不偷偷开干。 |
 
@@ -659,7 +659,7 @@ LLM ──tool_call("create_plan", { goal, draft, todos })──▶ tool_exec
 
 | 触发 | 反馈 | 说人话 |
 |------|------|--------|
-| `mode != Planning` | catalog 已不可见；强行调用返回 tool error，附 usage `先 /plan` | 非规划态不能创建计划。 |
+| `mode != Planning` | catalog 保持可见；强行调用返回 `RejectedInMode`，附 usage `先 /plan` | 非规划态不能创建计划。 |
 | advisory lock 获取失败 | tool error（附 holder pid） | 锁被占就拒写。 |
 | frontmatter 序列化 / 反序列化失败 | tool error；保留旧文件（原子 rename 未触发） | 序列化挂了不动旧文件。 |
 | reviewer 子 Agent 异常退出 | tool error 携带 reviewer stderr 摘要；`PlanFile` 保留，`mode` 仍 `planning` | 审稿员挂了不影响计划文件。 |

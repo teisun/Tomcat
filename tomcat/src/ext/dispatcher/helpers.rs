@@ -1,3 +1,4 @@
+use crate::core::llm::PromptCacheKeyFamily;
 use crate::core::{ChatMessage, ChatRequest, Tool};
 use crate::infra::error::AppError;
 
@@ -109,6 +110,12 @@ pub(super) fn parse_chat_request(params: &serde_json::Value) -> Result<ChatReque
         stream: params.get("stream").and_then(|v| v.as_bool()),
         model_override: None,
         thinking_level: None,
+        cache_key: params
+            .get("session_id")
+            .or_else(|| params.get("sessionId"))
+            .and_then(|value| value.as_str())
+            .and_then(|session_id| PromptCacheKeyFamily::Extension.key_for(session_id)),
+        ephemeral_tail_count: 0,
         tools: params
             .get("tools")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),

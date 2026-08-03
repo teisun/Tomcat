@@ -10,7 +10,9 @@ use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
     TOOL_RESULT_PLACEHOLDER,
 };
-use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider, MessageKind};
+use crate::core::llm::{
+    ChatMessage, ChatMessageRole, LlmProvider, MessageKind, PromptCacheKeyFamily,
+};
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars,
@@ -589,12 +591,14 @@ pub(super) async fn collapse_to_branch_summary(
         .collect();
     ensure_working_message_ids(agent, &mut working)?;
     let compaction_provider = agent.compaction_provider();
-    let artifacts = build_collapse_summary_artifacts_for_test(
+    let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
+    let artifacts = build_collapse_summary_artifacts(
         &working,
         compaction_provider.as_ref(),
         &agent.config.context_config.compaction_model,
         plan_runtime.as_deref(),
         Some(session_model.as_str()),
+        cache_key.as_deref(),
     )
     .await?;
     let Some(ctx_state) = agent.context_state.as_mut() else {
@@ -641,6 +645,25 @@ pub async fn build_collapse_summary_artifacts_for_test(
     plan_runtime: Option<&PlanRuntime>,
     session_model: Option<&str>,
 ) -> Result<CollapseSummaryArtifacts, AppError> {
+    build_collapse_summary_artifacts(
+        messages,
+        llm,
+        compaction_model,
+        plan_runtime,
+        session_model,
+        None,
+    )
+    .await
+}
+
+async fn build_collapse_summary_artifacts(
+    messages: &[ChatMessage],
+    llm: &dyn LlmProvider,
+    compaction_model: &str,
+    plan_runtime: Option<&PlanRuntime>,
+    session_model: Option<&str>,
+    cache_key: Option<&str>,
+) -> Result<CollapseSummaryArtifacts, AppError> {
     let working: Vec<ChatMessage> = messages
         .iter()
         .filter(|msg| msg.role != ChatMessageRole::System)
@@ -651,8 +674,15 @@ pub async fn build_collapse_summary_artifacts_for_test(
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // 这里不再自己拼一份 keepalive —— 两份机器区块只会互相矛盾。
     let control = plan_runtime.map(|rt| rt.control_snapshot(session_model));
-    let summary_text =
-        generate_summary(&working, None, llm, compaction_model, control.as_ref()).await?;
+    let summary_text = generate_summary(
+        &working,
+        None,
+        llm,
+        compaction_model,
+        control.as_ref(),
+        cache_key,
+    )
+    .await?;
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
     let covered_count = working
         .iter()

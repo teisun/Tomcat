@@ -424,6 +424,8 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
         Ok(StreamEvent::Usage {
             prompt_tokens: 120,
             completion_tokens: 20,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             total_tokens: Some(140),
             reasoning_tokens: None,
             text_tokens: None,
@@ -476,6 +478,8 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
         Ok(StreamEvent::Usage {
             prompt_tokens: 140,
             completion_tokens: 24,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             total_tokens: Some(164),
             reasoning_tokens: None,
             text_tokens: None,

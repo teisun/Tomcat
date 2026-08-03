@@ -10,13 +10,14 @@ use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+use crate::core::llm::SystemPromptSnapshot;
 use crate::infra::event_bus::EventListenerId;
 use crate::{api::chat::ChatContext, AppError, ContextState, SessionMode};
 
 /// 单会话 turn 之间需要延续的上下文快照。
 pub struct SessionTurnState {
     pub context_state: ContextState,
-    pub system_text: String,
+    pub prompt_snapshot: SystemPromptSnapshot,
     pub context_budget_chars: usize,
 }
 

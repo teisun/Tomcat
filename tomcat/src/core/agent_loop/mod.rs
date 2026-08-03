@@ -148,5 +148,5 @@ pub use config_backend::{ConfigBackend, SharedConfigBackend};
 pub use current_tail_guard::{build_collapse_summary_artifacts_for_test, CollapseSummaryArtifacts};
 pub use types::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, BackgroundCompletionRoutes,
-    CompletionRoute, LoopError, SubagentType, ToolCallInfo,
+    CompletionRoute, EphemeralTailProvider, LoopError, SubagentType, ToolCallInfo,
 };

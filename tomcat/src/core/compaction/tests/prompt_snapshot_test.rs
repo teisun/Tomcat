@@ -209,7 +209,7 @@ async fn compaction_request_carries_no_tools() {
     let (provider, captured) = CapturingMockProvider::new();
     let snapshot = vec![ChatMessage::user("hello"), ChatMessage::assistant("world")];
 
-    let summary = generate_summary(&snapshot, None, &provider, "gpt-5.4", None)
+    let summary = generate_summary(&snapshot, None, &provider, "gpt-5.4", None, None)
         .await
         .expect("mock provider 应返回非空摘要");
     assert!(
@@ -251,7 +251,7 @@ async fn compaction_request_uses_update_prompt_when_existing_summary_present() {
     let snapshot = vec![ChatMessage::user("next user msg")];
     let previous = "## Goal\nold goal\n## Next Steps\n1. old step";
 
-    let _ = generate_summary(&snapshot, Some(previous), &provider, "gpt-5.2", None)
+    let _ = generate_summary(&snapshot, Some(previous), &provider, "gpt-5.2", None, None)
         .await
         .expect("mock provider 应返回非空摘要");
 

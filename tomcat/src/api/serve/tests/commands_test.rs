@@ -184,12 +184,7 @@ fn count_event(lines: &[serde_json::Value], event_type: &str) -> usize {
 }
 
 fn latest_user_request_parts(request: &ChatRequest) -> &[ChatMessageContentPart] {
-    let user_message = request
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(request);
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
         panic!(
             "expected multimodal user parts, got {:?}",
@@ -197,6 +192,18 @@ fn latest_user_request_parts(request: &ChatRequest) -> &[ChatMessageContentPart]
         );
     };
     parts
+}
+
+fn latest_persisted_user_request(request: &ChatRequest) -> &ChatMessage {
+    let persisted_len = request
+        .messages
+        .len()
+        .saturating_sub(request.ephemeral_tail_count);
+    request.messages[..persisted_len]
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+        .expect("persisted user message")
 }
 
 fn request_has_input_file(request: &ChatRequest) -> bool {
@@ -970,6 +977,8 @@ async fn serve_prompt_drives_agent_run() {
         Ok(StreamEvent::Usage {
             prompt_tokens: 1,
             completion_tokens: 1,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             total_tokens: Some(2),
             reasoning_tokens: None,
             text_tokens: None,
@@ -1139,11 +1148,11 @@ async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach(
         .expect("seed pending ask_question before hook registration");
     let context_budget_chars =
         crate::infra::config::compute_context_budget_chars(&ctx.config.context);
-    let system_text = crate::api::chat::build_system_text(&ctx, context_budget_chars).await;
+    let prompt_snapshot = crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
     let context_state = init_context_state(
         &ctx.session_runtime.session,
         &ctx.config.context,
-        &system_text,
+        prompt_snapshot.system_text(),
     )
     .expect("context state");
     let slot = Arc::new(crate::api::serve::registry::SessionSlot::new(
@@ -1153,7 +1162,7 @@ async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach(
         cwd_string,
         crate::api::serve::registry::SessionTurnState {
             context_state,
-            system_text,
+            prompt_snapshot,
             context_budget_chars,
         },
     ));
@@ -1662,12 +1671,7 @@ async fn serve_prompt_with_image_attachment_builds_multimodal_message() {
 
     let captured = requests.0.lock();
     assert_eq!(captured.len(), 1, "expected exactly one LLM request");
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(&captured[0]);
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
         panic!(
             "expected multimodal parts user message, got {:?}",
@@ -1946,12 +1950,7 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
     .await;
 
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(&captured[0]);
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
         panic!(
             "expected multimodal parts user message, got {:?}",
@@ -2199,12 +2198,7 @@ async fn serve_prompt_uses_requested_user_message_id_for_transcript_and_context(
     .await;
 
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(&captured[0]);
     assert_eq!(user_message.msg_id.as_deref(), Some("user-fixed-id"));
     drop(captured);
     assert_eq!(count_message_entries_with_id(&slot, "user-fixed-id"), 1);
@@ -2238,12 +2232,7 @@ async fn serve_prompt_without_attachments_falls_back_to_user_text() {
     .await;
 
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(&captured[0]);
     assert!(matches!(
         &user_message.content,
         Some(ChatMessageContent::Text(text)) if text == "plain text"
@@ -3718,8 +3707,9 @@ async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
         .lock()
         .as_ref()
         .expect("session turn state")
-        .system_text
-        .clone();
+        .prompt_snapshot
+        .system_text()
+        .to_string();
     let healed_context = init_context_state(
         &slot.ctx.session_runtime.session,
         &slot.ctx.config.context,
@@ -3760,10 +3750,13 @@ async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
 
     let recorded = requests.0.lock().clone();
     assert_eq!(recorded.len(), 1);
-    let tail = recorded[0]
+    let persisted_len = recorded[0]
         .messages
+        .len()
+        .saturating_sub(recorded[0].ephemeral_tail_count);
+    let tail = recorded[0].messages[..persisted_len]
         .last()
-        .expect("Resume provider request tail");
+        .expect("Resume provider persisted request tail");
     assert_eq!(tail.role, crate::core::llm::ChatMessageRole::Tool);
     assert_eq!(
         tail.text_content(),
@@ -4047,8 +4040,9 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
         guard
             .as_ref()
             .expect("session turn state")
-            .system_text
-            .clone()
+            .prompt_snapshot
+            .system_text()
+            .to_string()
     };
     let seeded_state = init_context_state(
         &slot.ctx.session_runtime.session,

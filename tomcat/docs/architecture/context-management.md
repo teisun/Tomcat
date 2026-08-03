@@ -6,9 +6,9 @@
 
 ## 2026-08 Plan reminder 规则
 
-计划执行不再是第三种会话模式。请求装配按两个正交事实派生提醒：`AgentMode::Plan` 注入 planner reminder；`PlanRuntime::executing_plan_id().is_some()` 注入 executor reminder。两段内容目前都追加在 system prompt，且都不写入 transcript。
+计划执行不再是第三种会话模式。请求装配按两个正交事实派生提醒：`AgentMode::Plan` 注入 planner reminder；`PlanRuntime::executing_plan_id().is_some()` 注入 executor reminder。
 
-将来接入 prompt-prefix cache 时，必须把两段 reminder 一起迁到请求级 ephemeral tail：它只能在 compaction 已恢复持久消息之后附加，绝不能进入 `ContextState.messages` 或 JSONL。否则既污染可回放历史，也会破坏稳定的缓存前缀。
+两段提醒与当前权限状态一起作为请求级 ephemeral tail，附加在已恢复的持久消息之后；它们不进入 system prompt、`ContextState.messages` 或 JSONL。因此模式转换与计划生命周期变化不会改写已经发送过的缓存前缀。
 
 ## 2026-05 Plan Recover 增补
 
@@ -1228,7 +1228,60 @@ pub attempts: Option<u32>,
 
 测试锁点见 [`src/core/compaction/tests/preheat_and_truncation.rs`](../../../src/core/compaction/tests/preheat_and_truncation.rs) 与 [`src/core/compaction/tests/legacy_transcript_compat.rs`](../../../src/core/compaction/tests/legacy_transcript_compat.rs)（虚拟时钟下退避计时；3 次耗尽端到端写入；缺字段默认 None；成功条目不序列化失败字段）。
 
-#### 7.5.4 三项不实施决议（关闭/转后续）
+#### 7.5.4 提示缓存前缀稳定化
+
+提示缓存只复用逐字节相同的请求前缀。因此系统遵循「已发送历史只追加、运行时事实只放尾部」：
+
+```text
+tools（稳定排序） → system（稳定说明） → 持久化历史 → 本轮输入 → runtime tail
+      ↑                   ↑                                   ↑
+ Anthropic 断点 1      断点 2                         每轮不同，不设断点
+```
+
+- `TokenUsage` / `StreamEvent::Usage` 记录 provider 返回的 `cache_read_tokens` 与
+  `cache_write_tokens`；只写入 assistant transcript 和 `tomcat_chat_diag`，不扩展
+  `ContextMetricsUpdate` wire schema。
+- 内置工具目录在所有 mode 相同，插件工具按 `(plugin_id, name)` 排序；权限与 mode
+  仍由 handler/path gate 强制执行，而不是通过删工具定义来实现。
+- `ChatRequest` 构造接缝在每个主 Agent 请求末尾临时添加 runtime tail（计划提醒和当前
+  workspace 权限状态）。尾部不进入 `ContextState.messages` 或 transcript，因而不会改写
+  缓存前缀。
+- Anthropic wire 在 tools 末项、system 末 block、压缩摘要和最后一个非 ephemeral message
+  最多放四个 `cache_control: {type: "ephemeral"}` 断点；最后一个断点绝不能落在 runtime
+  tail。OpenAI Chat Completions / Responses 使用按 `{session_id}:{family}` 分域的
+  `prompt_cache_key`。
+- Layer 0 只在 `usage_ratio >= 0.50` 时落盘/替换大 tool result。低水位保留历史字节不变；
+  Layer 1 的 preheat 本身只读快照，不会改写缓存，真正改变历史的是 Layer 2/L3 的必要
+  boundary 应用。
+
+用 `scripts/analyze_prompt_cache_baseline.py` 对同一条至少 20 轮真实会话采集改造前后
+命中率、授权次数、插件/技能变动、拒绝工具比例与 `usage_ratio` P50/P90。
+
+#### 7.5.4.1 2026-08-03 三条 wire 实测基线
+
+三组探针均通过真实 provider 连发 20 次 `LlmProvider::chat` 请求，并把上一轮 assistant
+回复追加到下一轮的消息历史。数据由
+`scripts/analyze_prompt_cache_baseline.py` 从 `tomcat_chat_diag` 形状的 usage 日志统计：
+
+| wire / 模型 | prompt tokens | cache read tokens | cache write tokens | 命中率 |
+|---|---:|---:|---:|---:|
+| DeepSeek Chat / `deepseek-v4-pro` | 118,500 | 111,232 | 0 | 93.87% |
+| fcodex OpenAI Responses / `gpt-5.6-sol` | 116,160 | 82,688 | 0 | 71.18% |
+| fcodex Anthropic Messages / `claude-opus-4-8` | 208,242 | 208,202 | 11,222 | 99.98% |
+
+Anthropic 的 `input_tokens` 不包含独立返回的 `cache_read_input_tokens`；分析脚本会先把两者相加
+为总输入再计算命中率，避免把 20 次 `input_tokens=2` 误读成万倍命中率。
+
+**结论**：三条 wire 都发生了真实 cache read，且 Anthropic 显式断点能够随追加历史推进。
+Responses 的 71.18% 明显低于 DeepSeek 和 Anthropic，说明 fcodex Responses 当前只复用有限大小的
+前缀块；这不是本地 `prompt_cache_key` 缺失（同一 key 已连续下发），不能把它当成稳定达到 80%
+的跨 provider 承诺。后续应在网关侧确认 cache block 上限和前缀扩展策略，再决定是否把该阈值纳入
+Responses 的发布门禁。
+
+这些是 provider 级缓存探针，故没有真实工具执行、授权、插件变更或 `ContextMetricsUpdate` 样本；
+它们用于验证 wire 和 usage 解析，不替代带工具负载的 Agent E2E 指标。
+
+#### 7.5.5 三项不实施决议（关闭/转后续）
 
 T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`docs/TODOS.md`](../TODOS.md) 与工程变更记录，背景论证见 [报告 §5.7](../reports/compaction-prompt-cc-vs-pi.md)）：
 
@@ -1248,7 +1301,7 @@ T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`
 | 机制                              | 说明                                                                                                | 后续计划                     |
 | ------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------ |
 | **Snip（中间段删除）**                 | CC Level 1，删除中间历史保留头尾，零 API 成本。当前 Layer 1 异步摘要可覆盖此场景。                                             | 若 Layer 1 触发过于频繁/费用高，再评估 |
-| **Prompt Cache 管理**             | CC 的 `cache_control` / `cache_reference` / `cache_edits` 三原语为 Anthropic API 专属，OpenAI 自动缓存无需客户端配置 | 不适用                      |
+| **Prompt Cache 管理**             | Anthropic 使用 `cache_control` 断点，OpenAI 使用自动前缀缓存 + scoped `prompt_cache_key`；见 §7.5.4 | 已实施，按基线数据复测 |
 | **Cached Microcompact**         | 依赖 `cache_edits` 服务端打洞能力                                                                          | 不适用                      |
 | **Session Stability Latching**  | 锁定运行时状态防 cache bust，tomcat 无 Prompt Cache                                                             | 不适用                      |
 | **Context Collapse**            | CC 实验性 commit-log 视图投影，通用性差                                                                       | 不纳入                      |

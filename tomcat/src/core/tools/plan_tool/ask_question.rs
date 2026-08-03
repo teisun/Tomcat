@@ -41,11 +41,12 @@ pub async fn execute_for_tool(
     tool_call_id: Option<&str>,
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
-    // 执行计划时隐藏（防止 agent loop 阻塞）。
+    // Executing plans reject questions to avoid blocking the agent loop.
     if runtime.executing_plan_id().is_some() {
-        return Err(ToolError::InvisibleInMode {
+        return Err(ToolError::RejectedInMode {
             tool: "ask_question",
             mode: mode.as_str().to_string(),
+            guidance: "计划正在执行；如需澄清，请在计划文件中记录为待确认项",
         });
     }
     let questions = parse_and_validate_questions(raw_args)?;

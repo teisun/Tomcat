@@ -14,6 +14,29 @@ use crate::core::llm::types::{
 use crate::core::llm::Capabilities;
 use crate::infra::config::ThinkingConfig;
 
+/// Anthropic rejects requests with more than four explicit cache breakpoints.
+///
+/// Keep this as a hard provider limit rather than a tuning parameter: callers
+/// must safely degrade by dropping lower-priority candidates.
+const ANTHROPIC_MAX_CACHE_BREAKPOINTS: usize = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CacheBreakpoint {
+    LastTool,
+    SystemBlock(usize),
+    MessageBlock {
+        message_idx: usize,
+        block_idx: usize,
+    },
+}
+
+struct RenderedMessages {
+    system: Vec<Value>,
+    messages: Vec<Value>,
+    /// Ordered from highest to lowest priority, excluding the tool candidate.
+    cache_breakpoint_candidates: Vec<CacheBreakpoint>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_request_body(
     request: &ChatRequest,
@@ -26,31 +49,48 @@ pub(super) fn build_request_body(
     files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> Value {
     let target = ProviderCompatProfile::anthropic_messages(model);
-    let (system, messages) = build_messages(
+    let mut rendered = build_messages(
         &request.messages,
         &target,
         continuity_enabled,
         capabilities,
         files_adapter,
+        request.ephemeral_tail_count,
     );
-    let tools = request
+    let mut tools = request
         .tools
         .as_ref()
         .map(|tools| convert_tools(tools))
         .filter(|tools| !tools.is_empty());
+
+    // A breakpoint budget is shared across tools, system blocks and messages.
+    // Do not add controls at their individual construction sites: compaction
+    // recovery may legitimately contain multiple summaries, which would
+    // otherwise overflow Anthropic's hard limit.
+    let mut cache_breakpoint_candidates = Vec::new();
+    if tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+        cache_breakpoint_candidates.push(CacheBreakpoint::LastTool);
+    }
+    cache_breakpoint_candidates.append(&mut rendered.cache_breakpoint_candidates);
+    apply_cache_breakpoints(
+        &mut rendered.system,
+        &mut rendered.messages,
+        tools.as_deref_mut(),
+        cache_breakpoint_candidates,
+    );
     let thinking_request =
         resolve_anthropic_request(thinking_cfg, thinking_format, request.max_tokens);
 
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(model.to_string()));
-    body.insert("messages".to_string(), Value::Array(messages));
+    body.insert("messages".to_string(), Value::Array(rendered.messages));
     body.insert(
         "max_tokens".to_string(),
         Value::Number(thinking_request.max_tokens.into()),
     );
     body.insert("stream".to_string(), Value::Bool(stream));
-    if let Some(system) = system.filter(|system| !system.trim().is_empty()) {
-        body.insert("system".to_string(), Value::String(system));
+    if !rendered.system.is_empty() {
+        body.insert("system".to_string(), Value::Array(rendered.system));
     }
     if let Some(temperature) = request
         .temperature
@@ -147,6 +187,8 @@ pub(super) fn final_stream_events(
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
             reasoning_tokens: usage.reasoning_tokens,
             text_tokens: usage.text_tokens,
         });
@@ -274,12 +316,17 @@ fn build_messages(
     continuity_enabled: bool,
     capabilities: &Capabilities,
     files_adapter: Option<&dyn FilesApiAdapter>,
-) -> (Option<String>, Vec<Value>) {
+    ephemeral_tail_count: usize,
+) -> RenderedMessages {
     let mut system_chunks = Vec::new();
     let mut out = Vec::new();
+    let mut last_non_ephemeral_block = None;
+    let mut last_compaction_summary_block = None;
     let window = ReplayWindow::compute(messages);
+    let first_ephemeral_idx = messages.len().saturating_sub(ephemeral_tail_count);
 
     for (idx, original) in messages.iter().enumerate() {
+        let is_ephemeral = idx >= first_ephemeral_idx;
         let action = if continuity_enabled {
             plan_scoped(target, original, window.contains(idx))
         } else {
@@ -295,13 +342,25 @@ fn build_messages(
             ChatMessageRole::System => {
                 let text = flatten_message_text(&msg);
                 if !text.trim().is_empty() {
-                    system_chunks.push(text);
+                    system_chunks.push(json!({
+                        "type": "text",
+                        "text": text,
+                    }));
                 }
             }
             ChatMessageRole::User => {
                 let content = user_content_blocks(&msg, capabilities, files_adapter);
                 if !content.is_empty() {
-                    push_role_message(&mut out, "user", content);
+                    if let Some(out_idx) = push_role_message(&mut out, "user", content) {
+                        let last_block =
+                            last_content_block_index(&out, out_idx).map(|idx| (out_idx, idx));
+                        if !is_ephemeral {
+                            last_non_ephemeral_block = last_block;
+                        }
+                        if matches!(msg.kind, crate::core::llm::MessageKind::CompactionSummary) {
+                            last_compaction_summary_block = last_block;
+                        }
+                    }
                 }
             }
             ChatMessageRole::Assistant => {
@@ -348,13 +407,18 @@ fn build_messages(
                     }
                 }
                 if !content.is_empty() {
-                    push_role_message(&mut out, "assistant", content);
+                    if let Some(out_idx) = push_role_message(&mut out, "assistant", content) {
+                        if !is_ephemeral {
+                            last_non_ephemeral_block =
+                                last_content_block_index(&out, out_idx).map(|idx| (out_idx, idx));
+                        }
+                    }
                 }
             }
             ChatMessageRole::Tool => {
                 let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
                 let text = flatten_message_text(&msg);
-                push_role_message(
+                if let Some(out_idx) = push_role_message(
                     &mut out,
                     "user",
                     vec![json!({
@@ -362,13 +426,37 @@ fn build_messages(
                         "tool_use_id": tool_use_id,
                         "content": text,
                     })],
-                );
+                ) {
+                    if !is_ephemeral {
+                        last_non_ephemeral_block =
+                            last_content_block_index(&out, out_idx).map(|idx| (out_idx, idx));
+                    }
+                }
             }
         }
     }
 
-    let system = (!system_chunks.is_empty()).then(|| system_chunks.join("\n\n"));
-    (system, out)
+    let mut cache_breakpoint_candidates = Vec::new();
+    if let Some(last_system_idx) = system_chunks.len().checked_sub(1) {
+        cache_breakpoint_candidates.push(CacheBreakpoint::SystemBlock(last_system_idx));
+    }
+    if let Some((message_idx, block_idx)) = last_non_ephemeral_block {
+        cache_breakpoint_candidates.push(CacheBreakpoint::MessageBlock {
+            message_idx,
+            block_idx,
+        });
+    }
+    if let Some((message_idx, block_idx)) = last_compaction_summary_block {
+        cache_breakpoint_candidates.push(CacheBreakpoint::MessageBlock {
+            message_idx,
+            block_idx,
+        });
+    }
+    RenderedMessages {
+        system: system_chunks,
+        messages: out,
+        cache_breakpoint_candidates,
+    }
 }
 
 fn continuation_blocks(continuation: &ReasoningContinuation) -> Option<Vec<Value>> {
@@ -427,12 +515,23 @@ fn usage_from_value(usage: Option<&Value>) -> Option<TokenUsage> {
         .get("output_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
-    if prompt == 0 && completion == 0 {
+    let cache_read_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let cache_write_tokens = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    if prompt == 0 && completion == 0 && cache_read_tokens.is_none() && cache_write_tokens.is_none()
+    {
         None
     } else {
         Some(TokenUsage {
             prompt_tokens: prompt,
             completion_tokens: completion,
+            cache_read_tokens,
+            cache_write_tokens,
             total_tokens: Some(prompt + completion),
             reasoning_tokens: None,
             text_tokens: None,
@@ -440,9 +539,9 @@ fn usage_from_value(usage: Option<&Value>) -> Option<TokenUsage> {
     }
 }
 
-fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) {
+fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) -> Option<usize> {
     if content.is_empty() {
-        return;
+        return None;
     }
     if let Some(last) = out.last_mut() {
         let same_role = last
@@ -453,7 +552,7 @@ fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) {
         if same_role {
             if let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut) {
                 existing.extend(content);
-                return;
+                return Some(out.len() - 1);
             }
         }
     }
@@ -461,6 +560,61 @@ fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) {
         "role": role,
         "content": content,
     }));
+    Some(out.len() - 1)
+}
+
+fn add_cache_control(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+    }
+}
+
+fn apply_cache_breakpoints(
+    system: &mut [Value],
+    messages: &mut [Value],
+    mut tools: Option<&mut [Value]>,
+    candidates: Vec<CacheBreakpoint>,
+) {
+    let mut selected = Vec::with_capacity(ANTHROPIC_MAX_CACHE_BREAKPOINTS);
+    for candidate in candidates {
+        if selected.len() == ANTHROPIC_MAX_CACHE_BREAKPOINTS {
+            break;
+        }
+        if selected.contains(&candidate) {
+            continue;
+        }
+        let applied = match candidate {
+            CacheBreakpoint::LastTool => tools
+                .as_deref_mut()
+                .and_then(|tools| tools.last_mut())
+                .map(add_cache_control)
+                .is_some(),
+            CacheBreakpoint::SystemBlock(index) => {
+                system.get_mut(index).map(add_cache_control).is_some()
+            }
+            CacheBreakpoint::MessageBlock {
+                message_idx,
+                block_idx,
+            } => messages
+                .get_mut(message_idx)
+                .and_then(|message| message.get_mut("content"))
+                .and_then(Value::as_array_mut)
+                .and_then(|blocks| blocks.get_mut(block_idx))
+                .map(add_cache_control)
+                .is_some(),
+        };
+        if applied {
+            selected.push(candidate);
+        }
+    }
+}
+
+fn last_content_block_index(messages: &[Value], message_idx: usize) -> Option<usize> {
+    messages
+        .get(message_idx)
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|blocks| blocks.len().checked_sub(1))
 }
 
 fn user_content_blocks(
@@ -625,7 +779,7 @@ fn normalize_finish_reason(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{build_request_body, final_stream_events, response_to_chat_response};
     use crate::core::llm::files_api::FilesApiAdapter;
@@ -669,6 +823,17 @@ mod tests {
         }
     }
 
+    fn count_cache_controls(value: &Value) -> usize {
+        match value {
+            Value::Array(items) => items.iter().map(count_cache_controls).sum(),
+            Value::Object(entries) => {
+                usize::from(entries.contains_key("cache_control"))
+                    + entries.values().map(count_cache_controls).sum::<usize>()
+            }
+            _ => 0,
+        }
+    }
+
     #[test]
     fn build_request_body_extracts_system_and_user_messages() {
         let request = ChatRequest {
@@ -682,6 +847,8 @@ mod tests {
             stream: Some(true),
             model_override: None,
             thinking_level: None,
+            cache_key: None,
+            ephemeral_tail_count: 0,
             tools: None,
         };
 
@@ -697,7 +864,9 @@ mod tests {
         );
 
         assert_eq!(body["model"], "claude-opus-4-6");
-        assert_eq!(body["system"], "be helpful");
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "be helpful");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"][0]["text"], "hello");
         assert_eq!(body["stream"], true);
@@ -707,6 +876,193 @@ mod tests {
             .as_f64()
             .expect("temperature serialized as number");
         assert!((temperature - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn last_breakpoint_precedes_the_ephemeral_tail() {
+        let mut summary = ChatMessage::user("compacted history");
+        summary.kind = crate::core::llm::MessageKind::CompactionSummary;
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::system("stable system"),
+                summary,
+                ChatMessage::user("latest persisted input"),
+                ChatMessage::user("<system_reminder>runtime state</system_reminder>"),
+            ],
+            model: "ignored".to_string(),
+            tools: Some(vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "read a file",
+                    "parameters": {"type": "object"},
+                }
+            })]),
+            ephemeral_tail_count: 1,
+            ..Default::default()
+        };
+
+        let body = build_request_body(
+            &request,
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            true,
+            &Capabilities::default(),
+            None,
+        );
+
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("merged user content");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+        assert!(
+            content[2].get("cache_control").is_none(),
+            "the synthetic tail must not become a cache breakpoint"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoints_never_exceed_the_provider_budget_with_many_summaries() {
+        let mut first_summary = ChatMessage::user("oldest compacted history");
+        first_summary.kind = crate::core::llm::MessageKind::CompactionSummary;
+        let mut second_summary = ChatMessage::user("middle compacted history");
+        second_summary.kind = crate::core::llm::MessageKind::CompactionSummary;
+        let mut latest_summary = ChatMessage::user("latest compacted history");
+        latest_summary.kind = crate::core::llm::MessageKind::CompactionSummary;
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::system("stable system"),
+                first_summary,
+                second_summary,
+                latest_summary,
+                ChatMessage::user("latest persisted input"),
+                ChatMessage::user("<system_reminder>runtime state</system_reminder>"),
+            ],
+            model: "ignored".to_string(),
+            tools: Some(vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "read a file",
+                    "parameters": {"type": "object"},
+                }
+            })]),
+            ephemeral_tail_count: 1,
+            ..Default::default()
+        };
+
+        let body = build_request_body(
+            &request,
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            true,
+            &Capabilities::default(),
+            None,
+        );
+
+        assert_eq!(count_cache_controls(&body), 4);
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("contiguous user messages merge into blocks");
+        assert!(
+            content[0].get("cache_control").is_none(),
+            "the oldest summary is lower priority than the four provider-supported breakpoints"
+        );
+        assert!(
+            content[1].get("cache_control").is_none(),
+            "only the latest summary may receive the summary breakpoint"
+        );
+        assert_eq!(content[2]["cache_control"]["type"], "ephemeral");
+        assert_eq!(content[3]["cache_control"]["type"], "ephemeral");
+        assert!(
+            content[4].get("cache_control").is_none(),
+            "the synthetic tail must never become a cache breakpoint"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoints_handle_empty_system_and_tools() {
+        let mut summary = ChatMessage::user("compacted history");
+        summary.kind = crate::core::llm::MessageKind::CompactionSummary;
+        let request = ChatRequest {
+            messages: vec![
+                summary,
+                ChatMessage::user("<system_reminder>runtime state</system_reminder>"),
+            ],
+            model: "ignored".to_string(),
+            ephemeral_tail_count: 1,
+            ..Default::default()
+        };
+
+        let body = build_request_body(
+            &request,
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            true,
+            &Capabilities::default(),
+            None,
+        );
+
+        assert_eq!(count_cache_controls(&body), 1);
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("contiguous user messages merge into blocks");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+        assert!(content[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn cache_breakpoints_allow_an_empty_history() {
+        let body = build_request_body(
+            &ChatRequest::default(),
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            true,
+            &Capabilities::default(),
+            None,
+        );
+
+        assert_eq!(count_cache_controls(&body), 0);
+        assert_eq!(body["messages"], json!([]));
+        assert!(body.get("system").is_none());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn cache_breakpoints_never_mark_an_ephemeral_only_history() {
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user(
+                "<system_reminder>runtime-only state</system_reminder>",
+            )],
+            ephemeral_tail_count: 1,
+            ..Default::default()
+        };
+        let body = build_request_body(
+            &request,
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            true,
+            &Capabilities::default(),
+            None,
+        );
+
+        assert_eq!(count_cache_controls(&body), 0);
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
     }
 
     #[test]
@@ -722,6 +1078,8 @@ mod tests {
             stream: Some(false),
             model_override: None,
             thinking_level: None,
+            cache_key: None,
+            ephemeral_tail_count: 0,
             tools: None,
         };
 
@@ -767,6 +1125,8 @@ mod tests {
             stream: Some(false),
             model_override: None,
             thinking_level: None,
+            cache_key: None,
+            ephemeral_tail_count: 0,
             tools: None,
         };
 
@@ -814,6 +1174,8 @@ mod tests {
             stream: Some(false),
             model_override: None,
             thinking_level: None,
+            cache_key: None,
+            ephemeral_tail_count: 0,
             tools: None,
         };
 

@@ -1,7 +1,7 @@
 use super::common::*;
 
 #[test]
-fn create_plan_invisible_outside_planning_returns_error() {
+fn create_plan_rejected_outside_planning_returns_actionable_error() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -16,13 +16,33 @@ fn create_plan_invisible_outside_planning_returns_error() {
     };
     let err = create_plan::execute(&rt, args).expect_err("CHAT 模式应被拒");
     match err {
-        ToolError::InvisibleInMode { tool, mode } => {
+        ToolError::RejectedInMode {
+            tool,
+            mode,
+            guidance,
+        } => {
             assert_eq!(tool, "create_plan");
             assert_eq!(mode, "chat");
+            assert!(guidance.contains("Plan"));
         }
-        other => panic!("expected InvisibleInMode, got {other:?}"),
+        other => panic!("expected RejectedInMode, got {other:?}"),
     }
     cleanup_home(&home);
+}
+
+#[test]
+fn rejection_message_does_not_claim_the_tool_is_invisible() {
+    let error = ToolError::RejectedInMode {
+        tool: "create_plan",
+        mode: "chat".to_string(),
+        guidance: "Enter Plan mode before creating a plan.",
+    };
+    let rendered = error.to_string().to_ascii_lowercase();
+    assert!(rendered.contains("不允许") || rendered.contains("not allowed"));
+    assert!(
+        !rendered.contains("invisible") && !rendered.contains("不可见"),
+        "the catalog is stable; rejection must describe policy, not visibility"
+    );
 }
 
 #[test]

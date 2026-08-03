@@ -26,8 +26,9 @@ async fn new_session_registers_slot_in_registry() {
         .lock()
         .as_ref()
         .expect("new session turn state")
-        .system_text
-        .clone();
+        .prompt_snapshot
+        .system_text()
+        .to_string();
     assert!(system_text.contains("Agent workspace directory"));
     assert!(!system_text.contains("Current date and time"));
     assert!(!system_text.contains("{now}"));

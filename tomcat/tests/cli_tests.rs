@@ -495,6 +495,8 @@ fn cli_text_stream_with_usage(
         Ok(StreamEvent::Usage {
             prompt_tokens,
             completion_tokens,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             total_tokens: Some(prompt_tokens + completion_tokens),
             reasoning_tokens: None,
             text_tokens: None,

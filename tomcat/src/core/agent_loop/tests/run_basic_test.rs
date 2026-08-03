@@ -1116,6 +1116,8 @@ async fn final_assistant_message_persists_provider_usage() {
         Ok(StreamEvent::Usage {
             prompt_tokens: 12,
             completion_tokens: 34,
+            cache_read_tokens: Some(9),
+            cache_write_tokens: Some(3),
             total_tokens: Some(46),
             reasoning_tokens: Some(20),
             text_tokens: Some(14),
@@ -1149,6 +1151,8 @@ async fn final_assistant_message_persists_provider_usage() {
         .expect("assistant transcript message must keep provider usage");
     assert_eq!(usage.prompt_tokens, 12);
     assert_eq!(usage.completion_tokens, 34);
+    assert_eq!(usage.cache_read_tokens, Some(9));
+    assert_eq!(usage.cache_write_tokens, Some(3));
     assert_eq!(usage.total_tokens, Some(46));
     assert_eq!(usage.reasoning_tokens, Some(20));
     assert_eq!(usage.text_tokens, Some(14));

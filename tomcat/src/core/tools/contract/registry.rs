@@ -156,12 +156,17 @@ impl ToolRegistry for DefaultToolRegistry {
 
     async fn list_tools(&self, plugin_id: Option<&str>) -> Result<Vec<Tool>, AppError> {
         let guard = self.tools.read();
-        let out: Vec<Tool> = guard
+        let mut out: Vec<Tool> = guard
             .values()
             .filter(|t| plugin_id.is_none_or(|p| t.plugin_id.as_str() == p))
             .filter(|t| t.is_enabled)
             .cloned()
             .collect();
+        out.sort_by(|left, right| {
+            left.plugin_id
+                .cmp(&right.plugin_id)
+                .then_with(|| left.name.cmp(&right.name))
+        });
         Ok(out)
     }
 

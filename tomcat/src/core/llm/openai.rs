@@ -561,6 +561,8 @@ struct OpenAiRequestBody {
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -792,6 +794,7 @@ impl OpenAiProvider {
             stream_options: None,
             reasoning_effort: thinking_fields.reasoning_effort,
             thinking: thinking_fields.thinking,
+            prompt_cache_key: request.cache_key.clone(),
         };
 
         let url = build_path_aware_endpoint(base_url, "chat/completions");
@@ -816,9 +819,7 @@ impl OpenAiProvider {
             return Err(map_http_status_error(status, &bytes));
         }
 
-        let response: ChatResponse =
-            serde_json::from_slice(&bytes).map_err(|e| map_parse_error("解析响应", e))?;
-        Ok(response)
+        parse_non_stream_response(&bytes)
     }
 
     /// 判断是否为可重试错误（429、5xx、超时等）。
@@ -1021,6 +1022,7 @@ impl LlmProvider for OpenAiProvider {
             }),
             reasoning_effort: thinking_fields.reasoning_effort,
             thinking: thinking_fields.thinking,
+            prompt_cache_key: request.cache_key.clone(),
         };
 
         let resp = self.stream_post_with_base_fallback(&body).await?;
@@ -1354,7 +1356,50 @@ fn parse_sse_buffer(
 #[serde(rename_all = "snake_case")]
 struct OpenAiStreamChunk {
     choices: Option<Vec<OpenAiStreamChoice>>,
-    usage: Option<TokenUsage>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct OpenAiUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: Option<u32>,
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct OpenAiPromptTokensDetails {
+    cached_tokens: Option<u32>,
+}
+
+impl From<OpenAiUsage> for TokenUsage {
+    fn from(usage: OpenAiUsage) -> Self {
+        Self {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            cache_read_tokens: usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            cache_write_tokens: None,
+            total_tokens: usage.total_tokens,
+            reasoning_tokens: None,
+            text_tokens: None,
+        }
+    }
+}
+
+fn parse_non_stream_response(bytes: &[u8]) -> Result<ChatResponse, AppError> {
+    let raw: Value = serde_json::from_slice(bytes).map_err(|e| map_parse_error("解析响应", e))?;
+    let mut response: ChatResponse =
+        serde_json::from_value(raw.clone()).map_err(|e| map_parse_error("解析响应", e))?;
+    if let Some(usage) = raw.get("usage") {
+        let usage: OpenAiUsage =
+            serde_json::from_value(usage.clone()).map_err(|e| map_parse_error("解析 usage", e))?;
+        response.usage = Some(usage.into());
+    }
+    Ok(response)
 }
 
 #[derive(serde::Deserialize)]
@@ -1455,10 +1500,13 @@ fn openai_chunk_to_stream_events_with_state(
     }
 
     if let Some(usage) = chunk.usage {
+        let usage: TokenUsage = usage.into();
         events.push(StreamEvent::Usage {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
             reasoning_tokens: None,
             text_tokens: None,
         });

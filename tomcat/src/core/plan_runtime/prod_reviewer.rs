@@ -319,6 +319,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         } else {
                             None
                         },
+                        ephemeral_tail_provider: None,
                     };
                     let mut agent_loop =
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone());
@@ -566,6 +567,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         } else {
                             None
                         },
+                        ephemeral_tail_provider: None,
                     };
                     let mut agent_loop =
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
@@ -895,6 +897,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         subagent_type: SubagentType::Explorer,
                         plan_runtime: None,
                         skill_set: None,
+                        ephemeral_tail_provider: None,
                     };
                     let mut agent_loop =
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())

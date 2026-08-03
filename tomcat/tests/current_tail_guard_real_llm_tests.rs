@@ -307,6 +307,8 @@ async fn request_update_plan_args(
             stream: Some(false),
             model_override: None,
             thinking_level: None,
+            cache_key: None,
+            ephemeral_tail_count: 0,
             tools: Some(tool_definitions.clone()),
         };
         let response = request_chat_response_or_skip(

@@ -26,12 +26,36 @@
 
 use tracing::info;
 
-use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest};
+use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, PromptCacheKeyFamily};
 use crate::infra::events::{AgentEvent, Message};
 
 use super::steering_injection::inject_follow_up_messages;
 use super::types::{unix_ts_ms, AgentLoop, LoopError, ToolCallInfo};
 use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize, turn_summary};
+
+pub(crate) fn with_ephemeral_tail(
+    messages: &[ChatMessage],
+    agent: &AgentLoop,
+) -> (Vec<ChatMessage>, usize) {
+    let mut request_messages = messages.to_vec();
+    let Some(provider) = agent.config.ephemeral_tail_provider.as_ref() else {
+        return (request_messages, 0);
+    };
+    let tail = provider.render_ephemeral_tail();
+    if !tail.trim().is_empty() {
+        request_messages.push(ChatMessage::user(tail));
+        return (request_messages, 1);
+    }
+    (request_messages, 0)
+}
+
+pub(crate) fn cache_key_for(agent: &AgentLoop) -> Option<String> {
+    let family = match agent.config.subagent_type {
+        super::types::SubagentType::User => PromptCacheKeyFamily::Main,
+        kind => PromptCacheKeyFamily::Subagent(kind.as_str()),
+    };
+    family.key_for(&agent.config.session_id)
+}
 
 pub(super) async fn run_reasoning_loop(
     agent: &mut AgentLoop,
@@ -75,14 +99,17 @@ pub(super) async fn run_reasoning_loop(
             timestamp: unix_ts_ms(),
         });
 
+        let (request_messages, ephemeral_tail_count) = with_ephemeral_tail(messages, agent);
         let req = ChatRequest {
-            messages: messages.clone(),
+            messages: request_messages,
             model: agent.wire_model().to_string(),
             temperature: None,
             max_tokens: None,
             stream: Some(true),
             model_override: None,
             thinking_level: agent.config.thinking_level,
+            cache_key: cache_key_for(agent),
+            ephemeral_tail_count,
             tools: Some(agent.config.tool_definitions.clone()),
         };
 

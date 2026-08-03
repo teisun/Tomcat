@@ -111,7 +111,7 @@ async fn ask_question_emits_transcript_event_on_cancelled() {
 }
 
 #[tokio::test]
-async fn ask_question_invisible_in_exec_returns_tool_error() {
+async fn ask_question_rejected_in_exec_returns_actionable_error() {
     let rt = PlanRuntime::new("s1");
     rt.seed_active_plan_for_test("plan_x".into(), PlanFileState::Executing);
     let panel = MockAskQuestionPanel::new(vec![]);
@@ -119,11 +119,16 @@ async fn ask_question_invisible_in_exec_returns_tool_error() {
         .await
         .unwrap_err();
     match err {
-        ToolError::InvisibleInMode { tool, mode } => {
+        ToolError::RejectedInMode {
+            tool,
+            mode,
+            guidance,
+        } => {
             assert_eq!(tool, "ask_question");
             assert_eq!(mode, "chat");
+            assert!(guidance.contains("待确认项"));
         }
-        other => panic!("expected InvisibleInMode, got {other:?}"),
+        other => panic!("expected RejectedInMode, got {other:?}"),
     }
 }
 

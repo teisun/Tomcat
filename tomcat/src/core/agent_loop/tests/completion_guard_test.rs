@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::super::turn_finalize::{
-    finalize_turn_after_text, TurnOutcome, MAX_COMPLETION_GUARD_INJECTIONS,
+    finalize_turn_after_text, should_run_layer0_cleanup, TurnOutcome, LAYER0_PRESSURE_GATE,
+    MAX_COMPLETION_GUARD_INJECTIONS,
 };
 use super::super::types::SubagentType;
 use super::super::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
@@ -20,8 +21,19 @@ use crate::core::plan_runtime::file_store::{
 use crate::core::plan_runtime::review::Finding;
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{ContextState, MessageAppendSink};
+use crate::core::tools::pipeline::read_state::{ReadFileState, ReadStamp};
+use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::DefaultEventBus;
+
+#[test]
+fn layer0_pressure_gate_opens_at_the_preheat_threshold() {
+    assert!(!should_run_layer0_cleanup(
+        LAYER0_PRESSURE_GATE - f64::EPSILON
+    ));
+    assert!(should_run_layer0_cleanup(LAYER0_PRESSURE_GATE));
+    assert!(should_run_layer0_cleanup(0.70));
+}
 
 /// 计划文件写在 `$HOME/.tomcat/plans` 下，和 plan_tool 那批测试共享同一个进程环境变量，
 /// 所以必须用同一把锁串行化，否则会互相把 HOME 抽走。
@@ -129,6 +141,24 @@ fn build_agent_with_sink(
     subagent_type: SubagentType,
     message_append_sink: Option<Arc<dyn MessageAppendSink>>,
 ) -> AgentLoop {
+    build_agent_with_config(
+        plan_runtime,
+        subagent_type,
+        message_append_sink,
+        ContextConfig::default(),
+        Arc::new(ReadFileState::new()),
+        String::new(),
+    )
+}
+
+fn build_agent_with_config(
+    plan_runtime: Option<Arc<PlanRuntime>>,
+    subagent_type: SubagentType,
+    message_append_sink: Option<Arc<dyn MessageAppendSink>>,
+    context_config: ContextConfig,
+    read_file_state: Arc<ReadFileState>,
+    agent_trail_dir: String,
+) -> AgentLoop {
     let mut agent = AgentLoop::new(
         test_binding(Arc::new(MockLlmProvider::new(vec![])), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
@@ -138,12 +168,29 @@ fn build_agent_with_sink(
             plan_runtime,
             subagent_type,
             message_append_sink,
+            context_config,
+            read_file_state,
+            agent_trail_dir,
             ..Default::default()
         },
         CancellationToken::new(),
     );
     agent.set_context_state(Some(empty_context_state()));
     agent
+}
+
+fn read_stamp(tool_call_id: &str) -> ReadStamp {
+    ReadStamp {
+        mtime_ms: 0,
+        size: 0,
+        content_hash: 0,
+        offset: None,
+        limit: None,
+        is_partial_view: false,
+        covered_lines: Some((1, 1)),
+        reached_eof: true,
+        tool_call_id: Some(tool_call_id.to_string()),
+    }
 }
 
 async fn finalize(agent: &mut AgentLoop, messages: &mut Vec<ChatMessage>) -> TurnOutcome {
@@ -161,6 +208,135 @@ async fn finalize(agent: &mut AgentLoop, messages: &mut Vec<ChatMessage>) -> Tur
     )
     .await
     .expect("finalize should not fail")
+}
+
+#[tokio::test]
+async fn layer0_above_gate_preserves_placeholder_and_persistence_semantics() {
+    let trail = tempfile::tempdir().expect("trail directory");
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        layer0_placeholder_threshold_chars: 10_000,
+        layer0_single_result_max_chars: 50_000,
+        ..Default::default()
+    };
+    let mut agent = build_agent_with_config(
+        None,
+        SubagentType::User,
+        None,
+        config,
+        Arc::new(ReadFileState::new()),
+        trail.path().display().to_string(),
+    );
+    let old_tool = ChatMessage::tool("old-12k", &"old".repeat(4_000));
+    let newest_tool = ChatMessage::tool("new-60k", &"new".repeat(20_000));
+    let state_messages = vec![
+        ChatMessage::user("older turn"),
+        old_tool,
+        ChatMessage::user("latest turn"),
+        newest_tool,
+    ];
+    let estimate_context_chars = state_messages
+        .iter()
+        .map(crate::core::session::manager::estimate_msg_chars)
+        .sum();
+    agent.set_context_state(Some(ContextState {
+        messages: state_messages.clone(),
+        estimate_context_chars,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+    let mut messages = state_messages;
+
+    assert_eq!(
+        finalize(&mut agent, &mut messages).await,
+        TurnOutcome::Finished
+    );
+
+    let state = agent.context_state.as_ref().expect("context state");
+    assert_eq!(
+        state.messages[1].text_content(),
+        Some(crate::core::compaction::TOOL_RESULT_PLACEHOLDER),
+        "a historical 12K tool result must retain the established placeholder behavior"
+    );
+    let persisted = state.messages[3].text_content().unwrap_or("");
+    assert!(
+        persisted.starts_with("[Tool result persisted:"),
+        "the newest 60K result must remain disk-backed with a preview: {persisted}"
+    );
+    assert!(persisted.contains("60000 chars"), "persisted={persisted}");
+    assert!(
+        trail
+            .path()
+            .join("tool-results/sess-guard/new-60k.txt")
+            .exists(),
+        "the original large result must be retained on disk"
+    );
+}
+
+#[tokio::test]
+async fn layer0_below_gate_keeps_read_stamp_and_tool_result_intact() {
+    let read_state = Arc::new(ReadFileState::new());
+    let stamp_path = PathBuf::from("/layer0-low-watermark-stamp");
+    read_state.put(stamp_path.clone(), read_stamp("old-12k"));
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        layer0_placeholder_threshold_chars: 10_000,
+        ..Default::default()
+    };
+    let mut agent = build_agent_with_config(
+        None,
+        SubagentType::User,
+        None,
+        config,
+        Arc::clone(&read_state),
+        String::new(),
+    );
+    let old_tool_text = "old".repeat(4_000);
+    let state_messages = vec![
+        ChatMessage::user("older turn"),
+        ChatMessage::tool("old-12k", &old_tool_text),
+        ChatMessage::user("latest turn"),
+        ChatMessage::tool("latest-small", "small result"),
+    ];
+    agent.set_context_state(Some(ContextState {
+        messages: state_messages.clone(),
+        estimate_context_chars: 40_000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+    let mut messages = state_messages;
+
+    assert_eq!(
+        finalize(&mut agent, &mut messages).await,
+        TurnOutcome::Finished
+    );
+
+    let state = agent.context_state.as_ref().expect("context state");
+    assert_eq!(
+        state.messages[1].text_content(),
+        Some(old_tool_text.as_str()),
+        "below the pressure gate, Layer 0 must not rewrite old results"
+    );
+    assert!(
+        read_state.get(&stamp_path).is_some(),
+        "a read stamp may only be invalidated after its visible result is evicted"
+    );
 }
 
 #[tokio::test]

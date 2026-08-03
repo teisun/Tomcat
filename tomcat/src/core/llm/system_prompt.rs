@@ -30,7 +30,11 @@
 // SystemPromptSection trait + Builder
 // ---------------------------------------------------------------------------
 
+use serde_json::Value;
+
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
+use crate::core::tools::contract::catalog::builtin_tool_surface_with_policy;
+use crate::core::tools::contract::registry::{tool_to_function_definition, Tool};
 
 pub trait SystemPromptSection: Send + Sync {
     fn section_name(&self) -> &str;
@@ -47,6 +51,189 @@ pub struct WorkspaceContext {
     pub agent_plans_dir: String,
     pub agent_trail_dir: String,
     pub tool_lines: Option<String>,
+}
+
+/// The immutable tool view used to derive both LLM function definitions and
+/// the human-readable system-prompt inventory.
+///
+/// Plugin tools are observed by the API layer exactly once before this value is
+/// built. From that one observation, all request-prefix representations are
+/// derived together.
+#[derive(Debug, Clone)]
+pub struct ToolSurface {
+    function_definitions: Vec<Value>,
+    identity_tool_lines: String,
+    signature: String,
+}
+
+impl ToolSurface {
+    pub fn from_plugin_tools(allow_load_skill: bool, plugin_tools: &[Tool]) -> Self {
+        let builtin = builtin_tool_surface_with_policy(allow_load_skill);
+        let mut plugin_tools = plugin_tools.iter().collect::<Vec<_>>();
+        plugin_tools.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.description.cmp(&right.description))
+        });
+        let mut function_definitions = builtin.function_definitions;
+        function_definitions.extend(
+            plugin_tools
+                .iter()
+                .map(|tool| tool_to_function_definition(tool)),
+        );
+        function_definitions.sort_by(|left, right| {
+            left["function"]["name"]
+                .as_str()
+                .cmp(&right["function"]["name"].as_str())
+                .then_with(|| left.to_string().cmp(&right.to_string()))
+        });
+
+        let plugin_tool_lines = plugin_tools
+            .iter()
+            .map(|tool| format!("- {}: {}", tool.name, tool.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let identity_tool_lines = if plugin_tool_lines.is_empty() {
+            builtin.identity_tool_lines
+        } else {
+            format!("{}\n{}", builtin.identity_tool_lines, plugin_tool_lines)
+        };
+        let signature = serde_json::to_string(&serde_json::json!({
+            "function_definitions": function_definitions,
+            "identity_tool_lines": identity_tool_lines,
+        }))
+        .expect("tool surfaces contain JSON-serializable definitions");
+
+        Self {
+            function_definitions,
+            identity_tool_lines,
+            signature,
+        }
+    }
+
+    pub fn function_definitions(&self) -> &[Value] {
+        &self.function_definitions
+    }
+
+    pub fn identity_tool_lines(&self) -> &str {
+        &self.identity_tool_lines
+    }
+
+    pub fn signature(&self) -> &str {
+        &self.signature
+    }
+}
+
+/// A cache-aware system-prompt snapshot paired with the exact tool array sent
+/// alongside it. The snapshot only rebuilds after an input that already
+/// invalidates the tools prefix has changed.
+#[derive(Debug, Clone)]
+pub struct SystemPromptSnapshot {
+    signature: String,
+    system_text: String,
+    tool_definitions: Vec<Value>,
+}
+
+impl SystemPromptSnapshot {
+    pub fn new(
+        context: &WorkspaceContext,
+        surface: &ToolSurface,
+        skill_set: Option<&crate::core::skill::SkillSet>,
+        skill_cfg: Option<&crate::infra::config::SkillsConfig>,
+        context_budget_chars: usize,
+    ) -> Self {
+        let signature =
+            prompt_snapshot_signature(context, surface, skill_set, skill_cfg, context_budget_chars);
+        let system_text = build_system_prompt_for_surface(
+            context,
+            surface,
+            skill_set,
+            skill_cfg,
+            context_budget_chars,
+        );
+        Self {
+            signature,
+            system_text,
+            tool_definitions: surface.function_definitions.clone(),
+        }
+    }
+
+    /// Returns true only when the rendered system prompt and tools must change.
+    pub fn refresh(
+        &mut self,
+        context: &WorkspaceContext,
+        surface: &ToolSurface,
+        skill_set: Option<&crate::core::skill::SkillSet>,
+        skill_cfg: Option<&crate::infra::config::SkillsConfig>,
+        context_budget_chars: usize,
+    ) -> bool {
+        let signature =
+            prompt_snapshot_signature(context, surface, skill_set, skill_cfg, context_budget_chars);
+        if self.signature == signature {
+            return false;
+        }
+        self.signature = signature;
+        self.system_text = build_system_prompt_for_surface(
+            context,
+            surface,
+            skill_set,
+            skill_cfg,
+            context_budget_chars,
+        );
+        self.tool_definitions = surface.function_definitions.clone();
+        true
+    }
+
+    pub fn system_text(&self) -> &str {
+        &self.system_text
+    }
+
+    pub fn signature(&self) -> &str {
+        &self.signature
+    }
+
+    pub fn tool_definitions(&self) -> &[Value] {
+        &self.tool_definitions
+    }
+}
+
+fn build_system_prompt_for_surface(
+    context: &WorkspaceContext,
+    surface: &ToolSurface,
+    skill_set: Option<&crate::core::skill::SkillSet>,
+    skill_cfg: Option<&crate::infra::config::SkillsConfig>,
+    context_budget_chars: usize,
+) -> String {
+    let mut context = context.clone();
+    context.tool_lines = Some(surface.identity_tool_lines().to_string());
+    build_system_prompt_with_skills(context, skill_set, skill_cfg, context_budget_chars)
+}
+
+fn prompt_snapshot_signature(
+    context: &WorkspaceContext,
+    surface: &ToolSurface,
+    skill_set: Option<&crate::core::skill::SkillSet>,
+    skill_cfg: Option<&crate::infra::config::SkillsConfig>,
+    context_budget_chars: usize,
+) -> String {
+    let rendered_skills = match (skill_set, skill_cfg) {
+        (Some(skill_set), Some(skill_cfg)) => {
+            render_available_skills_prompt(skill_set, context_budget_chars, skill_cfg)
+        }
+        _ => None,
+    };
+    serde_json::to_string(&serde_json::json!({
+        "workspace": {
+            "agent_workspace_dir": context.agent_workspace_dir,
+            "agent_definition_dir": context.agent_definition_dir,
+            "agent_plans_dir": context.agent_plans_dir,
+            "agent_trail_dir": context.agent_trail_dir,
+        },
+        "tool_surface": surface.signature(),
+        "available_skills": rendered_skills,
+        "context_budget_chars": context_budget_chars,
+    }))
+    .expect("prompt snapshot inputs are JSON-serializable")
 }
 
 pub struct SystemPromptBuilder {
@@ -471,21 +658,16 @@ pub fn build_system_prompt(workspace_dir: &str) -> String {
     SystemPromptBuilder::default().build(&context)
 }
 
-/// 携带工作区状态的便捷 wrapper（plan §8）：
-/// 在默认 section 之上注册 [`WorkspaceStateSection`]，给 Agent 提供权限边界感知。
-pub fn build_system_prompt_with_state(context: WorkspaceContext, state: WorkspaceState) -> String {
-    build_system_prompt_with_state_and_skills(context, state, None, None, 0)
-}
-
-pub fn build_system_prompt_with_state_and_skills(
+/// Builds the stable system-prompt portion that does not include per-request
+/// permission roots or path rules. Callers must carry those runtime facts in an
+/// ephemeral trailing message instead of invalidating the system prefix.
+pub fn build_system_prompt_with_skills(
     context: WorkspaceContext,
-    state: WorkspaceState,
     skill_set: Option<&crate::core::skill::SkillSet>,
     skill_cfg: Option<&crate::infra::config::SkillsConfig>,
     context_budget_chars: usize,
 ) -> String {
     let mut builder = SystemPromptBuilder::default();
-    builder.register(Box::new(WorkspaceStateSection::new(state)));
     if let (Some(skill_set), Some(skill_cfg)) = (skill_set, skill_cfg) {
         if let Some(section) =
             AvailableSkillsSection::from_skill_set(skill_set, context_budget_chars, skill_cfg)

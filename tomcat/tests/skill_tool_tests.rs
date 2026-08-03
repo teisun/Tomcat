@@ -7,7 +7,10 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tomcat::core::llm::system_prompt::{WorkspaceContext, WorkspaceState};
+use tomcat::core::llm::system_prompt::{
+    AvailableSkillsSection, SystemPromptBuilder, WorkspaceContext, WorkspaceState,
+    WorkspaceStateSection,
+};
 use tomcat::core::llm::{ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene};
 use tomcat::{
     init_context_state, run_chat_turn, AppConfig, AppError, BashResult, Capabilities, ChatContext,
@@ -249,39 +252,40 @@ fn write_live_skill_fixture(workspace: &Path, name: &str, description: &str, sec
 
 fn build_system_text(ctx: &ChatContext, skill_set: &tomcat::core::skill::SkillSet) -> String {
     let budget = tomcat::infra::compute_context_budget_chars(&ctx.config.context);
-    tomcat::core::llm::system_prompt::build_system_prompt_with_state_and_skills(
-        WorkspaceContext {
-            agent_workspace_dir: ctx
-                .scope_services
-                .agent_workspace_dir
-                .to_string_lossy()
-                .to_string(),
-            agent_definition_dir: ctx
-                .scope_services
-                .agent_definition_dir
-                .to_string_lossy()
-                .to_string(),
-            agent_plans_dir: "~/.tomcat/plans".to_string(),
-            agent_trail_dir: ctx
-                .scope_services
-                .agent_trail_dir
-                .to_string_lossy()
-                .to_string(),
-            tool_lines: Some(
-                tomcat::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
-                    true,
-                ),
+    let mut builder = SystemPromptBuilder::default();
+    builder.register(Box::new(WorkspaceStateSection::new(WorkspaceState {
+        read_write: vec![],
+        read_only: vec![],
+        path_rules: vec![],
+    })));
+    if let Some(section) =
+        AvailableSkillsSection::from_skill_set(skill_set, budget, &ctx.config.skills)
+    {
+        builder.register(Box::new(section));
+    }
+    builder.build(&WorkspaceContext {
+        agent_workspace_dir: ctx
+            .scope_services
+            .agent_workspace_dir
+            .to_string_lossy()
+            .to_string(),
+        agent_definition_dir: ctx
+            .scope_services
+            .agent_definition_dir
+            .to_string_lossy()
+            .to_string(),
+        agent_plans_dir: "~/.tomcat/plans".to_string(),
+        agent_trail_dir: ctx
+            .scope_services
+            .agent_trail_dir
+            .to_string_lossy()
+            .to_string(),
+        tool_lines: Some(
+            tomcat::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
+                true,
             ),
-        },
-        WorkspaceState {
-            read_write: vec![],
-            read_only: vec![],
-            path_rules: vec![],
-        },
-        Some(skill_set),
-        Some(&ctx.config.skills),
-        budget,
-    )
+        ),
+    })
 }
 
 #[tokio::test]

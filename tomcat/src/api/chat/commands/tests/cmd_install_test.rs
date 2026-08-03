@@ -162,6 +162,12 @@ async fn run_install_refreshes_current_session_inventory() {
             outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
         }]));
     let ctx = build_ctx(work.path(), panel);
+    let context_budget_chars =
+        crate::infra::config::compute_context_budget_chars(&ctx.config.context);
+    let mut prompt_snapshot =
+        crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
+    let before_text = prompt_snapshot.system_text().to_string();
+    let before_tools = prompt_snapshot.tool_definitions().to_vec();
 
     let outcome = run(
         &ctx,
@@ -183,6 +189,27 @@ async fn run_install_refreshes_current_session_inventory() {
         tools.iter().any(|tool| tool.name == "release_tool"),
         "plugin static tool should become visible immediately"
     );
+    assert!(
+        crate::api::chat::refresh_prompt_snapshot(
+            &ctx,
+            context_budget_chars,
+            &mut prompt_snapshot,
+        )
+        .await,
+        "installing a plugin or skill must rebuild the shared request snapshot"
+    );
+    assert_ne!(prompt_snapshot.system_text(), before_text);
+    assert_ne!(prompt_snapshot.tool_definitions(), before_tools);
+    assert!(
+        prompt_snapshot
+            .system_text()
+            .contains("- release_tool: tool description"),
+        "the system inventory and function array must derive from the same tool observation"
+    );
+    assert!(prompt_snapshot
+        .tool_definitions()
+        .iter()
+        .any(|definition| { definition["function"]["name"].as_str() == Some("release_tool") }));
 }
 
 #[tokio::test]

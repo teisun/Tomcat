@@ -35,6 +35,8 @@ pub const OPENAI_GATEWAY_TEST_BASE_URL: &str = "https://aigateway.sunmi.com";
 pub const FCODEX_TEST_MODEL_ENV: &str = "TOMCAT_E2E_FCODEX_MODEL";
 pub const FCODEX_TEST_DEFAULT_MODEL: &str = "fcodex/gpt-5.6-sol";
 pub const FCODEX_TEST_API_KEY_ENV: &str = "FCODEX_OPENAI_API_KEY";
+pub const FCODEX_ANTHROPIC_TEST_API_KEY_ENV: &str = "FCODEX_API_KEY";
+pub const FCODEX_ANTHROPIC_TEST_MODEL: &str = "fcodex/claude-opus-4-8";
 pub const FCODEX_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_FCODEX_BASE_URL";
 pub const FCODEX_TEST_DEFAULT_BASE_URL: &str = "https://fcodex.top";
 pub const MIMO_TEST_MODEL_ENV: &str = "TOMCAT_E2E_MIMO_MODEL";
@@ -166,6 +168,26 @@ pub fn apply_fcodex_app_config(cfg: &mut AppConfig) {
             base_url: Some(base_url.as_str()),
             model_name: Some("gpt-5.6-sol"),
             thinking_format: Some("openai"),
+            supports_files: true,
+            supports_reasoning: true,
+        },
+    );
+}
+
+pub fn apply_fcodex_anthropic_app_config(cfg: &mut AppConfig) {
+    let base_url = fcodex_test_base_url();
+    cfg.llm.default_model = FCODEX_ANTHROPIC_TEST_MODEL.to_string();
+    cfg.context.compaction_model = FCODEX_ANTHROPIC_TEST_MODEL.to_string();
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id: FCODEX_ANTHROPIC_TEST_MODEL,
+            api: "anthropic-messages",
+            provider: "fcodex",
+            env_key: FCODEX_ANTHROPIC_TEST_API_KEY_ENV,
+            base_url: Some(base_url.as_str()),
+            model_name: Some("claude-opus-4-8"),
+            thinking_format: Some("anthropic-adaptive"),
             supports_files: true,
             supports_reasoning: true,
         },

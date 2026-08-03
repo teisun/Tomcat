@@ -3,7 +3,7 @@
 use crate::api::chat::ChatContext;
 use crate::core::compaction::compact_tool_results;
 use crate::core::compaction::preheat::generate_summary;
-use crate::core::llm::LlmScene;
+use crate::core::llm::{LlmScene, PromptCacheKeyFamily};
 use crate::core::session::manager::init_context_state;
 use crate::AppError;
 
@@ -101,6 +101,9 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
         compaction_call.provider_impl.as_ref(),
         &compaction_call.model,
         Some(&control),
+        PromptCacheKeyFamily::Compaction
+            .key_for(ctx.session_runtime.session.current_session_key())
+            .as_deref(),
     )
     .await?;
 

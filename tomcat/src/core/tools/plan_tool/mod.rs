@@ -29,8 +29,12 @@ pub use update_plan::UpdatePlanArgs;
 /// 所有 plan 工具的统一错误。可序列化到 ToolResult.content。
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    #[error("当前模式 {mode} 下 {tool} 不可见")]
-    InvisibleInMode { tool: &'static str, mode: String },
+    #[error("当前模式 {mode} 不允许调用 {tool}：{guidance}")]
+    RejectedInMode {
+        tool: &'static str,
+        mode: String,
+        guidance: &'static str,
+    },
     #[error("参数错误: {0}")]
     BadArgs(String),
     #[error("plan 文件错误: {0}")]
@@ -49,7 +53,7 @@ impl ToolError {
         serde_json::json!({
             "error": self.to_string(),
             "kind": match self {
-                ToolError::InvisibleInMode { .. } => "invisible_in_mode",
+                ToolError::RejectedInMode { .. } => "rejected_in_mode",
                 ToolError::BadArgs(_) => "bad_args",
                 ToolError::PlanFile(_) => "plan_file",
                 ToolError::Op(_) => "op",

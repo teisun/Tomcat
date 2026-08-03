@@ -249,7 +249,12 @@ fn responses_payload_to_chat_response_extracts_text_and_usage() {
             "type": "message",
             "content": [{"type": "output_text", "text": "hello"}]
         }],
-        "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 3,
+            "total_tokens": 8,
+            "input_tokens_details": {"cached_tokens": 4}
+        }
     });
     let r = responses_payload_to_chat_response(&raw);
     assert_eq!(r.id.as_deref(), Some("resp_1"));
@@ -260,6 +265,27 @@ fn responses_payload_to_chat_response_extracts_text_and_usage() {
     assert_eq!(u.prompt_tokens, 5);
     assert_eq!(u.completion_tokens, 3);
     assert_eq!(u.total_tokens, Some(8));
+    assert_eq!(u.cache_read_tokens, Some(4));
+    assert_eq!(u.cache_write_tokens, None);
+}
+
+#[test]
+fn responses_payload_without_cache_details_leaves_cache_usage_empty() {
+    let raw = json!({
+        "id": "resp_1",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "content": [{"type": "output_text", "text": "hello"}]
+        }],
+        "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+    });
+
+    let usage = responses_payload_to_chat_response(&raw)
+        .usage
+        .expect("usage present");
+    assert_eq!(usage.cache_read_tokens, None);
+    assert_eq!(usage.cache_write_tokens, None);
 }
 
 #[test]
@@ -468,6 +494,7 @@ fn responses_chunk_completed_emits_finish_and_usage() {
                 "input_tokens": 7,
                 "output_tokens": 4,
                 "total_tokens": 11,
+                "input_tokens_details": {"cached_tokens": 5},
                 "output_tokens_details": {"reasoning_tokens": 3}
             }
         }
@@ -482,6 +509,8 @@ fn responses_chunk_completed_emits_finish_and_usage() {
     if let StreamEvent::Usage {
         prompt_tokens,
         completion_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
         total_tokens,
         reasoning_tokens,
         text_tokens,
@@ -490,6 +519,8 @@ fn responses_chunk_completed_emits_finish_and_usage() {
     {
         assert_eq!(*prompt_tokens, 7);
         assert_eq!(*completion_tokens, 4);
+        assert_eq!(*cache_read_tokens, Some(5));
+        assert_eq!(*cache_write_tokens, None);
         assert_eq!(*total_tokens, Some(11));
         assert_eq!(*reasoning_tokens, Some(3));
         assert_eq!(*text_tokens, Some(1));
@@ -661,10 +692,13 @@ fn responses_build_request_body_uses_model_name_when_present() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: Some("session-1:main".to_string()),
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
     assert_eq!(body["model"], "gpt-5.4");
+    assert_eq!(body["prompt_cache_key"], "session-1:main");
 }
 
 #[test]
@@ -688,6 +722,8 @@ fn responses_build_request_body_maps_catalog_id_to_model_name() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -715,6 +751,8 @@ fn responses_build_request_body_without_model_name_uses_id() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -740,6 +778,8 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -773,6 +813,8 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -809,6 +851,8 @@ fn responses_auto_thinking_format_ignores_claude_model_name_on_responses_wire() 
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -840,6 +884,8 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -870,6 +916,8 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -900,6 +948,8 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -926,6 +976,8 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -972,6 +1024,8 @@ fn openai_responses_roundtrip_replays_reasoning_items() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -1021,6 +1075,8 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -1081,6 +1137,8 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body_with_hint(&req, true, false);
@@ -1158,6 +1216,8 @@ fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_u
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -1234,6 +1294,8 @@ fn responses_build_request_body_skips_previous_response_id_across_routed_relays(
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = target_provider.build_request_body(&req, true);
@@ -1319,6 +1381,8 @@ fn responses_build_request_body_does_not_fall_back_to_older_same_route_response_
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -2060,6 +2124,8 @@ fn responses_stream_test_request() -> ChatRequest {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     }
 }
@@ -2432,6 +2498,8 @@ fn responses_build_request_body_degrades_unsupported_history_attachments_to_inpu
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
 

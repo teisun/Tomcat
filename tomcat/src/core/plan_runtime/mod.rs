@@ -125,7 +125,8 @@ fn read_plan_for_restore(path: &std::path::Path) -> Option<file_store::PlanFile>
 /// - `recover()`（启动时扫描 `~/.tomcat/plans/`）— 占位实现，P2 起接入 file_store
 ///
 /// 后续 PR：`build_plan` / `cancel_to_pending` / `dispatch_reviewer` / `attach_cancel_hook` /
-/// `decorate_messages` / `visible_tools_for_mode` 在 P2-P7 逐步补齐；本结构体公共字段
+/// `decorate_messages` 在 P2-P7 逐步补齐；工具目录现保持稳定，由 handler 按 mode
+/// 执行 policy；本结构体公共字段
 /// 在 P1 已定型，避免后续多次扩字段引发的连锁修改。
 pub struct PlanRuntime {
     /// 当前模式。每轮 `chat_loop` 装配 `tool_definitions` / system reminder / user prefix

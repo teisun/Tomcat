@@ -1,6 +1,6 @@
 # `ask_question` 工具：PLAN 模式下的结构化提问
 
-本文档是内置工具 **`ask_question`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 与 [`planner.md`](./planner.md)：**在 PLAN 与 CHAT/Pending/Completed 模式均可见**（EXEC 模式不可见，避免 agent loop 阻塞在用户输入上），让模型以「单选」结构化方式向用户索要明确决策，避免 prompt 里塞自然语言提问后模型自己脑补答案。**实现以仓库代码为准**；本文只保留**已定稿的行为与契约**。
+本文档是内置工具 **`ask_question`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 与 [`planner.md`](./planner.md)：它始终出现在稳定工具目录中；handler 会在不允许提问的计划生命周期返回 `RejectedInMode` 和下一步指引，避免 agent loop 在执行中阻塞，同时不让模式切换破坏提示缓存前缀。它让模型以「单选」结构化方式向用户索要明确决策，避免 prompt 里塞自然语言提问后模型自己脑补答案。**实现以仓库代码为准**；本文只保留**已定稿的行为与契约**。
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
@@ -125,7 +125,7 @@
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
-| **AQ-A** | catalog 注册 `ask_question`；`is_read_only=true`、`requires_user_interaction=true`；`mode ∈ {Planning, Chat, Pending, Completed}` 可见（EXEC 隐藏）；**交付**：`ToolMetadata` | `src/core/tools/contract/catalog.rs`、`src/api/chat/plan_runtime/catalog.rs` | 见 §11：`ask_question_visible_in_planning_and_chat` / `ask_question_hidden_in_executing`（PENDING） | CHAT/PLAN 都出现；执行态隐藏。 |
+| **AQ-A** | catalog 注册 `ask_question`；`is_read_only=true`、`requires_user_interaction=true`；稳定目录始终下发，执行中的计划由 handler 拒绝；**交付**：`ToolMetadata` | `src/core/tools/contract/catalog.rs`、`src/core/tools/plan_tool/ask_question.rs` | 见 §11：`ask_question_visible_in_planning_and_chat` / `ask_question_rejected_in_executing`（PENDING） | 模型始终知道工具存在；执行态得到可行动的拒绝说明。 |
 | **AQ-B** | 入参校验：`questions∈[1,4]`、每题 `options∈[2,4]`、id 唯一、**恰好一个 `recommended: true`**、`id` **不得**为保留值 `__custom__`；**交付**：校验错误文案 | `src/api/chat/plan_runtime/tool_exec.rs`（拟定） | 见 §11：`ask_question_schema_bounds`、`ask_question_requires_exactly_one_recommended`、`ask_question_rejects_reserved_custom_id`（PENDING） | 题数选项数越界 / 推荐项缺失 / 保留 id 直接拒。 |
 | **AQ-C** | UI panel 阻塞 await 用户选择；CLI/IDE 双实现；**自动在每题末尾追加** `__custom__` 槽（label 默认「自定义…」，可输入文本）；推荐项在 label 后追加「— 推荐」后缀；**交付**：`AskQuestionPanel` trait | `src/api/chat/ui/ask_question_panel.rs`（拟定） | 见 §11：`ask_question_blocks_until_answered`、`ask_question_ui_appends_custom_slot`（PENDING） | 弹窗答完才返回 tool 结果；UI 永远多一个自定义槽，推荐项加后缀。 |
 | **AQ-D** | transcript 写 `plan.ask_question`（题目 + 答案）；**交付**：事件 schema | `src/infra/transcript/...`（既有） | 见 §11：`ask_question_emits_transcript_event`（PENDING） | 问答落盘方便回放。 |
@@ -135,20 +135,20 @@
 
 #### 4.2.1 AQ-A：catalog 注册与元属性
 
-- **交付**：`BUILTIN_TOOL_CATALOG` 新增 `ask_question`；`visible_tools_for_mode(Planning, …)` 包含；`Chat` / `Executing` / `Completed` / `Pending` 剔除（普通自由聊天用自然语言追问即可，不强制结构化提问）。
+- **交付**：`BUILTIN_TOOL_CATALOG` 新增 `ask_question`；稳定 tool surface 在所有模式下都包含它。执行中计划由 handler 返回 `RejectedInMode` 和下一步指引，避免改变缓存前缀。
 - **元属性**：`is_read_only = true`（不写 `PlanRecord`）；`requires_user_interaction = true`（阻塞 agent loop 直到 UI 回填）。
 
 ```text
-  Planning 态 catalog 构造
+  Stable ToolSurface 构造
         │
         ▼
-  READ_ONLY_TOOLS + create_plan + ask_question
+  all built-ins + ask_question
         │
         ▼
-  Executing 态 → ask_question 被 filter 掉
+  Executing plan → ask_question handler returns actionable rejection
 ```
 
-**说人话**：只在规划态给模型这道「选择题」工具，且标明要等人答。
+**说人话**：模型始终能看见这道「选择题」工具；只有执行中的计划不能停下来等人答，届时工具会解释原因和替代做法。
 
 #### 4.2.2 AQ-B：入参校验
 
@@ -373,7 +373,7 @@ LLM ──tool_call("ask_question", { questions: [...] })──▶ tool_exec
 
 | 触发 | 反馈 | 说人话 |
 |------|------|--------|
-| `mode != Planning` | catalog 已不可见；强行调用返回 tool error，附 usage `先 /plan` | 非规划态调不了。 |
+| handler 不允许提问的生命周期 | catalog 仍可见；调用返回 `RejectedInMode`，附下一步指引 | 不靠隐藏工具阻止阻塞。 |
 | `questions.length < 1` 或 `> 4` | tool error | 题数越界。 |
 | `options.length < 2` 或 `> 4`（不含 UI 兜底的 `__custom__` 槽） | tool error | 选项数越界。 |
 | 重复 `id`（题或选项） | tool error | id 不能重复。 |

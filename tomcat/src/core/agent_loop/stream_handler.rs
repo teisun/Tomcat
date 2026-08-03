@@ -379,6 +379,8 @@ pub(super) async fn run_chat_stream(
             Ok(StreamEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
                 total_tokens,
                 reasoning_tokens,
                 text_tokens,
@@ -386,10 +388,21 @@ pub(super) async fn run_chat_stream(
                 usage = Some(TokenUsage {
                     prompt_tokens,
                     completion_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
                     total_tokens,
                     reasoning_tokens,
                     text_tokens,
                 });
+                info!(
+                    target: "tomcat_chat_diag",
+                    phase = "llm_usage",
+                    provider = agent.llm.provider_name(),
+                    prompt_tokens,
+                    completion_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                );
                 if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.update_api_usage(prompt_tokens, completion_tokens);
                 }

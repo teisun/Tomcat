@@ -28,7 +28,7 @@ const STREAM_TEST_KEY_ENV: &str = "__OPENAI_STREAM_TEST_KEY__";
 #[test]
 fn test_openai_chunk_with_usage_emits_usage_event() {
     let chunk: OpenAiStreamChunk = serde_json::from_str(
-        r#"{"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":42,"total_tokens":192}}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":42,"total_tokens":192,"prompt_tokens_details":{"cached_tokens":120}}}"#,
     )
     .expect("should parse chunk with usage");
     let events = openai_chunk_to_stream_events(chunk);
@@ -37,11 +37,15 @@ fn test_openai_chunk_with_usage_emits_usage_event() {
         StreamEvent::Usage {
             prompt_tokens,
             completion_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
             total_tokens,
             ..
         } => {
             assert_eq!(*prompt_tokens, 150);
             assert_eq!(*completion_tokens, 42);
+            assert_eq!(*cache_read_tokens, Some(120));
+            assert_eq!(*cache_write_tokens, None);
             assert_eq!(*total_tokens, Some(192));
         }
         other => panic!("expected StreamEvent::Usage, got {:?}", other),
@@ -277,6 +281,7 @@ fn test_openai_request_body_does_not_serialize_reasoning_when_none() {
         stream_options: None,
         reasoning_effort: None,
         thinking: None,
+        prompt_cache_key: None,
     };
     let j = serde_json::to_value(&body).unwrap();
     assert!(
@@ -289,6 +294,25 @@ fn test_openai_request_body_does_not_serialize_reasoning_when_none() {
         "None thinking 不应进 wire JSON: {}",
         j
     );
+    assert!(j.get("prompt_cache_key").is_none());
+}
+
+#[test]
+fn test_openai_request_body_serializes_scoped_prompt_cache_key() {
+    let body = OpenAiRequestBody {
+        model: "gpt-5.4".into(),
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        stream: true,
+        tools: None,
+        stream_options: None,
+        reasoning_effort: None,
+        thinking: None,
+        prompt_cache_key: Some("session-1:subagent:verifier".to_string()),
+    };
+    let wire = serde_json::to_value(&body).expect("serialize request body");
+    assert_eq!(wire["prompt_cache_key"], "session-1:subagent:verifier");
 }
 
 #[test]
@@ -303,6 +327,7 @@ fn test_openai_request_body_serializes_reasoning_effort() {
         stream_options: None,
         reasoning_effort: Some("high".into()),
         thinking: None,
+        prompt_cache_key: None,
     };
     let j = serde_json::to_value(&body).unwrap();
     assert_eq!(
@@ -324,6 +349,7 @@ fn test_openai_request_body_serializes_thinking_object() {
         stream_options: None,
         reasoning_effort: None,
         thinking: Some(serde_json::json!({"type":"enabled"})),
+        prompt_cache_key: None,
     };
     let j = serde_json::to_value(&body).unwrap();
     assert_eq!(j["thinking"]["type"], "enabled");
@@ -342,6 +368,7 @@ fn test_openai_request_body_serializes_deepseek_thinking_fields_together() {
         stream_options: None,
         reasoning_effort: Some("high".into()),
         thinking: Some(serde_json::json!({"type":"enabled"})),
+        prompt_cache_key: None,
     };
     let j = serde_json::to_value(&body).unwrap();
     assert_eq!(
@@ -829,6 +856,8 @@ fn stream_test_request() -> ChatRequest {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     }
 }
@@ -864,6 +893,7 @@ async fn stream_post_once_gateway_503_sets_connect_stage() {
         }),
         reasoning_effort: None,
         thinking: None,
+        prompt_cache_key: Some("session:main".to_string()),
     };
     let err = provider
         .stream_post_once(&server.base_url, &body)
@@ -901,6 +931,7 @@ async fn stream_post_once_header_read_timeout_maps_to_retryable_read_timeout() {
         }),
         reasoning_effort: None,
         thinking: None,
+        prompt_cache_key: None,
     };
     let err = provider
         .stream_post_once(&server.base_url, &body)

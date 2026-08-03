@@ -335,6 +335,7 @@ impl Preheat {
         usage_ratio: f64,
         messages: &[ChatMessage],
         transcript_path: &std::path::Path,
+        cache_key: Option<String>,
         llm: Arc<dyn LlmProvider>,
         config: &ContextConfig,
         emitter: Arc<ScopedEventEmitter>,
@@ -361,6 +362,7 @@ impl Preheat {
         let transcript_path = transcript_path.to_path_buf();
         let compaction_model = config.compaction_model.clone();
         let ratio_before = usage_ratio;
+        let cache_key = cache_key.unwrap_or_default();
 
         let existing_summary = find_last_summary(&snapshot);
 
@@ -376,6 +378,7 @@ impl Preheat {
                     &*llm,
                     &compaction_model,
                     control.as_ref(),
+                    (!cache_key.is_empty()).then_some(cache_key.as_str()),
                 )
                 .await
                 {
@@ -538,6 +541,7 @@ impl Preheat {
         usage_ratio: f64,
         messages: &[ChatMessage],
         transcript_path: &std::path::Path,
+        cache_key: Option<String>,
         llm: Arc<dyn LlmProvider>,
         config: &ContextConfig,
         emitter: Arc<ScopedEventEmitter>,
@@ -551,6 +555,7 @@ impl Preheat {
             usage_ratio,
             messages,
             transcript_path,
+            cache_key,
             llm,
             config,
             emitter,
@@ -662,6 +667,7 @@ pub async fn generate_summary(
     llm: &dyn LlmProvider,
     compaction_model: &str,
     control: Option<&ControlSnapshot>,
+    cache_key: Option<&str>,
 ) -> Result<String, AppError> {
     let batch_text = messages_to_text(snapshot);
 
@@ -682,6 +688,7 @@ pub async fn generate_summary(
         messages: vec![ChatMessage::system(&prompt), ChatMessage::user(&batch_text)],
         stream: Some(false),
         tools: None,
+        cache_key: cache_key.map(str::to_owned),
         ..Default::default()
     };
 

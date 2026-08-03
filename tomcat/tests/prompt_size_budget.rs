@@ -6,9 +6,8 @@
 //!    基线之下，防止未来回退。基线常量取自"优化前"实测（见 BASELINE_* 注释）。
 
 use tomcat::core::llm::system_prompt::build_system_prompt;
-use tomcat::core::plan_runtime::catalog::visible_tools_for_mode;
+use tomcat::core::plan_runtime::catalog::all_tools_with_policy;
 use tomcat::core::prompts::{load, PromptKey};
-use tomcat::core::session::AgentMode;
 use tomcat::core::tools::contract::catalog::{
     build_function_definitions, render_tool_guidelines_with_policy, BUILTIN_TOOL_CATALOG,
 };
@@ -60,14 +59,14 @@ fn print_prompt_static_sizes() {
     println!("  {:<16} {:>6}", "DESC TOTAL", desc_total);
 
     let full = build_function_definitions();
-    let chat = visible_tools_for_mode(AgentMode::Chat, false);
+    let chat = all_tools_with_policy(false);
     println!("\n=== TOOL DEFS serialized (chars) ===");
     println!(
         "  full  build_function_definitions : {}",
         serialized_len(&full)
     );
     println!(
-        "  chat  visible_tools_for_mode(Chat): {}",
+        "  stable all_tools_with_policy(false): {}",
         serialized_len(&chat)
     );
 
@@ -89,7 +88,7 @@ fn print_prompt_static_sizes() {
 
 #[test]
 fn chat_tool_defs_below_baseline() {
-    let chat_len = serialized_len(&visible_tools_for_mode(AgentMode::Chat, false));
+    let chat_len = serialized_len(&all_tools_with_policy(false));
     assert!(
         chat_len < BASELINE_CHAT_TOOLDEFS,
         "CHAT tool defs must shrink below baseline: got {chat_len}, baseline {BASELINE_CHAT_TOOLDEFS}"

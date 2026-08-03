@@ -206,11 +206,15 @@ fn chat_request_serialize_snake_case() {
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        cache_key: Some("session:main".to_string()),
+        ephemeral_tail_count: 1,
         tools: None,
     };
     let j = serde_json::to_string(&req).unwrap();
     assert!(j.contains("model"));
     assert!(j.contains("messages"));
+    assert!(!j.contains("cache_key"));
+    assert!(!j.contains("ephemeral_tail_count"));
 }
 
 #[test]
@@ -235,6 +239,8 @@ fn chat_request_serializes_hydrate_recovered_tool_round_for_openai_wire() {
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     let j = serde_json::to_value(&req).unwrap();

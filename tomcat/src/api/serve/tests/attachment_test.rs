@@ -38,6 +38,20 @@ async fn wait_for_line(
     read_ndjson_lines(buffer)
 }
 
+fn latest_persisted_user_message(
+    request: &crate::core::llm::ChatRequest,
+) -> &crate::core::llm::ChatMessage {
+    let persisted_len = request
+        .messages
+        .len()
+        .saturating_sub(request.ephemeral_tail_count);
+    request.messages[..persisted_len]
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, ChatMessageRole::User))
+        .expect("persisted user message")
+}
+
 // ── 夹具 ──────────────────────────────────────────────────────────────
 
 fn png_bytes() -> Vec<u8> {
@@ -375,12 +389,7 @@ async fn ingest_then_prompt_reaches_transcript_and_provider_without_rewriting_by
 
     // (1) provider 真的收到了这张图的字节
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_message(&captured[0]);
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
         panic!("expected multimodal parts, got {:?}", user_message.content);
     };
@@ -495,12 +504,7 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
     .await;
 
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_message(&captured[0]);
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
         panic!("expected parts");
     };
@@ -1170,12 +1174,7 @@ async fn prompt_without_attachments_still_works() {
     .await;
 
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_message(&captured[0]);
     assert!(matches!(
         &user_message.content,
         Some(ChatMessageContent::Text(text)) if text == "hello"

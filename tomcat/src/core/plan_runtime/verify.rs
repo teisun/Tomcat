@@ -420,6 +420,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         } else {
                             None
                         },
+                        ephemeral_tail_provider: None,
                     };
                     let mut agent_loop =
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())

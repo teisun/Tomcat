@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::api::chat::run_loop::cleanup_plugin_sessions_on_session_end;
-use crate::api::chat::run_loop::compose_planned_turn_messages;
+use crate::api::chat::run_loop::{build_tool_definitions, compose_planned_turn_messages};
 use crate::core::session::manager::init_context_state;
 use crate::SessionEntry;
 use crate::{
@@ -135,10 +135,10 @@ __pi_start_event_loop();
     .expect("write plugin main");
 }
 
-// T2-P1-002 PR-PLA：build_tool_definitions 现在需要 &ChatContext 才能按 AgentMode 过滤。
-// 这三个测试改为直接读 catalog 默认视图（与 build_tool_definitions 在 Chat 时等价）。
+// The request catalog is mode-stable; handlers, not catalog visibility,
+// enforce plan-mode policy.
 fn build_tool_definitions_default_view() -> Vec<serde_json::Value> {
-    crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
+    crate::core::plan_runtime::catalog::all_tools_with_policy(false)
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn build_tool_definitions_contains_config_tools() {
 }
 
 #[test]
-fn build_tool_definitions_default_view_excludes_plan_only_tools() {
+fn build_tool_definitions_default_view_includes_plan_tools_for_handler_policy() {
     let defs = build_tool_definitions_default_view();
     let names: Vec<String> = defs
         .iter()
@@ -215,10 +215,162 @@ fn build_tool_definitions_default_view_excludes_plan_only_tools() {
         .collect();
     for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
         assert!(
-            !names.contains(&plan_tool.to_string()),
-            "CHAT 默认视图不应暴露 plan_only 工具 {plan_tool}, got: {names:?}"
+            names.contains(&plan_tool.to_string()),
+            "stable tool surface must include {plan_tool}, got: {names:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn tool_catalog_is_identical_across_all_mode_and_executing_combinations() {
+    const ENV_KEY: &str = "TOMCAT_STABLE_TOOL_SURFACE_TEST_KEY";
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let chat = build_tool_definitions(&ctx).await;
+
+    ctx.session_runtime
+        .plan_runtime
+        .enter_plan()
+        .expect("enter Plan mode");
+    let planning = build_tool_definitions(&ctx).await;
+
+    ctx.session_runtime
+        .plan_runtime
+        .exit_plan()
+        .expect("return to Chat mode");
+    ctx.session_runtime.plan_runtime.seed_active_plan_for_test(
+        "executing-catalog-test".to_string(),
+        crate::core::plan_runtime::file_store::PlanFileState::Executing,
+    );
+    let executing = build_tool_definitions(&ctx).await;
+
+    assert_eq!(
+        serde_json::to_string(&chat).expect("serialize tools"),
+        serde_json::to_string(&planning).expect("serialize tools"),
+        "the actual LLM tool array must not change on Chat → Plan"
+    );
+    assert_eq!(
+        serde_json::to_string(&chat).expect("serialize tools"),
+        serde_json::to_string(&executing).expect("serialize tools"),
+        "the actual LLM tool array must not change when a plan becomes executing"
+    );
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+async fn request_prefix_is_byte_identical_across_turns() {
+    const ENV_KEY: &str = "TOMCAT_RUNTIME_TAIL_PREFIX_TEST_KEY";
+    let (dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let budget = crate::infra::config::compute_context_budget_chars(&ctx.config.context);
+    let snapshot = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+    let tail_provider = crate::api::chat::run_loop::runtime_tail_provider(&ctx);
+    let stable_history = vec![
+        crate::ChatMessage::system(snapshot.system_text()),
+        crate::ChatMessage::user("first user request"),
+    ];
+    let capture = |history: &[crate::ChatMessage]| {
+        let mut messages = history.to_vec();
+        messages.push(crate::ChatMessage::user(
+            tail_provider.render_ephemeral_tail(),
+        ));
+        crate::ChatRequest {
+            messages,
+            model: "gpt-5.4".to_string(),
+            temperature: None,
+            max_tokens: None,
+            stream: Some(true),
+            model_override: None,
+            thinking_level: None,
+            cache_key: Some("prefix-test:main".to_string()),
+            ephemeral_tail_count: 1,
+            tools: Some(snapshot.tool_definitions().to_vec()),
+        }
+    };
+
+    let initial = capture(&stable_history);
+    ctx.session_runtime.session_grants.add(
+        dir.path().join("granted-after-turn-start"),
+        crate::core::permission::GrantTrigger::UserConfirm,
+    );
+    let after_grant = capture(&stable_history);
+    ctx.session_runtime
+        .plan_runtime
+        .enter_plan()
+        .expect("enter Plan mode");
+    let in_plan = capture(&stable_history);
+    ctx.session_runtime
+        .plan_runtime
+        .exit_plan()
+        .expect("return to Chat mode");
+    ctx.session_runtime.plan_runtime.seed_active_plan_for_test(
+        "executing-prefix-test".to_string(),
+        crate::core::plan_runtime::file_store::PlanFileState::Executing,
+    );
+    let executing = capture(&stable_history);
+    let mut appended_history = stable_history.clone();
+    appended_history.push(crate::ChatMessage::assistant("first response"));
+    appended_history.push(crate::ChatMessage::user("second user request"));
+    let after_history_append = capture(&appended_history);
+
+    for request in [&after_grant, &in_plan, &executing, &after_history_append] {
+        assert_eq!(
+            serde_json::to_string(&initial.tools).expect("serialize tools"),
+            serde_json::to_string(&request.tools).expect("serialize tools"),
+            "runtime state must not alter the tools cache prefix"
+        );
+        assert_eq!(
+            initial.messages[0].text_content(),
+            request.messages[0].text_content(),
+            "runtime state must not alter the system cache prefix"
+        );
+        assert_eq!(initial.ephemeral_tail_count, request.ephemeral_tail_count);
+    }
+    for request in [&after_grant, &in_plan, &executing] {
+        assert_eq!(
+            serde_json::to_string(&request.messages[..stable_history.len()])
+                .expect("serialize stable history"),
+            serde_json::to_string(&initial.messages[..stable_history.len()])
+                .expect("serialize stable history"),
+            "permissions and plan lifecycle may only change the ephemeral tail"
+        );
+    }
+    assert_ne!(
+        initial
+            .messages
+            .last()
+            .and_then(crate::ChatMessage::text_content),
+        after_grant
+            .messages
+            .last()
+            .and_then(crate::ChatMessage::text_content)
+    );
+    assert_ne!(
+        after_grant
+            .messages
+            .last()
+            .and_then(crate::ChatMessage::text_content),
+        in_plan
+            .messages
+            .last()
+            .and_then(crate::ChatMessage::text_content)
+    );
+    assert_ne!(
+        in_plan
+            .messages
+            .last()
+            .and_then(crate::ChatMessage::text_content),
+        executing
+            .messages
+            .last()
+            .and_then(crate::ChatMessage::text_content)
+    );
+    assert_eq!(
+        serde_json::to_string(&after_history_append.messages[..stable_history.len()])
+            .expect("serialize persisted prefix"),
+        serde_json::to_string(&initial.messages[..stable_history.len()])
+            .expect("serialize persisted prefix"),
+        "appending a turn must retain the original persisted prefix byte-for-byte"
+    );
+    unsafe { std::env::remove_var(ENV_KEY) };
 }
 
 #[test]
@@ -1530,21 +1682,17 @@ fn user_prompt_for_mode_separates_session_mode_from_plan_lifecycle() {
 
 #[test]
 fn plan_reminders_follow_session_mode_and_active_plan_lifecycle() {
-    use crate::api::chat::run_loop::system_text_with_plan_reminder;
+    use crate::api::chat::run_loop::render_plan_runtime_reminder;
     use crate::core::plan_runtime::{file_store::PlanFileState, PlanRuntime};
 
     let runtime = PlanRuntime::new("plan-reminder-test");
-    let base = "BASE_SYSTEM\n";
-
-    assert_eq!(
-        system_text_with_plan_reminder(base, &runtime),
-        base,
+    assert!(
+        render_plan_runtime_reminder(&runtime).is_none(),
         "plain Chat must not receive a plan reminder"
     );
 
     runtime.enter_plan().expect("enter Plan mode");
-    let planner = system_text_with_plan_reminder(base, &runtime);
-    assert!(planner.starts_with(base));
+    let planner = render_plan_runtime_reminder(&runtime).expect("Plan mode reminder");
     assert!(planner.contains("<system_reminder"));
     assert!(
         planner.to_lowercase().contains("plan"),
@@ -1553,7 +1701,7 @@ fn plan_reminders_follow_session_mode_and_active_plan_lifecycle() {
 
     runtime.exit_plan().expect("return to Chat mode");
     runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Executing);
-    let executor = system_text_with_plan_reminder(base, &runtime);
+    let executor = render_plan_runtime_reminder(&runtime).expect("executor reminder");
     assert!(executor.contains("plan-1"));
     assert!(
         executor.contains("<system_reminder"),
@@ -1561,22 +1709,22 @@ fn plan_reminders_follow_session_mode_and_active_plan_lifecycle() {
     );
 
     runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Completed);
-    assert_eq!(
-        system_text_with_plan_reminder(base, &runtime),
-        base,
+    assert!(
+        render_plan_runtime_reminder(&runtime).is_none(),
         "completion removes executor guidance without a separate drop action"
     );
 
     runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Pending);
-    assert_eq!(
-        system_text_with_plan_reminder(base, &runtime),
-        base,
+    assert!(
+        render_plan_runtime_reminder(&runtime).is_none(),
         "parking to pending removes executor guidance"
     );
 
     runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Executing);
     assert!(
-        system_text_with_plan_reminder(base, &runtime).contains("plan-1"),
+        render_plan_runtime_reminder(&runtime)
+            .as_deref()
+            .is_some_and(|reminder| reminder.contains("plan-1")),
         "resuming execution restores executor guidance"
     );
 }

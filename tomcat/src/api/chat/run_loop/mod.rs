@@ -8,7 +8,10 @@ use tracing::{info, warn};
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
 use crate::core::llm::resolver::validate_capabilities;
-use crate::core::llm::{degrade_unsupported_multimodal, ChatMessage, LlmScene};
+use crate::core::llm::{
+    degrade_unsupported_multimodal, ChatMessage, LlmScene, PromptCacheKeyFamily,
+    SystemPromptSnapshot, ToolSurface,
+};
 use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
 };
@@ -41,10 +44,12 @@ pub(crate) use self::rehydrate::has_resumable_tail_ask_question;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
 pub(crate) use self::rehydrate::{recover_context_state_after_failed_turn, render_error_message};
 use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_session_title};
-use self::workspace_state::compute_workspace_state;
+pub(crate) use self::workspace_state::runtime_tail_provider;
 
 #[cfg(test)]
 pub(crate) use self::cleanup::cleanup_plugin_sessions_on_session_end;
+#[cfg(test)]
+pub(crate) use self::workspace_state::render_plan_runtime_reminder;
 
 #[cfg(test)]
 pub(crate) use self::cleanup::cleanup_openai_files_on_session_end;
@@ -63,56 +68,45 @@ pub(crate) use self::thinking_persist::{
     register_thinking_persist_listeners, unregister_thinking_persist_listeners,
 };
 
-async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
-    let skill_set = ctx.skill_set_snapshot();
-    let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
-    let mut tools = plan_runtime::catalog::visible_tools_for_mode_with_policy(
-        ctx.session_runtime.plan_runtime.mode(),
-        ctx.session_runtime
-            .plan_runtime
-            .executing_plan_id()
-            .is_some(),
-        allow_load_skill,
-    );
-    match ctx.global_services.tool_registry.list_tools(None).await {
-        Ok(plugin_tools) => {
-            tools.extend(
-                plugin_tools
-                    .iter()
-                    .map(crate::core::tools::contract::registry::tool_to_function_definition),
-            );
-        }
-        Err(err) => {
-            warn!(error = %err, "list plugin tools for LLM definitions failed; continuing with builtins only");
-        }
-    }
-    tools
+pub(crate) async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
+    observe_tool_surface(ctx)
+        .await
+        .function_definitions()
+        .to_vec()
 }
 
-pub(crate) async fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
+async fn observe_tool_surface(ctx: &ChatContext) -> ToolSurface {
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
-    let plugin_tool_lines = match ctx.global_services.tool_registry.list_tools(None).await {
-        Ok(plugin_tools) => plugin_tools
-            .iter()
-            .map(|tool| format!("- {}: {}", tool.name, tool.description))
-            .collect::<Vec<_>>()
-            .join("\n"),
+    let plugin_tools = match ctx.global_services.tool_registry.list_tools(None).await {
+        Ok(plugin_tools) => plugin_tools,
         Err(err) => {
-            warn!(error = %err, "list plugin tools for system prompt failed; omitting plugin tool lines");
-            String::new()
+            warn!(error = %err, "list plugin tools for prompt surface failed; continuing with builtins only");
+            Vec::new()
         }
     };
-    let builtin_tool_lines =
-        crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
-            allow_load_skill,
-        );
-    let tool_lines = if plugin_tool_lines.is_empty() {
-        builtin_tool_lines
-    } else {
-        format!("{builtin_tool_lines}\n{plugin_tool_lines}")
-    };
-    let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
+    let plugin_signature = plugin_tools
+        .iter()
+        .map(|tool| format!("{}:{}", tool.plugin_id, tool.name))
+        .collect::<Vec<_>>()
+        .join(",");
+    let skill_signature = skill_set
+        .visible_skills()
+        .into_iter()
+        .map(|skill| skill.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "prompt_runtime_snapshot",
+        plugin_tools = %plugin_signature,
+        visible_skills = %skill_signature,
+    );
+    ToolSurface::from_plugin_tools(allow_load_skill, &plugin_tools)
+}
+
+fn workspace_context(ctx: &ChatContext) -> crate::core::llm::system_prompt::WorkspaceContext {
+    crate::core::llm::system_prompt::WorkspaceContext {
         agent_workspace_dir: ctx
             .scope_services
             .agent_workspace_dir
@@ -131,64 +125,39 @@ pub(crate) async fn build_system_text(ctx: &ChatContext, context_budget_chars: u
             .agent_trail_dir
             .to_string_lossy()
             .to_string(),
-        tool_lines: Some(tool_lines),
-    };
-    let workspace_state = compute_workspace_state(ctx);
-    crate::core::llm::system_prompt::build_system_prompt_with_state_and_skills(
-        workspace_context,
-        workspace_state,
+        tool_lines: None,
+    }
+}
+
+pub(crate) async fn build_prompt_snapshot(
+    ctx: &ChatContext,
+    context_budget_chars: usize,
+) -> SystemPromptSnapshot {
+    let skill_set = ctx.skill_set_snapshot();
+    let tool_surface = observe_tool_surface(ctx).await;
+    SystemPromptSnapshot::new(
+        &workspace_context(ctx),
+        &tool_surface,
         Some(&skill_set),
         Some(&ctx.config.skills),
         context_budget_chars,
     )
 }
 
-/// Adds the reminder derived from the session mode and active plan file.
-///
-/// Plan mode enables planning guidance; an executing plan enables execution
-/// guidance. A parked or completed plan must leave no executor reminder in
-/// Chat, even though it remains the active plan.
-pub(crate) fn system_text_with_plan_reminder(
-    system_text: &str,
-    plan_runtime: &crate::core::plan_runtime::PlanRuntime,
-) -> String {
-    match plan_runtime.mode() {
-        crate::core::session::AgentMode::Plan => {
-            format!(
-                "{}{}",
-                system_text,
-                *plan_runtime::reminders::PLANNER_REMINDER
-            )
-        }
-        crate::core::session::AgentMode::Chat => plan_runtime
-            .executing_plan_id()
-            .map(|plan_id| {
-                format!(
-                    "{}{}",
-                    system_text,
-                    plan_runtime::reminders::render_executor_reminder(&plan_id)
-                )
-            })
-            .unwrap_or_else(|| system_text.to_string()),
-    }
-}
-
-pub(crate) fn sync_context_state_system_prompt_len(
-    context_state: &mut crate::core::ContextState,
-    old_len: usize,
-    new_len: usize,
-) {
-    if old_len == new_len {
-        return;
-    }
-    if new_len >= old_len {
-        context_state.estimate_context_chars += new_len - old_len;
-    } else {
-        context_state.estimate_context_chars = context_state
-            .estimate_context_chars
-            .saturating_sub(old_len - new_len);
-    }
-    context_state.invalidate_api_usage();
+pub(crate) async fn refresh_prompt_snapshot(
+    ctx: &ChatContext,
+    context_budget_chars: usize,
+    snapshot: &mut SystemPromptSnapshot,
+) -> bool {
+    let skill_set = ctx.skill_set_snapshot();
+    let tool_surface = observe_tool_surface(ctx).await;
+    snapshot.refresh(
+        &workspace_context(ctx),
+        &tool_surface,
+        Some(&skill_set),
+        Some(&ctx.config.skills),
+        context_budget_chars,
+    )
 }
 
 const AUTO_TURN_BUDGET: u32 = 8;
@@ -259,7 +228,6 @@ type PlannedAppendOutcome = (Vec<ChatMessage>, Vec<(ChatMessage, bool)>);
 fn append_planned_messages_with_rehydrate_retry(
     ctx: &ChatContext,
     system_text: &str,
-    system_text_with_reminder: &str,
     context_config: &crate::infra::ContextConfig,
     planned_messages: &[ChatMessage],
     context_state: &mut crate::core::ContextState,
@@ -269,7 +237,7 @@ fn append_planned_messages_with_rehydrate_retry(
     loop {
         let mut messages = build_context_from_state(context_state);
         let mut appended_messages = Vec::new();
-        messages.insert(0, ChatMessage::system(system_text_with_reminder));
+        messages.insert(0, ChatMessage::system(system_text));
 
         let mut append_error = None;
         for message in planned_messages.iter().skip(next_pending_idx) {
@@ -350,13 +318,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let _ = ctx.await_skill_discovery().await;
     }
     let context_budget_chars = crate::infra::config::compute_context_budget_chars(context_config);
-    let mut system_text = build_system_text(ctx, context_budget_chars).await;
+    let mut prompt_snapshot = build_prompt_snapshot(ctx, context_budget_chars).await;
     persist::schedule_checkpoint_prune(ctx);
     // ResumePlan 目前恒为 Continue；保留 hook，未来若恢复逻辑需要 tail，可在这里恢复
     // `read_entries_tail(..., 64)` 预读。
     let _ = crate::core::compute_resume_plan(entry.as_ref(), &[]);
-    let mut context_state =
-        init_context_state(&ctx.session_runtime.session, context_config, &system_text)?;
+    let mut context_state = init_context_state(
+        &ctx.session_runtime.session,
+        context_config,
+        prompt_snapshot.system_text(),
+    )?;
     if let Err(err) = ctx
         .session_runtime
         .plan_runtime
@@ -465,7 +436,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     parse_chat_command(&trimmed),
                     &mut rl,
                     &mut context_state,
-                    &system_text,
+                    prompt_snapshot.system_text(),
                 )
                 .await
                 {
@@ -513,16 +484,14 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 AppError::Config(format!("agent_registry root rearm 失败: {error}"))
             })?;
 
-        let next_system_text = build_system_text(ctx, context_budget_chars).await;
-        sync_context_state_system_prompt_len(
+        let outcome = run_chat_turn_with_snapshot(
+            ctx,
+            &input,
+            &mut prompt_snapshot,
             &mut context_state,
-            system_text.len(),
-            next_system_text.len(),
-        );
-        system_text = next_system_text;
-
-        let outcome =
-            run_chat_turn(ctx, &input, &system_text, &mut context_state, turn_token).await?;
+            turn_token,
+        )
+        .await?;
 
         match outcome {
             AgentRunOutcome::Completed(_) => {}
@@ -587,10 +556,72 @@ pub async fn run_chat_turn(
     run_chat_turn_with_message(ctx, input_message, system_text, context_state, turn_token).await
 }
 
+pub(crate) async fn run_chat_turn_with_snapshot(
+    ctx: &ChatContext,
+    input: &str,
+    prompt_snapshot: &mut SystemPromptSnapshot,
+    context_state: &mut crate::core::ContextState,
+    turn_token: CancellationToken,
+) -> Result<AgentRunOutcome, AppError> {
+    let input_message = (!input.is_empty()).then(|| ChatMessage::user(input));
+    run_chat_turn_with_message_and_snapshot(
+        ctx,
+        input_message,
+        prompt_snapshot,
+        context_state,
+        turn_token,
+    )
+    .await
+}
+
+pub(crate) async fn run_chat_turn_with_message_and_snapshot(
+    ctx: &ChatContext,
+    input_message: Option<ChatMessage>,
+    prompt_snapshot: &mut SystemPromptSnapshot,
+    context_state: &mut crate::core::ContextState,
+    turn_token: CancellationToken,
+) -> Result<AgentRunOutcome, AppError> {
+    let previous_system_len = prompt_snapshot.system_text().len();
+    if refresh_prompt_snapshot(ctx, context_state.context_budget_chars, prompt_snapshot).await {
+        context_state
+            .replace_system_prompt_chars(previous_system_len, prompt_snapshot.system_text().len());
+    }
+    let system_text = prompt_snapshot.system_text().to_string();
+    run_chat_turn_with_message_and_tool_definitions(
+        ctx,
+        input_message,
+        &system_text,
+        prompt_snapshot.tool_definitions().to_vec(),
+        context_state,
+        turn_token,
+    )
+    .await
+}
+
 pub async fn run_chat_turn_with_message(
     ctx: &ChatContext,
     input_message: Option<ChatMessage>,
     system_text: &str,
+    context_state: &mut crate::core::ContextState,
+    turn_token: CancellationToken,
+) -> Result<AgentRunOutcome, AppError> {
+    let tool_definitions = build_tool_definitions(ctx).await;
+    run_chat_turn_with_message_and_tool_definitions(
+        ctx,
+        input_message,
+        system_text,
+        tool_definitions,
+        context_state,
+        turn_token,
+    )
+    .await
+}
+
+async fn run_chat_turn_with_message_and_tool_definitions(
+    ctx: &ChatContext,
+    input_message: Option<ChatMessage>,
+    system_text: &str,
+    tool_definitions: Vec<serde_json::Value>,
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
@@ -657,8 +688,6 @@ pub async fn run_chat_turn_with_message(
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
-    let system_text_with_reminder =
-        system_text_with_plan_reminder(system_text, &ctx.session_runtime.plan_runtime);
     let planned_messages = drain_planned_turn_messages(ctx, input_message);
     if let Err(error) = ctx.global_services.model_catalog.with_catalog(|catalog| {
         validate_capabilities(
@@ -685,7 +714,6 @@ pub async fn run_chat_turn_with_message(
     let (messages, appended_messages) = append_planned_messages_with_rehydrate_retry(
         ctx,
         system_text,
-        &system_text_with_reminder,
         &context_config,
         &planned_messages,
         context_state,
@@ -715,6 +743,7 @@ pub async fn run_chat_turn_with_message(
         context_state.usage_ratio(),
         &context_state.messages,
         &context_state.transcript_path,
+        PromptCacheKeyFamily::Compaction.key_for(&session_id),
         compaction_provider.clone(),
         &context_config,
         Arc::clone(&root_event_emitter),
@@ -748,7 +777,7 @@ pub async fn run_chat_turn_with_message(
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         thinking_level,
         session_id: session_id.clone(),
-        tool_definitions: build_tool_definitions(ctx).await,
+        tool_definitions,
         context_config: context_config.clone(),
         compaction_provider: Some(compaction_provider.clone()),
         title_provider: title_provider.clone(),
@@ -767,6 +796,7 @@ pub async fn run_chat_turn_with_message(
         subagent_type: crate::core::agent_loop::SubagentType::User,
         plan_runtime: Some(ctx.session_runtime.plan_runtime.clone()),
         skill_set: Some(ctx.scope_services.skill_set.clone()),
+        ephemeral_tail_provider: Some(runtime_tail_provider(ctx)),
     };
     let mut agent_loop = AgentLoop::new(
         main_call,

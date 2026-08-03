@@ -1016,6 +1016,14 @@ pub struct ChatRequest {
     pub model_override: Option<String>,
     #[serde(skip)]
     pub thinking_level: Option<ThinkingLevel>,
+    /// Provider routing hint for prompt-cache affinity. This is intentionally
+    /// local-only and must not be serialized as part of a generic request.
+    #[serde(skip)]
+    pub cache_key: Option<String>,
+    /// Number of synthetic runtime-only messages appended after persisted
+    /// history. Providers use this to avoid placing cache breakpoints on them.
+    #[serde(skip)]
+    pub ephemeral_tail_count: usize,
     /// OpenAI function calling: tool definitions sent to the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
@@ -1027,6 +1035,12 @@ pub struct ChatRequest {
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Input tokens read from a provider prompt cache, when reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u32>,
+    /// Input tokens written to a provider prompt cache, when reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u32>,
     /// Provider 明确给出的 reasoning 输出 token；未给出时保持 None，绝不猜测。
@@ -1121,6 +1135,8 @@ pub enum StreamEvent {
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
+        cache_read_tokens: Option<u32>,
+        cache_write_tokens: Option<u32>,
         total_tokens: Option<u32>,
         reasoning_tokens: Option<u32>,
         text_tokens: Option<u32>,

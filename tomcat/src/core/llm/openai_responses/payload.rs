@@ -603,6 +603,12 @@ pub(super) fn responses_payload_to_chat_response(raw: &Value) -> ChatResponse {
                 .get("total_tokens")
                 .and_then(Value::as_u64)
                 .map(|v| v as u32),
+            cache_read_tokens: u
+                .get("input_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(Value::as_u64)
+                .map(|v| v as u32),
+            cache_write_tokens: None,
             reasoning_tokens: u
                 .get("output_tokens_details")
                 .and_then(|details| details.get("reasoning_tokens"))

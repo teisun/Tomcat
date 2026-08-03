@@ -58,12 +58,9 @@ pub struct BuiltinToolCatalogEntry {
     /// 避免在 `description` 里逐工具重复。空切片表示该工具无额外跨工具规则。
     pub prompt_guidelines: &'static [&'static str],
     /// 计划相关工具（`create_plan` / `update_plan` / `todos` / `ask_question`）。
-    /// 默认 `false`：进入 chat_loop 默认 LLM 工具集；`true` 时：
-    /// - 工具仍在 `BUILTIN_TOOL_CATALOG` 中（保持单一事实源、`tool-catalog.md` 文档完整）；
-    /// - 不进 `build_function_definitions_for_chat_default()`（chat_loop 默认视图）；
-    /// - 由 `PlanRuntime::visible_tools_for_mode(AgentMode, executing)` 依会话模式和计划文件
-    ///   生命周期决定是否可见。
-    ///   详见 [`plan-runtime.md`](../../../../docs/architecture/plan-runtime.md) §4.1 R6。
+    /// 工具始终在稳定的 LLM catalog 中；`true` 表示其 handler 必须按
+    /// `PlanRuntime` 状态实施额外的 mode policy。详情见
+    /// [`plan-runtime.md`](../../../../docs/architecture/plan-runtime.md) §4.1。
     pub plan_only: bool,
     /// 调用本工具是否需要等待用户交互（如 `ask_question` 在 CLI/IDE panel 阻塞 await）。
     /// 这是工具元属性，与 `read_only` / `destructive` 并列；写 catalog 时用作"工具是否会让 chat 主循环让出 stdin"的硬约束声明。
@@ -466,30 +463,41 @@ pub fn build_function_definitions() -> Vec<Value> {
         .collect()
 }
 
-/// chat_loop 默认 LLM 工具集（不含 `plan_only` 工具）。
+/// The two prompt representations of the stable built-in catalog.
 ///
-/// PLAN 模式专属工具（`create_plan` / `update_plan` / `todos` / `ask_question`）依据 plan-runtime.md
-/// §4.1 R6 由 `PlanRuntime::visible_tools_for_mode` 根据 Plan 会话模式和执行中计划显式合入；
-/// 未启用 `PlanRuntime` 时（or `mode == Chat`），chat_loop 用本 helper 装配 `tool_definitions`，
-/// 避免 plan 工具暴露给 CHAT 期 LLM。
-///
-/// 全集（含 plan_only）仍由 [`build_function_definitions`] 输出，用于
-/// `tool-catalog.md` 文档与 `catalog_and_function_definitions_have_same_names` 回归。
-pub fn build_function_definitions_for_chat_default() -> Vec<Value> {
-    BUILTIN_TOOL_CATALOG
+/// Build this once per request surface so the function array and the system
+/// prompt's human-readable tool list cannot drift apart.
+#[derive(Debug, Clone)]
+pub struct BuiltinToolSurface {
+    pub function_definitions: Vec<Value>,
+    pub identity_tool_lines: String,
+}
+
+pub fn builtin_tool_surface_with_policy(allow_load_skill: bool) -> BuiltinToolSurface {
+    let entries = BUILTIN_TOOL_CATALOG
         .iter()
-        .filter(|entry| !entry.plan_only && entry.name != "load_skill")
-        .map(|entry| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": entry.name,
-                    "description": entry.description,
-                    "parameters": (entry.parameters)(),
-                }
+        .filter(|entry| allow_load_skill || entry.name != "load_skill")
+        .collect::<Vec<_>>();
+    BuiltinToolSurface {
+        function_definitions: entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": entry.name,
+                        "description": entry.description,
+                        "parameters": (entry.parameters)(),
+                    }
+                })
             })
-        })
-        .collect()
+            .collect(),
+        identity_tool_lines: entries
+            .iter()
+            .map(|entry| format!("- {}: {}", entry.name, entry.display_summary()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
 }
 
 pub fn render_core_identity_tool_lines() -> String {
@@ -497,12 +505,7 @@ pub fn render_core_identity_tool_lines() -> String {
 }
 
 pub fn render_core_identity_tool_lines_with_policy(allow_load_skill: bool) -> String {
-    BUILTIN_TOOL_CATALOG
-        .iter()
-        .filter(|entry| allow_load_skill || entry.name != "load_skill")
-        .map(|entry| format!("- {}: {}", entry.name, entry.display_summary()))
-        .collect::<Vec<_>>()
-        .join("\n")
+    builtin_tool_surface_with_policy(allow_load_skill).identity_tool_lines
 }
 
 /// 聚合各工具的 [`BuiltinToolCatalogEntry::prompt_guidelines`]，按 catalog 顺序展开、

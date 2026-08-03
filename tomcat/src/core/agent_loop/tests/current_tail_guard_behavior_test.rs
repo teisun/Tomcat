@@ -418,6 +418,83 @@ async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
 }
 
 #[tokio::test]
+async fn current_tail_guard_catches_a_single_turn_that_jumps_from_low_watermark() {
+    let mut agent = make_agent(ContextConfig {
+        current_tail_compactable_min_chars: 1,
+        current_tail_single_result_max_chars: 20_000,
+        ..Default::default()
+    });
+    let system = ChatMessage::system("sys");
+    let user = ChatMessage::user("read the three generated artifacts");
+    let assistant = assistant_with_tool_calls(&[("tc1", "read"), ("tc2", "read"), ("tc3", "read")]);
+    let mut messages = vec![
+        system,
+        user,
+        assistant,
+        ChatMessage::tool("tc1", &"a".repeat(50_000)),
+        ChatMessage::tool("tc2", &"b".repeat(50_000)),
+        ChatMessage::tool("tc3", &"c".repeat(50_000)),
+    ];
+    let initial_chars = 128_000usize;
+    let context_budget_chars = 320_000usize;
+    let appended_tool_chars: usize = messages.iter().skip(3).map(estimate_msg_chars).sum();
+    assert!(
+        initial_chars as f64 / (context_budget_chars as f64) < 0.50,
+        "fixture must begin below the Layer 0 pressure gate"
+    );
+    assert!(
+        (initial_chars + appended_tool_chars) as f64 / (context_budget_chars as f64) > 0.85,
+        "three large tool results must cross the high-water mark in one turn"
+    );
+
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: initial_chars,
+        context_budget_chars,
+        context_budget_tokens: 60_000,
+        last_api_usage: Some(ApiUsage {
+            prompt_tokens: 32_000,
+            completion_tokens: 0,
+        }),
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    for message in messages.iter().skip(3) {
+        state.on_message_appended(estimate_msg_chars(message));
+    }
+    agent.set_context_state(Some(state));
+
+    let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
+        &mut agent,
+        &mut messages,
+    )
+    .await
+    .unwrap()
+    .expect("the overflow guard must make a reduction decision");
+
+    assert_eq!(decision.route, GuardRoute::Reduce);
+    assert!(
+        messages
+            .iter()
+            .filter(|message| message.role == crate::core::llm::ChatMessageRole::Tool)
+            .all(|message| {
+                message
+                    .text_content()
+                    .is_some_and(|text| text.starts_with("[Tool result persisted:"))
+            }),
+        "the current-tail guard must retain a bounded disk reference instead of sending the 150K payload onward"
+    );
+    assert_eq!(decision.after_collapse, None);
+}
+
+#[tokio::test]
 async fn mid_turn_guard_rewrites_oldest_whitelisted_tools_and_preserves_noncompactable_raw() {
     let mut agent = make_agent(ContextConfig {
         current_tail_compactable_min_chars: 1,

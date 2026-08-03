@@ -374,11 +374,11 @@ pub async fn build_initialized_state_with_provider(
 
     let context_budget_chars =
         crate::infra::config::compute_context_budget_chars(&ctx.config.context);
-    let system_text = crate::api::chat::build_system_text(&ctx, context_budget_chars).await;
+    let prompt_snapshot = crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
     let context_state = init_context_state(
         &ctx.session_runtime.session,
         &ctx.config.context,
-        &system_text,
+        prompt_snapshot.system_text(),
     )
     .expect("context state");
     if let Err(err) = ctx
@@ -396,7 +396,7 @@ pub async fn build_initialized_state_with_provider(
         cwd_string,
         SessionTurnState {
             context_state,
-            system_text,
+            prompt_snapshot,
             context_budget_chars,
         },
     ));

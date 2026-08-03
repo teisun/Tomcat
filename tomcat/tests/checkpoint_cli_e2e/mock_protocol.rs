@@ -29,7 +29,20 @@ pub(super) fn classify_mock_request(request: &str, expected_followup: &str) -> M
         };
     };
 
-    if let Some(last_message) = messages
+    let protocol_messages: Vec<&Value> = messages
+        .iter()
+        .filter(|message| {
+            let content = message
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim_start();
+            !(message.get("role").and_then(Value::as_str) == Some("user")
+                && content.starts_with("<system_reminder"))
+        })
+        .collect();
+
+    if let Some(last_message) = protocol_messages
         .last()
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
     {
@@ -52,7 +65,7 @@ pub(super) fn classify_mock_request(request: &str, expected_followup: &str) -> M
         }
     }
 
-    let user_messages: Vec<&str> = messages
+    let user_messages: Vec<&str> = protocol_messages
         .iter()
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
         .filter_map(|message| message.get("content").and_then(Value::as_str))

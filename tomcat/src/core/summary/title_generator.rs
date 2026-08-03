@@ -39,7 +39,8 @@ pub async fn generate_turn_summary(
         return String::new();
     }
     let prompt = build_turn_summary_prompt(thinking_text, tools);
-    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await
+    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model, None))
+        .await
     {
         Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 10),
         Ok(Ok(_)) => fallback_turn_summary(tools),
@@ -76,7 +77,9 @@ async fn generate_purpose_clause(
     model: &str,
 ) -> Option<String> {
     let prompt = build_purpose_clause_prompt(thinking_text, tools);
-    let raw = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+    let raw = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model, None))
+        .await
+    {
         Ok(Ok(text)) if !text.trim().is_empty() => text,
         Ok(Ok(_)) => return None,
         Ok(Err(err)) => {
@@ -137,8 +140,22 @@ pub async fn generate_session_title(
     llm: &dyn LlmProvider,
     model: &str,
 ) -> Result<String, AppError> {
+    generate_session_title_with_cache_key(first_user_text, llm, model, None).await
+}
+
+pub async fn generate_session_title_with_cache_key(
+    first_user_text: &str,
+    llm: &dyn LlmProvider,
+    model: &str,
+    cache_key: Option<&str>,
+) -> Result<String, AppError> {
     let prompt = build_session_title_prompt(first_user_text);
-    match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+    match tokio::time::timeout(
+        UTILITY_TIMEOUT,
+        call_utility(&prompt, llm, model, cache_key),
+    )
+    .await
+    {
         Ok(Ok(title)) if !title.trim().is_empty() => Ok(sanitize_title(title, 6)),
         Ok(Ok(_)) => Err(AppError::internal("LLM returned empty session title")),
         Ok(Err(e)) => Err(e),
@@ -160,7 +177,7 @@ pub async fn generate_command_summary(
         return String::new();
     }
     let prompt = build_command_summary_prompt(command, output_excerpt);
-    match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+    match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model, None)).await {
         Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 6),
         _ => fallback_command_summary(command),
     }
@@ -310,12 +327,14 @@ async fn call_utility(
     prompt: &str,
     llm: &dyn LlmProvider,
     model: &str,
+    cache_key: Option<&str>,
 ) -> Result<String, AppError> {
     let req = ChatRequest {
         model: model.to_string(),
         messages: vec![ChatMessage::user(prompt)],
         stream: Some(false),
         tools: None,
+        cache_key: cache_key.map(str::to_owned),
         ..Default::default()
     };
     let resp = llm.chat(req).await?;

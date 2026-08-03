@@ -31,7 +31,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::api::chat::run_chat_turn_with_message;
 use crate::api::chat::{
     recover_context_state_after_failed_turn, spawn_completion_subscriber, ChatContext,
     ChatContextOverrides,
@@ -304,11 +303,11 @@ pub(crate) async fn create_session_slot(
     }
     let context_budget_chars =
         crate::infra::config::compute_context_budget_chars(&ctx.config.context);
-    let system_text = crate::api::chat::build_system_text(&ctx, context_budget_chars).await;
+    let prompt_snapshot = crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
     let context_state = crate::init_context_state(
         &ctx.session_runtime.session,
         &ctx.config.context,
-        &system_text,
+        prompt_snapshot.system_text(),
     )?;
     if let Err(err) = ctx
         .session_runtime
@@ -325,7 +324,7 @@ pub(crate) async fn create_session_slot(
         cwd_string,
         SessionTurnState {
             context_state,
-            system_text,
+            prompt_snapshot,
             context_budget_chars,
         },
     )))
@@ -420,7 +419,7 @@ struct TurnStateLease {
     context_state: Option<crate::ContextState>,
     context_budget_chars: usize,
     slot: Arc<SessionSlot>,
-    system_text: String,
+    prompt_snapshot: crate::core::llm::SystemPromptSnapshot,
 }
 
 impl TurnStateLease {
@@ -434,12 +433,8 @@ impl TurnStateLease {
             context_state: Some(state.context_state),
             context_budget_chars: state.context_budget_chars,
             slot,
-            system_text: state.system_text,
+            prompt_snapshot: state.prompt_snapshot,
         })
-    }
-
-    fn context_budget_chars(&self) -> usize {
-        self.context_budget_chars
     }
 
     fn context_state_mut(&mut self) -> &mut crate::ContextState {
@@ -448,12 +443,17 @@ impl TurnStateLease {
             .expect("turn state lease should always hold context_state")
     }
 
-    fn replace_system_text(&mut self, system_text: String) {
-        self.system_text = system_text;
-    }
-
-    fn system_text_len(&self) -> usize {
-        self.system_text.len()
+    fn prompt_snapshot_and_context_state_mut(
+        &mut self,
+    ) -> (
+        &mut crate::core::llm::SystemPromptSnapshot,
+        &mut crate::ContextState,
+    ) {
+        let context_state = self
+            .context_state
+            .as_mut()
+            .expect("turn state lease should always hold context_state");
+        (&mut self.prompt_snapshot, context_state)
     }
 }
 
@@ -465,7 +465,7 @@ impl Drop for TurnStateLease {
         let mut guard = self.slot.turn_state.lock();
         *guard = Some(SessionTurnState {
             context_state,
-            system_text: std::mem::take(&mut self.system_text),
+            prompt_snapshot: self.prompt_snapshot.clone(),
             context_budget_chars: self.context_budget_chars,
         });
     }
@@ -557,28 +557,23 @@ pub(crate) async fn run_slot_turn(
     turn_token: tokio_util::sync::CancellationToken,
 ) -> Result<crate::AgentRunOutcome, AppError> {
     let mut turn_state = TurnStateLease::acquire(Arc::clone(&slot))?;
-    let next_system_text =
-        crate::api::chat::build_system_text(&slot.ctx, turn_state.context_budget_chars()).await;
-    let previous_system_text_len = turn_state.system_text_len();
-    crate::api::chat::sync_context_state_system_prompt_len(
-        turn_state.context_state_mut(),
-        previous_system_text_len,
-        next_system_text.len(),
-    );
-    turn_state.replace_system_text(next_system_text.clone());
-    let result = run_chat_turn_with_message(
-        &slot.ctx,
-        input_message,
-        &next_system_text,
-        turn_state.context_state_mut(),
-        turn_token,
-    )
-    .await;
+    let result = {
+        let (prompt_snapshot, context_state) = turn_state.prompt_snapshot_and_context_state_mut();
+        crate::api::chat::run_chat_turn_with_message_and_snapshot(
+            &slot.ctx,
+            input_message,
+            prompt_snapshot,
+            context_state,
+            turn_token,
+        )
+        .await
+    };
     if let Err(error) = &result {
+        let system_text = turn_state.prompt_snapshot.system_text().to_string();
         let _ = recover_context_state_after_failed_turn(
             &slot.ctx,
             &slot.ctx.config.context,
-            &next_system_text,
+            &system_text,
             error,
             turn_state.context_state_mut(),
         );

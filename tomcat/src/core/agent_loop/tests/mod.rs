@@ -30,6 +30,7 @@ mod current_tail_guard_runtime_test;
 mod current_tail_guard_test;
 mod current_tail_provider_routing_test;
 mod defaults_test;
+mod ephemeral_tail_test;
 mod events_order_test;
 mod interrupt_test;
 mod metrics_test;

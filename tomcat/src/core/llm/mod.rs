@@ -18,6 +18,7 @@ pub mod files_api;
 pub(crate) mod http_client;
 pub(crate) mod multimodal;
 pub mod openai_files;
+mod prompt_cache_key;
 mod provider;
 mod registry;
 pub mod replay_policy;
@@ -41,6 +42,7 @@ pub use files_api::{
 };
 pub(crate) use multimodal::degrade_unsupported_multimodal;
 pub use openai_files::FilesApiProviderContext;
+pub use prompt_cache_key::PromptCacheKeyFamily;
 pub use provider::LlmProvider;
 pub use registry::{build_provider, registered_provider_ids};
 #[allow(unused_imports)]
@@ -49,6 +51,7 @@ pub use replay_policy::{
     ReplayAction,
 };
 pub use resolver::{DefaultLlmResolver, LlmResolver, LlmScene, ResolvedCall};
+pub use system_prompt::{SystemPromptSnapshot, ToolSurface};
 pub use thinking_policy::ThinkingLevel;
 pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]

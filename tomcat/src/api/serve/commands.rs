@@ -1587,7 +1587,7 @@ fn rehydrate_slot_context_state(slot: &Arc<super::registry::SessionSlot>) -> Res
         .turn_state
         .lock()
         .as_ref()
-        .map(|state| state.system_text.clone())
+        .map(|state| state.prompt_snapshot.system_text().to_string())
         .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
     let context_state = init_context_state(
         &slot.ctx.session_runtime.session,

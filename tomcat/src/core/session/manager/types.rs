@@ -297,6 +297,17 @@ impl ContextState {
         self.post_usage_appended_chars = 0;
     }
 
+    /// Replace the session-level system-prompt contribution to the fallback
+    /// character estimate. API usage is deliberately invalidated because its
+    /// prompt-token base was measured against the previous system prefix.
+    pub fn replace_system_prompt_chars(&mut self, old_chars: usize, new_chars: usize) {
+        self.estimate_context_chars = self
+            .estimate_context_chars
+            .saturating_sub(old_chars)
+            .saturating_add(new_chars);
+        self.invalidate_api_usage();
+    }
+
     /// mid-turn 改写 current tail 文本后，同步修正内存估算与 appended delta。
     /// 仅适用于「发生在最后一次 Usage 之后」的本轮局部消息改写。
     pub fn rewrite_local_tail_chars(&mut self, old_chars: usize, new_chars: usize) {

@@ -20,7 +20,7 @@ pub mod preflight;
 
 pub use context::{ChatContext, ChatContextOverrides, CliConfirmation};
 pub(crate) use run_loop::spawn_completion_subscriber;
-pub(crate) use run_loop::{build_system_text, sync_context_state_system_prompt_len};
+pub(crate) use run_loop::{build_prompt_snapshot, run_chat_turn_with_message_and_snapshot};
 pub use run_loop::{chat_loop, run_chat_turn, run_chat_turn_with_message};
 pub(crate) use run_loop::{
     has_resumable_tail_ask_question, recover_context_state_after_failed_turn, render_error_message,
@@ -29,6 +29,8 @@ pub use session_runtime::{GlobalServices, ScopeServices, SessionRuntime, Session
 
 #[cfg(test)]
 pub(crate) use context::resolve_initial_thinking_display;
+#[cfg(test)]
+pub(crate) use run_loop::refresh_prompt_snapshot;
 #[cfg(test)]
 pub(crate) use run_loop::{
     build_turn_checkpoint_request, checkpoint_warn_line, cleanup_openai_files_on_session_end,

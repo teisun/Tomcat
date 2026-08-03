@@ -173,6 +173,8 @@ fn openai_provider_effective_model_maps_catalog_id_to_model_name() {
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
     assert_eq!(provider.effective_model(&request), "gpt-5.4");
@@ -545,6 +547,48 @@ fn transport_messages_degrades_uploaded_parts_when_files_adapter_missing() {
 }
 
 /// 依赖 DEEPSEEK_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。
+#[test]
+fn openai_non_stream_usage_reports_cached_tokens() {
+    let response = parse_non_stream_response(
+        br#"{
+            "id":"chatcmpl-1",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+            "usage":{
+                "prompt_tokens":120,
+                "completion_tokens":4,
+                "total_tokens":124,
+                "prompt_tokens_details":{"cached_tokens":96}
+            }
+        }"#,
+    )
+    .expect("valid OpenAI response");
+
+    let usage = response.usage.expect("provider supplied usage");
+    assert_eq!(usage.prompt_tokens, 120);
+    assert_eq!(usage.cache_read_tokens, Some(96));
+    assert_eq!(usage.cache_write_tokens, None);
+}
+
+#[test]
+fn openai_non_stream_usage_without_cache_details_stays_none() {
+    let response = parse_non_stream_response(
+        br#"{
+            "id":"chatcmpl-1",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}
+        }"#,
+    )
+    .expect("valid OpenAI response");
+
+    assert_eq!(
+        response
+            .usage
+            .expect("provider supplied usage")
+            .cache_read_tokens,
+        None
+    );
+}
+
 #[tokio::test]
 #[ignore = "依赖真实 DeepSeek API 与配额，CI 默认跳过"]
 async fn chat_real_request_response_print() {
@@ -573,6 +617,8 @@ async fn chat_real_request_response_print() {
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
 
@@ -607,6 +653,8 @@ fn thinking_level_override_updates_openai_reasoning_effort() {
         stream: Some(false),
         model_override: None,
         thinking_level: Some(ThinkingLevel::Low),
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
 
@@ -635,6 +683,8 @@ fn thinking_level_override_updates_deepseek_reasoning_effort() {
         stream: Some(false),
         model_override: None,
         thinking_level: Some(ThinkingLevel::Xhigh),
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     };
 

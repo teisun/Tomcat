@@ -437,6 +437,13 @@ impl OpenAiResponsesProvider {
             "stream": stream,
             "store": false,
         });
+        if let Some(cache_key) = request
+            .cache_key
+            .as_ref()
+            .filter(|key| !key.trim().is_empty())
+        {
+            body["prompt_cache_key"] = Value::String(cache_key.clone());
+        }
         if explicit_replay {
             body["include"] = json!(["reasoning.encrypted_content"]);
         }

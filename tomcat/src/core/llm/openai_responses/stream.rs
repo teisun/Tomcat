@@ -504,6 +504,11 @@ fn push_terminal_events(
             .get("total_tokens")
             .and_then(Value::as_u64)
             .map(|v| v as u32);
+        let cache_read_tokens = usage
+            .get("input_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .map(|value| value as u32);
         let reasoning_tokens = usage
             .get("output_tokens_details")
             .and_then(|details| details.get("reasoning_tokens"))
@@ -517,6 +522,8 @@ fn push_terminal_events(
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,
+            cache_read_tokens,
+            cache_write_tokens: None,
             reasoning_tokens,
             text_tokens,
         });

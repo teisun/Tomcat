@@ -95,6 +95,14 @@ impl SubagentType {
     }
 }
 
+/// Produces runtime-only instruction text for the next main-agent request.
+///
+/// The result is appended only to the outgoing `ChatRequest`; it must never
+/// become part of `ContextState.messages` or the persisted transcript.
+pub trait EphemeralTailProvider: Send + Sync {
+    fn render_ephemeral_tail(&self) -> String;
+}
+
 // ─── 配置与结果 ─────────────────────────────────────────────────────────────
 
 pub struct AgentLoopConfig {
@@ -153,6 +161,10 @@ pub struct AgentLoopConfig {
     /// Skill 目录账本：root chat 透传共享 `SkillSet`，`load_skill` 按名解析用；
     /// reviewer/verifier 或无 Skill 上下文的独立 loop 可为 `None`。
     pub skill_set: Option<Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
+    /// Runtime facts (permissions, current plan guidance) appended to each
+    /// main-agent request after persisted messages. Subagents may use a
+    /// separate provider; utility calls leave this empty.
+    pub ephemeral_tail_provider: Option<Arc<dyn EphemeralTailProvider>>,
 }
 
 impl Default for AgentLoopConfig {
@@ -178,6 +190,7 @@ impl Default for AgentLoopConfig {
             subagent_type: SubagentType::User,
             plan_runtime: None,
             skill_set: None,
+            ephemeral_tail_provider: None,
         }
     }
 }

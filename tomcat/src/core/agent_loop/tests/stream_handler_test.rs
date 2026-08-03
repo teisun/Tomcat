@@ -70,6 +70,8 @@ fn make_request() -> ChatRequest {
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        cache_key: None,
+        ephemeral_tail_count: 0,
         tools: None,
     }
 }
@@ -100,6 +102,8 @@ async fn run_chat_stream_preserves_finish_reason_and_trailing_usage() {
         Ok(StreamEvent::Usage {
             prompt_tokens: 123,
             completion_tokens: 45,
+            cache_read_tokens: Some(100),
+            cache_write_tokens: Some(23),
             total_tokens: Some(168),
             reasoning_tokens: Some(30),
             text_tokens: Some(15),
@@ -113,6 +117,13 @@ async fn run_chat_stream_preserves_finish_reason_and_trailing_usage() {
         .expect("stream_handler should consume trailing usage");
 
     assert_eq!(outcome.content_buf, "hello");
+    assert_eq!(
+        outcome
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.cache_read_tokens),
+        Some(100)
+    );
     assert_eq!(
         outcome
             .usage

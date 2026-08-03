@@ -1,7 +1,7 @@
 //! `create_plan` 工具实现（plan-runtime.md §P2 / [create-plan.md]）。
 //!
 //! 语义：
-//! - 仅 Plan 会话模式可用；Chat 会话模式调用 → `InvisibleInMode`。
+//! - 仅 Plan 会话模式可用；Chat 会话模式调用会收到可操作的拒绝。
 //! - 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md`；runtime 拼 frontmatter（state/session/created_at/schema_version）。
 //! - P4 前 `review` 字段返回 `aborted: true` 占位（reviewer 子 Agent 在 P4 接入）。
 //! - 写盘后 PlanRuntime 内存切换为 `Planning`（已是 Planning 时不变），保持 active_plan_id。
@@ -131,9 +131,10 @@ pub fn execute(
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
     if mode != AgentMode::Plan {
-        return Err(ToolError::InvisibleInMode {
+        return Err(ToolError::RejectedInMode {
             tool: "create_plan",
             mode: mode.as_str().to_string(),
+            guidance: "请先切换到 Plan 模式再创建计划",
         });
     }
     if args.goal.trim().is_empty() {

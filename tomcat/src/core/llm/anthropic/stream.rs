@@ -277,12 +277,26 @@ impl<S> AnthropicStream<S> {
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32;
-        if prompt_tokens == 0 && completion_tokens == 0 {
+        let cache_read_tokens = usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32);
+        let cache_write_tokens = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32);
+        if prompt_tokens == 0
+            && completion_tokens == 0
+            && cache_read_tokens.is_none()
+            && cache_write_tokens.is_none()
+        {
             return;
         }
         self.usage = Some(TokenUsage {
             prompt_tokens,
             completion_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
             total_tokens: Some(prompt_tokens + completion_tokens),
             reasoning_tokens: None,
             text_tokens: None,
@@ -440,7 +454,7 @@ mod tests {
             .is_empty());
         assert!(stream
             .parse_block(
-                "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":34}}\n\n",
+                "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":34,\"cache_read_input_tokens\":8,\"cache_creation_input_tokens\":4}}\n\n",
             )
             .expect("message delta")
             .is_empty());
@@ -461,6 +475,8 @@ mod tests {
             StreamEvent::Usage {
                 prompt_tokens: 12,
                 completion_tokens: 34,
+                cache_read_tokens: Some(8),
+                cache_write_tokens: Some(4),
                 total_tokens: Some(46),
                 ..
             }

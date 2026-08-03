@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use crate::core::compaction::run_layer0_cleanup;
 use crate::core::llm::{
-    ChatMessage, ContinuityMetadata, MessageKind, ReasoningContinuation, TokenUsage,
+    ChatMessage, ContinuityMetadata, MessageKind, PromptCacheKeyFamily, ReasoningContinuation,
+    TokenUsage,
 };
 use crate::core::plan_runtime::file_store::{self, TodoStatus};
 use crate::core::plan_runtime::PlanRuntime;
@@ -28,6 +29,11 @@ use super::types::AgentLoop;
 
 /// 连续注入上限。到顶后停止注入、交还用户，避免模型卡在同一个坎上无限打转。
 pub(super) const MAX_COMPLETION_GUARD_INJECTIONS: u32 = 8;
+pub(super) const LAYER0_PRESSURE_GATE: f64 = 0.50;
+
+pub(super) fn should_run_layer0_cleanup(usage_ratio: f64) -> bool {
+    usage_ratio >= LAYER0_PRESSURE_GATE
+}
 
 /// text-only 回合的处理结果。
 #[derive(Debug, PartialEq, Eq)]
@@ -188,16 +194,23 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         .plan_runtime
         .as_ref()
         .map(|rt| rt.control_snapshot(Some(agent.wire_model())));
+    let compaction_cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let mut preheat_started: Option<(usize, f64)> = None;
     let mut layer0_release: Option<(usize, usize)> = None;
     if let Some(ref mut ctx_state) = agent.context_state {
-        // Step 1: L0 cleanup
-        let l0 = run_layer0_cleanup(
-            ctx_state,
-            &agent.config.context_config,
-            std::path::Path::new(&agent.config.agent_trail_dir),
-            &agent.config.session_id,
-        );
+        // Step 1: L0 cleanup. Below the preheat threshold, preserving a
+        // byte-identical history is more valuable than proactively rewriting
+        // old tool output; compaction is not yet under pressure.
+        let l0 = if should_run_layer0_cleanup(ctx_state.usage_ratio()) {
+            run_layer0_cleanup(
+                ctx_state,
+                &agent.config.context_config,
+                std::path::Path::new(&agent.config.agent_trail_dir),
+                &agent.config.session_id,
+            )
+        } else {
+            Default::default()
+        };
         for pr in &l0.persisted {
             ctx_state.session_obs.tool_result_chars_persisted += pr.original_chars;
         }
@@ -221,6 +234,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
             ctx_state.usage_ratio(),
             &ctx_state.messages,
             &ctx_state.transcript_path,
+            compaction_cache_key.clone(),
             Arc::clone(&compaction_provider),
             &agent.config.context_config,
             Arc::clone(&compaction_emitter),
@@ -239,6 +253,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
             ratio,
             &ctx_state.messages,
             &ctx_state.transcript_path,
+            compaction_cache_key,
             Arc::clone(&compaction_provider),
             &agent.config.context_config,
             Arc::clone(&compaction_emitter),

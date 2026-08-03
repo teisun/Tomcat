@@ -45,7 +45,7 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use tomcat::core::llm::system_prompt::{
-    build_system_prompt_with_state, WorkspaceContext, WorkspaceState,
+    SystemPromptBuilder, WorkspaceContext, WorkspaceState, WorkspaceStateSection,
 };
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, PlanFileState, TodoStatus,
@@ -222,14 +222,13 @@ fn build_system_text_minimal(ctx: &ChatContext) -> String {
             .to_string(),
         tool_lines: None,
     };
-    build_system_prompt_with_state(
-        workspace_context,
-        WorkspaceState {
-            read_write: Vec::new(),
-            read_only: Vec::new(),
-            path_rules: Vec::new(),
-        },
-    )
+    let mut builder = SystemPromptBuilder::default();
+    builder.register(Box::new(WorkspaceStateSection::new(WorkspaceState {
+        read_write: Vec::new(),
+        read_only: Vec::new(),
+        path_rules: Vec::new(),
+    })));
+    builder.build(&workspace_context)
 }
 
 fn ensure_session(ctx: &ChatContext) {

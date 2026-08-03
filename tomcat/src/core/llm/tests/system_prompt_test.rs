@@ -4,6 +4,29 @@ use crate::infra::config::SkillsConfig;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+fn build_system_prompt_with_state(context: WorkspaceContext, state: WorkspaceState) -> String {
+    build_system_prompt_with_state_and_skills(context, state, None, None, 0)
+}
+
+fn build_system_prompt_with_state_and_skills(
+    context: WorkspaceContext,
+    state: WorkspaceState,
+    skill_set: Option<&SkillSet>,
+    skill_cfg: Option<&SkillsConfig>,
+    context_budget_chars: usize,
+) -> String {
+    let mut builder = SystemPromptBuilder::default();
+    builder.register(Box::new(WorkspaceStateSection::new(state)));
+    if let (Some(skill_set), Some(skill_cfg)) = (skill_set, skill_cfg) {
+        if let Some(section) =
+            AvailableSkillsSection::from_skill_set(skill_set, context_budget_chars, skill_cfg)
+        {
+            builder.register(Box::new(section));
+        }
+    }
+    builder.build(&context)
+}
+
 #[test]
 fn build_system_prompt_contains_tools_and_workspace() {
     let prompt = build_system_prompt("/home/user/workspace");
@@ -282,6 +305,128 @@ fn system_prompt_reflects_runtime_permission_skill_and_plugin_tool_changes() {
     let plugin_changed = build_system_prompt_with_state(plugin_context, fixture_state());
     assert_ne!(baseline, plugin_changed);
     assert!(plugin_changed.contains("plugin_echo"));
+}
+
+#[test]
+fn stable_system_prompt_excludes_runtime_workspace_state() {
+    let skills = fixture_skill_set();
+    let first = build_system_prompt_with_skills(
+        fixture_context(),
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    let second = build_system_prompt_with_skills(
+        fixture_context(),
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    assert_eq!(first, second);
+    assert!(!first.contains("Workspace State"));
+
+    let mut granted = fixture_state();
+    granted.read_write.push(WorkspaceRootDescriptor {
+        path: "/Users/yan/newly-authorized".into(),
+        label: "session_grant".into(),
+        alias: None,
+        description: Some("granted during the session".into()),
+    });
+    let runtime_tail = WorkspaceStateSection::new(granted).render(&fixture_context());
+    assert!(runtime_tail.contains("/Users/yan/newly-authorized"));
+    assert!(!first.contains("/Users/yan/newly-authorized"));
+}
+
+fn plugin_tool(name: &str, description: &str) -> crate::core::tools::contract::registry::Tool {
+    crate::core::tools::contract::registry::Tool {
+        name: name.to_string(),
+        label: name.to_string(),
+        description: description.to_string(),
+        parameters: serde_json::json!({"type": "object"}),
+        plugin_id: "test-plugin".to_string(),
+        is_enabled: true,
+        created_at: 0,
+    }
+}
+
+#[test]
+fn system_prompt_snapshot_reuses_unchanged_surface_and_rebuilds_with_plugin_change() {
+    let skills = fixture_skill_set();
+    let context = fixture_context();
+    let first_surface =
+        ToolSurface::from_plugin_tools(false, &[plugin_tool("plugin_alpha", "alpha tool")]);
+    let mut snapshot = SystemPromptSnapshot::new(
+        &context,
+        &first_surface,
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    let stable_text = snapshot.system_text().to_string();
+    let stable_tools = snapshot.tool_definitions().to_vec();
+    let stable_signature = snapshot.signature().to_string();
+
+    assert!(
+        !snapshot.refresh(
+            &context,
+            &first_surface,
+            Some(&skills),
+            Some(&SkillsConfig::default()),
+            400_000,
+        ),
+        "unchanged prompt inputs must preserve a byte-identical snapshot"
+    );
+    assert_eq!(snapshot.system_text(), stable_text);
+    assert_eq!(snapshot.tool_definitions(), stable_tools);
+    assert_eq!(snapshot.signature(), stable_signature);
+
+    let changed_surface = ToolSurface::from_plugin_tools(
+        false,
+        &[
+            plugin_tool("plugin_alpha", "alpha tool"),
+            plugin_tool("plugin_beta", "beta tool"),
+        ],
+    );
+    assert!(
+        snapshot.refresh(
+            &context,
+            &changed_surface,
+            Some(&skills),
+            Some(&SkillsConfig::default()),
+            400_000,
+        ),
+        "a plugin catalog change must rebuild both representations together"
+    );
+    assert!(snapshot.system_text().contains("- plugin_beta: beta tool"));
+    assert_ne!(snapshot.signature(), stable_signature);
+    let tool_names = snapshot
+        .tool_definitions()
+        .iter()
+        .filter_map(|definition| definition["function"]["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(tool_names.contains(&"plugin_beta"));
+}
+
+#[test]
+fn tool_surface_is_byte_stable_when_registry_observation_order_changes() {
+    let alpha = plugin_tool("plugin_alpha", "alpha tool");
+    let beta = plugin_tool("plugin_beta", "beta tool");
+    let alphabetic = ToolSurface::from_plugin_tools(false, &[alpha.clone(), beta.clone()]);
+    let reverse_observation = ToolSurface::from_plugin_tools(false, &[beta, alpha]);
+
+    assert_eq!(
+        alphabetic.signature(),
+        reverse_observation.signature(),
+        "the registry may not perturb cache affinity by changing observation order"
+    );
+    assert_eq!(
+        alphabetic.function_definitions(),
+        reverse_observation.function_definitions()
+    );
+    assert_eq!(
+        alphabetic.identity_tool_lines(),
+        reverse_observation.identity_tool_lines()
+    );
 }
 
 fn fixture_state() -> WorkspaceState {

@@ -194,6 +194,8 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             stream: Some(true),
             model_override: None,
             thinking_level: None,
+            cache_key: None,
+            ephemeral_tail_count: 0,
             tools: None,
         })
         .await

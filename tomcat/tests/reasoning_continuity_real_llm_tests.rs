@@ -274,6 +274,8 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: None,
             },
         )
@@ -326,6 +328,8 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
                 stream: Some(false),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: None,
             },
         )
@@ -362,6 +366,8 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -433,6 +439,8 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
                 stream: Some(false),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: None,
             },
         )
@@ -472,6 +480,8 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -543,6 +553,8 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
                 stream: Some(false),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: None,
             },
         )
@@ -589,6 +601,8 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -676,6 +690,8 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
                 stream: Some(false),
                 model_override: entry.model_override.clone(),
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: None,
             },
         )
@@ -718,6 +734,8 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -778,6 +796,8 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: None,
             },
         )
@@ -835,6 +855,8 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 stream: Some(false),
                 model_override: None,
                 thinking_level: None,
+                cache_key: None,
+                ephemeral_tail_count: 0,
                 tools: None,
             },
         )

@@ -8,7 +8,7 @@ fn prompts_render_executor_reminder_substitutes_plan_id() {
 }
 
 #[test]
-fn plan_enter_injects_planner_reminder_into_system() {
+fn planner_reminder_is_ready_for_ephemeral_tail_injection() {
     let reminder: &str = *reminders::PLANNER_REMINDER;
     assert!(
         reminder.contains("<system_reminder") && reminder.contains("</system_reminder>"),
@@ -19,9 +19,10 @@ fn plan_enter_injects_planner_reminder_into_system() {
         "PLANNER_REMINDER 必须显式提示当前在 PLAN/规划 模式，实际：\n{reminder}"
     );
 
-    let composed = format!("BASE_SYSTEM_PROMPT\n{reminder}");
-    assert!(composed.starts_with("BASE_SYSTEM_PROMPT"));
-    assert!(composed.contains("<system_reminder"));
+    assert!(
+        reminder.trim_start().starts_with("<system_reminder"),
+        "the pre-wrapped reminder can be appended as a synthetic user message"
+    );
 }
 
 #[test]
