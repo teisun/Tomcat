@@ -140,7 +140,7 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.23";
+const serverVersion = "0.1.25";
 
 function persistPendingApproval() {
   if (!pendingApproval || pendingApproval.kind !== "answer-card") {
@@ -1459,7 +1459,7 @@ function handlePrompt(frame) {
     return;
   }
 
-  if (text.includes("retry 403 showcase")) {
+  if (text.includes("retry 403 showcase") || text.includes("retry rejected showcase")) {
     const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
     const failureDetail = "API 错误 403: <html>forbidden</html>\\nHost: aigateway.sunmi.com\\nRequest-Id: req-host-retry";
     session.retry403ShowcaseAttempts = Number(session.retry403ShowcaseAttempts || 0) + 1;
@@ -1962,6 +1962,16 @@ function handleRetry(frame) {
     });
     return;
   }
+  if (content.includes("retry rejected showcase")) {
+    send({
+      error: "retry_target_stale",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
   // The copy is already durable; use the normal prompt simulation only to execute the next
   // model turn, never to synthesize another user row.
   handlePrompt({ ...frame, params: {}, resume: true, sessionId, text: content });
@@ -2072,6 +2082,7 @@ function handleInterrupt(frame) {
       session.planState = "pending";
       emitPlanEvent(sessionId, "plan.pending");
     }
+    recordHistoryCustom(sessionId, "agent.interrupted");
     send({
       sessionId,
       type: "agent_interrupted",

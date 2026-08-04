@@ -139,7 +139,8 @@ api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-context_window = 400000
+context_window = 1000000
+max_output_tokens = 128000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -151,7 +152,8 @@ api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-context_window = 400000
+context_window = 1000000
+max_output_tokens = 128000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -163,5 +165,97 @@ api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "max"]
-context_window = 400000
+context_window = 1000000
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-fable-5"
+model_name = "claude-fable-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-opus-5"
+model_name = "claude-opus-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-sonnet-5"
+model_name = "claude-sonnet-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-sonnet-4-6"
+model_name = "claude-sonnet-4-6"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-sonnet-4-5"
+model_name = "claude-sonnet-4-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+context_window = 200000
+max_output_tokens = 64000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-opus-4-5"
+model_name = "claude-opus-4-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+context_window = 200000
+max_output_tokens = 64000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-opus-4-1"
+model_name = "claude-opus-4-1"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+context_window = 200000
+max_output_tokens = 32000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }

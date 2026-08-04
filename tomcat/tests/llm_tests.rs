@@ -56,11 +56,12 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
         // 某些模型在严格/最小输出预算下会返回 max_tokens 限制错误（HTTP 400）。
         // 给到一个小但稳妥的上限，避免把网络 E2E 用例变成配额边界测试。
         max_tokens: Some(64),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     tracing::info!("Arrange: 加载 .env，经 catalog/resolver 拿 Arc<dyn LlmProvider>");
@@ -126,11 +127,12 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
         model: config.llm.default_model.clone(),
         temperature: None,
         max_tokens: Some(5),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     tracing::info!("Arrange: ChatRequest(stream=true)");

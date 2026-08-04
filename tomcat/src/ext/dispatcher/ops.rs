@@ -259,6 +259,7 @@ impl HostApiDispatcher {
         let mut req = parse_chat_request(params)?;
         let call = self.resolve_chat_call(&req)?;
         req.model = call.model.clone();
+        call.apply_resolved_output_limit(&mut req);
         let resp = call.provider_impl.chat(req).await?;
         Ok(HostResponse::ok(
             serde_json::to_value(resp).map_err(AppError::Serialize)?,
@@ -278,6 +279,7 @@ impl HostApiDispatcher {
         let mut req = parse_chat_request(params)?;
         let call = self.resolve_chat_call(&req)?;
         req.model = call.model.clone();
+        call.apply_resolved_output_limit(&mut req);
         let mut stream = call.provider_impl.chat_stream(req).await?;
         let mut content = String::new();
         while let Some(ev) = stream.next().await {

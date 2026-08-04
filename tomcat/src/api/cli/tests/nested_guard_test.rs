@@ -113,6 +113,7 @@ fn blocked_commands() -> Vec<Commands> {
                 reasoning: false,
                 web_search: false,
                 context_window: None,
+                max_output_tokens: None,
                 thinking_format: None,
             },
         },

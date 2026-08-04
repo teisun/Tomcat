@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use tracing::warn;
 
 use crate::core::compaction::preheat::Preheat;
-use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
+use crate::core::llm::{
+    ChatMessage, ChatMessageContent, ChatMessageRole, EffectiveModelLimits, MessageKind,
+};
 use crate::infra::error::AppError;
 use crate::infra::wire;
 
@@ -256,6 +258,14 @@ fn _static_assert_context_state_send() {
 }
 
 impl ContextState {
+    /// Apply the limits of the model selected for the next request. This never
+    /// restores compacted history; it only changes the next compaction
+    /// threshold when a session switches models.
+    pub fn apply_limits(&mut self, limits: &EffectiveModelLimits) {
+        self.context_budget_tokens = limits.input_budget_tokens;
+        self.context_budget_chars = limits.input_budget_tokens * 4;
+    }
+
     /// 追加消息后增量更新估算字符数和 post-usage 增量。
     pub fn on_message_appended(&mut self, content_len: usize) {
         self.estimate_context_chars += content_len;

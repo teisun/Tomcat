@@ -68,7 +68,7 @@ fn format_resolve_auto_by_wire_api() {
     );
     assert_eq!(
         ThinkingFormat::Auto.resolve_for_api("anthropic-messages"),
-        ThinkingFormat::Anthropic
+        ThinkingFormat::AnthropicAdaptive
     );
     assert_eq!(thinking_format_for_api("openai"), ThinkingFormat::Openai);
     assert_eq!(
@@ -86,7 +86,7 @@ fn format_resolve_auto_by_wire_api() {
     );
     assert_eq!(
         default_thinking_format_for_api("anthropic-messages"),
-        "anthropic"
+        "anthropic-adaptive"
     );
     // 已显式指定的 format 不会被改写
     assert_eq!(
@@ -231,8 +231,13 @@ fn qwen_has_no_request_field() {
 
 #[test]
 fn anthropic_request_maps_to_enabled_budget_tokens() {
-    let r = resolve_anthropic_request(&cfg_with(true, "high"), ThinkingFormat::Anthropic, None);
-    assert_eq!(r.max_tokens, 5120);
+    let r = resolve_anthropic_request(
+        &cfg_with(true, "high"),
+        ThinkingFormat::Anthropic,
+        None,
+        Some(128_000),
+    );
+    assert_eq!(r.max_tokens, 128_000);
     assert_eq!(r.thinking.as_ref().unwrap()["type"], "enabled");
     assert_eq!(r.thinking.as_ref().unwrap()["budget_tokens"], 4096);
     assert!(r.effort.is_none());
@@ -244,12 +249,34 @@ fn anthropic_request_caps_budget_against_requested_max_tokens() {
         &cfg_with(true, "xhigh"),
         ThinkingFormat::Anthropic,
         Some(1024),
+        Some(128_000),
     );
     assert_eq!(r.max_tokens, 1024);
-    assert_eq!(r.thinking.as_ref().unwrap()["budget_tokens"], 768);
+    assert!(
+        r.thinking.is_none(),
+        "classic thinking must be omitted when the cap cannot satisfy 1024 <= budget < max"
+    );
 
-    let off =
-        resolve_anthropic_request(&cfg_with(true, "off"), ThinkingFormat::Anthropic, Some(400));
+    let fitted = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::Anthropic,
+        Some(8_192),
+        Some(128_000),
+    );
+    let fitted_budget = fitted.thinking.as_ref().unwrap()["budget_tokens"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        (1_024..8_192).contains(&fitted_budget),
+        "classic budget must satisfy the Anthropic protocol bounds"
+    );
+
+    let off = resolve_anthropic_request(
+        &cfg_with(true, "off"),
+        ThinkingFormat::Anthropic,
+        Some(400),
+        Some(128_000),
+    );
     assert!(off.thinking.is_none());
     assert_eq!(off.max_tokens, 400);
 }
@@ -260,10 +287,75 @@ fn anthropic_adaptive_request_emits_effort() {
         &cfg_with(true, "max"),
         ThinkingFormat::AnthropicAdaptive,
         Some(4096),
+        Some(128_000),
     );
     assert_eq!(r.max_tokens, 4096);
     assert_eq!(r.thinking.as_ref().unwrap()["type"], "adaptive");
     assert_eq!(r.effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn anthropic_adaptive_effort_changes_do_not_change_the_output_cap() {
+    let high = resolve_anthropic_request(
+        &cfg_with(true, "high"),
+        ThinkingFormat::AnthropicAdaptive,
+        None,
+        Some(128_000),
+    );
+    let xhigh = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::AnthropicAdaptive,
+        None,
+        Some(128_000),
+    );
+
+    assert_eq!(high.max_tokens, 128_000);
+    assert_eq!(xhigh.max_tokens, 128_000);
+    assert_ne!(high.effort, xhigh.effort);
+}
+
+#[test]
+fn anthropic_request_uses_model_cap_and_never_raises_explicit_cap() {
+    let adaptive = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::AnthropicAdaptive,
+        None,
+        Some(128_000),
+    );
+    assert_eq!(adaptive.max_tokens, 128_000);
+
+    let capped = resolve_anthropic_request(
+        &cfg_with(true, "max"),
+        ThinkingFormat::Anthropic,
+        Some(8_192),
+        Some(128_000),
+    );
+    assert_eq!(capped.max_tokens, 8_192);
+    assert!(
+        capped.thinking.as_ref().unwrap()["budget_tokens"]
+            .as_u64()
+            .unwrap()
+            < 8_192
+    );
+
+    let over_cap = resolve_anthropic_request(
+        &cfg_with(true, "high"),
+        ThinkingFormat::AnthropicAdaptive,
+        Some(256_000),
+        Some(128_000),
+    );
+    assert_eq!(over_cap.max_tokens, 128_000);
+}
+
+#[test]
+fn anthropic_request_uses_conservative_fallback_for_unknown_models() {
+    let request = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::AnthropicAdaptive,
+        None,
+        None,
+    );
+    assert_eq!(request.max_tokens, 32_000);
 }
 
 #[test]

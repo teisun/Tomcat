@@ -41,14 +41,14 @@ async fn wait_for_line(
 fn latest_persisted_user_message(
     request: &crate::core::llm::ChatRequest,
 ) -> &crate::core::llm::ChatMessage {
-    let persisted_len = request
+    request
         .messages
-        .len()
-        .saturating_sub(request.ephemeral_tail_count);
-    request.messages[..persisted_len]
         .iter()
         .rev()
-        .find(|message| matches!(message.role, ChatMessageRole::User))
+        .find(|message| {
+            matches!(message.role, ChatMessageRole::User)
+                && message.kind != crate::core::llm::MessageKind::EphemeralTail
+        })
         .expect("persisted user message")
 }
 

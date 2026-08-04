@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::core::llm::replay_policy::{
-    plan_scoped, ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
+    plan, ProviderCompatProfile, ReplayAction, ReplayDowngradeReport,
 };
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatResponse,
@@ -228,22 +228,16 @@ pub(super) fn build_responses_input(
     let mut instructions: Option<String> = None;
     let mut input: Vec<Value> = Vec::with_capacity(messages.len());
     let mut first_seen = false;
-    let window = ReplayWindow::compute(messages);
     let mut report = ReplayDowngradeReport::default();
 
-    for (idx, original) in messages.iter().enumerate() {
-        let in_window = window.contains(idx);
+    for original in messages {
         let action = if continuity_enabled {
-            plan_scoped(target, original, in_window)
+            plan(target, original)
         } else {
             ReplayAction::StripOpaque
         };
         if continuity_enabled {
-            if in_window {
-                report.record_in_window(target, original, &action);
-            } else {
-                report.record_stripped_old_history(original);
-            }
+            report.record_replay_decision(target, original, &action);
         }
         let explicit_keep = matches!(action, ReplayAction::KeepOpaque);
         let msg = match action {

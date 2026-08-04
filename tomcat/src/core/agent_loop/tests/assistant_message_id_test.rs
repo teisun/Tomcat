@@ -333,4 +333,18 @@ async fn interrupted_partial_stream_persists_the_same_pre_minted_id() {
         "interrupt path should not emit turn_end after an aborted stream"
     );
     assert_eq!(transcript_ids, message_start_ids);
+    assert!(
+        mgr.get_entries(16)
+            .expect("read interrupted transcript")
+            .iter()
+            .any(|entry| {
+                matches!(
+                    entry,
+                    TranscriptEntry::Custom(custom)
+                        if custom.extra.get("event").and_then(|value| value.as_str())
+                            == Some("agent.interrupted")
+                )
+            }),
+        "interruption must leave a durable custom transcript marker"
+    );
 }

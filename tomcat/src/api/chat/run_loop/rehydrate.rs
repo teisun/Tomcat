@@ -193,13 +193,25 @@ pub(super) fn make_fallback_context_state(
     system_text: &str,
     context_config: &crate::infra::ContextConfig,
 ) -> crate::core::ContextState {
+    let context_budget_tokens = ctx
+        .session_runtime
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())
+        .ok()
+        .flatten()
+        .and_then(|entry| {
+            ctx.resolve_call(crate::core::llm::LlmScene::Main, Some(&entry))
+                .ok()
+        })
+        .map(|call| call.limits.input_budget_tokens)
+        .unwrap_or_else(|| crate::infra::config::fallback_input_budget_tokens(context_config));
     crate::core::ContextState {
         messages: Vec::new(),
         estimate_context_chars: system_text.len(),
-        context_budget_chars: crate::infra::config::compute_context_budget_chars(context_config),
-        context_budget_tokens: context_config
-            .context_window
-            .saturating_sub(context_config.max_output_tokens),
+        context_budget_chars: crate::infra::config::compute_context_budget_chars_from_tokens(
+            context_budget_tokens,
+        ),
+        context_budget_tokens,
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: ctx

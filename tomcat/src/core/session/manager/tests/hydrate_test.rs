@@ -151,7 +151,7 @@ fn init_context_state_empty_session() {
     let state = init_context_state(&mgr, &cfg, "system prompt").unwrap();
     assert!(state.messages.is_empty());
     assert_eq!(state.estimate_context_chars, "system prompt".len());
-    assert_eq!(state.context_budget_chars, 1_088_000);
+    assert_eq!(state.context_budget_chars, 1_200_000);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -178,6 +178,34 @@ fn init_context_state_with_messages() {
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
     assert_eq!(state.messages.len(), 4);
     assert!(state.estimate_context_chars > 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_skips_legacy_empty_assistant_after_output_exhaustion() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"",
+        "finish_reason":"max_tokens"
+    }))
+    .unwrap();
+    mgr.append_message(serde_json::json!({"role":"user","content":"q2"}))
+        .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    assert_eq!(state.messages.len(), 2);
+    assert_eq!(state.messages[0].text_content(), Some("q1"));
+    assert_eq!(state.messages[1].text_content(), Some("q2"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

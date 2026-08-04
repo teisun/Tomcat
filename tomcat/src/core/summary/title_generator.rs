@@ -35,12 +35,27 @@ pub async fn generate_turn_summary(
     llm: &dyn LlmProvider,
     model: &str,
 ) -> String {
+    generate_turn_summary_with_output_limit(thinking_text, tools, llm, model, None).await
+}
+
+/// Same as [`generate_turn_summary`], with a provider-wire output limit
+/// resolved from the selected title model's capability.
+pub async fn generate_turn_summary_with_output_limit(
+    thinking_text: Option<&str>,
+    tools: &[ToolSnapshot],
+    llm: &dyn LlmProvider,
+    model: &str,
+    resolved_output_limit: Option<u32>,
+) -> String {
     if tools.is_empty() && thinking_text.is_none_or(|t| t.trim().is_empty()) {
         return String::new();
     }
     let prompt = build_turn_summary_prompt(thinking_text, tools);
-    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model, None))
-        .await
+    let title = match tokio::time::timeout(
+        UTILITY_TIMEOUT,
+        call_utility(&prompt, llm, model, None, resolved_output_limit),
+    )
+    .await
     {
         Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 10),
         Ok(Ok(_)) => fallback_turn_summary(tools),
@@ -62,7 +77,9 @@ pub async fn generate_turn_summary(
         }
     };
     if is_bare_tool_count(&title) {
-        if let Some(clause) = generate_purpose_clause(thinking_text, tools, llm, model).await {
+        if let Some(clause) =
+            generate_purpose_clause(thinking_text, tools, llm, model, resolved_output_limit).await
+        {
             return format!("Used {} tools for {clause}", tools.len());
         }
     }
@@ -75,10 +92,14 @@ async fn generate_purpose_clause(
     tools: &[ToolSnapshot],
     llm: &dyn LlmProvider,
     model: &str,
+    resolved_output_limit: Option<u32>,
 ) -> Option<String> {
     let prompt = build_purpose_clause_prompt(thinking_text, tools);
-    let raw = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model, None))
-        .await
+    let raw = match tokio::time::timeout(
+        UTILITY_TIMEOUT,
+        call_utility(&prompt, llm, model, None, resolved_output_limit),
+    )
+    .await
     {
         Ok(Ok(text)) if !text.trim().is_empty() => text,
         Ok(Ok(_)) => return None,
@@ -140,7 +161,8 @@ pub async fn generate_session_title(
     llm: &dyn LlmProvider,
     model: &str,
 ) -> Result<String, AppError> {
-    generate_session_title_with_cache_key(first_user_text, llm, model, None).await
+    generate_session_title_with_cache_key_and_output_limit(first_user_text, llm, model, None, None)
+        .await
 }
 
 pub async fn generate_session_title_with_cache_key(
@@ -149,10 +171,29 @@ pub async fn generate_session_title_with_cache_key(
     model: &str,
     cache_key: Option<&str>,
 ) -> Result<String, AppError> {
+    generate_session_title_with_cache_key_and_output_limit(
+        first_user_text,
+        llm,
+        model,
+        cache_key,
+        None,
+    )
+    .await
+}
+
+/// Generate a session title with the title call's capability-resolved output
+/// limit. The public compatibility wrapper above deliberately uses `None`.
+pub async fn generate_session_title_with_cache_key_and_output_limit(
+    first_user_text: &str,
+    llm: &dyn LlmProvider,
+    model: &str,
+    cache_key: Option<&str>,
+    resolved_output_limit: Option<u32>,
+) -> Result<String, AppError> {
     let prompt = build_session_title_prompt(first_user_text);
     match tokio::time::timeout(
         UTILITY_TIMEOUT,
-        call_utility(&prompt, llm, model, cache_key),
+        call_utility(&prompt, llm, model, cache_key, resolved_output_limit),
     )
     .await
     {
@@ -172,12 +213,29 @@ pub async fn generate_command_summary(
     llm: &dyn LlmProvider,
     model: &str,
 ) -> String {
+    generate_command_summary_with_output_limit(command, output_excerpt, llm, model, None).await
+}
+
+/// Same as [`generate_command_summary`], with a capability-resolved output
+/// limit for the utility request.
+pub async fn generate_command_summary_with_output_limit(
+    command: &str,
+    output_excerpt: Option<&str>,
+    llm: &dyn LlmProvider,
+    model: &str,
+    resolved_output_limit: Option<u32>,
+) -> String {
     let command = command.trim();
     if command.is_empty() {
         return String::new();
     }
     let prompt = build_command_summary_prompt(command, output_excerpt);
-    match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model, None)).await {
+    match tokio::time::timeout(
+        UTILITY_TIMEOUT,
+        call_utility(&prompt, llm, model, None, resolved_output_limit),
+    )
+    .await
+    {
         Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 6),
         _ => fallback_command_summary(command),
     }
@@ -328,10 +386,12 @@ async fn call_utility(
     llm: &dyn LlmProvider,
     model: &str,
     cache_key: Option<&str>,
+    resolved_output_limit: Option<u32>,
 ) -> Result<String, AppError> {
     let req = ChatRequest {
         model: model.to_string(),
         messages: vec![ChatMessage::user(prompt)],
+        resolved_output_limit,
         stream: Some(false),
         tools: None,
         cache_key: cache_key.map(str::to_owned),

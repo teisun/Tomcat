@@ -432,6 +432,24 @@ fn replay_window_ignores_steering_as_turn_start() {
 }
 
 #[test]
+fn replay_window_ignores_ephemeral_tail_as_turn_start() {
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+    let messages = vec![
+        ChatMessage::user("q1"),
+        deepseek_v4_compatible_message(),
+        tail,
+    ];
+
+    let window = ReplayWindow::compute(&messages);
+
+    assert!(
+        window.contains(1),
+        "the tail must not empty the replay window for the active assistant turn"
+    );
+}
+
+#[test]
 fn replay_window_uses_signal_but_not_nudge_as_a_turn_start() {
     let mut nudge = ChatMessage::user("continue the plan");
     nudge.kind = MessageKind::Nudge;

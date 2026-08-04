@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::core::compaction::compact_tool_results;
-use tomcat::core::llm::{ChatMessageRole, MessageKind};
+use tomcat::core::llm::{ChatMessageRole, EffectiveModelLimits, LimitSource, MessageKind};
 use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
 use tomcat::infra::ScopedEventEmitter;
 use tomcat::{
@@ -25,6 +25,57 @@ use tracing::{info, info_span};
 
 fn scoped_emitter(bus: Arc<dyn EventBus>, session_id: &str) -> ScopedEventEmitter {
     ScopedEventEmitter::new(bus, session_id)
+}
+
+#[test]
+fn model_capability_budget_changes_the_pre_request_compaction_gate() {
+    // Same 111K-token history: Opus 5 and the legacy 272K budget both stay
+    // below the 85% preheat threshold, while a 120K-input model must compact
+    // before the next provider request.
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 111_000 * 4,
+        context_budget_chars: 872_000 * 4,
+        context_budget_tokens: 872_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: tomcat::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    assert!(
+        state.usage_ratio() < 0.85,
+        "Opus 5's 872K input budget must not compact a 111K-token history"
+    );
+
+    state.apply_limits(&EffectiveModelLimits {
+        context_window: 400_000,
+        model_max_output_tokens: None,
+        output_reserve_tokens: 128_000,
+        input_budget_tokens: 272_000,
+        context_source: LimitSource::LegacyFallback,
+        output_source: LimitSource::LegacyFallback,
+    });
+    assert!(
+        state.usage_ratio() < 0.85,
+        "legacy 272K remains below the pre-request compaction gate"
+    );
+
+    state.apply_limits(&EffectiveModelLimits {
+        context_window: 184_000,
+        model_max_output_tokens: Some(64_000),
+        output_reserve_tokens: 64_000,
+        input_budget_tokens: 120_000,
+        context_source: LimitSource::ModelCatalog,
+        output_source: LimitSource::ModelCatalog,
+    });
+    assert!(
+        state.usage_ratio() >= 0.85,
+        "the smaller model must trigger compaction before its next request"
+    );
 }
 
 // ────────────────────── Mock 实现 ──────────────────────────────────────────

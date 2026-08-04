@@ -97,25 +97,27 @@ pub(crate) struct ResolvedSubagentRuntime {
     pub main_call: ResolvedCall,
     pub context_config: ContextConfig,
     pub compaction_provider: Option<Arc<dyn LlmProvider>>,
+    pub compaction_output_limit: Option<u32>,
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
 }
 
 fn resolve_subagent_compaction_runtime(
     llm_resolver: &dyn LlmResolver,
     base_context_config: &ContextConfig,
-) -> (ContextConfig, Option<Arc<dyn LlmProvider>>) {
+) -> (ContextConfig, Option<Arc<dyn LlmProvider>>, Option<u32>) {
     let mut context_config = base_context_config.clone();
     match llm_resolver.resolve(LlmScene::Compaction, None) {
         Ok(call) => {
+            let output_limit = call.output_limit_for_request(None).0;
             context_config.compaction_model = call.model;
-            (context_config, Some(call.provider_impl))
+            (context_config, Some(call.provider_impl), output_limit)
         }
         Err(err) => {
             warn!(
                 error = %err,
                 "failed to resolve child-agent compaction runtime; falling back to main provider"
             );
-            (context_config, None)
+            (context_config, None, None)
         }
     }
 }
@@ -129,7 +131,7 @@ pub(crate) fn resolve_subagent_runtime(
     model_id: &str,
 ) -> Result<ResolvedSubagentRuntime, crate::infra::error::AppError> {
     let main_call = llm_resolver.resolve(LlmScene::Main, Some(model_id))?;
-    let (context_config, compaction_provider) =
+    let (context_config, compaction_provider, compaction_output_limit) =
         resolve_subagent_compaction_runtime(llm_resolver, base_context_config);
     let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
         main_call.provider_impl.as_ref(),
@@ -142,6 +144,7 @@ pub(crate) fn resolve_subagent_runtime(
         main_call,
         context_config,
         compaction_provider,
+        compaction_output_limit,
         openai_files_runtime,
     })
 }
@@ -239,8 +242,9 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                 return s;
             }
         };
-        let context_budget_chars =
-            crate::infra::config::compute_context_budget_chars(&runtime.context_config);
+        let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
+            runtime.main_call.limits.input_budget_tokens,
+        );
         let skill_prompt = if expose_skills {
             render_available_skills_prompt(&skill_set, context_budget_chars, &deps.skills_config)
         } else {
@@ -249,6 +253,9 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
         let plan_id_for_closure = plan_id.to_string();
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
         let compaction_provider = runtime.compaction_provider.clone();
+        let compaction_output_limit = runtime
+            .compaction_output_limit
+            .or_else(|| runtime.main_call.output_limit_for_request(None).0);
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
         let binding = runtime.main_call;
@@ -303,8 +310,10 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         tool_definitions: tool_defs,
                         context_config,
                         compaction_provider,
+                        compaction_output_limit,
                         title_provider: None,
                         title_model: String::new(),
+                        title_output_limit: None,
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,
@@ -472,8 +481,9 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                 return s;
             }
         };
-        let context_budget_chars =
-            crate::infra::config::compute_context_budget_chars(&runtime.context_config);
+        let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
+            runtime.main_call.limits.input_budget_tokens,
+        );
         let skill_prompt = if expose_skills {
             render_available_skills_prompt(&skill_set, context_budget_chars, &deps.skills_config)
         } else {
@@ -482,6 +492,9 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         let plan_id_for_closure = plan_id.to_string();
         let dispatch = dispatch.clone();
         let compaction_provider = runtime.compaction_provider.clone();
+        let compaction_output_limit = runtime
+            .compaction_output_limit
+            .or_else(|| runtime.main_call.output_limit_for_request(None).0);
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
         let binding = runtime.main_call;
@@ -551,8 +564,10 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         tool_definitions: tool_defs,
                         context_config,
                         compaction_provider,
+                        compaction_output_limit,
                         title_provider: None,
                         title_model: String::new(),
+                        title_output_limit: None,
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,
@@ -823,6 +838,9 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
             }
         };
         let compaction_provider = runtime.compaction_provider.clone();
+        let compaction_output_limit = runtime
+            .compaction_output_limit
+            .or_else(|| runtime.main_call.output_limit_for_request(None).0);
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
         let binding = runtime.main_call;
@@ -885,8 +903,10 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         tool_definitions: tool_defs,
                         context_config,
                         compaction_provider,
+                        compaction_output_limit,
                         title_provider: None,
                         title_model: String::new(),
+                        title_output_limit: None,
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,

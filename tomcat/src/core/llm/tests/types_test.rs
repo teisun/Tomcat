@@ -203,11 +203,12 @@ fn chat_request_serialize_snake_case() {
         model: "gpt-4".to_string(),
         temperature: Some(0.5),
         max_tokens: Some(100),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: Some("session:main".to_string()),
-        ephemeral_tail_count: 1,
         tools: None,
     };
     let j = serde_json::to_string(&req).unwrap();
@@ -236,11 +237,12 @@ fn chat_request_serializes_hydrate_recovered_tool_round_for_openai_wire() {
         model: "gpt-4".to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let j = serde_json::to_value(&req).unwrap();

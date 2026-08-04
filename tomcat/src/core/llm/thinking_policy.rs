@@ -173,7 +173,9 @@ pub fn default_thinking_format_for_api(api: &str) -> &'static str {
         "zai" => "zai",
         "qwen" => "qwen",
         "doubao" | "moonshot" => "doubao",
-        "anthropic" | "anthropic-messages" => "anthropic",
+        // Modern Claude models use adaptive thinking. Older models are covered
+        // by the provider's one-shot compatibility fallback after a 400.
+        "anthropic" | "anthropic-messages" => "anthropic-adaptive",
         _ => "openai",
     }
 }
@@ -229,6 +231,14 @@ pub struct AnthropicThinkingRequest {
     pub effort: Option<String>,
     pub max_tokens: u32,
 }
+
+/// Conservative wire limit for an Anthropic-compatible model whose output
+/// capability is not declared in `models.toml`.
+///
+/// The value is deliberately a provider fallback, not a product context
+/// reserve. A catalog value always wins when one is available.
+pub const UNKNOWN_ANTHROPIC_MAX_OUTPUT_TOKENS: u32 = 32_000;
+const ANTHROPIC_CLASSIC_MIN_THINKING_BUDGET: u32 = 1_024;
 
 pub fn normalize_supported_reasoning_levels(levels: &[String]) -> Vec<String> {
     let mut normalized = Vec::new();
@@ -364,21 +374,20 @@ pub fn resolve_anthropic_request(
     cfg: &ThinkingConfig,
     fmt: ThinkingFormat,
     request_max_tokens: Option<u32>,
+    model_max_output_tokens: Option<u32>,
 ) -> AnthropicThinkingRequest {
     let (level, _ok) = ThinkingLevel::parse_or_medium(&cfg.level);
     let default_budget = anthropic_default_budget(level);
-    let mut max_tokens = request_max_tokens.unwrap_or_else(|| {
-        if cfg.enabled && default_budget > 0 {
-            (default_budget + 1024).max(2048)
-        } else {
-            2048
-        }
-    });
+    let model_limit = model_max_output_tokens.unwrap_or(UNKNOWN_ANTHROPIC_MAX_OUTPUT_TOKENS);
+    // `max_tokens` is an output cap. The caller may request a smaller one,
+    // but no request may advertise an output capability the model does not
+    // have. Thinking configuration must never influence this value.
+    let max_tokens = request_max_tokens.unwrap_or(model_limit).min(model_limit);
     if !cfg.enabled || default_budget == 0 {
         return AnthropicThinkingRequest {
             thinking: None,
             effort: None,
-            max_tokens: max_tokens.max(256),
+            max_tokens,
         };
     }
     if matches!(fmt, ThinkingFormat::AnthropicAdaptive) {
@@ -387,23 +396,24 @@ pub fn resolve_anthropic_request(
                 "type": "adaptive",
             })),
             effort: Some(level.as_str().to_string()),
-            max_tokens: max_tokens.max(256),
+            max_tokens,
         };
     }
-    if max_tokens <= 512 {
+    // Anthropic classic thinking requires `1024 <= budget_tokens < max_tokens`.
+    // If the caller's cap cannot fit both constraints, omit thinking rather
+    // than emitting a request the provider will reject. Never increase
+    // `max_tokens` to make room: it is the model-capability boundary.
+    if max_tokens <= ANTHROPIC_CLASSIC_MIN_THINKING_BUDGET {
         return AnthropicThinkingRequest {
             thinking: None,
             effort: None,
-            max_tokens: max_tokens.max(256),
+            max_tokens,
         };
     }
     let configured_budget = cfg.max_tokens.unwrap_or(default_budget);
     let budget_tokens = configured_budget
-        .min(max_tokens.saturating_sub(256).max(256))
-        .max(256);
-    if max_tokens <= budget_tokens {
-        max_tokens = budget_tokens + 256;
-    }
+        .min(max_tokens - 1)
+        .max(ANTHROPIC_CLASSIC_MIN_THINKING_BUDGET);
     AnthropicThinkingRequest {
         thinking: Some(serde_json::json!({
             "type": "enabled",

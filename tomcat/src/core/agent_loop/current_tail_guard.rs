@@ -5,7 +5,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use crate::core::compaction::apply::check_after_reply;
-use crate::core::compaction::preheat::generate_summary;
+use crate::core::compaction::preheat::generate_summary_with_output_limit;
 use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
     TOOL_RESULT_PLACEHOLDER,
@@ -599,6 +599,7 @@ pub(super) async fn collapse_to_branch_summary(
         plan_runtime.as_deref(),
         Some(session_model.as_str()),
         cache_key.as_deref(),
+        agent.config.compaction_output_limit,
     )
     .await?;
     let Some(ctx_state) = agent.context_state.as_mut() else {
@@ -652,6 +653,7 @@ pub async fn build_collapse_summary_artifacts_for_test(
         plan_runtime,
         session_model,
         None,
+        None,
     )
     .await
 }
@@ -663,6 +665,7 @@ async fn build_collapse_summary_artifacts(
     plan_runtime: Option<&PlanRuntime>,
     session_model: Option<&str>,
     cache_key: Option<&str>,
+    resolved_output_limit: Option<u32>,
 ) -> Result<CollapseSummaryArtifacts, AppError> {
     let working: Vec<ChatMessage> = messages
         .iter()
@@ -674,13 +677,14 @@ async fn build_collapse_summary_artifacts(
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // 这里不再自己拼一份 keepalive —— 两份机器区块只会互相矛盾。
     let control = plan_runtime.map(|rt| rt.control_snapshot(session_model));
-    let summary_text = generate_summary(
+    let summary_text = generate_summary_with_output_limit(
         &working,
         None,
         llm,
         compaction_model,
         control.as_ref(),
         cache_key,
+        resolved_output_limit,
     )
     .await?;
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);

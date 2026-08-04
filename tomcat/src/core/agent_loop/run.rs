@@ -229,6 +229,13 @@ impl AgentLoop {
             .filter(|m| m.role == ChatMessageRole::Tool)
             .count();
         let partial_text_len = partial_text.chars().count();
+        if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+            "event": "agent.interrupted",
+            "partial_text_len": partial_text_len,
+            "tool_results_count": tool_results_count,
+        })) {
+            tracing::warn!(%error, "failed to persist agent interruption marker");
+        }
         self.emit_event(AgentEvent::Interrupted {
             partial_text_len,
             tool_results_count,

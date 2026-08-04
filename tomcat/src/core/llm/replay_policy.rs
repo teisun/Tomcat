@@ -297,8 +297,12 @@ pub struct ReplayDowngradeReport {
 }
 
 impl ReplayDowngradeReport {
-    /// 记录窗口内一条 turn 的出站结果（`KeepOpaque` / 无 continuation 不计入）。
-    pub fn record_in_window(
+    /// Record one replay decision that was evaluated for this outbound request.
+    ///
+    /// Chat Completions invokes this only for its current replay window;
+    /// Responses invokes it for the full explicit history. The name therefore
+    /// describes the decision, not a windowing policy owned by this collector.
+    pub fn record_replay_decision(
         &mut self,
         target: &ProviderCompatProfile,
         message: &ChatMessage,

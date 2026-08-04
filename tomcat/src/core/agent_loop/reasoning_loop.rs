@@ -26,27 +26,28 @@
 
 use tracing::info;
 
-use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, PromptCacheKeyFamily};
+use crate::core::llm::{
+    ChatMessage, ChatMessageRole, ChatRequest, MessageKind, PromptCacheKeyFamily,
+};
 use crate::infra::events::{AgentEvent, Message};
 
 use super::steering_injection::inject_follow_up_messages;
 use super::types::{unix_ts_ms, AgentLoop, LoopError, ToolCallInfo};
 use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize, turn_summary};
 
-pub(crate) fn with_ephemeral_tail(
-    messages: &[ChatMessage],
-    agent: &AgentLoop,
-) -> (Vec<ChatMessage>, usize) {
+pub(crate) fn with_ephemeral_tail(messages: &[ChatMessage], agent: &AgentLoop) -> Vec<ChatMessage> {
     let mut request_messages = messages.to_vec();
     let Some(provider) = agent.config.ephemeral_tail_provider.as_ref() else {
-        return (request_messages, 0);
+        return request_messages;
     };
     let tail = provider.render_ephemeral_tail();
     if !tail.trim().is_empty() {
-        request_messages.push(ChatMessage::user(tail));
-        return (request_messages, 1);
+        let mut tail = ChatMessage::user(tail);
+        tail.kind = MessageKind::EphemeralTail;
+        request_messages.push(tail);
+        return request_messages;
     }
-    (request_messages, 0)
+    request_messages
 }
 
 pub(crate) fn cache_key_for(agent: &AgentLoop) -> Option<String> {
@@ -55,6 +56,28 @@ pub(crate) fn cache_key_for(agent: &AgentLoop) -> Option<String> {
         kind => PromptCacheKeyFamily::Subagent(kind.as_str()),
     };
     family.key_for(&agent.config.session_id)
+}
+
+fn is_output_truncation_finish_reason(reason: Option<&str>) -> bool {
+    matches!(
+        reason.map(str::trim),
+        Some("max_tokens")
+            | Some("max_output_tokens")
+            | Some("max_completion_tokens")
+            | Some("length")
+            | Some("output_length")
+    )
+}
+
+fn prompt_prefix_fingerprint_enabled() -> bool {
+    std::env::var("TOMCAT_PROMPT_PREFIX_FINGERPRINT")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
 }
 
 pub(super) async fn run_reasoning_loop(
@@ -99,19 +122,42 @@ pub(super) async fn run_reasoning_loop(
             timestamp: unix_ts_ms(),
         });
 
-        let (request_messages, ephemeral_tail_count) = with_ephemeral_tail(messages, agent);
-        let req = ChatRequest {
+        let request_messages = with_ephemeral_tail(messages, agent);
+        let mut req = ChatRequest {
             messages: request_messages,
             model: agent.wire_model().to_string(),
             temperature: None,
             max_tokens: None,
+            resolved_output_limit: None,
+            diagnostic_request_id: prompt_prefix_fingerprint_enabled()
+                .then(|| format!("{}:{}", agent.config.session_id, turn_index)),
             stream: Some(true),
             model_override: None,
             thinking_level: agent.config.thinking_level,
             cache_key: cache_key_for(agent),
-            ephemeral_tail_count,
             tools: Some(agent.config.tool_definitions.clone()),
         };
+        let wire_limit_source = agent.binding.apply_resolved_output_limit(&mut req);
+        let request_max_tokens = req.max_tokens;
+        let wire_output_limit = req.resolved_output_limit;
+        let thinking_budget = agent
+            .binding
+            .thinking_budget_for_request(req.thinking_level, wire_output_limit);
+        let diagnostic_request_id = req.diagnostic_request_id.clone();
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "llm_request_resolved",
+            model = %agent.wire_model(),
+            api = %agent.binding.api,
+            model_limit = ?agent.binding.limits.model_max_output_tokens,
+            request_limit = ?request_max_tokens,
+            wire_limit = ?wire_output_limit,
+            context_window = agent.binding.limits.context_window,
+            input_budget = agent.binding.limits.input_budget_tokens,
+            context_source = agent.binding.limits.context_source.as_str(),
+            output_source = agent.binding.limits.output_source.as_str(),
+            wire_limit_source = wire_limit_source.as_str(),
+        );
 
         // context_metrics_update：单次 run_reasoning_loop 内仅在首次 LLM 请求前发一次（中间 tool round 不发）。
         if turn_index == 1 {
@@ -149,6 +195,43 @@ pub(super) async fn run_reasoning_loop(
             ctx_state.live.finish_reason = finish_reason.clone();
             ctx_state.live.error_message = error_message.clone();
             ctx_state.live.error_code = error_code.clone();
+        }
+        if let Some(usage) = usage.as_ref() {
+            info!(
+                target: "tomcat_chat_diag",
+                phase = "llm_usage",
+                model = %agent.wire_model(),
+                prompt_tokens = usage.prompt_tokens,
+                completion_tokens = usage.completion_tokens,
+                cache_read_tokens = ?usage.cache_read_tokens,
+                cache_write_tokens = ?usage.cache_write_tokens,
+            );
+            if let Some(request_id) = diagnostic_request_id.as_deref() {
+                // These names intentionally match Anthropic's response fields,
+                // even though TokenUsage stores the normalized values. The
+                // paired request-side fingerprint has the same request id.
+                info!(
+                    target: "tomcat_chat_diag",
+                    phase = "prompt_prefix_result",
+                    request_id,
+                    cache_read_input_tokens = ?usage.cache_read_tokens,
+                    cache_creation_input_tokens = ?usage.cache_write_tokens,
+                );
+            }
+        }
+        if is_output_truncation_finish_reason(finish_reason.as_deref()) {
+            info!(
+                target: "tomcat_chat_diag",
+                phase = "output_truncated",
+                model = %agent.wire_model(),
+                request_max_tokens = ?request_max_tokens,
+                wire_max_tokens = ?wire_output_limit,
+                thinking_budget = ?thinking_budget,
+                completion_tokens = ?usage.as_ref().map(|usage| usage.completion_tokens),
+                prompt_tokens = ?usage.as_ref().map(|usage| usage.prompt_tokens),
+                usage_ratio = agent.context_state.as_ref().map(|state| state.usage_ratio()),
+                has_reasoning_continuation = reasoning_continuation.is_some(),
+            );
         }
 
         // stream 被取消：把 partial content_buf 作为 partial assistant 落到 messages，
@@ -190,13 +273,13 @@ pub(super) async fn run_reasoning_loop(
             })
             .collect();
 
-        // “只思考、不回答”不是成功回合。正文为空、与 thinking 完全相同，或只是
-        // thinking 前缀且不足其一半时，都视为上游把推理误当正文后提前截断：
-        // - 无工具：排除纯工具调用回合；
-        // - 有 thinking：排除 provider 合法的空结构化响应。
-        //
-        // 不能让它落入 finalize_turn_after_text：那里会把空 assistant 写进
-        // transcript 并发 AgentEnd(error=None)，UI 便会静默结束且允许输入下一条。
+        // “只思考、不回答”不是成功回合。不能只看 thinking_text：Anthropic 可能
+        // 加密它，OpenAI Responses 也可能因 display 配置省略它。截断终态与
+        // reasoning continuation 是能区分隐藏推理和合法空 end_turn 的事实信号。
+        // `completion_tokens` 只说明本轮消耗过输出配额；合法结构化收尾也会消耗
+        // token，不能拿它当失败判据。若某个 provider 发生“隐藏推理 + stop”却
+        // 不提供 reasoning_continuation，必须由该 provider 把终态适配为截断类，
+        // 而不是在这里重新引入 usage 猜测。
         let thinking_only_or_truncated = thinking_text.as_deref().is_some_and(|thinking| {
             let content = content_buf.trim();
             !thinking.trim().is_empty()
@@ -205,19 +288,42 @@ pub(super) async fn run_reasoning_loop(
                     || (thinking.starts_with(content)
                         && content.len().saturating_mul(2) < thinking.len()))
         });
-        if tool_calls.is_empty() && thinking_only_or_truncated {
+        let has_no_visible_output = content_buf.trim().is_empty();
+        let output_truncated = is_output_truncation_finish_reason(finish_reason.as_deref());
+        let has_hidden_output = reasoning_continuation.is_some();
+        let empty_turn_failure = tool_calls.is_empty()
+            && (thinking_only_or_truncated
+                || (has_no_visible_output && (output_truncated || has_hidden_output)));
+        if empty_turn_failure {
             let thinking_chars = thinking_text.as_deref().map(str::len).unwrap_or_default();
+            let failure_kind = if output_truncated {
+                "output_truncated"
+            } else if has_hidden_output {
+                "hidden_output"
+            } else {
+                "thinking_only"
+            };
             let _ = agent.persist_custom_entry_if_needed(serde_json::json!({
                 "event": "empty_turn",
                 "turn_index": turn_index,
                 "finish_reason": finish_reason.as_deref(),
                 "thinking_chars": thinking_chars,
                 "has_reasoning_continuation": reasoning_continuation.is_some(),
+                "completion_tokens": usage.as_ref().map(|usage| usage.completion_tokens),
+                "failure_kind": failure_kind,
             }));
             agent.clear_pending_assistant_entry_id();
+            let message = match failure_kind {
+                "output_truncated" => {
+                    "本轮输出在达到上限前没有产生可见回答。请使用 Resume 重试，或换一个模型后重试。"
+                }
+                "hidden_output" => {
+                    "本轮产生了不可显示的推理、没有可见回答。请使用 Resume 重试，或换一个模型后重试。"
+                }
+                _ => "本轮只产生了思考、没有产生回答。请使用 Resume 重试，或换一个模型后重试。",
+            };
             return Err(LoopError::Fatal(crate::infra::error::AppError::Llm(
-                "本轮只产生了思考、没有产生回答。请使用 Resume 重试，或换一个模型后重试。"
-                    .to_string(),
+                message.to_string(),
             )));
         }
 

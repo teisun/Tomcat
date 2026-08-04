@@ -19,14 +19,14 @@ use crate::api::chat::commands::{
 use crate::core::llm::{
     list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind, ContextReference,
-    ProviderKeyInput, ThinkingLevel,
+    LlmScene, ProviderKeyInput, ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::attachments::{
     safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore,
     REBUILDABLE_MAX_BYTES,
 };
-use crate::core::session::manager::init_context_state;
+use crate::core::session::manager::init_context_state_with_limits;
 use crate::core::session::transcript::{
     entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset,
     TranscriptEntry, TranscriptPage,
@@ -1589,10 +1589,17 @@ fn rehydrate_slot_context_state(slot: &Arc<super::registry::SessionSlot>) -> Res
         .as_ref()
         .map(|state| state.prompt_snapshot.system_text().to_string())
         .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
-    let context_state = init_context_state(
+    let entry = slot
+        .ctx
+        .session_runtime
+        .session
+        .get_session(slot.ctx.session_runtime.session.current_session_key())?;
+    let main_call = slot.ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
+    let context_state = init_context_state_with_limits(
         &slot.ctx.session_runtime.session,
         &slot.ctx.config.context,
         &system_text,
+        &main_call.limits,
     )?;
     let mut turn_state = slot.turn_state.lock();
     let state = turn_state

@@ -47,7 +47,7 @@ fn resolve_known_model() {
 fn builtin_models_toml_parses() {
     let parsed =
         toml::from_str::<UserModelsFile>(builtin_seed_toml_text()).expect("parse embedded seed");
-    assert_eq!(parsed.models.len(), 14);
+    assert_eq!(parsed.models.len(), 21);
 }
 
 #[test]
@@ -75,8 +75,38 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
         ]
     );
+
+    for id in [
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+    ] {
+        let entry = entries.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(entry.context_window, Some(1_000_000), "{id}");
+        assert_eq!(entry.max_output_tokens, Some(128_000), "{id}");
+    }
+    for (id, max_output_tokens) in [
+        ("claude-sonnet-4-5", 64_000),
+        ("claude-opus-4-5", 64_000),
+        ("claude-opus-4-1", 32_000),
+    ] {
+        let entry = entries.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(entry.context_window, Some(200_000), "{id}");
+        assert_eq!(entry.max_output_tokens, Some(max_output_tokens), "{id}");
+    }
 
     let utility = entries
         .iter()
@@ -155,6 +185,8 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
             "max".to_string(),
         ]
     );
+    assert_eq!(claude.context_window, Some(1_000_000));
+    assert_eq!(claude.max_output_tokens, Some(128_000));
     assert!(claude.capabilities.files);
 
     let embedded = builtin_seed_toml_text();
@@ -171,7 +203,7 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
 #[test]
 fn builtin_seed_entries_keep_embedded_context_window_when_runtime_default_changes() {
     let mut cfg = AppConfig::default();
-    cfg.context.context_window = 200_000;
+    cfg.context.context_window_fallback = 200_000;
     let entries = builtin_seed_entries(&cfg.context);
 
     let gpt = entries
@@ -197,6 +229,56 @@ fn builtin_seed_entries_keep_embedded_context_window_when_runtime_default_change
         .find(|entry| entry.id == "mimo-v2.5-pro")
         .expect("mimo preset");
     assert_eq!(mimo.context_window, Some(1_000_000));
+
+    let claude = entries
+        .iter()
+        .find(|entry| entry.id == "claude-opus-4-8")
+        .expect("claude-opus-4-8 preset");
+    assert_eq!(claude.context_window, Some(1_000_000));
+    assert_eq!(claude.max_output_tokens, Some(128_000));
+}
+
+#[test]
+fn custom_model_without_context_window_stays_unspecified() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "custom-hosted"
+api = "openai-responses"
+provider = "relay"
+"#,
+    )
+    .unwrap();
+    let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path).expect("load catalog");
+    let entry = catalog.lookup("custom-hosted").expect("custom entry");
+    assert_eq!(entry.context_window, None);
+    assert_eq!(entry.max_output_tokens, None);
+}
+
+#[test]
+fn catalog_load_rejects_output_capacity_larger_than_context_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "invalid-capacity"
+api = "openai-responses"
+provider = "relay"
+context_window = 4096
+max_output_tokens = 8192
+"#,
+    )
+    .unwrap();
+
+    let error = ModelCatalog::load_from_path(&AppConfig::default(), path)
+        .expect_err("catalog loading must reject an impossible capability declaration");
+    assert!(error.to_string().contains("invalid-capacity"));
+    assert!(error.to_string().contains("max_output_tokens"));
 }
 
 #[test]

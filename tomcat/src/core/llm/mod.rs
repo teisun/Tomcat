@@ -50,7 +50,9 @@ pub use replay_policy::{
     model_family, plan as plan_replay, CaptureMode, ProviderCompatProfile, ReplayAcceptance,
     ReplayAction,
 };
-pub use resolver::{DefaultLlmResolver, LlmResolver, LlmScene, ResolvedCall};
+pub use resolver::{
+    DefaultLlmResolver, EffectiveModelLimits, LimitSource, LlmResolver, LlmScene, ResolvedCall,
+};
 pub use system_prompt::{SystemPromptSnapshot, ToolSurface};
 pub use thinking_policy::ThinkingLevel;
 pub use token_usage::SessionTokenUsage;

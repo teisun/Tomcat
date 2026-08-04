@@ -24,6 +24,8 @@ fn read_allowlist_covers_documented_keys() {
         "agent.id",
         "log.level",
         "session.default_mode",
+        "context.context_window_fallback",
+        "context.output_reserve_tokens",
         "preflight.show_search_tools_ui",
         "preflight.show_git_ui",
     ] {
@@ -51,6 +53,8 @@ fn write_allowlist_subset() {
         "primitive.bash_forbidden",
         "log.level",
         "session.default_mode",
+        "context.context_window_fallback",
+        "context.output_reserve_tokens",
         "preflight.show_search_tools_ui",
         "preflight.show_git_ui",
     ] {
@@ -235,6 +239,33 @@ async fn config_set_updates_preflight_ui_scalar_bool() {
     let cfg = load_config(Some(&p)).unwrap();
     assert!(cfg.preflight.show_search_tools_ui);
     assert!(!cfg.preflight.show_git_ui);
+}
+
+#[tokio::test]
+async fn config_set_writes_only_new_context_limit_keys() {
+    let dir = TempDir::new().unwrap();
+    let p = empty_config(&dir);
+    let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
+    let ctx = ConfigToolContext::new(p.clone(), confirm);
+
+    assert!(
+        config_set_impl("context.context_window_fallback", "500000", &ctx)
+            .await
+            .unwrap()
+            .applied
+    );
+    assert!(
+        config_set_impl("context.output_reserve_tokens", "130000", &ctx)
+            .await
+            .unwrap()
+            .applied
+    );
+
+    let raw = std::fs::read_to_string(&p).unwrap();
+    assert!(raw.contains("context_window_fallback = 500000"));
+    assert!(raw.contains("output_reserve_tokens = 130000"));
+    assert!(!raw.contains("\ncontext_window ="));
+    assert!(!raw.contains("\nmax_output_tokens ="));
 }
 
 #[tokio::test]

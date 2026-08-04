@@ -18,7 +18,8 @@ use crate::core::llm::multimodal::{
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, StreamEvent, ThinkingSource,
+    ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, MessageKind, StreamEvent,
+    ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::{
@@ -49,6 +50,7 @@ fn responses_entry() -> ModelEntry {
             web_search: false,
         },
         context_window: None,
+        max_output_tokens: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -689,11 +691,12 @@ fn responses_build_request_body_uses_model_name_when_present() {
         model: String::new(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: Some("session-1:main".to_string()),
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -719,11 +722,12 @@ fn responses_build_request_body_maps_catalog_id_to_model_name() {
         model: "gpt-5.4_litellm-sunmi".to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -748,11 +752,12 @@ fn responses_build_request_body_without_model_name_uses_id() {
         model: String::new(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -775,11 +780,12 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -789,6 +795,28 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         body
     );
     assert!(body.get("thinking").is_none());
+    assert!(
+        body.get("max_output_tokens").is_none(),
+        "OpenAI Responses must omit an unspecified output limit so the provider may adapt it: {body}"
+    );
+}
+
+#[test]
+fn responses_build_request_body_uses_resolved_cap_not_callers_raw_request() {
+    let provider = provider_from_cfg(LlmConfig::default());
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        // The resolver accepts this as the caller's product request, then
+        // clamps it to the model capacity below before it reaches the wire.
+        max_tokens: Some(256_000),
+        resolved_output_limit: Some(128_000),
+        stream: Some(true),
+        ..Default::default()
+    };
+
+    let body = provider.build_request_body(&request, true);
+    assert_eq!(body["max_output_tokens"], 128_000);
 }
 
 #[test]
@@ -810,11 +838,12 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -848,11 +877,12 @@ fn responses_auto_thinking_format_ignores_claude_model_name_on_responses_wire() 
         model: String::new(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -881,11 +911,12 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -913,11 +944,12 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -945,11 +977,12 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -973,11 +1006,12 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -986,7 +1020,7 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
 }
 
 #[test]
-fn openai_responses_roundtrip_replays_reasoning_items() {
+fn openai_responses_roundtrip_replays_reasoning_items_before_an_ephemeral_tail() {
     let cfg = LlmConfig {
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         ..LlmConfig::default()
@@ -1016,21 +1050,35 @@ fn openai_responses_roundtrip_replays_reasoning_items() {
             replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
         }),
     );
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
     let req = ChatRequest {
-        messages: vec![ChatMessage::user("hi"), assistant],
+        messages: vec![ChatMessage::user("hi"), assistant, tail],
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
     assert_eq!(body["input"][1]["type"], "reasoning");
     assert_eq!(body["input"][1]["encrypted_content"], "enc_123");
+    let tail_index = body["input"]
+        .as_array()
+        .expect("Responses input must be an array")
+        .iter()
+        .position(|item| item.to_string().contains("runtime-only workspace state"))
+        .expect("ephemeral tail must remain in the request");
+    assert!(
+        tail_index > 1,
+        "historical reasoning must be replayed before the ephemeral tail: {}",
+        body["input"]
+    );
 }
 
 #[test]
@@ -1072,11 +1120,12 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -1134,11 +1183,12 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body_with_hint(&req, true, false);
@@ -1213,11 +1263,12 @@ fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_u
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -1291,11 +1342,12 @@ fn responses_build_request_body_skips_previous_response_id_across_routed_relays(
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = target_provider.build_request_body(&req, true);
@@ -1378,11 +1430,12 @@ fn responses_build_request_body_does_not_fall_back_to_older_same_route_response_
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -2121,11 +2174,12 @@ fn responses_stream_test_request() -> ChatRequest {
         model: "gpt-5".to_string(),
         temperature: Some(0.0),
         max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     }
 }
@@ -2495,11 +2549,12 @@ fn responses_build_request_body_degrades_unsupported_history_attachments_to_inpu
         model: entry.id,
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
 

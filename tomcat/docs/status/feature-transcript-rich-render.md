@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-03 22:37 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-04 17:02 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 失败回合 / `max_tokens` / Prompt 缓存整改与二次复查收口：`EffectiveModelLimits` 统一上下文与输出预算；`ChatRequest.resolved_output_limit` 按请求解析 Anthropic/OpenAI wire 上限，去掉 provider 实例缓存的输出上限；空回合守卫回到截断/`reasoning_continuation`/thinking 三选一，不再用 `completion_tokens>0` 误判；classic thinking 下限升至协议 1024；配置键迁到 `context_window_fallback` / `output_reserve_tokens` 且目录加载期校验 `0 < max_output_tokens ≤ context_window`。UI 恢复「按钮消失、错误/中断卡保留」；Retry copy-forward 旧输入 `abandoned` 仍可见；中断卡 live+hydrate 去重为 1。指纹日志默认关闭、O(n) 滚动哈希、user with/without-tail 成对指纹。版本 CLI `0.1.24 → 0.1.26`、扩展 `0.1.35 → 0.1.37`（`bundledCli=0.1.26`）。验证：`cargo fmt/clippy`、`cargo test --lib`（2537 passed）、webview unit 475、E2E 33、`release-version check` 全绿；真实 DeepSeek multi-timeout CLI 仍可能因模型少一次 `task_output` 失败（非本轮回归）。@2026-08-04
 - [✓] **[P0]** Prompt 前缀缓存实现复核补全：`ToolSurface` + `SystemPromptSnapshot` 统一 CLI/serve 刷新路径；权限与计划 reminder 进 ephemeral 尾部，稳定 system/tools 前缀；Anthropic `cache_control` 显式 ≤4 断点预算；`PromptCacheKeyFamily` 收拢 main/subagent/compaction/title/extension key；OpenAI/Responses 解析 `cached_tokens`；删除会重新引入抖动的死入口；补 P0/Layer0/真实 LLM probe 与 20 轮基线（DeepSeek ~93.87%、fcodex Anthropic ~99.98%、fcodex Responses ~71.18%）。版本 CLI `0.1.23 → 0.1.24`、扩展 `0.1.34 → 0.1.35`（`bundledCli=0.1.24`）。验证：`cargo fmt/clippy`、`gate-fast`、`npm run check:wire`/`gate:fast`、`release-version check` 全绿。@2026-08-03
 - [✓] **[P0]** PlanState 五态拆成会话模式与计划文件态：`AgentMode` 仅 `Chat|Plan`，`ActivePlan{id,path,state}` 承载 planning/pending/executing/completed；Build 回到 Chat 且不因计划完成改模式；取消 executing 降为 pending；`session.agent_mode.changed` + `activePlan` 载荷（protocol v2 / resume schema 3）；executor reminder 按 `executing_plan_id()` 注入；`MessageKind::PlanBuild` 摘要渲染与 pending→Resume 文案。门禁修复同轮落地：预览 dirty 缓冲权威 + `tomcat.plan.autoSave`；confirmed-overflow 至少删一 turn；恢复占位符对齐 PENDING/UNKNOWN_RESTART；E2E 补 interrupt→Resume 与完成后仍在 Chat。验证：`cargo fmt/clippy`、`gate-fast`、`npm run check:wire`/`gate:fast`、`test:e2e:vscode-devhost` 全绿。@2026-08-03
 - [✓] **[P0]** resolver 迁移后的 14 条 Rust 红测已按根因收口：serve `FixedResolver` 经 `from_provider_and_entry_unchecked` 保留 catalog capabilities；`HostApiDispatcher` 用同一次 `ResolvedCall` 盖章 wire model；会话级缓存 `OpenAiFilesRuntime` 让 enqueue/cleanup 共享队列；compaction 未解析夹具、bash `wait_for_finish`、dispatcher `007` 断言对齐。验证：`cargo test --lib`（2479 passed, 1 ignored）。@2026-08-02
@@ -53,6 +54,10 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- Token / 输出上限：`ChatRequest.resolved_output_limit`（调用方 `max_tokens` 与 wire 解析值分离）；`EffectiveModelLimits` 去掉实例级 `wire_output_limit`；`ContextConfig` 权威键 `context_window_fallback` / `output_reserve_tokens`（旧键别名可读、混用报错）；catalog 加载期校验模型 `max_output_tokens`。
+- 空回合守卫：hidden output 仅看截断类 `finish_reason` / `reasoning_continuation` / thinking 文本；`completion_tokens` 只进诊断与 empty_turn 落盘。
+- Webview 恢复 UX：错误卡 dismiss 后保留卡片、去掉 `recoveryAction`；Retry copy-forward 源 user 带 `abandoned`；`agent.interrupted` live+history 去重恰好一张。
+- 发布版本：CLI `0.1.26`、扩展 `0.1.37`、`bundledCliVersion=0.1.26`。
 - 会话/计划状态拆分：删除五态 `PlanState`；`AgentMode`=`chat|plan`；`ActivePlan`/`PlanFileState`；`get_state` 用 `agentMode`+`activePlan`，旧 `mode` 改名 `workspaceMode`；新增 `session.agent_mode.changed`；`RESUME_INDEX_SCHEMA_VERSION=3` 公开导出。
 - Build 用户消息：`MessageKind::PlanBuild`（`plan_build`）；扩展渲染为「开始执行计划」折叠摘要；pending 计划 Build 按钮文案 `Resume`。
 - Plan 预览：`refreshFromServeEvent` dirty 时用缓冲文本、非文本态可跟事件；设置 `tomcat.plan.autoSave`（默认 true，~1s 防抖）；`PlanPreviewDomSnapshot.refreshCounters` 保留热更新诊断四计数器。
@@ -67,7 +72,6 @@
 - Host→Webview 新增批量 `insertReferences{sessionId,references[]}`；picker 确认走一次 draft 替换 + 一次批量事件，单条 `insertReference` 路径保留。Composer 暴露 `insertReferences()`，多引用只产生一次 TipTap 事务与一次草稿同步。
 - transcript：公开 `PENDING_TOOL_RESULT_TEXT` / `INTERRUPTED_TOOL_RESULT_TEXT` / `UNKNOWN_RESTART_TOOL_RESULT_TEXT`；扩展侧 `toolResultPlaceholders.ts` 契约对齐；`replace_tool_result_by_tool_call_id` 允许无旧 result 时追加（悬空 ask_question）；非结构性盖章走 `refresh_resume_index_after_nonstructural_rewrite`；新增按 id 盖章 `mark_user_message_entry_superseded_by_id`。
 - 新增 CLI `/compact`（`cmd_compact`）与 serve compact ratio 字段断言；手动 compact 与自动 overflow 路径分工写入 `context-management.md`。
-- 发布版本：CLI `0.1.24`、扩展 `0.1.35`、`bundledCliVersion=0.1.24`；fake-serve E2E 夹具 `serverVersion` 按需同步。
 - Prompt 缓存面：`ToolSurface` / `SystemPromptSnapshot`（`core/llm/system_prompt.rs`）；`PromptCacheKeyFamily`（`core/llm/prompt_cache_key.rs`）；`SessionTurnState` / CLI 持 snapshot 而非裸 system 文本；运行时权限与 plan reminder 仅经 ephemeral request tail 注入；Anthropic wire 显式断点预算；工具目录不再按 mode 动态过滤可见集合（推翻条件见 `plan-runtime.md`）。
 - `dispatch_agent` catalog description 与 Planner/Executor 行为合同收紧为条件式 Explorer 派发；工具 schema 与 wire 协议不变。
 - Plan Preview Markdown 列表项新增内部 `_sourceLine` 递归标记；`WebviewReference` wire 类型不变，selection 去重身份改为 `path + range + text hash`。
@@ -106,6 +110,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-04 17:02）：失败回合与缓存整改 + 二次复查合入。`resolved_output_limit`、空回合守卫、thinking 下限 1024、配置别名与目录期校验、恢复卡保留/`abandoned`/中断去重、指纹门禁与成对哈希；版本 CLI `0.1.26` / 扩展 `0.1.37`。验证：`cargo fmt/clippy`、`cargo test --lib` 2537 passed、webview unit 475、E2E 33、`release-version check`；真实 DeepSeek multi-timeout CLI 偶发仍记在 BLOCKED。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-03 22:37）：Prompt 前缀缓存复核补全合入。稳定 ToolSurface/SystemPromptSnapshot + ephemeral 尾部；Anthropic 断点预算与 cache key 家族；OpenAI/Responses cached_tokens；文档与 20 轮命中率基线写入 `context-management.md`；版本 CLI `0.1.24` / 扩展 `0.1.35`。验证：`cargo fmt --check`、`clippy -D warnings`、`./scripts/run-integration-tests.sh gate-fast`、`npm run check:wire && npm run gate:fast`、`node scripts/release-version.mjs check`。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-03 14:05）：PlanState teardown + 门禁修复合入。会话模式与计划文件生命周期拆分；预览 dirty/autosave、overflow confirmed-drop、恢复占位符与剩余 Plan E2E 已绿。验证口径：Rust `fmt`/`clippy -D warnings`/`run-integration-tests.sh gate-fast`；扩展 `check:wire`/`gate:fast`/`test:e2e:vscode-devhost`。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-02 21:55）：14 条 Rust 红测已按根因收口：serve `FixedResolver` 从 catalog 保留 capabilities；dispatcher 以同一次 `ResolvedCall` 的 wire model 盖章请求；OpenAI FilesRuntime 改为会话级缓存；未解析 compaction 夹具、bash drain 等待及 resolver 错误码断言已对齐。`cargo test --lib`（2479 passed, 1 ignored）通过；图形化宿主下真实计划文件点击未做人工验收。

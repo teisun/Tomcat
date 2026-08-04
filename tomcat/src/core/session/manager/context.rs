@@ -16,7 +16,10 @@ use crate::core::session::transcript::{
 use crate::core::session::{
     append_message_chain::collect_recent_chat_messages_from_tail, find_dangling_tail_tool_calls,
 };
-use crate::infra::config::{compute_context_budget_chars, ContextConfig, ResumeHydrationMode};
+use crate::infra::config::{
+    compute_context_budget_chars_from_tokens, fallback_input_budget_tokens, ContextConfig,
+    ResumeHydrationMode,
+};
 use crate::infra::error::AppError;
 
 use super::session_impl::generate_entry_id;
@@ -487,6 +490,18 @@ fn chat_message_from_entry(
     }
     let mut msg: ChatMessage = serde_json::from_value(me.message.clone()).ok()?;
 
+    // Older transcripts may contain an assistant row emitted after output
+    // exhaustion even though the provider produced neither visible text nor a
+    // tool call. It cannot help the next request and renders as a blank bubble,
+    // so omit it during rehydrate. Tool-call-only assistant turns remain
+    // replayable and must never be filtered here.
+    if msg.role == crate::core::llm::ChatMessageRole::Assistant
+        && msg.tool_calls.as_ref().is_none_or(Vec::is_empty)
+        && msg.text_content().is_none_or(|text| text.trim().is_empty())
+    {
+        return None;
+    }
+
     if let Some(ref arr) = msg.tool_calls {
         warn_if_legacy_tool_name(arr);
     }
@@ -705,10 +720,8 @@ pub fn init_context_state(
     system_text: &str,
 ) -> Result<ContextState, AppError> {
     let started = Instant::now();
-    let budget = compute_context_budget_chars(config);
-    let token_budget = config
-        .context_window
-        .saturating_sub(config.max_output_tokens);
+    let token_budget = fallback_input_budget_tokens(config);
+    let budget = compute_context_budget_chars_from_tokens(token_budget);
     let (cc, ctf, trcp) = observability_from_session(session)?;
     let session_obs = SessionContextObservation {
         compaction_count: cc,
@@ -799,6 +812,21 @@ pub fn init_context_state(
         session_obs,
         live: super::types::ContextLiveMetrics::default(),
     })
+}
+
+/// 与已解析模型能力一起恢复上下文。
+///
+/// 历史解析本身不依赖 provider，故仍由 [`init_context_state`] 完成；但任何已知主模型
+/// 的生产入口必须在返回前覆盖预算，避免用全局 fallback 判断压缩水位。
+pub fn init_context_state_with_limits(
+    session: &SessionManager,
+    config: &ContextConfig,
+    system_text: &str,
+    limits: &crate::core::llm::EffectiveModelLimits,
+) -> Result<ContextState, AppError> {
+    let mut state = init_context_state(session, config, system_text)?;
+    state.apply_limits(limits);
+    Ok(state)
 }
 
 /// Messages from ContextState, ready for LLM (no system prompt).

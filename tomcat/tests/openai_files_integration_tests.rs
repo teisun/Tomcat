@@ -141,11 +141,12 @@ async fn chat_text_with_parts(
         model: model.to_string(),
         temperature: None,
         max_tokens: Some(max_tokens),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(timeout_secs), provider.chat(req))

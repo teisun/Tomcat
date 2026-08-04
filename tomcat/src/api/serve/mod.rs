@@ -36,7 +36,7 @@ use crate::api::chat::{
     ChatContextOverrides,
 };
 use crate::core::agent_registry::AgentRegistry;
-use crate::core::llm::ChatMessage;
+use crate::core::llm::{ChatMessage, LlmScene};
 use crate::core::tools::primitive::BashTaskStatus;
 use crate::infra::{wire, ScopedEventEmitter};
 use crate::{
@@ -301,13 +301,16 @@ pub(crate) async fn create_session_slot(
         ctx.spawn_skill_discovery_if_needed().await;
         let _ = ctx.await_skill_discovery().await;
     }
-    let context_budget_chars =
-        crate::infra::config::compute_context_budget_chars(&ctx.config.context);
+    let initial_main_call = ctx.resolve_call(LlmScene::Main, Some(&current_entry))?;
+    let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
+        initial_main_call.limits.input_budget_tokens,
+    );
     let prompt_snapshot = crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
-    let context_state = crate::init_context_state(
+    let context_state = crate::core::session::manager::init_context_state_with_limits(
         &ctx.session_runtime.session,
         &ctx.config.context,
         prompt_snapshot.system_text(),
+        &initial_main_call.limits,
     )?;
     if let Err(err) = ctx
         .session_runtime

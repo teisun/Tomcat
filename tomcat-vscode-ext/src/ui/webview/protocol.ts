@@ -66,6 +66,7 @@ export interface WebviewDomAction {
 }
 
 export interface WebviewMessageBlock {
+  abandoned?: boolean;
   assistantMessageId?: string;
   detailText?: string | null;
   failureDomain?: string | null;
@@ -87,6 +88,7 @@ export interface WebviewMessageBlock {
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
   recoveryAction?: "resume" | "retry";
+  recoveryError?: string | null;
   /** Durable transcript id of the user message Retry must copy forward. */
   recoveryTargetUserMessageId?: string;
   statusCode?: number | null;

@@ -4,6 +4,72 @@
 
 # 上下文管理技术方案
 
+## 2026-08 模型额度与运行时尾巴整改
+
+`context_window` 和 `max_output_tokens` 是模型能力，不再由全局上下文配置冒充。模型目录解析出
+`EffectiveModelLimits` 后，`ContextState` 使用 `input_budget = context_window - max(model_max_output_tokens, output_reserve_tokens)` 作为压缩水位线的分母。
+`[context].context_window_fallback` 与 `output_reserve_tokens` 只服务未知模型和额外安全余量；旧键仍可读取，但新配置不得再把它们当成模型事实上报。
+
+Anthropic 必须发送 `max_tokens`，因此它取模型目录的输出能力（显式请求只能缩小）；OpenAI 未显式限长时不发送
+`max_completion_tokens`。thinking budget/effort 只控制推理，不得推导或抬高 wire 输出上限。
+
+请求级 workspace/plan 状态使用 `MessageKind::EphemeralTail`：它不持久化、不开启 user turn，也不切断 reasoning replay。
+Anthropic 的缓存断点落在最后一条完全不含 tail 的消息末尾；不拆成连续 user 消息，因为 Anthropic 会合并它们且 Bedrock 会拒绝。
+运行时只记录哈希形式的 `prompt_prefix_fingerprint`，用于定位前缀漂移，绝不记录 prompt 原文。
+
+诊断字段以请求真相命名：`llm_request_resolved.wire_limit_source` 说明上限来自模型目录、未知模型回退还是调用方显式请求；发生 `output_truncated` 时同时写入
+`request_max_tokens`、实际 `wire_max_tokens` 与 `thinking_budget`。adaptive thinking 的 `thinking_budget = null` 是正确证据——它发送的是
+`effort`，没有 classic budget；绝不把本地 `output_reserve_tokens` 伪装成 wire 上限。
+
+反例与推翻条件：若全历史 replay 在跨模型切换时导致签名校验失败或成本不可接受，可恢复有语义边界的窗口；若两轮指纹一致而 Anthropic 仍无 cache read，应判为网关问题而不是继续改写 prompt。部分正文已产生时的截断 notice 不落盘：它是轻提示，真正无可见输出的失败由持久化 ErrorEntry 覆盖；只有出现需要审计截断正文的产品需求时才改变这一点。
+
+### Chat Completions 为什么仍保留 `ReplayWindow`
+
+OpenAI Responses 和 Chat Completions 不是同一种协议能力：
+
+```text
+Responses:         全历史显式 replay reasoning item
+Chat Completions:  旧历史只保留可见对话 ── ReplayWindow ──> 当前轮才带 opaque reasoning
+```
+
+Chat Completions 的 `reasoning_content` 兼容字段没有 Responses 的加密 replay 语义和稳定性保证。把每一轮旧 blob
+都重发，可能让兼容网关拒绝请求、重复计费，或把已经失效的工具推理带进新回合。因此这里保留窗口：窗口外只保留用户、
+正文和工具事实，当前 turn 才带同 profile 的 opaque 续传材料。反例是 Responses：它的 `encrypted_content` 就是为
+全历史显式重放设计，所以不套这个窗口。
+
+推翻条件：若某个 Chat Completions provider 文档化并实测支持多轮历史 `reasoning_content`，且全历史重放在同一
+模型、跨模型和工具回合中均无 4xx、成本可接受、连续性明显更好，才可针对该 provider 移除窗口；不能因为单次
+“看起来能用”而全局删除。
+
+### 2026-08-04 fcodex Opus 5 M0/M1 实测
+
+M0 对 `fcodex/claude-opus-5` 发出 `max_tokens = 128000` 的真实 Messages 请求并正常得到
+`completion_tokens = 8`。因此用户模型目录可声明 `context_window = 1000000` 和
+`max_output_tokens = 128000`；这不是从模型名猜出的值。
+
+M1 使用相同工具定义、system、三轮 tool history、adaptive thinking 与 `EphemeralTail`。诊断哈希显示：
+
+- `tool_hash`、`system_hashes`、`tail_hashes` 三轮相同；
+- 第二、三轮的既有消息前缀哈希相同；
+- 每轮选中的缓存断点都包含稳定的 `LastTool` 与 `SystemBlock(0)`，且后续完整消息断点不落在 tail 上。
+
+首次冷探针在约 19 秒内连续三次得到 `cache_read_tokens = 0`、`cache_write_tokens =
+11087 / 11168 / 15570`；同一条历史在约两分钟后重跑，三轮分别得到
+`cache_read_tokens = 11087 / 11168 / 15570`、`cache_write_tokens = 0`。这只证明该新前缀
+在 fcodex Anthropic 路由上曾延迟变为可读；它不能推出“fcodex 整体有故障”或“每条冷请求都必须等
+两分钟”。已有长会话的连续大额 `cache_read` 反而证明已预热的稳定前缀可以持续命中。冷写入的短时
+零 read 不能用来判断本地前缀失配，也不要因此再改写 tail 或拆分 user message。
+
+同日以 `fcodex/gpt-5.6-sol` 走 OpenAI Responses 做了同形状（三轮、tools、xhigh reasoning、
+runtime tail）的实测：预热后的三轮 `prompt_tokens = 5655 / 7868 / 10081`，分别读取
+`cache_read_tokens = 4608 / 7680 / 7680`。首次运行曾出现 `0 / 4608 / 0`，所以 Responses 的
+单轮零 read 也不能当成“本地 prompt 一定坏了”的结论；实际门槛是同一稳定前缀是否在后续请求中出现
+cache read，而不是要求每一轮都读到完整历史。
+
+推翻条件：如果缓存已预热（使用同一稳定前缀等待至少两分钟）后，稳定工具/system 断点仍连续两轮
+`cache_read_tokens = 0` 且仍有 `cache_write_tokens > 0`，才将其判定为网关不复用或 usage
+语义不兼容，并携带本段哈希和 selected breakpoints 向网关排查。
+
 ## 2026-08 Plan reminder 规则
 
 计划执行不再是第三种会话模式。请求装配按两个正交事实派生提醒：`AgentMode::Plan` 注入 planner reminder；`PlanRuntime::executing_plan_id().is_some()` 注入 executor reminder。
@@ -70,7 +136,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | **user turn**          | 逻辑分组概念：一条 turn-start 消息（`role == User && kind != Steering`，或 `kind == CompactionSummary`）+ 其后所有消息，直到下一个 turn start。上下文管理的最小粒度单位。在内存中通过 `messages: Vec<ChatMessage>` 扁平存储，turn 边界由 `is_turn_start()` 动态判定。 |
 | **MessageId**          | Transcript 中每条 `MessageEntry.id`（user/assistant/tool 各一行一条），对应 `ChatMessage.msg_id`（`#[serde(skip)]`）。会话内须**唯一**，且不得包含子串 `::`（与复合 id 分隔符冲突），详见 §5.7。                                                                    |
 | **TurnId（复合）**      | `start_id + "::" + end_id`，其中 `start_id` / `end_id` 均为 MessageId。标识一段 turn 的首尾 message。`BranchSummaryEntry.id` 表示「预热 snapshot 首条 turn start 的 `msg_id` + 末条消息的 `msg_id`」，见 §5.7。                                |
-| **MessageKind**        | `ChatMessage` 上的 `#[serde(skip)]` 枚举字段，取值 `Normal`（默认）/ `Steering`（用户中途注入指令）/ `CompactionSummary`（摘要）。用于 turn 边界判定与消息分类。                                                                                         |
+| **MessageKind**        | `ChatMessage` 上的枚举字段，取值 `Normal`（默认）/ `Steering`（用户中途注入指令）/ `CompactionSummary`（摘要）/ `EphemeralTail`（本请求临时现场状态）。`EphemeralTail` 不持久化、不建立 turn 边界、不切断 reasoning replay。 |
 | **turn start**         | 满足 `(role == User && kind != Steering) \|\| kind == CompactionSummary` 的 `ChatMessage`。`ContextState.turn_count()` 统计 `messages` 中满足条件的消息数。                                                                            |
 | **context_window**     | 模型固有的最大上下文长度（输入 + 输出），由模型提供商决定（如 GPT-4o 128K, GPT-5.4 400K）。                                                                                                                                                              |
 | **input_budget**       | 输入 token 预算，`context_window - max_output_tokens`。分母，用于计算 ratio。                                                                                                                                                           |

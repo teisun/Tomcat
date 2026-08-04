@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use super::super::*;
 use super::mocks::temp_sessions_dir;
 use crate::core::compaction::preheat::Preheat;
-use crate::core::llm::{ChatMessage, ChatMessageContentPart};
+use crate::core::llm::{ChatMessage, ChatMessageContentPart, EffectiveModelLimits, LimitSource};
 
 const TINY_PNG_B64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -117,6 +117,46 @@ fn test_estimated_token_count_uses_api_usage_when_present() {
         state.estimated_token_count(),
         1300,
         "should use API usage base + post_usage increment"
+    );
+}
+
+#[test]
+fn apply_limits_changes_the_compaction_gate_from_opus_to_legacy_unknown_model() {
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 1_088_000,
+        context_budget_chars: 3_488_000,
+        context_budget_tokens: 872_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    assert!(
+        state.usage_ratio() < 1.0,
+        "the Opus 5 872K input budget must not compact this transcript"
+    );
+
+    let legacy_unknown = EffectiveModelLimits {
+        context_window: 400_000,
+        model_max_output_tokens: None,
+        output_reserve_tokens: 128_000,
+        input_budget_tokens: 272_000,
+        context_source: LimitSource::LegacyFallback,
+        output_source: LimitSource::LegacyFallback,
+    };
+
+    state.apply_limits(&legacy_unknown);
+
+    assert_eq!(state.context_budget_tokens, 272_000);
+    assert_eq!(state.context_budget_chars, 1_088_000);
+    assert!(
+        state.usage_ratio() >= 1.0,
+        "the legacy 272K fallback must trigger the normal over-budget compaction path"
     );
 }
 

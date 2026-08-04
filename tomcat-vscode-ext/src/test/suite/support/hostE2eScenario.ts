@@ -1668,6 +1668,23 @@ export async function assertWebviewInterruptFlow(
   );
   void settled;
 
+  await api.__testing.reloadWebview();
+  await api.__testing.waitForWebviewReady();
+  const reloadedAfterInterrupt = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="send-button"') &&
+      !snapshot.html.includes('data-testid="stop-button"') &&
+      snapshot.loadingShimmerCount === 0 &&
+      snapshot.messageTexts.includes("interrupt please") &&
+      snapshot.messageTexts.filter((text) => text === "Tomcat turn interrupted").length === 1
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  void reloadedAfterInterrupt;
+
   const otherSessionId = await claimDifferentWebviewSession(
     api,
     sessionId,
@@ -2445,13 +2462,12 @@ export async function assertWebviewRetryRecoveryFlow(
     "expected retrying in the same session to produce a successful assistant reply",
   );
   assert.ok(
-    !recoveredSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
-    "a successful Retry must hide its completed failure chapter",
+    recoveredSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
+    "a successful Retry must keep its completed failure card for audit context",
   );
-  assert.equal(
-    recoveredSnapshot.messageTexts.filter((text) => text.includes("retry 403 showcase")).length,
-    1,
-    "Retry must render only its fresh copy-forward user message",
+  assert.ok(
+    recoveredSnapshot.html.includes("已废弃 · 未发送给模型"),
+    "Retry must render the abandoned input beside its fresh copy-forward message",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -2476,15 +2492,14 @@ export async function assertWebviewRetryRecoveryFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId
       && candidate.messageTexts.some((text) => text.includes(successText))
-      && !candidate.messageTexts.some((text) => text.includes(failureSummary))
+      && candidate.messageTexts.some((text) => text.includes(failureSummary))
         ? candidate
         : undefined,
     20_000,
   );
-  assert.equal(
-    rehydratedSnapshot.messageTexts.filter((text) => text.includes("retry 403 showcase")).length,
-    1,
-    "rehydration must keep only the fresh copy-forward user message",
+  assert.ok(
+    rehydratedSnapshot.html.includes("已废弃 · 未发送给模型"),
+    "rehydration must retain the abandoned input and its fresh copy-forward message",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
@@ -2501,6 +2516,61 @@ export async function assertWebviewRetryRecoveryFlow(
       "Extension Development Host",
     );
   }
+}
+
+export async function assertWebviewRecoveryRejectionFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-retry-rejection-session",
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId, text: "retry rejected showcase" },
+      messageId: "webview-retry-rejection-prompt",
+      type: "prompt",
+    }),
+  );
+  await api.__testing.waitForEvent({
+    sessionId,
+    timeoutMs: 20_000,
+    type: "agent_end",
+  });
+  await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.messageTexts.some((text) => text.includes(failureSummary))
+        ? candidate
+        : undefined,
+    20_000,
+  );
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "recover-error-turn",
+  });
+  const rejected = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.messageTexts.some((text) => text.includes(failureSummary)) &&
+      candidate.html.includes("这张错误卡已经过期，无法重试") &&
+      candidate.html.includes('data-testid="recover-error-turn"')
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    rejected.html.includes("这张错误卡已经过期，无法重试"),
+    "a rejected recovery must show its reason inline on the restored error card",
+  );
 }
 
 export async function assertWebviewResumeCardFlow(
@@ -2572,7 +2642,8 @@ export async function assertWebviewResumeCardFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId
       && candidate.messageTexts.some((text) => text.includes(successText))
-      && !candidate.messageTexts.some((text) => text.includes(failureSummary))
+      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+      && !candidate.html.includes('data-testid="recover-error-turn"')
         ? candidate
         : undefined,
     20_000,
@@ -2582,8 +2653,12 @@ export async function assertWebviewResumeCardFlow(
     "Resume must continue the tool turn from the post-error [pending] placeholder",
   );
   assert.ok(
-    !resumedSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
-    "a successful Resume must hide its completed error card",
+    resumedSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
+    "a successful Resume must retain its completed error card",
+  );
+  assert.ok(
+    !resumedSnapshot.html.includes('data-testid="recover-error-turn"'),
+    "a completed recovery must consume the one-shot Resume action",
   );
 }
 

@@ -45,11 +45,14 @@ fn ephemeral_tail_is_request_only_and_not_a_persisted_message() {
         ..Default::default()
     });
 
-    let (outgoing, ephemeral_tail_count) = with_ephemeral_tail(&persistent, &loop_);
+    let outgoing = with_ephemeral_tail(&persistent, &loop_);
 
-    assert_eq!(ephemeral_tail_count, 1);
     assert_eq!(persistent.len(), 2, "source history must stay unchanged");
     assert_eq!(outgoing.len(), 3);
+    assert_eq!(
+        outgoing.last().map(|message| message.kind),
+        Some(MessageKind::EphemeralTail)
+    );
     assert_eq!(
         outgoing.last().and_then(ChatMessage::text_content),
         Some("<system_reminder>runtime state</system_reminder>")
@@ -78,12 +81,11 @@ fn mutable_ephemeral_tail_does_not_rewrite_existing_history() {
         ChatMessage::system("stable system"),
         ChatMessage::user("first"),
     ];
-    let (first_messages, first_tail_count) = with_ephemeral_tail(&first_history, &loop_);
+    let first_messages = with_ephemeral_tail(&first_history, &loop_);
     let first_request = ChatRequest {
         messages: first_messages,
         model: "gpt-5.4".to_string(),
         cache_key: cache_key_for(&loop_),
-        ephemeral_tail_count: first_tail_count,
         tools: Some(loop_.config.tool_definitions.clone()),
         ..Default::default()
     };
@@ -92,19 +94,20 @@ fn mutable_ephemeral_tail_does_not_rewrite_existing_history() {
     second_history.push(ChatMessage::assistant("first response"));
     second_history.push(ChatMessage::user("second"));
     *tail.lock() = "<system_reminder>permissions: granted</system_reminder>".to_string();
-    let (second_messages, second_tail_count) = with_ephemeral_tail(&second_history, &loop_);
+    let second_messages = with_ephemeral_tail(&second_history, &loop_);
     let second_request = ChatRequest {
         messages: second_messages,
         model: "gpt-5.4".to_string(),
         cache_key: cache_key_for(&loop_),
-        ephemeral_tail_count: second_tail_count,
         tools: Some(loop_.config.tool_definitions.clone()),
         ..Default::default()
     };
 
-    let first_persisted_len = first_request.messages.len() - first_tail_count;
-    assert_eq!(first_tail_count, 1);
-    assert_eq!(second_tail_count, 1);
+    let first_persisted_len = first_request
+        .messages
+        .iter()
+        .position(|message| message.kind == MessageKind::EphemeralTail)
+        .expect("request has one runtime-only tail");
     assert_eq!(first_request.tools, second_request.tools);
     assert_eq!(first_request.cache_key, second_request.cache_key);
     assert_eq!(
@@ -171,11 +174,9 @@ fn subagent_request_uses_its_own_cache_key_family_and_own_tail() {
     });
     let history = vec![ChatMessage::system("stable"), ChatMessage::user("question")];
 
-    let (parent_request, parent_tail_count) = with_ephemeral_tail(&history, &parent);
-    let (subagent_request, subagent_tail_count) = with_ephemeral_tail(&history, &subagent);
+    let parent_request = with_ephemeral_tail(&history, &parent);
+    let subagent_request = with_ephemeral_tail(&history, &subagent);
 
-    assert_eq!(parent_tail_count, 1);
-    assert_eq!(subagent_tail_count, 1);
     assert_eq!(
         parent_request.last().and_then(ChatMessage::text_content),
         Some("parent runtime facts")
@@ -203,9 +204,8 @@ fn ephemeral_tail_survives_collapse() {
         ChatMessage::user("new question"),
     ];
 
-    let (request, tail_count) = with_ephemeral_tail(&collapsed_history, &loop_);
+    let request = with_ephemeral_tail(&collapsed_history, &loop_);
 
-    assert_eq!(tail_count, 1);
     assert_eq!(request.len(), collapsed_history.len() + 1);
     assert_eq!(request[1].kind, MessageKind::CompactionSummary);
     assert_eq!(

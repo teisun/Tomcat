@@ -49,6 +49,7 @@ function MessageBubbleComponent({
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const isFailedUserMessage = item.kind === "user" && item.deliveryState === "failed";
   const isPendingUserMessage = item.kind === "user" && item.deliveryState === "pending";
+  const isAbandonedUserMessage = item.kind === "user" && item.abandoned === true;
   const showRetry = isFailedUserMessage && item.retryable === true && typeof onRetry === "function";
   const recoveryAction =
     item.kind === "error" && item.recoveryAction && typeof onRecover === "function"
@@ -91,7 +92,7 @@ function MessageBubbleComponent({
 
   return (
     <article
-      className={`tc-message tc-message--${item.kind}${isFailedUserMessage ? " tc-message--user-failed" : ""}${isPendingUserMessage ? " tc-message--user-pending" : ""}`}
+      className={`tc-message tc-message--${item.kind}${isFailedUserMessage ? " tc-message--user-failed" : ""}${isPendingUserMessage ? " tc-message--user-pending" : ""}${isAbandonedUserMessage ? " tc-message--user-abandoned" : ""}`}
       data-delivery-state={item.deliveryState}
       data-kind={item.kind}
       data-message-id={item.id}
@@ -198,6 +199,11 @@ function MessageBubbleComponent({
           ) : null}
         </>
       ) : null}
+      {item.kind === "error" && item.recoveryError ? (
+        <div className="tc-message__status" data-testid="error-recovery-rejection">
+          <span>{item.recoveryError}</span>
+        </div>
+      ) : null}
       {detailsExpanded && rawErrorDetail ? (
         <pre className="tc-message__detail" data-testid="error-detail-text">
           {rawErrorDetail}
@@ -206,6 +212,11 @@ function MessageBubbleComponent({
       {isPendingUserMessage ? (
         <div className="tc-message__status" data-testid="user-message-status">
           <span>Sending...</span>
+        </div>
+      ) : null}
+      {isAbandonedUserMessage ? (
+        <div className="tc-message__status" data-testid="abandoned-user-message-status">
+          <span>已废弃 · 未发送给模型</span>
         </div>
       ) : null}
       {isFailedUserMessage ? (

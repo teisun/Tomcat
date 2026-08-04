@@ -58,6 +58,7 @@ type SessionRuntimeState = {
   hasMoreHistory: boolean;
   historyEntries: unknown[];
   historyLoading: boolean;
+  dismissedErrorCards: Map<string, WebviewMessageBlock>;
   dismissedErrorIds: Set<string>;
   localUserMessageIds: Set<string>;
   oldestHistoryCursor: string | null;
@@ -308,28 +309,16 @@ function historyEntryId(entry: unknown): string | null {
   return isRecord(entry) && typeof entry.id === "string" ? entry.id : null;
 }
 
-function filterSupersededHistoryEntries(
-  entries: unknown[],
-  localUserMessageIds: ReadonlySet<string>,
-): unknown[] {
+function filterSupersededHistoryEntries(entries: unknown[]): unknown[] {
   const filtered: unknown[] = [];
   let inSupersededSpan = false;
-  const latestUserMessageIndex = entries.reduce(
-    (latestIndex, entry, index) => (messageRole(entry) === "user" ? index : latestIndex),
-    -1,
-  );
-  for (const [index, entry] of entries.entries()) {
+  for (const entry of entries) {
     if (isSupersededMessageEntry(entry)) {
       if (isTurnFailedMessageEntry(entry)) {
-        // A failed prompt remains visible only while it is the newest user input. Once Retry
-        // copy-forwards it (or the user sends anything newer), the archived source row must not
-        // become a second identical bubble after history hydration.
-        if (
-          index === latestUserMessageIndex &&
-          !localUserMessageIds.has(historyEntryId(entry) ?? "")
-        ) {
-          filtered.push(entry);
-        }
+        // Retry is append-only: retain the original failed input as an
+        // abandoned bubble beside its copy-forward replacement. It is useful
+        // audit context and must survive history rebuilds.
+        filtered.push(entry);
         continue;
       }
       // Resume replaces only a synthetic tool result (`[pending]`) under the same
@@ -426,19 +415,6 @@ function isCurrentErrorEntry(entries: unknown[], errorIndex: number): boolean {
     }
   }
   return true;
-}
-
-function filterHandledErrorEntries(
-  entries: unknown[],
-  dismissedErrorIds: ReadonlySet<string>,
-): unknown[] {
-  return entries.filter((entry, index) => {
-    const errorId = historyEntryId(entry);
-    if (!errorId || !isRecord(entry) || entry.type !== "error") {
-      return true;
-    }
-    return !dismissedErrorIds.has(errorId) && isCurrentErrorEntry(entries, index);
-  });
 }
 
 function buildErrorRecoveryActions(
@@ -1727,6 +1703,9 @@ function applyHistoryEntry(
       const segments = contentToMessageSegments(entry.message.content);
       const attachments = extractAttachments(entry.message.content, id);
       const block: WebviewMessageBlock = {
+        ...(entry.message.superseded === true && entry.message.turn_failed === true
+          ? { abandoned: true }
+          : {}),
         id,
         kind: "user",
         segments,
@@ -1822,6 +1801,10 @@ function applyHistoryEntry(
   }
 
   if (entry.type === "custom") {
+    if (entry.event === "agent.interrupted") {
+      pushMessage(session, "warn", "Tomcat turn interrupted", "agent-interrupted");
+      return;
+    }
     if (
       applyLegacyAskQuestionCustomEntry(
         session,
@@ -1852,6 +1835,7 @@ function createSessionRuntime(): SessionRuntimeState {
     hasMoreHistory: false,
     historyEntries: [],
     historyLoading: false,
+    dismissedErrorCards: new Map<string, WebviewMessageBlock>(),
     dismissedErrorIds: new Set<string>(),
     localUserMessageIds: new Set<string>(),
     oldestHistoryCursor: null,
@@ -2732,14 +2716,6 @@ export class WebviewStateStore {
   ): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
-    for (const item of session.timeline) {
-      if (item.type === "message" && item.kind === "error") {
-        runtime.dismissedErrorIds.add(item.id);
-      }
-    }
-    session.timeline = session.timeline.filter(
-      (item) => item.type !== "message" || item.kind !== "error",
-    );
     this.dropOtherFailedLocalUserMessages(sessionId, options.messageId);
     pushMessage(session, "user", text, options.messageId, {
       deliveryState: "pending",
@@ -2753,38 +2729,46 @@ export class WebviewStateStore {
   dismissErrorRecovery(sessionId: string, errorId: string): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
-    const failedUserMessageId = session.timeline.find(
+    const card = session.timeline.find(
       (item): item is WebviewMessageBlock =>
-        item.type === "message" &&
-        item.kind === "error" &&
-        item.id === errorId &&
-        item.recoveryAction === "retry" &&
-        typeof item.recoveryTargetUserMessageId === "string",
-    )?.recoveryTargetUserMessageId;
-    runtime.dismissedErrorIds.add(errorId);
-    // A recovery starts a fresh attempt. Drop its obsolete failure chapter optimistically so the
-    // UI never leaves a red card or duplicate user bubble on screen while the server works.
-    session.timeline = session.timeline.filter(
-      (item) =>
-        !(
-          item.type === "message" &&
-          ((item.kind === "error" && item.id === errorId) ||
-            (failedUserMessageId !== undefined &&
-              item.kind === "user" &&
-              item.id === failedUserMessageId))
-        ),
+        item.type === "message" && item.kind === "error" && item.id === errorId,
     );
-    if (failedUserMessageId !== undefined) {
-      runtime.localUserMessageIds.delete(failedUserMessageId);
+    if (card) {
+      runtime.dismissedErrorCards.set(errorId, { ...card });
+      card.recoveryAction = undefined;
     }
+    runtime.dismissedErrorIds.add(errorId);
   }
 
   restoreDismissedErrorRecovery(sessionId: string, errorId: string): void {
+    const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
     if (!runtime.dismissedErrorIds.delete(errorId)) {
       return;
     }
     this.rebuildHistoryTimeline(sessionId);
+    if (
+      !session.timeline.some(
+        (item) => item.type === "message" && item.kind === "error" && item.id === errorId,
+      )
+    ) {
+      const card = runtime.dismissedErrorCards.get(errorId);
+      if (card) {
+        upsertTimelineItem(session, card);
+      }
+    }
+    runtime.dismissedErrorCards.delete(errorId);
+  }
+
+  setErrorRecoveryRejection(sessionId: string, errorId: string, reason: string): void {
+    const session = this.ensureSession(sessionId);
+    const card = session.timeline.find(
+      (item): item is WebviewMessageBlock =>
+        item.type === "message" && item.kind === "error" && item.id === errorId,
+    );
+    if (card) {
+      card.recoveryError = reason;
+    }
   }
 
   markLocalUserMessageFailed(
@@ -2961,6 +2945,7 @@ export class WebviewStateStore {
           const recovery = currentTurnRecoveryAction(session);
           const recoveryOptions = {
             recoveryAction: recovery?.action,
+      recoveryError: null,
             recoveryTargetUserMessageId: recovery?.targetUserMessageId,
           };
         if (frame.error && frame.error !== "interrupted") {
@@ -2968,10 +2953,8 @@ export class WebviewStateStore {
         } else if (!frame.error && !runtime.turnHadAssistantText) {
           pushMessage(
             session,
-            "error",
+            "notice",
             "本轮没有产生可见回答。",
-            undefined,
-            recoveryOptions,
           );
         }
         }
@@ -2980,7 +2963,7 @@ export class WebviewStateStore {
         clearActiveAssistant(runtime);
         markRunningToolsInterrupted(session);
         if (!messageExistsAtTail(session, "warn", "Tomcat turn interrupted")) {
-          pushMessage(session, "warn", "Tomcat turn interrupted");
+          pushMessage(session, "warn", "Tomcat turn interrupted", "agent-interrupted");
         }
         return sessionRenderMutation(session.sessionId);
       case "agent_idle":
@@ -3339,10 +3322,7 @@ export class WebviewStateStore {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
     const renderableEntries = trimLeadingHistoryEntries(
-      filterHandledErrorEntries(
-        filterSupersededHistoryEntries(runtime.historyEntries, runtime.localUserMessageIds),
-        runtime.dismissedErrorIds,
-      ),
+      filterSupersededHistoryEntries(runtime.historyEntries),
     );
     const historyToolNames = buildHistoryToolNameLookup(renderableEntries);
     const toolCallToAssistant = buildToolCallToAssistantMap(renderableEntries);

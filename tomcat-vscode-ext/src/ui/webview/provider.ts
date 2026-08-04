@@ -1471,7 +1471,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
         } catch (error) {
           this.stateStore.restoreDismissedErrorRecovery(sessionId, intent.data.errorId);
-          await vscode.window.showWarningMessage(displayRecoveryError(error));
+          this.stateStore.setErrorRecoveryRejection(
+            sessionId,
+            intent.data.errorId,
+            displayRecoveryError(error),
+          );
           await this.postState();
         }
         return;

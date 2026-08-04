@@ -374,7 +374,7 @@ fn transport_messages(
         };
         if continuity_enabled {
             if in_window {
-                report.record_in_window(&target, original, &action);
+                report.record_replay_decision(&target, original, &action);
             } else {
                 report.record_stripped_old_history(original);
             }
@@ -551,6 +551,7 @@ struct OpenAiRequestBody {
     messages: Vec<Value>,
     temperature: Option<f32>,
     #[serde(rename = "max_completion_tokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -788,7 +789,7 @@ impl OpenAiProvider {
                 files_adapter.as_deref(),
             ),
             temperature: request.temperature,
-            max_tokens: request.max_tokens,
+            max_tokens: request.resolved_output_limit,
             stream: false,
             tools: request.tools.clone(),
             stream_options: None,
@@ -1014,7 +1015,7 @@ impl LlmProvider for OpenAiProvider {
                 files_adapter.as_deref(),
             ),
             temperature: request.temperature,
-            max_tokens: request.max_tokens,
+            max_tokens: request.resolved_output_limit,
             stream: true,
             tools: request.tools.clone(),
             stream_options: Some(StreamOptionsBody {

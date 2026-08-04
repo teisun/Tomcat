@@ -63,6 +63,8 @@ pub struct ModelEntry {
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
     pub thinking_format: Option<String>,
     #[serde(default)]
     pub supported_reasoning_levels: Vec<String>,
@@ -72,6 +74,30 @@ impl ModelEntry {
     pub fn request_model_name(&self) -> &str {
         self.model_name.as_deref().unwrap_or(self.id.as_str())
     }
+}
+
+/// Validate the hard relationship between a model's total context capacity and
+/// its maximum output capacity. Both catalog loading and runtime fallback
+/// resolution call this one helper so configuration errors fail early without
+/// creating a second rule.
+pub(crate) fn validate_model_limit_values(
+    model_id: &str,
+    context_window: usize,
+    max_output_tokens: Option<usize>,
+) -> Result<(), AppError> {
+    if context_window == 0 {
+        return Err(AppError::Config(format!(
+            "模型 `{model_id}` 的 context_window 必须大于 0。"
+        )));
+    }
+    if let Some(output) = max_output_tokens {
+        if output == 0 || output > context_window {
+            return Err(AppError::Config(format!(
+                "模型 `{model_id}` 的 max_output_tokens 必须满足 0 < max_output_tokens <= context_window。"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +302,9 @@ pub(crate) struct UserModelEntry {
     pub(crate) context_window: Option<u32>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output_tokens: Option<u32>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) thinking_format: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -355,7 +384,8 @@ fn merge_user_model(
         api_key_env: None,
         base_url: None,
         capabilities: Capabilities::default(),
-        context_window: Some(context.context_window as u32),
+        context_window: None,
+        max_output_tokens: None,
         thinking_format: None,
         supported_reasoning_levels: Vec::new(),
     });
@@ -393,6 +423,9 @@ fn merge_user_model(
     if let Some(context_window) = raw.context_window {
         merged.context_window = Some(context_window);
     }
+    if let Some(max_output_tokens) = raw.max_output_tokens {
+        merged.max_output_tokens = Some(max_output_tokens);
+    }
     if let Some(thinking_format) = raw.thinking_format {
         merged.thinking_format = Some(thinking_format);
     }
@@ -412,6 +445,14 @@ fn merge_user_model(
             merged.thinking_format.as_deref(),
         );
     }
+    validate_model_limit_values(
+        &merged.id,
+        merged
+            .context_window
+            .map(|value| value as usize)
+            .unwrap_or(context.context_window_fallback),
+        merged.max_output_tokens.map(|value| value as usize),
+    )?;
     Ok(merged)
 }
 

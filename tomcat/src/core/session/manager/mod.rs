@@ -9,8 +9,8 @@ mod tests;
 mod types;
 
 pub use context::{
-    build_context_from_state, init_context_state, INTERRUPTED_TOOL_RESULT_TEXT,
-    PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
+    build_context_from_state, init_context_state, init_context_state_with_limits,
+    INTERRUPTED_TOOL_RESULT_TEXT, PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
 };
 pub(crate) use session_impl::extract_user_text_from_content;
 #[allow(unused_imports)]

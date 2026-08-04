@@ -53,7 +53,8 @@ const MODELS_TOML_HEADER: &str = "\
 #                   例如 host -> /v1/<leaf>，GLM 这类 /api/paas/v4 路径会被保留
 #   thinking_format openai | deepseek | qwen | doubao | anthropic 等
 #   capabilities    vision/files/tools/reasoning/web_search 能力位
-#   context_window  模型上下文窗口（当前用于列表显示；运行时预算仍读 [context] 全局配置）
+#   context_window     模型上下文窗口（输入历史与本轮实际输出共用）
+#   max_output_tokens  模型单轮输出上限（thinking 与正文共用）；Anthropic 请求的上限依据
 #
 # API Key 请写入 ~/.tomcat/assets/.env（0600 权限），不要回填到本文件。
 # 再加一个模型时，复制下面这段、改 id/provider/base_url 即可。

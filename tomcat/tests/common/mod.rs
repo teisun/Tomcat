@@ -35,8 +35,11 @@ pub const OPENAI_GATEWAY_TEST_BASE_URL: &str = "https://aigateway.sunmi.com";
 pub const FCODEX_TEST_MODEL_ENV: &str = "TOMCAT_E2E_FCODEX_MODEL";
 pub const FCODEX_TEST_DEFAULT_MODEL: &str = "fcodex/gpt-5.6-sol";
 pub const FCODEX_TEST_API_KEY_ENV: &str = "FCODEX_OPENAI_API_KEY";
-pub const FCODEX_ANTHROPIC_TEST_API_KEY_ENV: &str = "FCODEX_API_KEY";
-pub const FCODEX_ANTHROPIC_TEST_MODEL: &str = "fcodex/claude-opus-4-8";
+/// Keep this aligned with the user-facing fcodex Anthropic model entry in
+/// `~/.tomcat/models.toml`; a different test-only key name silently skips
+/// real gateway coverage.
+pub const FCODEX_ANTHROPIC_TEST_API_KEY_ENV: &str = "FCODEX_ANTHROPIC_API_KEY";
+pub const FCODEX_ANTHROPIC_TEST_MODEL: &str = "fcodex/claude-opus-5";
 pub const FCODEX_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_FCODEX_BASE_URL";
 pub const FCODEX_TEST_DEFAULT_BASE_URL: &str = "https://fcodex.top";
 pub const MIMO_TEST_MODEL_ENV: &str = "TOMCAT_E2E_MIMO_MODEL";
@@ -186,12 +189,23 @@ pub fn apply_fcodex_anthropic_app_config(cfg: &mut AppConfig) {
             provider: "fcodex",
             env_key: FCODEX_ANTHROPIC_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
-            model_name: Some("claude-opus-4-8"),
+            model_name: Some("claude-opus-5"),
             thinking_format: Some("anthropic-adaptive"),
             supports_files: true,
             supports_reasoning: true,
         },
     );
+    let path = cfg
+        .storage
+        .work_dir
+        .as_deref()
+        .map(Path::new)
+        .expect("fcodex Anthropic probe has a work directory")
+        .join("models.toml");
+    let mut model_toml =
+        std::fs::read_to_string(&path).expect("read fcodex Anthropic probe model override");
+    model_toml.push_str("context_window = 1000000\nmax_output_tokens = 128000\n");
+    std::fs::write(path, model_toml).expect("write fcodex Anthropic probe capabilities");
 }
 
 pub fn apply_kimi_app_config(cfg: &mut AppConfig) {

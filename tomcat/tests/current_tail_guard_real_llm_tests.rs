@@ -304,11 +304,12 @@ async fn request_update_plan_args(
             model: default_model(),
             temperature: None,
             max_tokens: Some(512),
+            resolved_output_limit: None,
+            diagnostic_request_id: None,
             stream: Some(false),
             model_override: None,
             thinking_level: None,
             cache_key: None,
-            ephemeral_tail_count: 0,
             tools: Some(tool_definitions.clone()),
         };
         let response = request_chat_response_or_skip(

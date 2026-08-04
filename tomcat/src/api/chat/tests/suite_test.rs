@@ -269,19 +269,20 @@ async fn request_prefix_is_byte_identical_across_turns() {
     ];
     let capture = |history: &[crate::ChatMessage]| {
         let mut messages = history.to_vec();
-        messages.push(crate::ChatMessage::user(
-            tail_provider.render_ephemeral_tail(),
-        ));
+        let mut tail = crate::ChatMessage::user(tail_provider.render_ephemeral_tail());
+        tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+        messages.push(tail);
         crate::ChatRequest {
             messages,
             model: "gpt-5.4".to_string(),
             temperature: None,
             max_tokens: None,
+            resolved_output_limit: None,
+            diagnostic_request_id: None,
             stream: Some(true),
             model_override: None,
             thinking_level: None,
             cache_key: Some("prefix-test:main".to_string()),
-            ephemeral_tail_count: 1,
             tools: Some(snapshot.tool_definitions().to_vec()),
         }
     };
@@ -322,7 +323,10 @@ async fn request_prefix_is_byte_identical_across_turns() {
             request.messages[0].text_content(),
             "runtime state must not alter the system cache prefix"
         );
-        assert_eq!(initial.ephemeral_tail_count, request.ephemeral_tail_count);
+        assert_eq!(
+            request.messages.last().map(|message| message.kind),
+            Some(crate::core::llm::MessageKind::EphemeralTail)
+        );
     }
     for request in [&after_grant, &in_plan, &executing] {
         assert_eq!(

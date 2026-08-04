@@ -107,6 +107,8 @@ pub(super) fn parse_chat_request(params: &serde_json::Value) -> Result<ChatReque
             .or_else(|| params.get("max_tokens"))
             .and_then(|v| v.as_u64())
             .map(|u| u as u32),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: params.get("stream").and_then(|v| v.as_bool()),
         model_override: None,
         thinking_level: None,
@@ -115,7 +117,6 @@ pub(super) fn parse_chat_request(params: &serde_json::Value) -> Result<ChatReque
             .or_else(|| params.get("sessionId"))
             .and_then(|value| value.as_str())
             .and_then(|session_id| PromptCacheKeyFamily::Extension.key_for(session_id)),
-        ephemeral_tail_count: 0,
         tools: params
             .get("tools")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),

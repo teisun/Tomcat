@@ -33,7 +33,8 @@ pub use lock::with_config_lock;
 pub use types::WorkspaceEntry;
 #[allow(unused_imports)]
 pub use types::{
-    compute_context_budget_chars, AgentConfig, AppConfig, CheckpointConfig, ContextConfig,
+    compute_context_budget_chars, compute_context_budget_chars_from_tokens,
+    fallback_input_budget_tokens, AgentConfig, AppConfig, CheckpointConfig, ContextConfig,
     LlmConfig, LlmFilesConfig, LlmRuntimeConfig, LogConfig, OpenAiResponsesConfig, PreflightConfig,
     PrimitiveConfig, ReasoningContinuityConfig, ResumeHydrationMode, SecurityConfig, SessionConfig,
     SkillsConfig, SplashConfig, ThinkingConfig, ThinkingDisplay, ToolCliVerbosity, WorkspaceConfig,

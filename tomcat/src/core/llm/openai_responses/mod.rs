@@ -457,7 +457,7 @@ impl OpenAiResponsesProvider {
         if let Some(temp) = request.temperature {
             body["temperature"] = json!(temp);
         }
-        if let Some(max) = request.max_tokens {
+        if let Some(max) = request.resolved_output_limit {
             // Responses 用 max_output_tokens；与 Completions 的 max_completion_tokens 概念一致。
             // 上游对 max_output_tokens 有下限（当前为 16），低于则 400。
             let max_out = max.max(16);

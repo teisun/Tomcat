@@ -195,14 +195,14 @@ fn latest_user_request_parts(request: &ChatRequest) -> &[ChatMessageContentPart]
 }
 
 fn latest_persisted_user_request(request: &ChatRequest) -> &ChatMessage {
-    let persisted_len = request
+    request
         .messages
-        .len()
-        .saturating_sub(request.ephemeral_tail_count);
-    request.messages[..persisted_len]
         .iter()
         .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+        .find(|message| {
+            matches!(message.role, crate::core::llm::ChatMessageRole::User)
+                && message.kind != crate::core::llm::MessageKind::EphemeralTail
+        })
         .expect("persisted user message")
 }
 
@@ -3655,7 +3655,7 @@ async fn serve_retry_rejects_a_stale_anchor_without_mutating_the_transcript() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
+async fn serve_resume_after_truncated_tool_turn_continues_from_tool_tail() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot, requests) = build_initialized_state_with_recorded_streams(
         vec![ok_text_stream("resumed from placeholder")],
@@ -3667,7 +3667,7 @@ async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
             &slot.session_id,
             serde_json::json!({
                 "role": "user",
-                "content": "finish the interrupted tool turn",
+                "content": "finish the truncated tool turn",
             }),
         )
         .unwrap();
@@ -3678,7 +3678,7 @@ async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
                 "role": "assistant",
                 "content": null,
                 "tool_calls": [{
-                    "id": "interrupted-read",
+                    "id": "truncated-read",
                     "type": "function",
                     "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"},
                 }],
@@ -3687,7 +3687,7 @@ async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
         .unwrap();
     session
         .append_error_entry(crate::core::session::transcript::ErrorEntry {
-            id: Some("error-interrupted-read".to_string()),
+            id: Some("error-truncated-read".to_string()),
             parent_id: None,
             timestamp: "2026-08-01T00:00:00.000Z".to_string(),
             phase: None,
@@ -3698,8 +3698,8 @@ async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
             request_id: None,
             failure_kind: None,
             failure_domain: None,
-            summary: "interrupted tool turn".to_string(),
-            detail: "interrupted tool turn".to_string(),
+            summary: "达到 max_tokens，回答可能未完成".to_string(),
+            detail: "the prior tool turn stopped at max_tokens".to_string(),
         })
         .unwrap();
     let system_text = slot
@@ -3726,7 +3726,7 @@ async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
             Some(crate::core::session::transcript::TranscriptEntry::Message(entry))
                 if entry.message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
                     && entry.message.get("tool_call_id").and_then(serde_json::Value::as_str)
-                        == Some("interrupted-read")
+                        == Some("truncated-read")
                     && entry.message.get("content").and_then(serde_json::Value::as_str)
                         == Some(crate::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
         ),
@@ -3750,12 +3750,11 @@ async fn serve_resume_after_post_error_placeholder_continues_from_tool_tail() {
 
     let recorded = requests.0.lock().clone();
     assert_eq!(recorded.len(), 1);
-    let persisted_len = recorded[0]
+    let tail = recorded[0]
         .messages
-        .len()
-        .saturating_sub(recorded[0].ephemeral_tail_count);
-    let tail = recorded[0].messages[..persisted_len]
-        .last()
+        .iter()
+        .rev()
+        .find(|message| message.kind != crate::core::llm::MessageKind::EphemeralTail)
         .expect("Resume provider persisted request tail");
     assert_eq!(tail.role, crate::core::llm::ChatMessageRole::Tool);
     assert_eq!(
@@ -4512,6 +4511,7 @@ async fn upsert_model_response_includes_non_fatal_warnings() {
                     ..Capabilities::default()
                 },
                 context_window: Some(200_000),
+                max_output_tokens: None,
                 supported_reasoning_levels: None,
                 thinking_format: Some("anthropic".to_string()),
             },
@@ -4569,6 +4569,7 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
                     ..Capabilities::default()
                 },
                 context_window: Some(200_000),
+                max_output_tokens: Some(128_000),
                 supported_reasoning_levels: None,
                 thinking_format: Some("anthropic".to_string()),
             },
@@ -5608,6 +5609,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
                     web_search: false,
                 },
                 context_window: Some(400_000),
+                max_output_tokens: None,
                 supported_reasoning_levels: Some(vec![
                     "low".to_string(),
                     "medium".to_string(),

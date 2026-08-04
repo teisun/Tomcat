@@ -142,6 +142,43 @@ describe("MessageBubble", () => {
     expect(retriedMessageId).toBe("u-failed");
   });
 
+  it("renders a superseded failed user message as an abandoned bubble", () => {
+    render(
+      <MessageBubble
+        item={{
+          abandoned: true,
+          id: "u-abandoned",
+          kind: "user",
+          text: "Retry me",
+          type: "message",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("message-block").className).toContain("tc-message--user-abandoned");
+    expect(screen.getByTestId("abandoned-user-message-status").textContent).toContain(
+      "已废弃 · 未发送给模型",
+    );
+  });
+
+  it("shows a rejected recovery reason on the persistent error card", () => {
+    render(
+      <MessageBubble
+        item={{
+          id: "error-rejected",
+          kind: "error",
+          recoveryError: "This error card is stale. Refresh the session and try again.",
+          text: "Request failed",
+          type: "message",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("error-recovery-rejection").textContent).toContain(
+      "This error card is stale",
+    );
+  });
+
   it("separates Retry or Resume as an icon-backed primary action", () => {
     const onRecover = vi.fn();
     const { rerender } = render(

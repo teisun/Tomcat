@@ -184,20 +184,23 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     let resolved = resolve_main_call(&cfg);
     assert_eq!(resolved.model, "gpt-5.4");
 
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("Say ok")],
+        model: resolved.model.clone(),
+        temperature: None,
+        max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        cache_key: None,
+        tools: None,
+    };
+    resolved.apply_resolved_output_limit(&mut request);
     let mut stream = resolved
         .provider_impl
-        .chat_stream(ChatRequest {
-            messages: vec![ChatMessage::user("Say ok")],
-            model: resolved.model.clone(),
-            temperature: None,
-            max_tokens: Some(16),
-            stream: Some(true),
-            model_override: None,
-            thinking_level: None,
-            cache_key: None,
-            ephemeral_tail_count: 0,
-            tools: None,
-        })
+        .chat_stream(request)
         .await
         .expect("start chat stream");
 

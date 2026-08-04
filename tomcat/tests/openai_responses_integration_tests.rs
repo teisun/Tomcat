@@ -105,11 +105,12 @@ async fn test_openai_responses_chat_real_request_returns_ok(
         model,
         temperature: None,
         max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     tracing::info!("Arrange: AppConfig + models.toml fixture → resolver → Arc<dyn LlmProvider>");
@@ -145,11 +146,12 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
         model,
         temperature: None,
         max_tokens: Some(64),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -185,11 +187,12 @@ async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_r
         model,
         temperature: None,
         max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -228,11 +231,12 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
         model,
         temperature: None,
         max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     tracing::info!("Arrange: ChatRequest(stream=true) → Responses SSE");
@@ -285,11 +289,12 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
             model: model.clone(),
             temperature: None,
             max_tokens: Some(256),
+            resolved_output_limit: None,
+            diagnostic_request_id: None,
             stream: Some(true),
             model_override: None,
             thinking_level: None,
             cache_key: None,
-            ephemeral_tail_count: 0,
             tools: None,
         };
         let mut stream = tokio::time::timeout(Duration::from_secs(60), async {
@@ -386,11 +391,12 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
         model,
         temperature: None,
         max_tokens: Some(64),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: Some(tools),
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -446,11 +452,12 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
         model,
         temperature: None,
         max_tokens: Some(256),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     let mut stream = tokio::time::timeout(Duration::from_secs(60), async move {
@@ -519,11 +526,12 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
         model,
         temperature: None,
         max_tokens: Some(96),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     tracing::info!(
@@ -616,11 +624,12 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
         model,
         temperature: None,
         max_tokens: Some(96),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     tracing::info!(

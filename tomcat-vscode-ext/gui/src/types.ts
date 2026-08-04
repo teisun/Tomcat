@@ -59,6 +59,8 @@ export interface WebviewDomAction {
 }
 
 export interface WebviewMessageBlock {
+  /** A durable failed input superseded by a copy-forward retry. */
+  abandoned?: boolean;
   assistantMessageId?: string;
   detailText?: string | null;
   failureDomain?: string | null;
@@ -79,6 +81,7 @@ export interface WebviewMessageBlock {
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
   recoveryAction?: "resume" | "retry";
+  recoveryError?: string | null;
   statusCode?: number | null;
   segments?: WebviewMessageSegment[];
   submitKind?: "prompt" | "steer";

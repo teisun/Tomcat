@@ -16,7 +16,8 @@ use tokio_util::sync::CancellationToken;
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::multimodal::UNSUPPORTED_FILE_INPUT_PLACEHOLDER;
 use crate::core::llm::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, MessageKind, StreamEvent,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, MessageKind, ReasoningContinuation,
+    ReasoningFormat, StreamEvent,
 };
 use crate::core::session::manager::{estimate_msg_chars, ContextState, MessageAppendSink};
 use crate::infra::error::{llm_http_status_error, AppError};
@@ -87,11 +88,13 @@ fn large_user_turn(label: &str) -> ChatMessage {
 #[derive(Default)]
 struct RecordingAppendSink {
     next_id: Mutex<u32>,
+    messages: Mutex<Vec<serde_json::Value>>,
     custom_entries: Mutex<Vec<serde_json::Value>>,
 }
 
 impl MessageAppendSink for RecordingAppendSink {
-    fn append_message(&self, _value: serde_json::Value) -> Result<String, AppError> {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
         let mut next = self.next_id.lock().unwrap();
         *next += 1;
         Ok(format!("msg-{}", *next))
@@ -104,9 +107,10 @@ impl MessageAppendSink for RecordingAppendSink {
 
     fn append_message_with_id(
         &self,
-        _value: serde_json::Value,
+        value: serde_json::Value,
         forced_id: &str,
     ) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
         Ok(forced_id.to_string())
     }
 }
@@ -736,6 +740,8 @@ async fn run_persists_auto_retry_events_to_transcript_sink() {
 }
 
 /// 空正文、无 thinking 的纯工具轮是合法中间态，不能被空回合守卫误判。
+/// 所有空回合护栏都携带 usage：真实 provider 会回传它，省略会掩盖
+/// 「正文为空但 completion_tokens 非零」这一线上形状。
 #[tokio::test]
 async fn run_pure_tool_turn_without_thinking_completes_in_two_requests() {
     let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
@@ -745,6 +751,15 @@ async fn run_pure_tool_turn_without_thinking_completes_in_two_requests() {
             name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/tmp/x"}"#.to_string()),
         }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 3,
+            total_tokens: Some(103),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            text_tokens: None,
+        }),
         Ok(StreamEvent::FinishReason {
             reason: "tool_calls".to_string(),
         }),
@@ -752,6 +767,15 @@ async fn run_pure_tool_turn_without_thinking_completes_in_two_requests() {
     let stream_text: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::ContentDelta {
             delta: "done".to_string(),
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 110,
+            completion_tokens: 5,
+            total_tokens: Some(115),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            text_tokens: None,
         }),
         Ok(StreamEvent::FinishReason {
             reason: "stop".to_string(),
@@ -785,12 +809,23 @@ async fn run_pure_tool_turn_without_thinking_completes_in_two_requests() {
 
 /// 某些兼容端点会在合法的结构化空收尾使用 `end_turn`，但没有正文和 thinking。
 /// 它与“只思考、不回答”不同，不能被终止守卫当成失败。
+/// 使用真实 provider 形状：即使没有可见正文，usage 也可能包含 completion token。
 #[tokio::test]
 async fn run_structured_end_turn_without_content_is_not_empty_turn_failure() {
-    let (provider, requests) =
-        RecordingStreamLlmProvider::new(vec![vec![Ok(StreamEvent::FinishReason {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![vec![
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 3,
+            total_tokens: Some(103),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            text_tokens: None,
+        }),
+        Ok(StreamEvent::FinishReason {
             reason: "end_turn".to_string(),
-        })]]);
+        }),
+    ]]);
     let mut loop_ = AgentLoop::new(
         test_binding(Arc::new(provider), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
@@ -823,13 +858,33 @@ async fn run_empty_end_turn_after_tool_result_is_not_empty_turn_failure() {
             name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/tmp/x"}"#.to_string()),
         }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 3,
+            total_tokens: Some(103),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            text_tokens: None,
+        }),
         Ok(StreamEvent::FinishReason {
             reason: "tool_calls".to_string(),
         }),
     ];
-    let stream_empty_tail = vec![Ok(StreamEvent::FinishReason {
-        reason: "end_turn".to_string(),
-    })];
+    let stream_empty_tail = vec![
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 110,
+            completion_tokens: 3,
+            total_tokens: Some(113),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            text_tokens: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "end_turn".to_string(),
+        }),
+    ];
     let (provider, requests) =
         RecordingStreamLlmProvider::new(vec![stream_tool, stream_empty_tail]);
     let mut loop_ = AgentLoop::new(
@@ -993,6 +1048,264 @@ async fn reasoning_only_empty_turn_is_fatal_and_never_auto_retries() {
         1,
         "the empty-turn guard must not retry an unchanged request"
     );
+}
+
+#[tokio::test]
+async fn truncated_encrypted_thinking_without_visible_text_is_fatal() {
+    let stream = vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: None,
+            reasoning_continuation: Some(ReasoningContinuation {
+                source_provider: "anthropic".to_string(),
+                source_api: "anthropic-messages".to_string(),
+                source_model: "claude-opus-4-6".to_string(),
+                format: ReasoningFormat::AnthropicThinkingBlocks,
+                opaque_payload: serde_json::json!([{
+                    "type": "thinking",
+                    "thinking": "encrypted-payload",
+                    "signature": "sig_123"
+                }]),
+                fallback_text: None,
+                provider_refs: None,
+            }),
+            continuity: None,
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 8_192,
+            total_tokens: Some(9_192),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            text_tokens: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "max_tokens".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "claude-opus-4-6"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "encrypted-thinking-truncated".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+    assert!(
+        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains("达到上限")),
+        "truncated output without plaintext thinking must fail: {outcome:?}"
+    );
+    assert_eq!(requests.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn hidden_reasoning_without_truncation_is_fatal() {
+    let stream = vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: None,
+            reasoning_continuation: Some(ReasoningContinuation {
+                source_provider: "anthropic".to_string(),
+                source_api: "anthropic-messages".to_string(),
+                source_model: "claude-opus-4-6".to_string(),
+                format: ReasoningFormat::AnthropicThinkingBlocks,
+                opaque_payload: serde_json::json!([{
+                    "type": "thinking",
+                    "signature": "sig_123"
+                }]),
+                fallback_text: None,
+                provider_refs: None,
+            }),
+            continuity: None,
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 3,
+            total_tokens: Some(1_003),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: Some(3),
+            text_tokens: Some(0),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "claude-opus-4-6"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "hidden-reasoning-not-truncated".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+
+    assert!(
+        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains("不可显示的推理")),
+        "a hidden reasoning continuation must fail even when the provider reports stop: {outcome:?}"
+    );
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        1,
+        "the guard must not retry an unchanged hidden-reasoning request"
+    );
+}
+
+#[tokio::test]
+async fn responses_max_output_tokens_without_visible_text_is_fatal() {
+    let stream = vec![
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 8_192,
+            total_tokens: Some(9_192),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: Some(8_192),
+            text_tokens: Some(0),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "max_output_tokens".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-5.4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "responses-thinking-truncated".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+
+    assert!(
+        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains("达到上限")),
+        "Responses max-output exhaustion without visible text must fail: {outcome:?}"
+    );
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        1,
+        "the guard must not retry the same truncated Responses request"
+    );
+}
+
+#[tokio::test]
+async fn truncated_empty_tail_keeps_the_completed_tool_result_as_the_persisted_tail() {
+    let tool_round = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("read-before-truncation".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/tmp/x"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let truncated_tail = vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: None,
+            reasoning_continuation: Some(ReasoningContinuation {
+                source_provider: "anthropic".to_string(),
+                source_api: "anthropic-messages".to_string(),
+                source_model: "claude-opus-4-6".to_string(),
+                format: ReasoningFormat::AnthropicThinkingBlocks,
+                opaque_payload: serde_json::json!([{"type": "thinking", "signature": "sig"}]),
+                fallback_text: None,
+                provider_refs: None,
+            }),
+            continuity: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "max_tokens".to_string(),
+        }),
+    ];
+    let (provider, _) = RecordingStreamLlmProvider::new(vec![tool_round, truncated_tail]);
+    let sink = Arc::new(RecordingAppendSink::default());
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "claude-opus-4-6"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "tool-before-truncation".to_string(),
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("read then answer")]).await;
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    let persisted = sink.messages.lock().unwrap();
+    assert_eq!(
+        persisted
+            .last()
+            .and_then(|message| message["role"].as_str()),
+        Some("tool"),
+        "the failed empty assistant turn must not replace a completed tool result"
+    );
+    assert_eq!(
+        persisted
+            .last()
+            .and_then(|message| message["tool_call_id"].as_str()),
+        Some("read-before-truncation")
+    );
+}
+
+#[tokio::test]
+async fn truncated_partial_visible_text_remains_a_completed_turn() {
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "partial answer".to_string(),
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 8_192,
+            total_tokens: Some(9_192),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            text_tokens: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "max_tokens".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "claude-opus-4-6"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "partial-text-truncated".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+    assert!(
+        matches!(&outcome, AgentRunOutcome::Completed(result) if result.final_text == "partial answer"),
+        "a partial visible answer must remain available: {outcome:?}"
+    );
+    assert_eq!(requests.0.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

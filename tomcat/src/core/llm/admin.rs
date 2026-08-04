@@ -46,6 +46,8 @@ pub struct ModelView {
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub supported_reasoning_levels: Vec<String>,
     pub source: ModelSource,
@@ -69,6 +71,8 @@ pub struct ModelEntryInput {
     pub capabilities: Capabilities,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,6 +120,7 @@ impl ModelView {
             capabilities: entry.capabilities.clone(),
             thinking_format: entry.thinking_format.clone(),
             context_window: entry.context_window,
+            max_output_tokens: entry.max_output_tokens,
             supported_reasoning_levels: entry.supported_reasoning_levels.clone(),
             source: if catalog.is_builtin_seed(&entry.id) {
                 ModelSource::Builtin
@@ -172,6 +177,7 @@ impl ModelEntryInput {
             base_url,
             capabilities: self.capabilities,
             context_window: self.context_window,
+            max_output_tokens: self.max_output_tokens,
             thinking_format,
             supported_reasoning_levels,
         })
@@ -413,6 +419,7 @@ fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {
             web_search: Some(entry.capabilities.web_search),
         }),
         context_window: entry.context_window,
+        max_output_tokens: entry.max_output_tokens,
         thinking_format: entry.thinking_format.clone(),
         supported_reasoning_levels: Some(entry.supported_reasoning_levels.clone()),
     }

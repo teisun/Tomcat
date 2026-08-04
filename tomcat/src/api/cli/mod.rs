@@ -412,6 +412,9 @@ pub enum ModelSub {
         /// context window
         #[arg(long)]
         context_window: Option<u32>,
+        /// maximum output tokens for one request
+        #[arg(long)]
+        max_output_tokens: Option<u32>,
         /// thinking format（如 deepseek / doubao / anthropic）
         #[arg(long)]
         thinking_format: Option<String>,

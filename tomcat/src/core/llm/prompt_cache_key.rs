@@ -1,7 +1,9 @@
-//! Provider-agnostic prompt-cache affinity keys.
+//! OpenAI prompt-cache affinity keys.
 //!
 //! A key is scoped to one session and one request family. Families must remain
 //! distinct because their stable prompt prefixes are intentionally different.
+//! Anthropic does not accept this field: its cache is controlled solely by
+//! `cache_control` breakpoints in the Messages request body.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PromptCacheKeyFamily<'a> {

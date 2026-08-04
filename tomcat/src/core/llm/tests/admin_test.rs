@@ -36,6 +36,7 @@ fn custom_claude_input() -> ModelEntryInput {
         base_url: Some("https://api.anthropic.com/v1".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        max_output_tokens: Some(128_000),
         supported_reasoning_levels: None,
         thinking_format: Some("anthropic".to_string()),
     }
@@ -60,6 +61,7 @@ fn upsert_list_and_remove_user_model_roundtrip() {
         base_url: Some("https://gateway.example.test/v1".to_string()),
         capabilities,
         context_window: Some(256_000),
+        max_output_tokens: Some(128_000),
         supported_reasoning_levels: None,
         thinking_format: Some("openai".to_string()),
     };
@@ -177,6 +179,7 @@ fn upsert_user_model_accepts_id_with_slash() {
             ..Default::default()
         },
         context_window: None,
+        max_output_tokens: None,
         supported_reasoning_levels: None,
         thinking_format: None,
     };
@@ -211,6 +214,7 @@ fn upsert_user_model_collects_warning_for_openai_api_with_non_effort_format() {
                 ..Default::default()
             },
             context_window: None,
+            max_output_tokens: None,
             supported_reasoning_levels: None,
             thinking_format: Some("anthropic".to_string()),
         },
@@ -505,6 +509,7 @@ fn upsert_user_model_rejects_unknown_api() {
             base_url: Some("https://example.test/v1".to_string()),
             capabilities: Capabilities::default(),
             context_window: None,
+            max_output_tokens: None,
             supported_reasoning_levels: None,
             thinking_format: None,
         },
@@ -634,6 +639,7 @@ fn model_config_reload_rebuilds_provider_without_restart() {
             base_url: Some(base_url.to_string()),
             capabilities: capabilities.clone(),
             context_window: None,
+            max_output_tokens: None,
             supported_reasoning_levels: None,
             thinking_format: Some("openai".to_string()),
         },
@@ -666,6 +672,7 @@ fn model_config_reload_rebuilds_provider_without_restart() {
             base_url: Some(base_url.to_string()),
             capabilities,
             context_window: None,
+            max_output_tokens: None,
             supported_reasoning_levels: None,
             thinking_format: Some("anthropic".to_string()),
         },

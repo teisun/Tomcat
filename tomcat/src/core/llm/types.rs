@@ -562,6 +562,9 @@ pub enum MessageKind {
     PlanBuild,
     /// Compaction summary replacing older messages; LLM sees `role: user`.
     CompactionSummary,
+    /// Request-only runtime state appended after the persisted conversation.
+    /// It must never establish a logical user turn or a reasoning replay window.
+    EphemeralTail,
 }
 
 impl MessageKind {
@@ -576,12 +579,13 @@ impl MessageKind {
             Some("signal") => Self::Signal,
             Some("plan_build") => Self::PlanBuild,
             Some("compaction_summary") => Self::CompactionSummary,
+            Some("ephemeral_tail") => Self::EphemeralTail,
             _ => Self::Normal,
         }
     }
 
     pub const fn is_non_turn_start(self) -> bool {
-        matches!(self, Self::Steering | Self::Nudge)
+        matches!(self, Self::Steering | Self::Nudge | Self::EphemeralTail)
     }
 
     pub const fn is_replay_input(self) -> bool {
@@ -1009,6 +1013,19 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Provider-wire output cap resolved from the selected model's capability.
+    ///
+    /// `max_tokens` above remains the caller's optional product request; this
+    /// value is the already-clamped result providers serialize to their
+    /// protocol-specific field. It is local-only because every provider uses a
+    /// different wire key.
+    #[serde(skip)]
+    pub resolved_output_limit: Option<u32>,
+    /// Correlates request-side prompt fingerprints with provider usage
+    /// diagnostics. It is generated only while fingerprint diagnostics are
+    /// explicitly enabled and never leaves the process.
+    #[serde(skip)]
+    pub diagnostic_request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     /// 会话级模型覆盖（不发给 API，仅用于选模型）。
@@ -1020,10 +1037,6 @@ pub struct ChatRequest {
     /// local-only and must not be serialized as part of a generic request.
     #[serde(skip)]
     pub cache_key: Option<String>,
-    /// Number of synthetic runtime-only messages appended after persisted
-    /// history. Providers use this to avoid placing cache breakpoints on them.
-    #[serde(skip)]
-    pub ephemeral_tail_count: usize,
     /// OpenAI function calling: tool definitions sent to the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,

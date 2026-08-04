@@ -337,6 +337,7 @@ impl Preheat {
         transcript_path: &std::path::Path,
         cache_key: Option<String>,
         llm: Arc<dyn LlmProvider>,
+        resolved_output_limit: Option<u32>,
         config: &ContextConfig,
         emitter: Arc<ScopedEventEmitter>,
         control: Option<ControlSnapshot>,
@@ -372,13 +373,14 @@ impl Preheat {
             let mut last_error = String::new();
 
             for attempt in 1..=MAX_PREHEAT_RETRIES {
-                match generate_summary(
+                match generate_summary_with_output_limit(
                     &snapshot,
                     existing_summary.as_deref(),
                     &*llm,
                     &compaction_model,
                     control.as_ref(),
                     (!cache_key.is_empty()).then_some(cache_key.as_str()),
+                    resolved_output_limit,
                 )
                 .await
                 {
@@ -543,6 +545,7 @@ impl Preheat {
         transcript_path: &std::path::Path,
         cache_key: Option<String>,
         llm: Arc<dyn LlmProvider>,
+        resolved_output_limit: Option<u32>,
         config: &ContextConfig,
         emitter: Arc<ScopedEventEmitter>,
         control: Option<ControlSnapshot>,
@@ -557,6 +560,7 @@ impl Preheat {
             transcript_path,
             cache_key,
             llm,
+            resolved_output_limit,
             config,
             emitter,
             control,
@@ -669,6 +673,29 @@ pub async fn generate_summary(
     control: Option<&ControlSnapshot>,
     cache_key: Option<&str>,
 ) -> Result<String, AppError> {
+    generate_summary_with_output_limit(
+        snapshot,
+        previous_summary,
+        llm,
+        compaction_model,
+        control,
+        cache_key,
+        None,
+    )
+    .await
+}
+
+/// Same as [`generate_summary`], with a provider-wire output limit resolved
+/// from the selected compaction model's capability.
+pub async fn generate_summary_with_output_limit(
+    snapshot: &[ChatMessage],
+    previous_summary: Option<&str>,
+    llm: &dyn LlmProvider,
+    compaction_model: &str,
+    control: Option<&ControlSnapshot>,
+    cache_key: Option<&str>,
+    resolved_output_limit: Option<u32>,
+) -> Result<String, AppError> {
     let batch_text = messages_to_text(snapshot);
 
     let prompt = if let Some(existing) = previous_summary {
@@ -686,6 +713,7 @@ pub async fn generate_summary(
     let req = ChatRequest {
         model: compaction_model.to_string(),
         messages: vec![ChatMessage::system(&prompt), ChatMessage::user(&batch_text)],
+        resolved_output_limit,
         stream: Some(false),
         tools: None,
         cache_key: cache_key.map(str::to_owned),

@@ -15,6 +15,7 @@ fn entry(provider: &str, api_key_env: Option<&str>) -> ModelEntry {
         base_url: None,
         capabilities: Default::default(),
         context_window: None,
+        max_output_tokens: None,
         supported_reasoning_levels: Vec::new(),
         thinking_format: None,
     }

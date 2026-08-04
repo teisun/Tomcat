@@ -2091,6 +2091,15 @@ span.tc-attachment-strip__file-chip {
   color: var(--vscode-errorForeground, #f14c4c);
 }
 
+.tc-message--user-abandoned {
+  opacity: 0.58;
+}
+
+.tc-message--user-abandoned .tc-message__status {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
 .tc-message__retry {
   background: transparent;
   border: none;

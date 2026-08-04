@@ -77,23 +77,23 @@ async fn run_stream_smoke(
         "{label} key env mismatch"
     );
 
-    let mut stream = tokio::time::timeout(
-        STREAM_TIMEOUT,
-        call.provider_impl.chat_stream(ChatRequest {
-            messages: vec![ChatMessage::user("Reply with exactly one word: ok")],
-            model: call.model.clone(),
-            temperature: None,
-            max_tokens: Some(max_tokens),
-            stream: Some(true),
-            model_override: None,
-            thinking_level: None,
-            cache_key: None,
-            ephemeral_tail_count: 0,
-            tools: None,
-        }),
-    )
-    .await
-    .map_err(|_| format!("{label} 启动 chat_stream 超时"))??;
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("Reply with exactly one word: ok")],
+        model: call.model.clone(),
+        temperature: None,
+        max_tokens: Some(max_tokens),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        cache_key: None,
+        tools: None,
+    };
+    call.apply_resolved_output_limit(&mut request);
+    let mut stream = tokio::time::timeout(STREAM_TIMEOUT, call.provider_impl.chat_stream(request))
+        .await
+        .map_err(|_| format!("{label} 启动 chat_stream 超时"))??;
 
     let mut answer = String::new();
     let mut saw_finish = false;

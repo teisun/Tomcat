@@ -26,6 +26,7 @@ fn run_model_add_list_remove_and_key_roundtrip() {
                 reasoning: true,
                 web_search: false,
                 context_window: Some(200_000),
+                max_output_tokens: Some(128_000),
                 thinking_format: Some("anthropic".to_string()),
             },
             &cfg,
@@ -41,6 +42,7 @@ fn run_model_add_list_remove_and_key_roundtrip() {
             .expect("inserted model");
         assert_eq!(inserted.api_key_env, "CLI_GATEWAY_API_KEY");
         assert_eq!(inserted.context_window, Some(200_000));
+        assert_eq!(inserted.max_output_tokens, Some(128_000));
         assert!(!inserted.key_present);
 
         run_model(

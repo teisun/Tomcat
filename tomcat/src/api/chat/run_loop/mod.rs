@@ -14,6 +14,7 @@ use crate::core::llm::{
 };
 use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
+    init_context_state_with_limits,
 };
 use crate::infra::error::AppError;
 use crate::infra::events::AgentEvent;
@@ -317,16 +318,20 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     if ctx.config.skills.enabled {
         let _ = ctx.await_skill_discovery().await;
     }
-    let context_budget_chars = crate::infra::config::compute_context_budget_chars(context_config);
+    let initial_main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
+    let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
+        initial_main_call.limits.input_budget_tokens,
+    );
     let mut prompt_snapshot = build_prompt_snapshot(ctx, context_budget_chars).await;
     persist::schedule_checkpoint_prune(ctx);
     // ResumePlan 目前恒为 Continue；保留 hook，未来若恢复逻辑需要 tail，可在这里恢复
     // `read_entries_tail(..., 64)` 预读。
     let _ = crate::core::compute_resume_plan(entry.as_ref(), &[]);
-    let mut context_state = init_context_state(
+    let mut context_state = init_context_state_with_limits(
         &ctx.session_runtime.session,
         context_config,
         prompt_snapshot.system_text(),
+        &initial_main_call.limits,
     )?;
     if let Err(err) = ctx
         .session_runtime
@@ -659,19 +664,40 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         .get_session(ctx.session_runtime.session.current_session_key())?;
     let main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
     let compaction_call = ctx.resolve_call(LlmScene::Compaction, entry.as_ref())?;
+    // A session can switch models between turns. Recompute the input budget
+    // before appending/sending this turn so compaction observes the selected
+    // model's actual limits rather than the global fallback.
+    context_state.apply_limits(&main_call.limits);
     // 会话标题优先走 title_model；若其未配置/未解析，则降级到主模型。
     // turn 折叠标题仍维持 title_call 语义，不在此处一起降级。
     let title_call = ctx.resolve_call(LlmScene::Title, entry.as_ref()).ok();
     let compaction_provider = compaction_call.provider_impl.clone();
+    let compaction_output_limit = compaction_call.output_limit_for_request(None).0;
     let title_provider = title_call.as_ref().map(|c| c.provider_impl.clone());
-    let (session_title_provider, session_title_model) = title_call
+    let (session_title_provider, session_title_model, session_title_output_limit) = title_call
         .as_ref()
-        .map(|c| (c.provider_impl.clone(), c.model.clone()))
-        .unwrap_or_else(|| (main_call.provider_impl.clone(), main_call.model.clone()));
+        .map(|c| {
+            (
+                c.provider_impl.clone(),
+                c.model.clone(),
+                c.output_limit_for_request(None).0,
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                main_call.provider_impl.clone(),
+                main_call.model.clone(),
+                main_call.output_limit_for_request(None).0,
+            )
+        });
     let title_model = title_call
         .as_ref()
         .map(|c| c.model.clone())
         .unwrap_or_default();
+    let title_output_limit = title_call
+        .as_ref()
+        .and_then(|c| c.output_limit_for_request(None).0)
+        .or_else(|| main_call.output_limit_for_request(None).0);
     let thinking_model_id = ctx.effective_model(entry.as_ref());
     // 让 reviewer / verifier 在下一次派发时跟上会话当前的模型。
     //
@@ -728,6 +754,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         &appended_messages,
         session_title_provider,
         session_title_model,
+        session_title_output_limit,
         root_event_emitter.clone(),
         session_id.clone(),
     );
@@ -745,6 +772,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         &context_state.transcript_path,
         PromptCacheKeyFamily::Compaction.key_for(&session_id),
         compaction_provider.clone(),
+        compaction_output_limit,
         &context_config,
         Arc::clone(&root_event_emitter),
         Some(
@@ -780,8 +808,10 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         tool_definitions,
         context_config: context_config.clone(),
         compaction_provider: Some(compaction_provider.clone()),
+        compaction_output_limit,
         title_provider: title_provider.clone(),
         title_model,
+        title_output_limit,
         agent_trail_dir: ctx
             .scope_services
             .agent_trail_dir

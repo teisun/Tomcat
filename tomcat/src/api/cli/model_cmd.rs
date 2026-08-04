@@ -52,6 +52,7 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
             reasoning,
             web_search,
             context_window,
+            max_output_tokens,
             thinking_format,
         } => {
             let model = upsert_user_model(
@@ -71,6 +72,7 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
                         web_search,
                     },
                     context_window,
+                    max_output_tokens,
                     supported_reasoning_levels: None,
                     thinking_format,
                 },

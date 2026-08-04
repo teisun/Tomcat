@@ -33,6 +33,7 @@ fn deepseek_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        max_output_tokens: None,
         supported_reasoning_levels: vec!["high".to_string(), "max".to_string()],
         thinking_format: Some("deepseek".to_string()),
     }
@@ -48,6 +49,7 @@ fn openai_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        max_output_tokens: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -68,6 +70,7 @@ fn openai_auto_entry(api_key_env: &str, provider: &str, model_name: &str) -> Mod
         base_url: Some("https://gateway.example.test/v1".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        max_output_tokens: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -94,6 +97,7 @@ fn openai_multimodal_entry(api_key_env: &str) -> ModelEntry {
             web_search: false,
         },
         context_window: None,
+        max_output_tokens: None,
         supported_reasoning_levels: vec![],
         thinking_format: Some("openai".to_string()),
     }
@@ -115,6 +119,7 @@ fn moonshot_multimodal_entry(api_key_env: &str) -> ModelEntry {
             web_search: false,
         },
         context_window: Some(1_000_000),
+        max_output_tokens: None,
         supported_reasoning_levels: vec!["low".to_string(), "high".to_string(), "max".to_string()],
         thinking_format: Some("openai".to_string()),
     }
@@ -170,11 +175,12 @@ fn openai_provider_effective_model_maps_catalog_id_to_model_name() {
         model: "gpt-5.4_litellm-sunmi".to_string(),
         temperature: Some(0.0),
         max_tokens: Some(10),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
     assert_eq!(provider.effective_model(&request), "gpt-5.4");
@@ -614,11 +620,12 @@ async fn chat_real_request_response_print() {
         model: entry.request_model_name().to_string(),
         temperature: Some(0.0),
         max_tokens: Some(10),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
 
@@ -650,11 +657,12 @@ fn thinking_level_override_updates_openai_reasoning_effort() {
         model: entry.request_model_name().to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: Some(ThinkingLevel::Low),
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
 
@@ -680,11 +688,12 @@ fn thinking_level_override_updates_deepseek_reasoning_effort() {
         model: entry.request_model_name().to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
         thinking_level: Some(ThinkingLevel::Xhigh),
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     };
 

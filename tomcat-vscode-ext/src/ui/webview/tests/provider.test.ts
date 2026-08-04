@@ -468,7 +468,7 @@ describe("error-turn recovery", () => {
     vi.spyOn(host, "postState").mockResolvedValue(undefined);
   }
 
-  it("hides the failed chapter while durable Retry starts", async () => {
+  it("keeps the failed chapter visible while durable Retry starts", async () => {
     const retry = vi.fn().mockResolvedValue(undefined);
     const resume = vi.fn().mockResolvedValue(undefined);
     const provider = createRecoveryProvider(retry, resume);
@@ -488,12 +488,13 @@ describe("error-turn recovery", () => {
     const failedChapter = host.currentState().sessionViews.s1.timeline.filter(
       (item: { kind?: string; type: string }) => item.type === "message" && item.kind === "user",
     );
-    expect(failedChapter).toHaveLength(0);
+    expect(failedChapter).toHaveLength(1);
+    expect(failedChapter[0]).toMatchObject({ abandoned: true, id: "user-1" });
     expect(
       host.currentState().sessionViews.s1.timeline.find(
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
-    ).toBeUndefined();
+    ).toMatchObject({ id: "error-1", kind: "error" });
     provider.dispose();
   });
 
@@ -525,7 +526,14 @@ describe("error-turn recovery", () => {
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "user-1",
       ),
     ).toMatchObject({ kind: "user", text: "keep this exact prompt" });
-    expect(warnings).toEqual(["这张错误卡已经过期，无法重试。请刷新会话后重新输入。"]);
+    expect(warnings).toEqual([]);
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({
+      recoveryError: "这张错误卡已经过期，无法重试。请刷新会话后重新输入。",
+    });
     provider.dispose();
     __testing.setWarningMessageHandler(undefined);
   });
@@ -575,7 +583,7 @@ describe("error-turn recovery", () => {
       host.currentState().sessionViews.s1.timeline.find(
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
-    ).toBeUndefined();
+    ).toMatchObject({ id: "error-1", kind: "error" });
     expect(
       host.currentState().sessionViews.s1.timeline.find(
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "user-1",
@@ -627,12 +635,15 @@ describe("error-turn recovery", () => {
     });
 
     expect(resume).toHaveBeenCalledWith("s1");
-    expect(warnings).toEqual(["Unable to recover this turn: bridge unavailable"]);
+    expect(warnings).toEqual([]);
     expect(
       host.currentState().sessionViews.s1.timeline.find(
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
-    ).toMatchObject({ recoveryAction: "resume" });
+    ).toMatchObject({
+      recoveryAction: "resume",
+      recoveryError: "Unable to recover this turn: bridge unavailable",
+    });
     provider.dispose();
     __testing.setWarningMessageHandler(undefined);
   });

@@ -255,6 +255,7 @@ async fn timing5_try_restart_uses_compaction_provider_after_exhausted_pending() 
             &ctx_state.transcript_path,
             None,
             failing_provider,
+            None,
             &agent.config.context_config,
             Arc::clone(&event_emitter),
             None,

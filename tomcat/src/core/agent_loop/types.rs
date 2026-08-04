@@ -117,10 +117,14 @@ pub struct AgentLoopConfig {
     pub context_config: ContextConfig,
     /// Compaction / preheat 场景专用的 provider；未设置时回落主对话 provider。
     pub compaction_provider: Option<Arc<dyn LlmProvider>>,
+    /// 已按 compaction 模型能力解析的 provider 输出上限。
+    pub compaction_output_limit: Option<u32>,
     /// Title / utility 场景专用 provider；未设置时回落主对话 provider。
     pub title_provider: Option<Arc<dyn LlmProvider>>,
     /// `LlmScene::Title` 解析后的 model id。
     pub title_model: String,
+    /// 已按 title 模型能力解析的 provider 输出上限。
+    pub title_output_limit: Option<u32>,
     /// Agent 运行态轨迹目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
     pub agent_trail_dir: String,
     /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 表。
@@ -178,8 +182,10 @@ impl Default for AgentLoopConfig {
             tool_definitions: Vec::new(),
             context_config: ContextConfig::default(),
             compaction_provider: None,
+            compaction_output_limit: None,
             title_provider: None,
             title_model: String::new(),
+            title_output_limit: None,
             agent_trail_dir: String::new(),
             read_file_state: Arc::new(ReadFileState::default()),
             openai_files_runtime: None,

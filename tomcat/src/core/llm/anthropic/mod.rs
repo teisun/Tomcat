@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
@@ -47,6 +48,11 @@ pub(super) struct AnthropicProvider {
     files_expires_after_seconds: u64,
     thinking_cfg: crate::infra::config::ThinkingConfig,
     configured_thinking_format: ThinkingFormat,
+    /// Session-scoped compatibility result. A successful adaptive↔budget
+    /// fallback is reused by this cached provider instead of causing a 400 on
+    /// every subsequent request. It deliberately is not persisted to models.toml:
+    /// one transient upstream failure must not rewrite user configuration.
+    learned_thinking_format: RwLock<Option<ThinkingFormat>>,
     continuity_enabled: bool,
     capabilities: Capabilities,
 }
@@ -82,6 +88,7 @@ impl AnthropicProvider {
             files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
             configured_thinking_format,
+            learned_thinking_format: RwLock::new(None),
             continuity_enabled: runtime.reasoning_continuity.enabled,
             capabilities: entry.capabilities.clone(),
         })
@@ -115,8 +122,15 @@ impl AnthropicProvider {
     }
 
     fn thinking_format_for_wire(&self) -> ThinkingFormat {
-        self.configured_thinking_format
-            .resolve_for_api(PROVIDER_NAME)
+        learned_or_configured_thinking_format(
+            &self.learned_thinking_format,
+            self.configured_thinking_format
+                .resolve_for_api(PROVIDER_NAME),
+        )
+    }
+
+    fn remember_compatible_thinking_format(&self, format: ThinkingFormat) {
+        *self.learned_thinking_format.write() = Some(format);
     }
 
     async fn run_non_stream_with_stale<T, F>(&self, fut: F) -> Result<T, AppError>
@@ -206,9 +220,18 @@ impl AnthropicProvider {
         request: &ChatRequest,
         stream: bool,
     ) -> Result<reqwest::Response, AppError> {
+        self.chat_once_with_thinking_format(request, stream, self.thinking_format_for_wire())
+            .await
+    }
+
+    async fn chat_once_with_thinking_format(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+        thinking_format: ThinkingFormat,
+    ) -> Result<reqwest::Response, AppError> {
         let model = self.effective_model(request);
         let thinking_cfg = self.thinking_cfg_for_request(request);
-        let thinking_format = self.thinking_format_for_wire();
         let files_cfg = LlmFilesConfig {
             expires_after_seconds: self.files_expires_after_seconds,
         };
@@ -263,9 +286,38 @@ impl AnthropicProvider {
         stream: bool,
     ) -> Result<reqwest::Response, AppError> {
         let mut last_error = None;
+        let mut thinking_format_fallback_used = false;
         for attempt in 0..=self.retry_count {
             match self.chat_once(request, stream).await {
                 Ok(response) => return Ok(response),
+                Err(error)
+                    if !thinking_format_fallback_used
+                        && is_thinking_format_rejection(&error)
+                        && alternative_thinking_format(self.thinking_format_for_wire())
+                            .is_some() =>
+                {
+                    thinking_format_fallback_used = true;
+                    let fallback = alternative_thinking_format(self.thinking_format_for_wire())
+                        .expect("guarded above");
+                    warn!(
+                        ?fallback,
+                        "Anthropic rejected the configured thinking format; retrying once with its compatible counterpart"
+                    );
+                    match self
+                        .chat_once_with_thinking_format(request, stream, fallback)
+                        .await
+                    {
+                        Ok(response) => {
+                            self.remember_compatible_thinking_format(fallback);
+                            warn!(
+                                ?fallback,
+                                "Anthropic thinking format fallback succeeded; reusing it for this runtime"
+                            );
+                            return Ok(response);
+                        }
+                        Err(fallback_error) => last_error = Some(fallback_error),
+                    }
+                }
                 Err(error) if is_retryable_llm_error(&error) && attempt < self.retry_count => {
                     let delay = provider_retry_delay(attempt);
                     warn!(
@@ -283,6 +335,34 @@ impl AnthropicProvider {
         }
         Err(last_error.unwrap_or_else(|| AppError::Llm("Anthropic 请求重试耗尽".to_string())))
     }
+}
+
+fn alternative_thinking_format(format: ThinkingFormat) -> Option<ThinkingFormat> {
+    match format {
+        ThinkingFormat::AnthropicAdaptive => Some(ThinkingFormat::Anthropic),
+        ThinkingFormat::Anthropic => Some(ThinkingFormat::AnthropicAdaptive),
+        _ => None,
+    }
+}
+
+fn learned_or_configured_thinking_format(
+    learned: &RwLock<Option<ThinkingFormat>>,
+    configured: ThinkingFormat,
+) -> ThinkingFormat {
+    (*learned.read()).unwrap_or(configured)
+}
+
+fn is_thinking_format_rejection(error: &AppError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    (text.contains("adaptive")
+        && (text.contains("unsupported")
+            || text.contains("not supported")
+            || text.contains("not available")))
+        || (text.contains("budget_tokens")
+            && (text.contains("unsupported")
+                || text.contains("not supported")
+                || text.contains("not accepted")
+                || text.contains("invalid")))
 }
 
 fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
@@ -393,9 +473,196 @@ impl LlmProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
+    use crate::core::llm::{ChatRequest, Credential, LlmProvider};
+    use crate::infra::LlmConfig;
     use bytes::Bytes;
     use tokio_stream::wrappers::IntervalStream;
     use tokio_stream::StreamExt;
+
+    #[test]
+    fn switches_only_between_the_two_anthropic_thinking_formats() {
+        assert_eq!(
+            alternative_thinking_format(ThinkingFormat::AnthropicAdaptive),
+            Some(ThinkingFormat::Anthropic)
+        );
+        assert_eq!(
+            alternative_thinking_format(ThinkingFormat::Anthropic),
+            Some(ThinkingFormat::AnthropicAdaptive)
+        );
+        assert_eq!(alternative_thinking_format(ThinkingFormat::Openai), None);
+        assert!(is_thinking_format_rejection(&AppError::Llm(
+            "400 adaptive thinking is not available for this model".to_string()
+        )));
+        assert!(is_thinking_format_rejection(&AppError::Llm(
+            "400 adaptive thinking is not supported for this model".to_string()
+        )));
+        assert!(is_thinking_format_rejection(&AppError::Llm(
+            "400 budget_tokens is not accepted".to_string()
+        )));
+        assert!(!is_thinking_format_rejection(&AppError::Llm(
+            "400 malformed tool input".to_string()
+        )));
+    }
+
+    #[test]
+    fn learned_thinking_format_overrides_only_the_current_runtime() {
+        let learned = RwLock::new(None);
+        assert_eq!(
+            learned_or_configured_thinking_format(&learned, ThinkingFormat::AnthropicAdaptive),
+            ThinkingFormat::AnthropicAdaptive
+        );
+
+        *learned.write() = Some(ThinkingFormat::Anthropic);
+        assert_eq!(
+            learned_or_configured_thinking_format(&learned, ThinkingFormat::AnthropicAdaptive),
+            ThinkingFormat::Anthropic
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_thinking_format_is_retried_once_and_cached_for_this_provider() {
+        let server = MockHttpServer::start(vec![
+            ScriptedHttpResponse::json(
+                400,
+                r#"{"error":{"message":"adaptive thinking is not supported for this model"}}"#,
+            ),
+            ScriptedHttpResponse::json(
+                200,
+                r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            ),
+            ScriptedHttpResponse::json(
+                200,
+                r#"{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"still ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            ),
+        ])
+        .await;
+        let entry = ModelEntry {
+            id: "thinking-fallback-test".to_string(),
+            model_name: Some("thinking-fallback-test".to_string()),
+            api: "anthropic-messages".to_string(),
+            provider: "anthropic".to_string(),
+            api_key_env: None,
+            base_url: Some(server.base_url.clone()),
+            capabilities: Capabilities {
+                reasoning: true,
+                ..Capabilities::default()
+            },
+            context_window: Some(200_000),
+            max_output_tokens: Some(32_000),
+            thinking_format: Some("anthropic-adaptive".to_string()),
+            supported_reasoning_levels: vec!["high".to_string()],
+        };
+        let provider = AnthropicProvider::new(
+            &entry,
+            &LlmConfig::default().runtime(),
+            &Credential {
+                provider: "anthropic".to_string(),
+                env_name: "TEST_KEY".to_string(),
+                value: "stub".to_string(),
+            },
+        )
+        .expect("provider");
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user("hello")],
+            model: entry.id.clone(),
+            temperature: None,
+            max_tokens: None,
+            resolved_output_limit: None,
+            diagnostic_request_id: None,
+            stream: Some(false),
+            model_override: None,
+            thinking_level: None,
+            cache_key: None,
+            tools: None,
+        };
+
+        assert_eq!(
+            provider
+                .chat(request.clone())
+                .await
+                .expect("fallback request")
+                .choices[0]
+                .message
+                .text_content(),
+            Some("ok")
+        );
+        provider
+            .chat(request)
+            .await
+            .expect("cached fallback request");
+
+        assert_eq!(server.request_count(), 3);
+        let requests = server.request_texts();
+        assert!(requests[0].contains(r#""type":"adaptive""#));
+        assert!(requests[1].contains(r#""type":"enabled""#));
+        assert!(
+            requests[2].contains(r#""type":"enabled""#),
+            "the succeeding fallback must be reused instead of repeating the rejected adaptive format"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cached_provider_uses_each_requests_resolved_output_limit() {
+        let server = MockHttpServer::start(vec![
+            ScriptedHttpResponse::json(
+                200,
+                r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"first"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            ),
+            ScriptedHttpResponse::json(
+                200,
+                r#"{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"second"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            ),
+        ])
+        .await;
+        let entry = ModelEntry {
+            id: "anthropic-small".to_string(),
+            model_name: Some("anthropic-small".to_string()),
+            api: "anthropic-messages".to_string(),
+            provider: "anthropic".to_string(),
+            api_key_env: None,
+            base_url: Some(server.base_url.clone()),
+            capabilities: Capabilities::default(),
+            context_window: Some(200_000),
+            max_output_tokens: Some(8_192),
+            thinking_format: Some("anthropic-adaptive".to_string()),
+            supported_reasoning_levels: vec!["high".to_string()],
+        };
+        let provider = AnthropicProvider::new(
+            &entry,
+            &LlmConfig::default().runtime(),
+            &Credential {
+                provider: "anthropic".to_string(),
+                env_name: "TEST_KEY".to_string(),
+                value: "stub".to_string(),
+            },
+        )
+        .expect("provider");
+
+        for (model, resolved_output_limit) in
+            [("anthropic-small", 8_192), ("anthropic-large", 16_384)]
+        {
+            provider
+                .chat(ChatRequest {
+                    messages: vec![ChatMessage::user("hello")],
+                    model: model.to_string(),
+                    resolved_output_limit: Some(resolved_output_limit),
+                    stream: Some(false),
+                    ..Default::default()
+                })
+                .await
+                .expect("request succeeds");
+        }
+
+        let requests = server.request_texts();
+        assert!(requests[0].contains(r#""max_tokens":8192"#));
+        assert!(
+            requests[1].contains(r#""max_tokens":16384"#),
+            "the second model's resolved cap must not inherit the provider construction entry"
+        );
+        server.shutdown().await;
+    }
 
     #[tokio::test(start_paused = true)]
     async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {

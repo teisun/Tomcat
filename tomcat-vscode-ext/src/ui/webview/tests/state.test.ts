@@ -1612,7 +1612,7 @@ describe("session state hydration", () => {
     ).toBe(false);
   });
 
-  it("offers a retry card when a turn ends without visible output", () => {
+  it("shows a notice when a turn ends without visible output", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     (
@@ -1637,8 +1637,7 @@ describe("session state hydration", () => {
     expect(store.snapshot().sessionViews.s1.timeline).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          kind: "error",
-          recoveryAction: "retry",
+          kind: "notice",
           text: "本轮没有产生可见回答。",
         }),
       ]),
@@ -1993,6 +1992,58 @@ describe("session state hydration", () => {
     expect(warnings[0]).toMatchObject({ text: "Tomcat turn interrupted" });
   });
 });
+
+  it("rehydrates the durable interruption marker after a restart", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          event: "agent.interrupted",
+          partial_text_len: 12,
+          tool_results_count: 1,
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "agent-interrupted",
+      ),
+    ).toMatchObject({ kind: "warn", text: "Tomcat turn interrupted" });
+  });
+
+  it("deduplicates a live interruption frame against its hydrated durable marker", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      partialTextLen: 0,
+      sessionId: "s1",
+      toolResultsCount: 0,
+      type: "agent_interrupted",
+    });
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          event: "agent.interrupted",
+          partial_text_len: 0,
+          tool_results_count: 0,
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const cards = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) =>
+        item.type === "message" &&
+        item.kind === "warn" &&
+        item.id === "agent-interrupted",
+    );
+    expect(cards).toHaveLength(1);
+  });
 
 describe("custom history replay", () => {
   it("keeps the current active plan authoritative over replayed plan history", () => {
@@ -2951,7 +3002,7 @@ describe("local user message delivery state", () => {
 });
 
 describe("checkpoint history replay", () => {
-  it("hides a completed failed chapter after a later user turn has started", () => {
+  it("keeps a completed failed chapter after a later user turn has started", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
@@ -3006,11 +3057,11 @@ describe("checkpoint history replay", () => {
       session.timeline.map((item) =>
         item.type === "message" ? item.id : item.type,
       ),
-    ).toEqual(["user-1", "assistant-1", "user-2"]);
-    expect(session.timeline.some((item) => item.type === "message" && item.id === "user-failed"))
-      .toBe(false);
-    expect(session.timeline.some((item) => item.type === "message" && item.id === "error-1"))
-      .toBe(false);
+    ).toEqual(["user-1", "assistant-1", "user-failed", "error-1", "user-2"]);
+    expect(session.timeline.find((item) => item.type === "message" && item.id === "user-failed"))
+      .toMatchObject({ abandoned: true, kind: "user" });
+    expect(session.timeline.find((item) => item.type === "message" && item.id === "error-1"))
+      .toMatchObject({ kind: "error" });
   });
 
   it("keeps the newest unresolved retry chapter visible after automatic retries", () => {
@@ -3085,7 +3136,7 @@ describe("checkpoint history replay", () => {
     expect(error).toMatchObject({ kind: "error", recoveryAction: "resume" });
   });
 
-  it("shows only the newest unresolved failed chapter across repeated failures", () => {
+  it("keeps repeated failed chapters but offers recovery only for the newest one", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.hydrateHistory("s1", {
@@ -3115,16 +3166,24 @@ describe("checkpoint history replay", () => {
     const errors = store.snapshot().sessionViews.s1.timeline.filter(
       (item) => item.type === "message" && item.kind === "error",
     );
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({
+    expect(errors).toHaveLength(3);
+    expect(errors[2]).toMatchObject({
       id: "error-3",
       recoveryAction: "retry",
       recoveryTargetUserMessageId: "user-3",
     });
+    expect(errors[0]).not.toHaveProperty("recoveryAction");
+    expect(errors[1]).not.toHaveProperty("recoveryAction");
     const users = store.snapshot().sessionViews.s1.timeline.filter(
       (item) => item.type === "message" && item.kind === "user",
     );
-    expect(users).toEqual([expect.objectContaining({ id: "user-3", text: "third" })]);
+    expect(users).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ abandoned: true, id: "user-1", text: "first" }),
+        expect.objectContaining({ abandoned: true, id: "user-2", text: "second" }),
+        expect.objectContaining({ abandoned: true, id: "user-3", text: "third" }),
+      ]),
+    );
   });
 
   it("scans healed tool results written after an error and offers Resume", () => {
@@ -3199,7 +3258,7 @@ describe("checkpoint history replay", () => {
     expect(error).not.toHaveProperty("recoveryAction");
   });
 
-  it("drops a retry chapter immediately and restores it if Retry is rejected", () => {
+  it("keeps a retry chapter visible and restores its actions if Retry is rejected", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.hydrateHistory("s1", {
@@ -3219,12 +3278,17 @@ describe("checkpoint history replay", () => {
       store.snapshot().sessionViews.s1.timeline.find(
         (item) => item.type === "message" && item.id === "error-1",
       ),
-    ).toBeUndefined();
+    ).toMatchObject({ kind: "error" });
+    expect(
+      store.snapshot().sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).not.toHaveProperty("recoveryAction");
     expect(
       store.snapshot().sessionViews.s1.timeline.find(
         (item) => item.type === "message" && item.id === "user-1",
       ),
-    ).toBeUndefined();
+    ).toMatchObject({ abandoned: true, kind: "user", text: "retry me" });
 
     store.restoreDismissedErrorRecovery("s1", "error-1");
     expect(
@@ -3239,7 +3303,67 @@ describe("checkpoint history replay", () => {
     ).toMatchObject({ kind: "user", text: "retry me" });
   });
 
-  it("uses the local failed bubble instead of rendering its superseded history duplicate", () => {
+  it("keeps a dismissed recovery card visible but removes its action", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: { content: "retry me", role: "user", superseded: true, turn_failed: true },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+
+    store.dismissErrorRecovery("s1", "error-1");
+
+    const card = store.snapshot().sessionViews.s1.timeline.find(
+      (item) => item.type === "message" && item.id === "error-1",
+    );
+    expect(card).toMatchObject({ kind: "error", text: "failed" });
+    expect(card).not.toHaveProperty("recoveryAction");
+  });
+
+  it("reinserts a dismissed error card when history no longer contains its anchor", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: { content: "retry me", role: "user", superseded: true, turn_failed: true },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+
+    store.dismissErrorRecovery("s1", "error-1");
+    const internalStore = store as unknown as {
+      ensureRuntime(sessionId: string): { historyEntries: unknown[] };
+      rebuildHistoryTimeline(sessionId: string): void;
+    };
+    internalStore.ensureRuntime("s1").historyEntries = [];
+    internalStore.rebuildHistoryTimeline("s1");
+    expect(
+      store.snapshot().sessionViews.s1.timeline.some(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toBe(false);
+
+    store.restoreDismissedErrorRecovery("s1", "error-1");
+    expect(
+      store.snapshot().sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ kind: "error", recoveryAction: "retry" });
+  });
+
+  it("renders a persisted failed bubble as abandoned after history catches up", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.appendLocalUserMessage("s1", "retry me", {
@@ -3270,7 +3394,46 @@ describe("checkpoint history replay", () => {
         (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
       );
     expect(copies).toHaveLength(1);
-    expect(copies[0]).toMatchObject({ deliveryState: "failed", id: "user-failed" });
+    expect(copies[0]).toMatchObject({ abandoned: true, id: "user-failed" });
+  });
+
+  it("keeps copy-forward retry input beside its abandoned source input", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-failed",
+          message: {
+            content: "retry me",
+            role: "user",
+            superseded: true,
+            turn_failed: true,
+          },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+        {
+          id: "user-copy-forward",
+          message: { content: "retry me", role: "user" },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const copies = store
+      .snapshot()
+      .sessionViews.s1.timeline.filter(
+        (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
+      );
+    expect(copies).toHaveLength(2);
+    expect(copies.find((item) => item.id === "user-failed")).toMatchObject({
+      abandoned: true,
+    });
+    expect(copies.find((item) => item.id === "user-copy-forward")).not.toHaveProperty(
+      "abandoned",
+    );
   });
 
   it("filters superseded spans and resumes rendering after checkpoint.restore", () => {

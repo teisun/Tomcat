@@ -14,6 +14,7 @@ import {
   assertWebviewDraftForkPreservesReferenceFlow,
   assertWebviewFileDropReferenceFlow,
   assertWebviewPickContextFlow,
+  assertWebviewRecoveryRejectionFlow,
   assertWebviewResumeCardFlow,
   assertWebviewRetryRecoveryFlow,
   assertWebviewGiantGroupLazyLoadFlow,
@@ -79,12 +80,17 @@ suite("Tomcat host E2E", () => {
     await assertWebviewReviewProgressFlow(api);
   });
 
-  test("copy-forwards a failed same-session retry while showing only the current attempt", async () => {
+  test("copy-forwards a failed same-session retry while preserving the failed chapter", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewRetryRecoveryFlow(api);
   });
 
-  test("resumes a failed tool turn and hides its completed error card", async () => {
+  test("shows a rejected recovery reason inline on its restored error card", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewRecoveryRejectionFlow(api);
+  });
+
+  test("resumes a failed tool turn and preserves its completed error card", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewResumeCardFlow(api);
   });

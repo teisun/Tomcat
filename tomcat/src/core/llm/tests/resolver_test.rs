@@ -4,10 +4,148 @@ use serial_test::serial;
 
 use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::llm::{
-    auth::clear_managed_credentials_for_test, DefaultLlmResolver, LlmResolver, LlmScene,
-    ModelCatalog, SharedModelCatalog,
+    auth::clear_managed_credentials_for_test, Capabilities, DefaultLlmResolver,
+    EffectiveModelLimits, LimitSource, LlmResolver, LlmScene, ModelCatalog, ModelEntry,
+    SharedModelCatalog,
 };
-use crate::infra::config::AppConfig;
+use crate::infra::config::{AppConfig, ContextConfig};
+
+fn limit_test_entry(
+    api: &str,
+    context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
+) -> ModelEntry {
+    ModelEntry {
+        id: "limit-test".to_string(),
+        model_name: None,
+        api: api.to_string(),
+        provider: "test".to_string(),
+        api_key_env: None,
+        base_url: None,
+        capabilities: Capabilities::default(),
+        context_window,
+        max_output_tokens,
+        thinking_format: None,
+        supported_reasoning_levels: Vec::new(),
+    }
+}
+
+#[test]
+fn effective_limits_use_model_capabilities_and_preserve_the_reserve_floor() {
+    let known = EffectiveModelLimits::resolve(
+        &limit_test_entry("anthropic-messages", Some(1_000_000), Some(128_000)),
+        &ContextConfig::default(),
+    )
+    .expect("known limits resolve");
+    assert_eq!(known.input_budget_tokens, 872_000);
+    assert_eq!(known.context_source, LimitSource::ModelCatalog);
+    assert_eq!(known.output_source, LimitSource::ModelCatalog);
+
+    let unknown_anthropic = EffectiveModelLimits::resolve(
+        &limit_test_entry("anthropic-messages", None, None),
+        &ContextConfig::default(),
+    )
+    .expect("unknown Anthropic limits resolve");
+    assert_eq!(unknown_anthropic.context_window, 400_000);
+    assert_eq!(unknown_anthropic.output_reserve_tokens, 32_000);
+    assert_eq!(unknown_anthropic.input_budget_tokens, 368_000);
+    assert_eq!(
+        unknown_anthropic.context_source,
+        LimitSource::LegacyFallback
+    );
+    assert_eq!(
+        unknown_anthropic.output_source,
+        LimitSource::UnknownAnthropicFallback
+    );
+
+    let unknown_openai = EffectiveModelLimits::resolve(
+        &limit_test_entry("openai-responses", None, None),
+        &ContextConfig::default(),
+    )
+    .expect("unknown OpenAI limits resolve");
+    assert_eq!(unknown_openai.output_reserve_tokens, 100_000);
+    assert_eq!(unknown_openai.input_budget_tokens, 300_000);
+    assert_eq!(
+        unknown_openai.output_source,
+        LimitSource::UnknownOpenAiLocalReserve
+    );
+
+    let below_cap = ContextConfig {
+        output_reserve_tokens: Some(10_000),
+        ..ContextConfig::default()
+    };
+    let protected = EffectiveModelLimits::resolve(
+        &limit_test_entry("anthropic-messages", Some(1_000_000), Some(128_000)),
+        &below_cap,
+    )
+    .expect("reserve is raised to model output capacity");
+    assert_eq!(protected.output_reserve_tokens, 128_000);
+    assert_eq!(protected.input_budget_tokens, 872_000);
+
+    let legacy_reserve = ContextConfig {
+        output_reserve_tokens: Some(128_000),
+        ..ContextConfig::default()
+    };
+    let legacy_unknown = EffectiveModelLimits::resolve(
+        &limit_test_entry("anthropic-messages", None, None),
+        &legacy_reserve,
+    )
+    .expect("legacy reserve remains compatible");
+    assert_eq!(legacy_unknown.input_budget_tokens, 272_000);
+
+    assert!(
+        EffectiveModelLimits::resolve(
+            &limit_test_entry("anthropic-messages", Some(100_000), Some(100_001)),
+            &ContextConfig::default(),
+        )
+        .is_err(),
+        "a model output cap cannot exceed its context window"
+    );
+    assert!(
+        EffectiveModelLimits::resolve(
+            &limit_test_entry("anthropic-messages", Some(200_000), Some(64_000)),
+            &ContextConfig {
+                output_reserve_tokens: Some(200_000),
+                ..ContextConfig::default()
+            },
+        )
+        .is_err(),
+        "the local reserve must stay below the context window"
+    );
+}
+
+#[test]
+fn per_request_output_limit_clamps_explicit_requests_without_forcing_openai_defaults() {
+    let anthropic = EffectiveModelLimits::resolve(
+        &limit_test_entry("anthropic-messages", Some(200_000), Some(8_192)),
+        &ContextConfig::default(),
+    )
+    .expect("Anthropic limits");
+    assert_eq!(
+        anthropic.wire_output_limit_for_request("anthropic-messages", None),
+        (Some(8_192), LimitSource::ModelCatalog)
+    );
+    assert_eq!(
+        anthropic.wire_output_limit_for_request("anthropic-messages", Some(16_384)),
+        (Some(8_192), LimitSource::ExplicitRequest)
+    );
+
+    let openai = EffectiveModelLimits::resolve(
+        &limit_test_entry("openai-responses", Some(200_000), Some(8_192)),
+        &ContextConfig::default(),
+    )
+    .expect("OpenAI limits");
+    assert_eq!(
+        openai.wire_output_limit_for_request("openai-responses", None),
+        (None, LimitSource::ModelCatalog),
+        "OpenAI must omit an unspecified output cap"
+    );
+    assert_eq!(
+        openai.wire_output_limit_for_request("openai-responses", Some(16_384)),
+        (Some(8_192), LimitSource::ExplicitRequest),
+        "an explicit OpenAI request is clamped before reaching either wire adapter"
+    );
+}
 
 #[test]
 #[serial(env_lock)]

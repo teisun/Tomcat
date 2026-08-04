@@ -294,6 +294,11 @@ fn test_openai_request_body_does_not_serialize_reasoning_when_none() {
         "None thinking 不应进 wire JSON: {}",
         j
     );
+    assert!(
+        j.get("max_completion_tokens").is_none(),
+        "None max_tokens 应彻底省略而非序列化为 null: {}",
+        j
+    );
     assert!(j.get("prompt_cache_key").is_none());
 }
 
@@ -821,6 +826,7 @@ fn stream_test_provider(
         base_url: Some(base_url),
         capabilities: Capabilities::default(),
         context_window: None,
+        max_output_tokens: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -853,11 +859,12 @@ fn stream_test_request() -> ChatRequest {
         model: "gpt-4.1".to_string(),
         temperature: Some(0.0),
         max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     }
 }

@@ -67,11 +67,12 @@ fn make_request() -> ChatRequest {
         model: "gpt-4".to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
         thinking_level: None,
         cache_key: None,
-        ephemeral_tail_count: 0,
         tools: None,
     }
 }
