@@ -669,6 +669,146 @@ async fn run_twenty_turn_probe(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DeepseekAgentTailMode {
+    /// The pre-fix wire shape. This is intentionally a normal user message:
+    /// the production adapter now promotes `EphemeralTail`, so a tagged tail
+    /// can no longer reproduce the legacy moving suffix.
+    LegacyUserSuffix,
+    StableEphemeralTail,
+    ChangingEphemeralTail,
+}
+
+impl DeepseekAgentTailMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::LegacyUserSuffix => "legacy-user-suffix",
+            Self::StableEphemeralTail => "stable-ephemeral-tail",
+            Self::ChangingEphemeralTail => "changing-ephemeral-tail",
+        }
+    }
+
+    fn tail_for_round(self, round: usize) -> ChatMessage {
+        let session_grant = match self {
+            Self::LegacyUserSuffix | Self::StableEphemeralTail => None,
+            // One state transition at r3: r1/r2 establish a cacheable prefix,
+            // r3 intentionally invalidates it, and r4-r6 must reuse r3.
+            Self::ChangingEphemeralTail if round >= 3 => {
+                Some("/tmp/tomcat-cache-probe/grant-after-round-2")
+            }
+            Self::ChangingEphemeralTail => None,
+        };
+        let mut tail = ChatMessage::user(main_agent_plan_tail(session_grant));
+        if !matches!(self, Self::LegacyUserSuffix) {
+            tail.kind = MessageKind::EphemeralTail;
+        }
+        tail
+    }
+}
+
+async fn run_deepseek_chat_agent_shape_probe(
+    tail_mode: DeepseekAgentTailMode,
+) -> Result<Vec<TokenUsage>, Box<dyn std::error::Error>> {
+    let (_home, cfg) = deepseek_chat_config();
+    let provider = common::resolve_main_provider(&cfg);
+    let (system, tools) = main_agent_prompt_and_tools();
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!(
+        "prompt-cache-deepseek-agent-shape:{}:{probe_id}",
+        tail_mode.label()
+    );
+    let mut messages = vec![
+        ChatMessage::system(system),
+        ChatMessage::user(format!(
+            "Run six cache verification rounds. On every round, call `config_get` exactly once \
+             with `{{ \"key\": \"agent.id\" }}` and do not write prose. After each tool result, \
+             immediately start the next round until all six are complete. \
+             Probe nonce: {probe_id}.",
+        )),
+    ];
+    let mut usages = Vec::with_capacity(6);
+
+    for round in 1..=6 {
+        let mut request_messages = messages.clone();
+        request_messages.push(tail_mode.tail_for_round(round));
+        let mut turn_request = request(request_messages, &cfg.llm.default_model, &cache_key);
+        turn_request.temperature = None;
+        turn_request.max_tokens = None;
+        turn_request.resolved_output_limit = None;
+        turn_request.thinking_level = Some(ThinkingLevel::High);
+        turn_request.tools = Some(tools.clone());
+        let response = call(provider.as_ref(), turn_request).await?;
+        let usage = response
+            .usage
+            .clone()
+            .ok_or_else(|| format!("DeepSeek omitted usage on agent-shaped round {round}"))?;
+        eprintln!(
+            "phase=\"deepseek_chat_agent_shape\" tail_mode={} round={} prompt_tokens={} \
+             cache_read_tokens={} cache_write_tokens={}",
+            tail_mode.label(),
+            round,
+            usage.prompt_tokens,
+            usage.cache_read_tokens.unwrap_or_default(),
+            usage.cache_write_tokens.unwrap_or_default(),
+        );
+        usages.push(usage);
+
+        // The sixth response is the final measurement. It may correctly end
+        // the requested six-step sequence instead of issuing a seventh tool
+        // call, so only the first five rounds must extend durable history.
+        if round == 6 {
+            continue;
+        }
+        let assistant = response
+            .choices
+            .first()
+            .map(|choice| choice.message.clone())
+            .ok_or_else(|| format!("DeepSeek returned no choice on agent-shaped round {round}"))?;
+        let tool_calls = assistant.tool_calls.clone().ok_or_else(|| {
+            format!("DeepSeek returned no tool call on agent-shaped round {round}")
+        })?;
+        let config_get_calls = tool_calls
+            .iter()
+            .filter(|call| call["function"]["name"].as_str() == Some("config_get"))
+            .count();
+        if config_get_calls != 1 {
+            return Err(format!(
+                "DeepSeek agent-shaped round {round} must call `config_get` exactly once; \
+                 got {tool_calls:?}"
+            )
+            .into());
+        }
+        messages.push(assistant);
+        // A provider can emit an unrelated extra tool call even when prompted
+        // not to. Every emitted id needs a matching result before the next
+        // request; otherwise the probe would measure a protocol 400 instead
+        // of cache behavior.
+        for (tool_index, tool_call) in tool_calls.iter().enumerate() {
+            let call_id = tool_call["id"]
+                .as_str()
+                .ok_or_else(|| {
+                    format!(
+                        "DeepSeek agent-shaped round {round} tool call {tool_index} has no id: \
+                         {tool_call:?}"
+                    )
+                })?
+                .to_string();
+            let tool_name = tool_call["function"]["name"]
+                .as_str()
+                .unwrap_or("unknown_tool");
+            messages.push(ChatMessage::tool(
+                &call_id,
+                &format!(
+                    "{tool_name} result round={round} tool_index={tool_index}\n{}",
+                    "large deterministic tool output retained in the durable history\n".repeat(240)
+                ),
+            ));
+        }
+    }
+
+    Ok(usages)
+}
+
 fn assert_second_request_read_cache(
     usage: Option<&tomcat::core::llm::TokenUsage>,
     provider_label: &str,
@@ -872,6 +1012,67 @@ async fn deepseek_chat_twenty_turn_cache_baseline() -> Result<(), Box<dyn std::e
         "deepseek-chat",
     )
     .await
+}
+
+#[tokio::test]
+#[ignore = "manual: compare DeepSeek Chat Completions cache with and without Agent tail"]
+#[serial]
+async fn deepseek_chat_agent_shape_tail_cache_probe() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    common::require_deepseek_api_key("deepseek_chat_agent_shape_tail_cache_probe");
+
+    let legacy =
+        run_deepseek_chat_agent_shape_probe(DeepseekAgentTailMode::LegacyUserSuffix).await?;
+    let stable =
+        run_deepseek_chat_agent_shape_probe(DeepseekAgentTailMode::StableEphemeralTail).await?;
+    let changing =
+        run_deepseek_chat_agent_shape_probe(DeepseekAgentTailMode::ChangingEphemeralTail).await?;
+
+    let legacy_reads = legacy
+        .iter()
+        .map(|usage| usage.cache_read_tokens.unwrap_or_default())
+        .collect::<Vec<_>>();
+    let stable_reads = stable
+        .iter()
+        .map(|usage| usage.cache_read_tokens.unwrap_or_default())
+        .collect::<Vec<_>>();
+    let changing_reads = changing
+        .iter()
+        .map(|usage| usage.cache_read_tokens.unwrap_or_default())
+        .collect::<Vec<_>>();
+    eprintln!(
+        "phase=\"deepseek_chat_agent_shape_summary\" \
+         legacy_user_suffix_cache_read_tokens={legacy_reads:?} \
+         stable_ephemeral_tail_cache_read_tokens={stable_reads:?} \
+         changing_ephemeral_tail_cache_read_tokens={changing_reads:?}"
+    );
+
+    assert!(
+        stable_reads.iter().skip(1).all(|read| *read > 0),
+        "a stable instruction tail must continuously report DeepSeek cached_tokens: {stable_reads:?}"
+    );
+    assert!(
+        stable_reads.windows(2).any(|window| window[1] > window[0]),
+        "large append-only tool outputs must cross at least one DeepSeek cache block: {stable_reads:?}"
+    );
+    assert!(
+        stable_reads[5] >= legacy_reads[5],
+        "the promoted tail must read at least as much history as the legacy moving user suffix at r6; \
+         legacy={legacy_reads:?}, stable={stable_reads:?}"
+    );
+    eprintln!(
+        "phase=\"deepseek_chat_agent_shape_transition\" \
+         state_change_round=3 stable_r3_cache_read_tokens={} \
+         changing_r3_cache_read_tokens={}",
+        stable_reads[2], changing_reads[2]
+    );
+    assert!(
+        changing_reads[3] > changing_reads[2] && changing_reads[5] >= changing_reads[3],
+        "once the grant stops changing, r4-r6 must recover the append-only cache prefix; \
+         changing={changing_reads:?}"
+    );
+    Ok(())
 }
 
 #[tokio::test]

@@ -449,6 +449,115 @@ fn transport_messages_never_sends_transcript_message_kind_to_provider() {
 }
 
 #[test]
+fn transport_messages_promotes_ephemeral_tail_to_leading_system_instruction() {
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+    let wire = transport_messages(
+        &[
+            ChatMessage::system("stable instructions"),
+            ChatMessage::user("inspect the project"),
+            ChatMessage::assistant("I will inspect it"),
+            tail,
+        ],
+        "deepseek-v4-pro",
+        false,
+        None,
+    );
+
+    assert_eq!(
+        wire.len(),
+        3,
+        "the request-only tail is not dialogue history"
+    );
+    assert_eq!(wire[0]["role"], "system");
+    assert_eq!(
+        wire[0]["content"],
+        "stable instructions\n\nruntime-only workspace state"
+    );
+    assert_eq!(wire[1]["role"], "user");
+    assert_eq!(wire[2]["role"], "assistant");
+    assert!(
+        wire.iter()
+            .skip(1)
+            .all(|message| !message.to_string().contains("runtime-only workspace state")),
+        "the tail must be present only in the instruction channel: {wire:?}"
+    );
+    assert!(
+        !serde_json::to_string(&wire)
+            .expect("serialize wire")
+            .contains("\"kind\""),
+        "transcript-only message metadata must not leak to the provider"
+    );
+}
+
+#[test]
+fn transport_messages_creates_leading_system_for_ephemeral_tail_without_system_prompt() {
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+    let wire = transport_messages(
+        &[ChatMessage::user("inspect the project"), tail],
+        "deepseek-v4-pro",
+        false,
+        None,
+    );
+
+    assert_eq!(
+        wire,
+        vec![
+            serde_json::json!({
+                "role": "system",
+                "content": "runtime-only workspace state",
+            }),
+            serde_json::json!({
+                "role": "user",
+                "content": "inspect the project",
+            }),
+        ]
+    );
+}
+
+#[test]
+fn transport_messages_keeps_tool_history_order_when_promoting_ephemeral_tail() {
+    let mut assistant = ChatMessage::assistant("I will read the file");
+    assistant.tool_calls = Some(vec![serde_json::json!({
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "arguments": "{\"path\":\"src/lib.rs\"}",
+        }
+    })]);
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+
+    let wire = transport_messages(
+        &[
+            ChatMessage::system("stable instructions"),
+            ChatMessage::user("inspect the project"),
+            assistant,
+            ChatMessage::tool("call_1", "file contents"),
+            tail,
+        ],
+        "deepseek-v4-pro",
+        true,
+        None,
+    );
+
+    assert_eq!(
+        wire.iter()
+            .map(|message| message["role"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["system", "user", "assistant", "tool"]
+    );
+    assert_eq!(wire[2]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(wire[3]["tool_call_id"], "call_1");
+    assert_eq!(
+        wire[0]["content"],
+        "stable instructions\n\nruntime-only workspace state"
+    );
+}
+
+#[test]
 fn transport_messages_renders_multimodal_user_content_for_standard_openai() {
     let msgs = vec![ChatMessage::user_with_parts(vec![
         ChatMessageContentPart::text("look "),

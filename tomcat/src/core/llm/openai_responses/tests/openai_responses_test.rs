@@ -185,6 +185,12 @@ fn build_responses_input_promotes_ephemeral_tail_to_instructions() {
     );
     assert_eq!(input[0]["role"], "user");
     assert_eq!(input[0]["content"][0]["text"], "hi");
+    assert!(
+        !serde_json::to_string(&input)
+            .expect("serialize Responses input")
+            .contains("runtime-only workspace state"),
+        "EphemeralTail must never be serialized as a Responses dialogue item"
+    );
 }
 
 #[test]

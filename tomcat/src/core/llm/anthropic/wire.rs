@@ -9,9 +9,10 @@ use crate::core::llm::replay_policy::{
 };
 use crate::core::llm::thinking_policy::{resolve_anthropic_request, ThinkingFormat};
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ChatResponse, ChatResponseChoice, ContinuityMetadata, FileSource, ImageSource,
-    ReasoningContinuation, ReasoningFormat, StreamEvent, TokenUsage,
+    ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
+    ChatMessageContentPart, ChatMessageRole, ChatRequest, ChatResponse, ChatResponseChoice,
+    ContinuityMetadata, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
+    StreamEvent, TokenUsage,
 };
 use crate::core::llm::Capabilities;
 use crate::infra::config::ThinkingConfig;
@@ -565,11 +566,15 @@ fn build_messages(
     let mut out: Vec<Value> = Vec::new();
     let mut last_non_ephemeral_message = None;
     let mut last_non_ephemeral_system = None;
-    let mut has_ephemeral_system_tail = false;
+    let runtime_tail = ephemeral_tail_texts(messages)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let mut keep_opaque_messages = 0;
     let mut strip_opaque_messages = 0;
     for original in messages {
-        let is_ephemeral = matches!(original.kind, crate::core::llm::MessageKind::EphemeralTail);
+        if is_ephemeral_tail(original) {
+            continue;
+        }
         let action = if continuity_enabled {
             plan(target, original)
         } else {
@@ -586,24 +591,6 @@ fn build_messages(
                 original.without_completion_metadata()
             }
         };
-        if is_ephemeral {
-            // fcodex only reused cache controls at completed message ends. A
-            // user-role tail merges with the latest tool result, which leaves
-            // D on an ignored middle block and recreates the entire cache on
-            // every tool round. Keep runtime state as a system suffix without
-            // its own cache-control marker: D remains at the newest tool
-            // result's end and covers this stable suffix too. A state change
-            // deliberately invalidates the next request.
-            let text = flatten_message_text(&msg);
-            if !text.trim().is_empty() {
-                system_chunks.push(json!({
-                    "type": "text",
-                    "text": text,
-                }));
-                has_ephemeral_system_tail = true;
-            }
-            continue;
-        }
         match msg.role {
             ChatMessageRole::System => {
                 let text = flatten_message_text(&msg);
@@ -689,6 +676,16 @@ fn build_messages(
             }
         }
     }
+    // fcodex only reuses cache controls at completed message ends. Keeping
+    // request-only runtime state as a system suffix leaves D on the newest
+    // durable tool result; a state change deliberately invalidates one request.
+    let has_ephemeral_system_tail = !runtime_tail.is_empty();
+    system_chunks.extend(runtime_tail.into_iter().map(|text| {
+        json!({
+            "type": "text",
+            "text": text,
+        })
+    }));
 
     let mut cache_breakpoint_candidates = Vec::new();
     if let Some(last_system_idx) = last_non_ephemeral_system {
@@ -1383,6 +1380,12 @@ mod tests {
         assert_eq!(
             body["system"][1]["text"],
             "<system_reminder>runtime state</system_reminder>"
+        );
+        assert!(
+            !body["messages"]
+                .to_string()
+                .contains("<system_reminder>runtime state</system_reminder>"),
+            "EphemeralTail must never be serialized as an Anthropic dialogue message"
         );
     }
 

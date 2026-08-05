@@ -20,9 +20,9 @@ use crate::core::llm::replay_policy::{
     plan, ProviderCompatProfile, ReplayAction, ReplayDowngradeReport,
 };
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatResponse,
-    ChatResponseChoice, FileSource, ImageSource, MessageKind, ReasoningContinuation,
-    ReasoningFormat,
+    ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
+    ChatMessageContentPart, ChatMessageRole, ChatResponse, ChatResponseChoice, FileSource,
+    ImageSource, ReasoningContinuation, ReasoningFormat,
 };
 
 pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
@@ -234,11 +234,7 @@ pub(super) fn build_responses_input(
         matches!(message.role, ChatMessageRole::System)
             .then(|| extract_text(&message.content).unwrap_or_default())
     });
-    let runtime_tail = messages
-        .iter()
-        .filter(|message| matches!(message.kind, MessageKind::EphemeralTail))
-        .filter_map(|message| extract_text(&message.content))
-        .filter(|text| !text.trim().is_empty())
+    let runtime_tail = ephemeral_tail_texts(messages)
         .collect::<Vec<_>>()
         .join("\n\n");
     if !runtime_tail.is_empty() {
@@ -256,7 +252,7 @@ pub(super) fn build_responses_input(
         // The runtime tail has already been promoted to top-level instructions. Keeping it
         // out of input means newly appended assistant/tool history extends the prior request
         // instead of being inserted before a disappearing user message.
-        if matches!(original.kind, MessageKind::EphemeralTail) {
+        if is_ephemeral_tail(original) {
             continue;
         }
         // The leading system message is always sent as top-level instructions. When a request

@@ -14,11 +14,19 @@ Anthropic 必须发送 `max_tokens`，因此它取模型目录的输出能力（
 `max_completion_tokens`。thinking budget/effort 只控制推理，不得推导或抬高 wire 输出上限。
 
 请求级 workspace/plan 状态使用 `MessageKind::EphemeralTail`：它不持久化、不开启 user turn，也不切断 reasoning replay。
-对于 Anthropic，它在 wire 层被渲染为**不单独标记 `cache_control` 的 system 后缀**，而非与 `role=user` 的 tool
-result 合并。它仍位于 D 之前，故稳定时会被 D 的缓存前缀覆盖。原因是 fcodex 实测不复用同一 user 内容数组中 tail
-前的中间断点；system 后缀让 D 落在最新 tool result 的完整消息末尾。状态变化会使下一请求重写缓存，这是有意接受的
-正确代价。运行时只记录哈希形式的
-`prompt_prefix_fingerprint`，用于定位前缀漂移，绝不记录 prompt 原文。
+它的唯一生产者 `EphemeralTailProvider` 只产生文本；三个 adapter 共用提取规则，并共同遵守一条 wire 不变量：
+**tail 绝不能作为对话消息出站**。各协议只在 instruction 通道选择不同落点：
+
+```text
+Anthropic Messages   → system suffix（不单独标 cache_control）
+Chat Completions     → leading system message
+OpenAI Responses     → top-level instructions
+```
+
+Anthropic 的 system 后缀避免与 `role=user` tool result 合并；它让 D 落在最新持久 tool result 的完整消息末尾。
+Chat Completions / Responses 则不能把 tail 留在末尾 user history：下一轮 assistant/tool 会插在它前面，截断自动
+prefix cache。稳定 tail 让 durable history 只追加；权限或计划状态变化会使该轮有意冷写一次，随后新的稳定前缀恢复增长。
+运行时只记录哈希形式的 `prompt_prefix_fingerprint`，用于定位前缀漂移，绝不记录 prompt 原文。
 
 诊断字段以请求真相命名：`llm_request_resolved.wire_limit_source` 说明上限来自模型目录、未知模型回退还是调用方显式请求；发生 `output_truncated` 时同时写入
 `request_max_tokens`、实际 `wire_max_tokens` 与 `thinking_budget`。adaptive thinking 的 `thinking_budget = null` 是正确证据——它发送的是
@@ -43,6 +51,47 @@ Chat Completions 的 `reasoning_content` 兼容字段没有 Responses 的加密 
 推翻条件：若某个 Chat Completions provider 文档化并实测支持多轮历史 `reasoning_content`，且全历史重放在同一
 模型、跨模型和工具回合中均无 4xx、成本可接受、连续性明显更好，才可针对该 provider 移除窗口；不能因为单次
 “看起来能用”而全局删除。
+
+### 2026-08-06 DeepSeek Chat Completions：移动 user tail 截断自动缓存
+
+Chat Completions 没有顶层 `instructions`。旧实现把 runtime tail 原样序列化为末尾 `role=user`；工具循环追加
+assistant/tool 后，它的物理位置每轮后移：
+
+```text
+旧 wire
+rN:     [system] → durable history → runtime tail (user)
+rN+1:   [system] → durable history → assistant/tool → runtime tail (user)
+                                                     ^ 旧完整前缀在这里断开
+
+正式 wire
+rN:     [system + runtime tail] → durable history
+rN+1:   [system + same tail]    → durable history → assistant/tool
+                                                        ^ 只追加，可继续命中
+```
+
+`openai.rs::transport_messages` 在多模态归一化之后剥离 `EphemeralTail`，将非空文本以空行合入**leading**
+system；没有 leading system 时才在 durable history 前新建 system。该函数被 `chat` 和 `chat_stream` 共用，
+所以两条路径的 wire 一致；`ChatRequest.messages`、transcript、`ReplayWindow` 和 `prompt_cache_key` 均不修改。
+
+真实 DeepSeek `deepseek-v4-pro` Agent-shaped 探针（完整 Agent system / 工具目录、六轮 `config_get`、大确定
+tool output、每个模式独立 nonce 防止服务端已有缓存污染）实测：
+
+```text
+legacy trailing user tail: 11,648 → 11,648 → 11,648 → 14,080 → 16,512 → 19,072
+stable leading system tail:13,184 → 13,184 → 15,616 → 18,176 → 20,608 → 23,168
+changing tail at r3:      13,184 → 13,184 →  3,072 → 18,176 → 20,736 → 23,168
+```
+
+第六轮的可读缓存从 `19,072 / 25,561 = 74.6%` 升至 `23,168 / 25,644 = 90.3%`；r3 唯一状态变化按预期降至
+`3,072`，r4 立即恢复 `18,176` 并在 r6 回到 `23,168`。这是「状态变化可冷写一次，稳定后可恢复」的直接证据，
+不是要求每轮数值都上升的脆弱假设（服务端按量化块报告）。
+
+反例：不把 state diff 追加进 transcript，也不把旧权限 / 计划事实留下来与当前约束竞争；不添加 Anthropic
+专用 `cache_control` 到 OpenAI-compatible wire。若目标网关拒绝 leading system、稳定 tail 连续实测仍显著
+低于旧布局，或其文档化并实测证明末尾 request-only user tail 可获得相同连续命中，才以 provider profile
+局部回退，不能全局恢复旧布局。回归由
+`tests/prompt_cache_real_llm_tests.rs::deepseek_chat_agent_shape_tail_cache_probe` 与三 adapter 的
+`EphemeralTail` wire 单测共同守住。
 
 ### 2026-08-04 fcodex Opus 5 M0/M1 实测
 
@@ -1411,7 +1460,8 @@ pub attempts: Option<u32>,
 
 #### 7.5.4 提示缓存前缀稳定化
 
-提示缓存只复用逐字节相同的请求前缀。因此系统遵循「已发送历史只追加、运行时事实只放尾部」：
+提示缓存只复用逐字节相同的请求前缀。因此系统遵循「已发送历史只追加、运行时事实先在内部请求尾部生成，
+再由 adapter 归一化到 instruction 通道」：
 
 ```text
 tools（稳定排序） → system（稳定说明） → 持久化历史 → 本轮输入 → runtime tail
@@ -1425,9 +1475,9 @@ tools（稳定排序） → system（稳定说明） → 持久化历史 → 本
 - 内置工具目录在所有 mode 相同，插件工具按 `(plugin_id, name)` 排序；权限与 mode
   仍由 handler/path gate 强制执行，而不是通过删工具定义来实现。
 - `ChatRequest` 构造接缝在每个主 Agent 请求末尾临时添加 runtime tail（计划提醒和当前
-  workspace 权限状态）。尾部不进入 `ContextState.messages` 或 transcript；Anthropic wire 把它渲染为
-  不单独标记的 system suffix，稳定时由 D 覆盖，状态变更会有意使下一次缓存冷写；OpenAI
-  Responses wire 把它合并到顶层 `instructions`，不把它作为每轮消失的 input user item。
+  workspace 权限状态）。它不进入 `ContextState.messages` 或 transcript，也绝不作为 provider dialogue
+  message：Anthropic wire 把它渲染为不单独标记的 system suffix，Chat Completions 合并到 leading system，
+  OpenAI Responses 合并到顶层 `instructions`。稳定时 durable history 只追加；状态变更会有意使下一次缓存冷写。
 - Anthropic wire 最多放四个 `cache_control: {type: "ephemeral"}` 断点：tools 末项（A）、
   最后一个非 runtime system block（B）、倒数第二条 wire user 消息末尾（C，滚动读锚）和最后一条持久 wire
   消息末尾（D，写锚）。runtime tail 是不单独标记的 system suffix；它变化时会使下一次 Anthropic 缓存失效。

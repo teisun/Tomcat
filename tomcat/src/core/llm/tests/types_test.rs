@@ -8,10 +8,11 @@
 //! - `TokenUsage::default` / `StreamEvent::ContentDelta` 序列化默认值。
 
 use super::super::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ContextRefKind, ContextReference, ContinuityMetadata, FileSource, ImageSource, MessageKind,
-    ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource,
-    TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
+    ChatMessageContentPart, ChatMessageRole, ChatRequest, ContextRefKind, ContextReference,
+    ContinuityMetadata, FileSource, ImageSource, MessageKind, ReasoningContinuation,
+    ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource, TokenUsage, FILE_MAX_BYTES,
+    IMAGE_MAX_BYTES,
 };
 use crate::core::llm::openai_files::OpenAiFilesClient;
 use crate::infra::events::ToolDisplay;
@@ -45,6 +46,34 @@ fn chat_message_kind_persists_non_normal_values_and_defaults_legacy_rows() {
     assert_eq!(persisted["kind"], "signal");
     let restored: ChatMessage = serde_json::from_value(persisted).unwrap();
     assert_eq!(restored.kind, MessageKind::Signal);
+}
+
+#[test]
+fn ephemeral_tail_texts_extracts_only_nonblank_runtime_instructions_in_order() {
+    let mut first_tail = ChatMessage::user("first runtime instruction");
+    first_tail.kind = MessageKind::EphemeralTail;
+    let mut blank_tail = ChatMessage::user(" \n ");
+    blank_tail.kind = MessageKind::EphemeralTail;
+    let mut multipart_tail = ChatMessage::user_with_parts(vec![ChatMessageContentPart::text(
+        "multipart runtime state is invalid",
+    )]);
+    multipart_tail.kind = MessageKind::EphemeralTail;
+    let mut second_tail = ChatMessage::user("second runtime instruction");
+    second_tail.kind = MessageKind::EphemeralTail;
+    let messages = vec![
+        ChatMessage::user("durable user input"),
+        first_tail,
+        blank_tail,
+        multipart_tail,
+        second_tail,
+    ];
+
+    assert!(is_ephemeral_tail(&messages[1]));
+    assert!(!is_ephemeral_tail(&messages[0]));
+    assert_eq!(
+        ephemeral_tail_texts(&messages).collect::<Vec<_>>(),
+        vec!["first runtime instruction", "second runtime instruction"]
+    );
 }
 
 #[test]

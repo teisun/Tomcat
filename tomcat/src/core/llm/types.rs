@@ -593,6 +593,29 @@ impl MessageKind {
     }
 }
 
+/// `EphemeralTail` is request-scoped runtime state, not a dialogue turn.
+///
+/// The sole producer, [`EphemeralTailProvider`](crate::core::agent_loop::EphemeralTailProvider),
+/// renders a `String`; keeping that contract text-only lets every provider
+/// adapter move the same tail into its instruction channel without treating
+/// attachments or projected context as runtime instructions.
+pub(crate) fn is_ephemeral_tail(message: &ChatMessage) -> bool {
+    matches!(message.kind, MessageKind::EphemeralTail)
+}
+
+/// Iterate the non-blank request-scoped runtime instructions in wire order.
+///
+/// Provider adapters decide where these instructions belong (`system` for
+/// Messages / Chat Completions and `instructions` for Responses), but all must
+/// exclude them from their durable conversation history.
+pub(crate) fn ephemeral_tail_texts(messages: &[ChatMessage]) -> impl Iterator<Item = &str> {
+    messages
+        .iter()
+        .filter(|message| is_ephemeral_tail(message))
+        .filter_map(ChatMessage::text_content)
+        .filter(|text| !text.trim().is_empty())
+}
+
 /// Assistant turn 中 opaque continuity blob 的格式标签。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -37,9 +37,10 @@ use crate::core::llm::files_api::{FilesApiAdapter, ImageRefSlot};
 use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ChatResponse, ContinuityMetadata, FileSource, ImageSource, ReasoningContinuation,
-    ReasoningFormat, StreamEvent, ThinkingSource, TokenUsage,
+    ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
+    ChatMessageContentPart, ChatMessageRole, ChatRequest, ChatResponse, ContinuityMetadata,
+    FileSource, ImageSource, ReasoningContinuation, ReasoningFormat, StreamEvent, ThinkingSource,
+    TokenUsage,
 };
 use crate::core::llm::{
     build_openai_compatible_files_adapter, degrade_unsupported_multimodal, Capabilities,
@@ -355,6 +356,45 @@ fn inject_reasoning_content(mut value: Value, reasoning_content: &str) -> Value 
     value
 }
 
+/// Promote request-only runtime state into the instruction prefix.
+///
+/// Chat Completions does not have a top-level `instructions` field. A trailing
+/// user message would move behind newly appended assistant/tool history on
+/// every Agent loop iteration, so it cannot remain in the durable
+/// `messages[]` history. Use an existing *leading* system message when
+/// possible; otherwise insert a synthetic one before all durable messages.
+fn promote_runtime_tail_to_system(messages: &mut Vec<Value>, runtime_tail: &str) {
+    if runtime_tail.is_empty() {
+        return;
+    }
+
+    let leading_system = messages
+        .first_mut()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"));
+    let Some(Value::Object(system)) = leading_system else {
+        messages.insert(
+            0,
+            json!({
+                "role": "system",
+                "content": runtime_tail,
+            }),
+        );
+        return;
+    };
+
+    let mut merged = system
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if !merged.is_empty() {
+        merged.push_str("\n\n");
+    }
+    merged.push_str(runtime_tail);
+    system.insert("content".to_string(), Value::String(merged));
+}
+
 fn transport_messages(
     messages: &[ChatMessage],
     model: &str,
@@ -362,10 +402,18 @@ fn transport_messages(
     files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> Vec<Value> {
     let target = ProviderCompatProfile::chat_completions(model);
+    let runtime_tail = ephemeral_tail_texts(messages)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let window = ReplayWindow::compute(messages);
     let mut report = ReplayDowngradeReport::default();
-    let mut out = Vec::with_capacity(messages.len());
+    let mut out = Vec::with_capacity(messages.len() + usize::from(!runtime_tail.is_empty()));
     for (idx, original) in messages.iter().enumerate() {
+        // Runtime state is promoted into the leading system instruction below.
+        // Excluding it here keeps the durable wire history append-only.
+        if is_ephemeral_tail(original) {
+            continue;
+        }
         let in_window = window.contains(idx);
         let action = if continuity_enabled {
             plan_scoped(&target, original, in_window)
@@ -410,6 +458,7 @@ fn transport_messages(
         };
         out.push(value);
     }
+    promote_runtime_tail_to_system(&mut out, &runtime_tail);
     if continuity_enabled {
         report.emit(&target);
     }
