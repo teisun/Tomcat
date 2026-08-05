@@ -158,18 +158,23 @@ pub fn apply_openai_app_config(cfg: &mut AppConfig) {
 
 pub fn apply_fcodex_app_config(cfg: &mut AppConfig) {
     let model_id = fcodex_test_model();
+    apply_fcodex_responses_app_config(cfg, &model_id);
+}
+
+pub fn apply_fcodex_responses_app_config(cfg: &mut AppConfig, model_id: &str) {
     let base_url = fcodex_test_base_url();
-    cfg.llm.default_model = model_id.clone();
-    cfg.context.compaction_model = model_id.clone();
+    let model_name = model_id.strip_prefix("fcodex/").unwrap_or(model_id);
+    cfg.llm.default_model = model_id.to_string();
+    cfg.context.compaction_model = model_id.to_string();
     write_model_override(
         cfg,
         ModelOverrideSpec {
-            model_id: &model_id,
+            model_id,
             api: "openai-responses",
             provider: "fcodex",
             env_key: FCODEX_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
-            model_name: Some("gpt-5.6-sol"),
+            model_name: Some(model_name),
             thinking_format: Some("openai"),
             supports_files: true,
             supports_reasoning: true,

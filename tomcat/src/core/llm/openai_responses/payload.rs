@@ -21,7 +21,8 @@ use crate::core::llm::replay_policy::{
 };
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatResponse,
-    ChatResponseChoice, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
+    ChatResponseChoice, FileSource, ImageSource, MessageKind, ReasoningContinuation,
+    ReasoningFormat,
 };
 
 pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
@@ -212,6 +213,9 @@ pub(super) fn infer_terminal_metadata(
 ///
 /// 规则（与 plan §5 Phase B 表 + pi_agent_rust 同名实现一致）：
 /// - 序列首条 `role=System` 文本 → 顶层 `instructions`，**不**进 input；
+/// - `EphemeralTail` → 追加到顶层 `instructions`，**不**进 input。运行时状态是 system
+///   reminder；若作为每轮末尾的 user item 注入，上一请求的该 item 会在下一请求中被新 assistant /
+///   tool history 插到前面，从而破坏 Responses 的字节前缀缓存；
 /// - 后续 `role=System` → 退化到 `input` 中的 `message` 项（Responses 通常允许，但少数 Codex
 ///   端点会拒绝；本期不做特殊处理）；
 /// - `User` → `{ type: "message", role: "user", content: [input_text] }`；
@@ -224,13 +228,48 @@ pub(super) fn build_responses_input(
     target: &ProviderCompatProfile,
     continuity_enabled: bool,
     explicit_replay: bool,
+    input_start: usize,
 ) -> (Option<String>, Vec<Value>) {
-    let mut instructions: Option<String> = None;
+    let mut instructions = messages.first().and_then(|message| {
+        matches!(message.role, ChatMessageRole::System)
+            .then(|| extract_text(&message.content).unwrap_or_default())
+    });
+    let runtime_tail = messages
+        .iter()
+        .filter(|message| matches!(message.kind, MessageKind::EphemeralTail))
+        .filter_map(|message| extract_text(&message.content))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !runtime_tail.is_empty() {
+        let mut merged = instructions.unwrap_or_default();
+        if !merged.is_empty() {
+            merged.push_str("\n\n");
+        }
+        merged.push_str(&runtime_tail);
+        instructions = Some(merged);
+    }
     let mut input: Vec<Value> = Vec::with_capacity(messages.len());
-    let mut first_seen = false;
     let mut report = ReplayDowngradeReport::default();
 
-    for original in messages {
+    for (index, original) in messages.iter().enumerate() {
+        // The runtime tail has already been promoted to top-level instructions. Keeping it
+        // out of input means newly appended assistant/tool history extends the prior request
+        // instead of being inserted before a disappearing user message.
+        if matches!(original.kind, MessageKind::EphemeralTail) {
+            continue;
+        }
+        // The leading system message is always sent as top-level instructions. When a request
+        // continues from `previous_response_id`, it still must be resent, but its historical
+        // message item must not be duplicated in `input`.
+        if index == 0 && matches!(original.role, ChatMessageRole::System) {
+            continue;
+        }
+        // `previous_response_id` restores all state through the selected assistant response.
+        // Only items after that assistant are new input for the next response.
+        if index < input_start {
+            continue;
+        }
         let action = if continuity_enabled {
             plan(target, original)
         } else {
@@ -255,12 +294,6 @@ pub(super) fn build_responses_input(
         match msg.role {
             ChatMessageRole::System => {
                 let text = extract_text(&msg.content).unwrap_or_default();
-                if !first_seen && instructions.is_none() {
-                    instructions = Some(text);
-                    first_seen = true;
-                    continue;
-                }
-                first_seen = true;
                 input.push(json!({
                     "type": "message",
                     "role": "system",
@@ -268,7 +301,6 @@ pub(super) fn build_responses_input(
                 }));
             }
             ChatMessageRole::User => {
-                first_seen = true;
                 let parts = user_content_parts(&msg.content);
                 input.push(json!({
                     "type": "message",
@@ -277,7 +309,6 @@ pub(super) fn build_responses_input(
                 }));
             }
             ChatMessageRole::Assistant => {
-                first_seen = true;
                 if continuity_enabled && explicit_replay && explicit_keep {
                     if let Some(continuation) = original.reasoning_continuation.as_ref() {
                         input.extend(responses_reasoning_items(continuation));
@@ -328,7 +359,6 @@ pub(super) fn build_responses_input(
                 }
             }
             ChatMessageRole::Tool => {
-                first_seen = true;
                 let call_id = msg.tool_call_id.clone().unwrap_or_default();
                 let output = extract_text(&msg.content).unwrap_or_default();
                 input.push(json!({

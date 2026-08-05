@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_stream::{Stream, StreamExt};
-use tracing::warn;
+use tracing::{info, warn, Level};
 
 use super::super::auth::Credential;
 use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
@@ -235,21 +235,32 @@ where
     )
 }
 
-fn latest_openai_response_id_for_profile(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviousResponseHint {
+    id: String,
+    assistant_index: usize,
+}
+
+fn latest_openai_response_hint_for_profile(
     messages: &[ChatMessage],
     target_profile: &ProviderCompatProfile,
-) -> Option<String> {
+) -> Option<PreviousResponseHint> {
     messages
         .iter()
+        .enumerate()
         .rev()
-        .find(|msg| matches!(msg.role, ChatMessageRole::Assistant))
-        .and_then(|msg| match plan(target_profile, msg) {
+        .find(|(_, msg)| matches!(msg.role, ChatMessageRole::Assistant))
+        .and_then(|(assistant_index, msg)| match plan(target_profile, msg) {
             ReplayAction::KeepOpaque => msg
                 .reasoning_continuation
                 .as_ref()
                 .and_then(|continuation| continuation.provider_refs.as_ref())
                 .and_then(|refs| refs.openai_response_id.clone())
-                .filter(|id| !id.is_empty()),
+                .filter(|id| !id.is_empty())
+                .map(|id| PreviousResponseHint {
+                    id,
+                    assistant_index,
+                }),
             ReplayAction::StripOpaque => None,
         })
 }
@@ -265,6 +276,115 @@ fn is_previous_response_id_error(err: &AppError) -> bool {
     text.contains("previous_response_id")
         || text.contains("previous response id")
         || text.contains("previous_response")
+}
+
+/// Emit only hashes and structural facts, never prompt text. The cache key is
+/// an input prefix, so adjacent requests can be compared at the first input
+/// item whose hash differs without exposing user content in diagnostics.
+fn log_responses_wire_fingerprint(
+    model: &str,
+    request: &ChatRequest,
+    instructions: Option<&str>,
+    input: &[Value],
+    tools: Option<&[Value]>,
+    explicit_replay: bool,
+    input_start: usize,
+    has_previous_response_id: bool,
+) {
+    if !prompt_prefix_fingerprint_enabled()
+        || !tracing::enabled!(target: "tomcat_chat_diag", Level::INFO)
+    {
+        return;
+    }
+
+    let tail_hashes = request
+        .messages
+        .iter()
+        .filter(|message| matches!(message.kind, crate::core::llm::MessageKind::EphemeralTail))
+        .map(|message| fingerprint(&serde_json::to_value(message).unwrap_or(Value::Null)))
+        .collect::<Vec<_>>();
+    let input_hashes = input.iter().map(fingerprint).collect::<Vec<_>>();
+    let input_prefix_hashes = rolling_array_fingerprints(input);
+    let tool_hash = tools.map(|tools| fingerprint(&Value::Array(tools.to_vec())));
+    let input_item_types = input
+        .iter()
+        .map(|item| {
+            item.get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let replayed_reasoning_items = input
+        .iter()
+        .filter(|item| {
+            item.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.contains("reasoning"))
+                || item.get("encrypted_content").is_some()
+        })
+        .count();
+
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "responses_wire_fingerprint",
+        model,
+        request_id = ?request.diagnostic_request_id,
+        request_family = ?request.cache_key,
+        instructions_hash = ?instructions.map(fingerprint_str),
+        instructions_chars = instructions.map(str::len).unwrap_or_default(),
+        tool_hash = ?tool_hash,
+        input_count = input.len(),
+        ?input_item_types,
+        ?input_hashes,
+        ?input_prefix_hashes,
+        ?tail_hashes,
+        explicit_replay,
+        replayed_reasoning_items,
+        input_start,
+        has_previous_response_id,
+    );
+}
+
+fn prompt_prefix_fingerprint_enabled() -> bool {
+    std::env::var("TOMCAT_PROMPT_PREFIX_FINGERPRINT")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+fn fingerprint(value: &Value) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(value).unwrap_or_default())
+    )[..16]
+        .to_string()
+}
+
+fn fingerprint_str(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))[..16].to_string()
+}
+
+fn rolling_array_fingerprints(values: &[Value]) -> Vec<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"[");
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if index > 0 {
+                hasher.update(b",");
+            }
+            hasher.update(serde_json::to_vec(value).unwrap_or_default());
+            let mut snapshot = hasher.clone();
+            snapshot.update(b"]");
+            format!("{:x}", snapshot.finalize())[..16].to_string()
+        })
+        .collect()
 }
 
 impl OpenAiResponsesProvider {
@@ -409,27 +529,41 @@ impl OpenAiResponsesProvider {
         let target_profile = self.replay_profile_for_model(&model);
         let thinking_format = self.thinking_format_for_wire();
         let thinking_cfg = self.thinking_cfg_for_request(request);
-        let previous_response_id = if self.continuity_enabled
+        let previous_response_hint = if self.continuity_enabled
             && self.use_previous_response_id
             && allow_response_id_hint
             && target_profile.supports_response_id_hint
         {
-            latest_openai_response_id_for_profile(&request.messages, &target_profile)
+            latest_openai_response_hint_for_profile(&request.messages, &target_profile)
         } else {
             None
         };
-        let explicit_replay = self.continuity_enabled && previous_response_id.is_none();
+        let explicit_replay = self.continuity_enabled && previous_response_hint.is_none();
+        let input_start = previous_response_hint
+            .as_ref()
+            .map_or(0, |hint| hint.assistant_index + 1);
         let (instructions, input) = payload::build_responses_input(
             degraded_messages.as_ref(),
             &target_profile,
             self.continuity_enabled,
             explicit_replay,
+            input_start,
         );
         let tools_payload = request
             .tools
             .as_deref()
             .map(payload::convert_tools_to_responses)
             .filter(|v| !v.is_empty());
+        log_responses_wire_fingerprint(
+            &model,
+            request,
+            instructions.as_deref(),
+            &input,
+            tools_payload.as_deref(),
+            explicit_replay,
+            input_start,
+            previous_response_hint.is_some(),
+        );
 
         let mut body = json!({
             "model": model,
@@ -447,9 +581,9 @@ impl OpenAiResponsesProvider {
         if explicit_replay {
             body["include"] = json!(["reasoning.encrypted_content"]);
         }
-        if let Some(previous_response_id) = previous_response_id {
+        if let Some(previous_response_hint) = previous_response_hint {
             body["store"] = json!(true);
-            body["previous_response_id"] = Value::String(previous_response_id);
+            body["previous_response_id"] = Value::String(previous_response_hint.id);
         }
         if let Some(ins) = instructions {
             body["instructions"] = Value::String(ins);

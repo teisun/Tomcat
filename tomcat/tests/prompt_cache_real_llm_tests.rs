@@ -8,9 +8,15 @@ mod common;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures_util::StreamExt;
 use serial_test::serial;
-use tomcat::core::llm::MessageKind;
-use tomcat::{AppConfig, ChatMessage, ChatRequest, LlmProvider, ThinkingLevel};
+use tomcat::core::llm::system_prompt::{
+    PathRuleSummary, SystemPromptSection, SystemPromptSnapshot, ToolSurface, WorkspaceContext,
+    WorkspaceRootDescriptor, WorkspaceState, WorkspaceStateSection,
+};
+use tomcat::core::llm::{ContinuityMetadata, MessageKind, ReasoningContinuation, TokenUsage};
+use tomcat::core::plan_runtime::reminders::PLANNER_REMINDER;
+use tomcat::{AppConfig, ChatMessage, ChatRequest, LlmProvider, StreamEvent, ThinkingLevel};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -19,6 +25,433 @@ fn stable_prefix() -> String {
      It contains implementation constraints, tool contracts, and prior decisions that must be \
      reused without alteration. "
         .repeat(180)
+}
+
+fn main_agent_prompt_and_tools() -> (String, Vec<serde_json::Value>) {
+    let context = WorkspaceContext {
+        agent_workspace_dir: "/tmp/tomcat-cache-probe/workspace".to_string(),
+        agent_definition_dir: "/tmp/tomcat-cache-probe/agent".to_string(),
+        agent_plans_dir: "~/.tomcat/plans".to_string(),
+        agent_trail_dir: "/tmp/tomcat-cache-probe/agent-trail".to_string(),
+        tool_lines: None,
+    };
+    let tool_surface = ToolSurface::from_plugin_tools(false, &[]);
+    let snapshot = SystemPromptSnapshot::new(&context, &tool_surface, None, None, 400_000);
+    (
+        snapshot.system_text().to_string(),
+        snapshot.tool_definitions().to_vec(),
+    )
+}
+
+fn main_agent_plan_tail(session_grant: Option<&str>) -> String {
+    let mut read_write = vec![
+        WorkspaceRootDescriptor {
+            path: "/tmp/tomcat-cache-probe/agent".to_string(),
+            label: "agent_definition_dir".to_string(),
+            alias: None,
+            description: None,
+        },
+        WorkspaceRootDescriptor {
+            path: "/tmp/tomcat-cache-probe/workspace".to_string(),
+            label: "agent_workspace_root".to_string(),
+            alias: Some("cache-probe".to_string()),
+            description: Some("reproducible cache experiment workspace".to_string()),
+        },
+    ];
+    if let Some(path) = session_grant {
+        read_write.push(WorkspaceRootDescriptor {
+            path: path.to_string(),
+            label: "session_grant".to_string(),
+            alias: None,
+            description: None,
+        });
+    }
+    let state = WorkspaceState {
+        read_write,
+        read_only: vec![
+            WorkspaceRootDescriptor {
+                path: "/tmp/tomcat-cache-probe/agent-trail".to_string(),
+                label: "agent_trail_dir".to_string(),
+                alias: None,
+                description: None,
+            },
+            WorkspaceRootDescriptor {
+                path: "/tmp/tomcat-cache-probe/sessions".to_string(),
+                label: "session_transcripts".to_string(),
+                alias: None,
+                description: None,
+            },
+        ],
+        path_rules: vec![PathRuleSummary {
+            path: "/tmp/tomcat-cache-probe/agent-trail".to_string(),
+            mode: "readonly".to_string(),
+            builtin: true,
+        }],
+    };
+    let context = WorkspaceContext {
+        agent_workspace_dir: String::new(),
+        agent_definition_dir: "/tmp/tomcat-cache-probe/agent".to_string(),
+        agent_plans_dir: "~/.tomcat/plans".to_string(),
+        agent_trail_dir: "/tmp/tomcat-cache-probe/agent-trail".to_string(),
+        tool_lines: None,
+    };
+    let workspace_state = WorkspaceStateSection::new(state).render(&context);
+    format!(
+        "{}\n\n<system_reminder kind=\"workspace_state\">\n{workspace_state}\n</system_reminder>",
+        *PLANNER_REMINDER
+    )
+}
+
+/// Replay the durable portion of a real session. The final assistant summary
+/// is intentionally excluded: only ending at a completed tool output gives
+/// the next request the same role invariant as an AgentLoop tool continuation.
+fn transcript_history_through_last_tool(
+    path: &std::path::Path,
+) -> Result<Vec<ChatMessage>, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(path)?;
+    let mut messages = Vec::new();
+    for (line_number, line) in raw.lines().enumerate() {
+        let event: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!("parse transcript line {}: {error}", line_number + 1))?;
+        if event.get("type").and_then(serde_json::Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = event.get("message") else {
+            continue;
+        };
+        let message = serde_json::from_value::<ChatMessage>(message.clone()).map_err(|error| {
+            format!(
+                "decode transcript message on line {}: {error}",
+                line_number + 1
+            )
+        })?;
+        messages.push(message);
+    }
+    let last_tool = messages
+        .iter()
+        .rposition(|message| matches!(message.role, tomcat::core::llm::ChatMessageRole::Tool))
+        .ok_or("transcript contains no tool result")?;
+    messages.truncate(last_tool + 1);
+    Ok(messages)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HistoricalReasoningMode {
+    All,
+    LatestOnly,
+    None,
+}
+
+impl HistoricalReasoningMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::LatestOnly => "latest-only",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StablePrefixLocation {
+    Instructions,
+    InputMessage,
+}
+
+impl StablePrefixLocation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Instructions => "instructions",
+            Self::InputMessage => "input-message",
+        }
+    }
+}
+
+fn retain_historical_reasoning(messages: &mut [ChatMessage], mode: HistoricalReasoningMode) {
+    let latest_reasoning_assistant = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| {
+            matches!(message.role, tomcat::core::llm::ChatMessageRole::Assistant)
+                && message.reasoning_continuation.is_some()
+        })
+        .map(|(index, _)| index);
+    for (index, message) in messages.iter_mut().enumerate() {
+        if !matches!(message.role, tomcat::core::llm::ChatMessageRole::Assistant) {
+            continue;
+        }
+        let keep = match mode {
+            HistoricalReasoningMode::All => true,
+            HistoricalReasoningMode::LatestOnly => Some(index) == latest_reasoning_assistant,
+            HistoricalReasoningMode::None => false,
+        };
+        if !keep {
+            message.reasoning_continuation = None;
+        }
+    }
+}
+
+async fn run_fcodex_cache_scope_probe(
+    location: StablePrefixLocation,
+) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    let (_home, cfg) = fcodex_responses_config_for_model("fcodex/gpt-5.6-sol", false);
+    let provider = common::resolve_main_provider(&cfg);
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!("prompt-cache-scope:{}:{probe_id}", location.label());
+    let stable_history = stable_prefix().repeat(6);
+    let system = match location {
+        StablePrefixLocation::Instructions => {
+            format!("{stable_history}\nReply with exactly one word: acknowledged.")
+        }
+        StablePrefixLocation::InputMessage => {
+            "Reply with exactly one word: acknowledged. The user message carries prior history."
+                .to_string()
+        }
+    };
+    let user = match location {
+        StablePrefixLocation::Instructions => "Start the cache-scope probe.".to_string(),
+        StablePrefixLocation::InputMessage => {
+            format!("{stable_history}\nStart the cache-scope probe.")
+        }
+    };
+    let mut first_request = request(
+        vec![
+            ChatMessage::system(system.clone()),
+            ChatMessage::user(user.clone()),
+        ],
+        &cfg.llm.default_model,
+        &cache_key,
+    );
+    first_request.temperature = None;
+    first_request.max_tokens = None;
+    first_request.thinking_level = Some(ThinkingLevel::Xhigh);
+    let first = call(provider.as_ref(), first_request).await?;
+    let first_usage = first
+        .usage
+        .as_ref()
+        .ok_or("cache-scope probe first response omitted usage")?;
+    let assistant = first
+        .choices
+        .first()
+        .map(|choice| choice.message.clone())
+        .ok_or("cache-scope probe first response omitted assistant")?;
+
+    let mut second_request = request(
+        vec![
+            ChatMessage::system(system),
+            ChatMessage::user(user),
+            assistant,
+            ChatMessage::user("Continue the cache-scope probe."),
+        ],
+        &cfg.llm.default_model,
+        &cache_key,
+    );
+    second_request.temperature = None;
+    second_request.max_tokens = None;
+    second_request.thinking_level = Some(ThinkingLevel::Xhigh);
+    let second = call(provider.as_ref(), second_request).await?;
+    let second_usage = second
+        .usage
+        .as_ref()
+        .ok_or("cache-scope probe second response omitted usage")?;
+    let first_read = first_usage.cache_read_tokens.unwrap_or_default();
+    let second_read = second_usage.cache_read_tokens.unwrap_or_default();
+    eprintln!(
+        "phase=\"fcodex_cache_scope\" location={} first_prompt_tokens={} \
+         first_cache_read_tokens={} second_prompt_tokens={} second_cache_read_tokens={}",
+        location.label(),
+        first_usage.prompt_tokens,
+        first_read,
+        second_usage.prompt_tokens,
+        second_read
+    );
+    Ok((first_read, second_read))
+}
+
+async fn run_fcodex_function_history_cache_scope_probe(
+) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    let (_home, cfg) = fcodex_responses_config_for_model("fcodex/gpt-5.6-sol", false);
+    let provider = common::resolve_main_provider(&cfg);
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!("prompt-cache-scope:function-history:{probe_id}");
+    let history_call_id = "historical-cache-probe-call";
+    let tool = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "cache_probe",
+            "description": "Record a cache probe.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            }
+        }
+    });
+    let history = vec![
+        ChatMessage::system("Reply with exactly one word: acknowledged."),
+        ChatMessage::user(format!(
+            "{}\nStart the structured-history cache probe.",
+            stable_prefix().repeat(6)
+        )),
+        ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![serde_json::json!({
+                "id": history_call_id,
+                "type": "function",
+                "function": {
+                    "name": "cache_probe",
+                    "arguments": "{}",
+                },
+            })],
+        ),
+        ChatMessage::tool(history_call_id, "historical tool result"),
+        ChatMessage::user("Continue after the historical tool result."),
+    ];
+    let mut first_request = request(history.clone(), &cfg.llm.default_model, &cache_key);
+    first_request.temperature = None;
+    first_request.max_tokens = None;
+    first_request.thinking_level = Some(ThinkingLevel::Xhigh);
+    first_request.tools = Some(vec![tool.clone()]);
+    let first = call(provider.as_ref(), first_request).await?;
+    let first_usage = first
+        .usage
+        .as_ref()
+        .ok_or("function-history scope first response omitted usage")?;
+    let assistant = first
+        .choices
+        .first()
+        .map(|choice| choice.message.clone())
+        .ok_or("function-history scope first response omitted assistant")?;
+
+    let mut second_history = history;
+    second_history.push(assistant);
+    second_history.push(ChatMessage::user(
+        "Continue the structured-history cache probe.",
+    ));
+    let mut second_request = request(second_history, &cfg.llm.default_model, &cache_key);
+    second_request.temperature = None;
+    second_request.max_tokens = None;
+    second_request.thinking_level = Some(ThinkingLevel::Xhigh);
+    second_request.tools = Some(vec![tool]);
+    let second = call(provider.as_ref(), second_request).await?;
+    let second_usage = second
+        .usage
+        .as_ref()
+        .ok_or("function-history scope second response omitted usage")?;
+    let first_read = first_usage.cache_read_tokens.unwrap_or_default();
+    let second_read = second_usage.cache_read_tokens.unwrap_or_default();
+    eprintln!(
+        "phase=\"fcodex_cache_scope\" location=function-history first_prompt_tokens={} \
+         first_cache_read_tokens={} second_prompt_tokens={} second_cache_read_tokens={}",
+        first_usage.prompt_tokens, first_read, second_usage.prompt_tokens, second_read
+    );
+    Ok((first_read, second_read))
+}
+
+async fn run_fcodex_multimessage_history_cache_scope_probe(
+) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    let (_home, cfg) = fcodex_responses_config_for_model("fcodex/gpt-5.6-sol", false);
+    let provider = common::resolve_main_provider(&cfg);
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!("prompt-cache-scope:multimessage-history:{probe_id}");
+    let first_segment = stable_prefix().repeat(3);
+    let second_segment = stable_prefix().repeat(3);
+    let history = vec![
+        ChatMessage::system("Reply with exactly one word: acknowledged."),
+        ChatMessage::user(format!("{first_segment}\nFirst historical user message.")),
+        ChatMessage::assistant("First historical assistant message."),
+        ChatMessage::user(format!("{second_segment}\nSecond historical user message.")),
+    ];
+    let mut first_request = request(history.clone(), &cfg.llm.default_model, &cache_key);
+    first_request.temperature = None;
+    first_request.max_tokens = None;
+    first_request.thinking_level = Some(ThinkingLevel::Xhigh);
+    let first = call(provider.as_ref(), first_request).await?;
+    let first_usage = first
+        .usage
+        .as_ref()
+        .ok_or("multimessage scope first response omitted usage")?;
+    let assistant = first
+        .choices
+        .first()
+        .map(|choice| choice.message.clone())
+        .ok_or("multimessage scope first response omitted assistant")?;
+
+    let mut second_history = history;
+    second_history.push(assistant);
+    second_history.push(ChatMessage::user(
+        "Continue the multimessage-history cache probe.",
+    ));
+    let mut second_request = request(second_history, &cfg.llm.default_model, &cache_key);
+    second_request.temperature = None;
+    second_request.max_tokens = None;
+    second_request.thinking_level = Some(ThinkingLevel::Xhigh);
+    let second = call(provider.as_ref(), second_request).await?;
+    let second_usage = second
+        .usage
+        .as_ref()
+        .ok_or("multimessage scope second response omitted usage")?;
+    let first_read = first_usage.cache_read_tokens.unwrap_or_default();
+    let second_read = second_usage.cache_read_tokens.unwrap_or_default();
+    eprintln!(
+        "phase=\"fcodex_cache_scope\" location=multimessage-history first_prompt_tokens={} \
+         first_cache_read_tokens={} second_prompt_tokens={} second_cache_read_tokens={}",
+        first_usage.prompt_tokens, first_read, second_usage.prompt_tokens, second_read
+    );
+    Ok((first_read, second_read))
+}
+
+async fn run_fcodex_full_tool_catalog_cache_scope_probe(
+) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    let (_home, cfg) = fcodex_responses_config_for_model("fcodex/gpt-5.6-sol", false);
+    let provider = common::resolve_main_provider(&cfg);
+    let (system, tools) = main_agent_prompt_and_tools();
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!("prompt-cache-scope:full-tool-catalog:{probe_id}");
+    let history = vec![
+        ChatMessage::system(system),
+        ChatMessage::user(format!(
+            "{}\nReply with exactly one word: acknowledged.",
+            stable_prefix().repeat(6)
+        )),
+    ];
+    let mut first_request = request(history.clone(), &cfg.llm.default_model, &cache_key);
+    first_request.temperature = None;
+    first_request.max_tokens = None;
+    first_request.thinking_level = Some(ThinkingLevel::Xhigh);
+    first_request.tools = Some(tools.clone());
+    let first = call(provider.as_ref(), first_request).await?;
+    let first_usage = first
+        .usage
+        .as_ref()
+        .ok_or("full-tool scope first response omitted usage")?;
+    let assistant = first
+        .choices
+        .first()
+        .map(|choice| choice.message.clone())
+        .ok_or("full-tool scope first response omitted assistant")?;
+
+    let mut second_history = history;
+    second_history.push(assistant);
+    second_history.push(ChatMessage::user("Continue the full-tool cache probe."));
+    let mut second_request = request(second_history, &cfg.llm.default_model, &cache_key);
+    second_request.temperature = None;
+    second_request.max_tokens = None;
+    second_request.thinking_level = Some(ThinkingLevel::Xhigh);
+    second_request.tools = Some(tools);
+    let second = call(provider.as_ref(), second_request).await?;
+    let second_usage = second
+        .usage
+        .as_ref()
+        .ok_or("full-tool scope second response omitted usage")?;
+    let first_read = first_usage.cache_read_tokens.unwrap_or_default();
+    let second_read = second_usage.cache_read_tokens.unwrap_or_default();
+    eprintln!(
+        "phase=\"fcodex_cache_scope\" location=full-tool-catalog first_prompt_tokens={} \
+         first_cache_read_tokens={} second_prompt_tokens={} second_cache_read_tokens={}",
+        first_usage.prompt_tokens, first_read, second_usage.prompt_tokens, second_read
+    );
+    Ok((first_read, second_read))
 }
 
 fn request(messages: Vec<ChatMessage>, model: &str, cache_key: &str) -> ChatRequest {
@@ -51,6 +484,152 @@ async fn call(
                 )
             })??,
     )
+}
+
+#[derive(Debug, Default)]
+struct ToolCallAccum {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+#[derive(Debug)]
+struct CapturedStreamTurn {
+    assistant: ChatMessage,
+    usage: TokenUsage,
+}
+
+fn merge_tool_call_delta(
+    tool_calls: &mut Vec<ToolCallAccum>,
+    index: u32,
+    id: Option<String>,
+    name: Option<String>,
+    arguments_delta: Option<String>,
+) {
+    let index = index as usize;
+    if tool_calls.len() <= index {
+        tool_calls.resize_with(index + 1, ToolCallAccum::default);
+    }
+    let entry = &mut tool_calls[index];
+    if let Some(id) = id {
+        entry.id = Some(id);
+    }
+    if let Some(name) = name {
+        entry.name = Some(name);
+    }
+    if let Some(arguments_delta) = arguments_delta {
+        entry.arguments.push_str(&arguments_delta);
+    }
+}
+
+fn finalized_tool_calls(tool_calls: Vec<ToolCallAccum>) -> Vec<serde_json::Value> {
+    tool_calls
+        .into_iter()
+        .filter(|tool_call| tool_call.name.is_some())
+        .map(|tool_call| {
+            serde_json::json!({
+                "id": tool_call.id.unwrap_or_else(|| "call_missing".to_string()),
+                "type": "function",
+                "function": {
+                    "name": tool_call.name.unwrap_or_else(|| "unknown".to_string()),
+                    "arguments": tool_call.arguments,
+                }
+            })
+        })
+        .collect()
+}
+
+async fn capture_stream_turn(
+    provider: &dyn LlmProvider,
+    request: ChatRequest,
+) -> Result<CapturedStreamTurn, Box<dyn std::error::Error>> {
+    let mut stream = tokio::time::timeout(REQUEST_TIMEOUT, provider.chat_stream(request))
+        .await
+        .map_err(|_| {
+            format!(
+                "provider.chat_stream timed out after {}s",
+                REQUEST_TIMEOUT.as_secs()
+            )
+        })??;
+    let mut text = String::new();
+    let mut tool_calls = Vec::<ToolCallAccum>::new();
+    let mut thinking_text: Option<String> = None;
+    let mut reasoning_continuation: Option<ReasoningContinuation> = None;
+    let mut continuity: Option<ContinuityMetadata> = None;
+    let mut finish_reason: Option<String> = None;
+    let mut usage: Option<TokenUsage> = None;
+
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamEvent::ContentDelta { delta } => text.push_str(&delta),
+            StreamEvent::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments_delta,
+            } => merge_tool_call_delta(&mut tool_calls, index, id, name, arguments_delta),
+            StreamEvent::ReasoningSnapshot {
+                thinking_text: snapshot_thinking_text,
+                reasoning_continuation: snapshot_reasoning_continuation,
+                continuity: snapshot_continuity,
+            } => {
+                if snapshot_thinking_text.is_some() {
+                    thinking_text = snapshot_thinking_text;
+                }
+                if snapshot_reasoning_continuation.is_some() {
+                    reasoning_continuation = snapshot_reasoning_continuation;
+                }
+                if snapshot_continuity.is_some() {
+                    continuity = snapshot_continuity;
+                }
+            }
+            StreamEvent::FinishReason { reason } => finish_reason = Some(reason),
+            StreamEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                total_tokens,
+                reasoning_tokens,
+                text_tokens,
+            } => {
+                usage = Some(TokenUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    reasoning_tokens,
+                    text_tokens,
+                });
+            }
+            StreamEvent::Thinking { .. } | StreamEvent::LlmNotice { .. } => {}
+            StreamEvent::LlmError {
+                reason,
+                message,
+                code,
+            } => {
+                return Err(format!(
+                "provider returned terminal stream error reason={reason} code={code:?}: {message}"
+            )
+                .into())
+            }
+        }
+    }
+
+    let tool_calls = finalized_tool_calls(tool_calls);
+    let assistant = if tool_calls.is_empty() {
+        ChatMessage::assistant(text)
+    } else if text.is_empty() {
+        ChatMessage::assistant_with_tool_calls(None, tool_calls)
+    } else {
+        ChatMessage::assistant_with_tool_calls(Some(&text), tool_calls)
+    }
+    .with_completion_metadata(finish_reason, None, None)
+    .with_reasoning_state(thinking_text, reasoning_continuation, continuity);
+    let usage = usage.ok_or("Responses stream omitted usage")?;
+
+    Ok(CapturedStreamTurn { assistant, usage })
 }
 
 async fn run_twenty_turn_probe(
@@ -118,14 +697,26 @@ fn assert_second_request_read_cache(
 }
 
 fn fcodex_responses_config() -> (common::TempHomeGuard, AppConfig) {
+    fcodex_responses_config_for_model("fcodex/gpt-5.6-sol", false)
+}
+
+fn fcodex_responses_config_for_model(
+    model: &str,
+    use_previous_response_id: bool,
+) -> (common::TempHomeGuard, AppConfig) {
     let home = common::TempHomeGuard::new();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(
-        common::dot_tomcat_e2e_workdir("prompt_cache_fcodex_responses")
-            .display()
-            .to_string(),
+        common::dot_tomcat_e2e_workdir(&format!(
+            "prompt_cache_fcodex_responses_{}",
+            model.replace('/', "_")
+        ))
+        .display()
+        .to_string(),
     );
-    common::apply_fcodex_app_config(&mut cfg);
+    common::apply_fcodex_responses_app_config(&mut cfg, model);
+    cfg.llm.reasoning_continuity.enabled = true;
+    cfg.llm.openai_responses.use_previous_response_id = use_previous_response_id;
     (home, cfg)
 }
 
@@ -493,6 +1084,587 @@ async fn fcodex_openai_responses_three_tool_turn_cache_probe_classifies_gateway_
     eprintln!(
         "phase=\"fcodex_openai_m1_classification\" cache_read_tokens={cache_reads:?} \
          result=\"gateway_reused_at_least_one_stable_prefix\""
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FcodexResponsesProbeMode {
+    Baseline,
+    PreviousResponseId,
+}
+
+impl FcodexResponsesProbeMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::PreviousResponseId => "previous_response_id",
+        }
+    }
+
+    fn use_previous_response_id(self) -> bool {
+        matches!(self, Self::PreviousResponseId)
+    }
+}
+
+async fn run_fcodex_responses_marathon_probe(
+    model_id: &str,
+    mode: FcodexResponsesProbeMode,
+    stable_prefix_multiplier: usize,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    let (_home, cfg) = fcodex_responses_config_for_model(model_id, mode.use_previous_response_id());
+    let provider = common::resolve_main_provider(&cfg);
+    let wire_model = model_id.strip_prefix("fcodex/").unwrap_or(model_id);
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!(
+        "prompt-cache-phase0:{}:{}:prefix-x{}:{probe_id}",
+        mode.label(),
+        wire_model,
+        stable_prefix_multiplier
+    );
+    let cache_probe_tool = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "cache_probe",
+            "description": "Record one deterministic cache-marathon step.",
+            "parameters": {
+                "type": "object",
+                "properties": {"round": {"type": "integer"}},
+                "required": ["round"]
+            }
+        }
+    });
+    let mut messages = vec![
+        ChatMessage::system(format!(
+            "{}\nYou are a cache-marathon harness. Every response must call \
+             `cache_probe` exactly once and must not produce prose. After each tool result, \
+             immediately call `cache_probe` again.",
+            stable_prefix().repeat(stable_prefix_multiplier)
+        )),
+        ChatMessage::user("Start the cache marathon by calling cache_probe for round 1."),
+    ];
+    let mut cache_reads = Vec::with_capacity(6);
+
+    for round in 1..=6 {
+        let mut request_messages = messages.clone();
+        let mut tail = ChatMessage::user(format!(
+            "runtime-only cache tail; this is deliberately different on round {round}"
+        ));
+        tail.kind = MessageKind::EphemeralTail;
+        request_messages.push(tail);
+
+        let mut turn_request = request(request_messages, &cfg.llm.default_model, &cache_key);
+        turn_request.stream = Some(true);
+        turn_request.thinking_level = Some(ThinkingLevel::High);
+        turn_request.tools = Some(vec![cache_probe_tool.clone()]);
+        let captured = capture_stream_turn(provider.as_ref(), turn_request).await?;
+        let usage = &captured.usage;
+        let cache_read = usage.cache_read_tokens.unwrap_or_default();
+        eprintln!(
+            "phase=\"responses_cache_phase0\" mode={} model={} round={} prompt_tokens={} \
+             cache_read_tokens={} cache_write_tokens={}",
+            mode.label(),
+            wire_model,
+            round,
+            usage.prompt_tokens,
+            cache_read,
+            usage.cache_write_tokens.unwrap_or_default()
+        );
+        cache_reads.push(cache_read);
+
+        let assistant = captured.assistant;
+        let tool_call_ids = assistant
+            .tool_calls
+            .as_deref()
+            .ok_or_else(|| format!("{model_id} did not call cache_probe on round {round}"))?
+            .iter()
+            .filter_map(|call| {
+                (call["function"]["name"].as_str() == Some("cache_probe"))
+                    .then(|| call["id"].as_str())
+                    .flatten()
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        if tool_call_ids.len() != 1 {
+            return Err(format!(
+                "{model_id} must call cache_probe exactly once on round {round}; got {:?}",
+                assistant.tool_calls
+            )
+            .into());
+        }
+
+        if mode.use_previous_response_id()
+            && assistant
+                .reasoning_continuation
+                .as_ref()
+                .and_then(|continuation| continuation.provider_refs.as_ref())
+                .and_then(|refs| refs.openai_response_id.as_ref())
+                .is_none()
+        {
+            return Err(format!(
+                "{model_id} did not return a replay-profile-bound response id on round {round}"
+            )
+            .into());
+        }
+
+        messages.push(assistant);
+        let tool_result = format!(
+            "cache_probe result round={round}\n{}",
+            "large deterministic diagnostic output\n".repeat(220)
+        );
+        messages.push(ChatMessage::tool(&tool_call_ids[0], &tool_result));
+    }
+
+    Ok(cache_reads)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FcodexAgentTailMode {
+    StablePlanState,
+    ChangingSessionGrant,
+}
+
+impl FcodexAgentTailMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::StablePlanState => "stable-plan-tail",
+            Self::ChangingSessionGrant => "changing-grant-tail",
+        }
+    }
+
+    fn session_grant(self, round: usize) -> Option<String> {
+        match self {
+            Self::StablePlanState => None,
+            Self::ChangingSessionGrant => {
+                Some(format!("/tmp/tomcat-cache-probe/grant-round-{round}"))
+            }
+        }
+    }
+}
+
+async fn run_fcodex_main_agent_wire_shape_probe(
+    tail_mode: FcodexAgentTailMode,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    let (_home, cfg) = fcodex_responses_config_for_model("fcodex/gpt-5.6-sol", false);
+    let provider = common::resolve_main_provider(&cfg);
+    let (system, tools) = main_agent_prompt_and_tools();
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!(
+        "prompt-cache-agent-wire:{}:{probe_id}:main",
+        tail_mode.label()
+    );
+    let mut messages = vec![
+        ChatMessage::system(&system),
+        ChatMessage::user(
+            "Run a six-step cache experiment. On every step, briefly state the current step in \
+             Chinese, then call `config_get` exactly once with `{ \"key\": \"agent.id\" }`. \
+             After each tool result, continue to the next step. Do not call any other tool.",
+        ),
+    ];
+    let mut cache_reads = Vec::with_capacity(6);
+
+    for round in 1..=6 {
+        let mut request_messages = messages.clone();
+        let mut tail = ChatMessage::user(main_agent_plan_tail(
+            tail_mode.session_grant(round).as_deref(),
+        ));
+        tail.kind = MessageKind::EphemeralTail;
+        request_messages.push(tail);
+
+        let mut turn_request = request(request_messages, &cfg.llm.default_model, &cache_key);
+        turn_request.stream = Some(true);
+        turn_request.temperature = None;
+        turn_request.max_tokens = None;
+        turn_request.resolved_output_limit = None;
+        turn_request.thinking_level = Some(ThinkingLevel::Xhigh);
+        turn_request.diagnostic_request_id = Some(format!(
+            "agent-wire:{}:{probe_id}:{round}",
+            tail_mode.label()
+        ));
+        turn_request.tools = Some(tools.clone());
+        let captured = capture_stream_turn(provider.as_ref(), turn_request).await?;
+        let usage = &captured.usage;
+        let cache_read = usage.cache_read_tokens.unwrap_or_default();
+        eprintln!(
+            "phase=\"fcodex_agent_wire_shape\" tail_mode={} round={} prompt_tokens={} \
+             cache_read_tokens={} cache_write_tokens={}",
+            tail_mode.label(),
+            round,
+            usage.prompt_tokens,
+            cache_read,
+            usage.cache_write_tokens.unwrap_or_default()
+        );
+        cache_reads.push(cache_read);
+
+        let assistant = captured.assistant;
+        let tool_calls = assistant
+            .tool_calls
+            .as_deref()
+            .ok_or_else(|| format!("agent-wire probe returned no tool call on round {round}"))?;
+        if tool_calls.len() != 1 || tool_calls[0]["function"]["name"].as_str() != Some("config_get")
+        {
+            return Err(format!(
+                "agent-wire probe expected exactly one config_get on round {round}, got {tool_calls:?}"
+            )
+            .into());
+        }
+        let call_id = tool_calls[0]["id"]
+            .as_str()
+            .ok_or_else(|| format!("agent-wire probe config_get has no id on round {round}"))?
+            .to_string();
+        messages.push(assistant);
+        messages.push(ChatMessage::tool(&call_id, "\"main\""));
+    }
+
+    Ok(cache_reads)
+}
+
+async fn run_fcodex_transcript_replay_probe(
+    transcript_path: &std::path::Path,
+    reasoning_mode: HistoricalReasoningMode,
+    large_tool_results: bool,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    let (_home, cfg) = fcodex_responses_config_for_model("fcodex/gpt-5.6-sol", false);
+    let provider = common::resolve_main_provider(&cfg);
+    let (system, tools) = main_agent_prompt_and_tools();
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!(
+        "prompt-cache-transcript-replay:{}:{probe_id}:main",
+        reasoning_mode.label()
+    );
+    let mut messages = vec![ChatMessage::system(system)];
+    let mut history = transcript_history_through_last_tool(transcript_path)?;
+    retain_historical_reasoning(&mut history, reasoning_mode);
+    messages.extend(history);
+    messages.push(ChatMessage::user(
+        "Continue with six small cache verification steps. On every step, briefly state the \
+         current step in Chinese, then call `config_get` exactly once with \
+         `{ \"key\": \"agent.id\" }`. Do not call any other tool.",
+    ));
+    let mut cache_reads = Vec::with_capacity(6);
+
+    for round in 1..=6 {
+        let mut request_messages = messages.clone();
+        let mut tail = ChatMessage::user(main_agent_plan_tail(None));
+        tail.kind = MessageKind::EphemeralTail;
+        request_messages.push(tail);
+
+        let mut turn_request = request(request_messages, &cfg.llm.default_model, &cache_key);
+        turn_request.stream = Some(true);
+        turn_request.temperature = None;
+        turn_request.max_tokens = None;
+        turn_request.resolved_output_limit = None;
+        turn_request.thinking_level = Some(ThinkingLevel::Xhigh);
+        turn_request.diagnostic_request_id = Some(format!("transcript-replay:{probe_id}:{round}"));
+        turn_request.tools = Some(tools.clone());
+        let captured = capture_stream_turn(provider.as_ref(), turn_request).await?;
+        let usage = &captured.usage;
+        let cache_read = usage.cache_read_tokens.unwrap_or_default();
+        eprintln!(
+            "phase=\"fcodex_transcript_replay\" reasoning_mode={} round={} prompt_tokens={} \
+             cache_read_tokens={} cache_write_tokens={}",
+            reasoning_mode.label(),
+            round,
+            usage.prompt_tokens,
+            cache_read,
+            usage.cache_write_tokens.unwrap_or_default()
+        );
+        cache_reads.push(cache_read);
+
+        let assistant = captured.assistant;
+        let tool_calls = assistant
+            .tool_calls
+            .as_deref()
+            .ok_or_else(|| format!("transcript replay returned no tool call on round {round}"))?;
+        if tool_calls.len() != 1 || tool_calls[0]["function"]["name"].as_str() != Some("config_get")
+        {
+            return Err(format!(
+                "transcript replay expected exactly one config_get on round {round}, got {tool_calls:?}"
+            )
+            .into());
+        }
+        let call_id = tool_calls[0]["id"]
+            .as_str()
+            .ok_or_else(|| format!("transcript replay config_get has no id on round {round}"))?
+            .to_string();
+        messages.push(assistant);
+        let tool_result = if large_tool_results {
+            format!(
+                "cache-growth probe result round={round}\n{}",
+                "deterministic tool output retained in the durable transcript\n".repeat(350)
+            )
+        } else {
+            "\"main\"".to_string()
+        };
+        messages.push(ChatMessage::tool(&call_id, &tool_result));
+    }
+
+    Ok(cache_reads)
+}
+
+#[tokio::test]
+#[ignore = "manual Phase 0: baseline fcodex Responses cache marathon for gpt-5.4 and gpt-5.6-sol"]
+#[serial]
+async fn fcodex_responses_phase0_baseline_marathon_both_models(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    for model in ["fcodex/gpt-5.4", "fcodex/gpt-5.6-sol"] {
+        let cache_reads =
+            run_fcodex_responses_marathon_probe(model, FcodexResponsesProbeMode::Baseline, 1)
+                .await?;
+        eprintln!(
+            "phase=\"responses_cache_phase0_summary\" mode=baseline model={} \
+             cache_read_tokens={cache_reads:?}",
+            model
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual Phase 0: previous_response_id fcodex Responses cache marathon for gpt-5.4 and gpt-5.6-sol"]
+#[serial]
+async fn fcodex_responses_phase0_previous_response_id_marathon_both_models(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    for model in ["fcodex/gpt-5.4", "fcodex/gpt-5.6-sol"] {
+        let cache_reads = run_fcodex_responses_marathon_probe(
+            model,
+            FcodexResponsesProbeMode::PreviousResponseId,
+            1,
+        )
+        .await?;
+        eprintln!(
+            "phase=\"responses_cache_phase0_summary\" mode=previous_response_id model={} \
+             cache_read_tokens={cache_reads:?}",
+            model
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual Phase 0: long-prefix baseline fcodex Responses cache marathon for gpt-5.4 and gpt-5.6-sol"]
+#[serial]
+async fn fcodex_responses_phase0_long_prefix_baseline_marathon_both_models(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    // 5,696 prompt tokens at multiplier 1; multiplier 6 reproduces the user's
+    // 35K–43K request range while retaining six deterministic tool-result rounds.
+    for model in ["fcodex/gpt-5.4", "fcodex/gpt-5.6-sol"] {
+        let cache_reads =
+            run_fcodex_responses_marathon_probe(model, FcodexResponsesProbeMode::Baseline, 6)
+                .await?;
+        eprintln!(
+            "phase=\"responses_cache_phase0_summary\" mode=baseline-long-prefix model={} \
+             cache_read_tokens={cache_reads:?}",
+            model
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: reproduce fcodex cache with the main Agent system, tools, XHigh, and runtime tail"]
+#[serial]
+async fn fcodex_responses_main_agent_wire_shape_cache_probe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    for tail_mode in [
+        FcodexAgentTailMode::StablePlanState,
+        FcodexAgentTailMode::ChangingSessionGrant,
+    ] {
+        let cache_reads = run_fcodex_main_agent_wire_shape_probe(tail_mode).await?;
+        eprintln!(
+            "phase=\"fcodex_agent_wire_shape_summary\" tail_mode={} cache_read_tokens={cache_reads:?}",
+            tail_mode.label()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: prove that a stable runtime tail lets a Responses history cache grow"]
+#[serial]
+async fn fcodex_responses_main_agent_promoted_tail_cache_probe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    let cache_reads =
+        run_fcodex_main_agent_wire_shape_probe(FcodexAgentTailMode::StablePlanState).await?;
+    eprintln!(
+        "phase=\"fcodex_agent_wire_shape_summary\" tail_mode=stable-plan-tail cache_read_tokens={cache_reads:?}"
+    );
+    assert!(
+        cache_reads.windows(2).any(|window| window[1] > window[0]),
+        "a stable instruction tail should let the server cache history appended after the first turn: {cache_reads:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: replay a real Agent transcript through the fcodex Responses cache"]
+#[serial]
+async fn fcodex_responses_transcript_replay_cache_probe() -> Result<(), Box<dyn std::error::Error>>
+{
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    let transcript_path = std::env::var("TOMCAT_CACHE_REPLAY_TRANSCRIPT")
+        .map_err(|_| "set TOMCAT_CACHE_REPLAY_TRANSCRIPT to a session JSONL path")?;
+    let cache_reads = run_fcodex_transcript_replay_probe(
+        std::path::Path::new(&transcript_path),
+        HistoricalReasoningMode::All,
+        false,
+    )
+    .await?;
+    eprintln!(
+        "phase=\"fcodex_transcript_replay_summary\" reasoning_mode=all cache_read_tokens={cache_reads:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: make Responses cache growth visible with a real transcript and large durable tool results"]
+#[serial]
+async fn fcodex_responses_transcript_replay_growth_marathon_probe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    let transcript_path = std::env::var("TOMCAT_CACHE_REPLAY_TRANSCRIPT")
+        .map_err(|_| "set TOMCAT_CACHE_REPLAY_TRANSCRIPT to a session JSONL path")?;
+    let cache_reads = run_fcodex_transcript_replay_probe(
+        std::path::Path::new(&transcript_path),
+        HistoricalReasoningMode::All,
+        true,
+    )
+    .await?;
+    eprintln!(
+        "phase=\"fcodex_transcript_replay_growth_summary\" cache_read_tokens={cache_reads:?}"
+    );
+    assert!(
+        cache_reads.windows(2).any(|window| window[1] > window[0]),
+        "the large durable results should cross at least one fcodex cache block: {cache_reads:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: measure whether historical Responses reasoning items limit cache reuse"]
+#[serial]
+async fn fcodex_responses_transcript_reasoning_history_cache_probe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    let transcript_path = std::env::var("TOMCAT_CACHE_REPLAY_TRANSCRIPT")
+        .map_err(|_| "set TOMCAT_CACHE_REPLAY_TRANSCRIPT to a session JSONL path")?;
+    for reasoning_mode in [
+        HistoricalReasoningMode::LatestOnly,
+        HistoricalReasoningMode::None,
+    ] {
+        let cache_reads = run_fcodex_transcript_replay_probe(
+            std::path::Path::new(&transcript_path),
+            reasoning_mode,
+            false,
+        )
+        .await?;
+        eprintln!(
+            "phase=\"fcodex_transcript_replay_summary\" reasoning_mode={} cache_read_tokens={cache_reads:?}",
+            reasoning_mode.label()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: compare fcodex cache coverage for instructions versus input history"]
+#[serial]
+async fn fcodex_responses_cache_scope_instructions_vs_input_probe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    for location in [
+        StablePrefixLocation::Instructions,
+        StablePrefixLocation::InputMessage,
+    ] {
+        let (_first_read, second_read) = run_fcodex_cache_scope_probe(location).await?;
+        assert!(
+            second_read > 0,
+            "fcodex must read at least one cached block for {}",
+            location.label()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: determine whether fcodex can cache across Responses function history"]
+#[serial]
+async fn fcodex_responses_cache_scope_function_history_probe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    let (_first_read, second_read) = run_fcodex_function_history_cache_scope_probe().await?;
+    assert!(
+        second_read > 0,
+        "fcodex must retain at least its stable request header across tool history"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: determine whether fcodex can cache across multiple Responses message items"]
+#[serial]
+async fn fcodex_responses_cache_scope_multimessage_history_probe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    let (_first_read, second_read) = run_fcodex_multimessage_history_cache_scope_probe().await?;
+    assert!(
+        second_read > 0,
+        "fcodex must retain at least its stable request header across message history"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual: determine whether the full tomcat tool catalog limits Responses cache depth"]
+#[serial]
+async fn fcodex_responses_cache_scope_full_tool_catalog_probe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_responses_credentials()?;
+
+    let (_first_read, second_read) = run_fcodex_full_tool_catalog_cache_scope_probe().await?;
+    assert!(
+        second_read > 0,
+        "fcodex must retain at least its stable request header with the full tool catalog"
     );
     Ok(())
 }

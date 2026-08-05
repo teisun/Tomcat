@@ -1426,7 +1426,8 @@ tools（稳定排序） → system（稳定说明） → 持久化历史 → 本
   仍由 handler/path gate 强制执行，而不是通过删工具定义来实现。
 - `ChatRequest` 构造接缝在每个主 Agent 请求末尾临时添加 runtime tail（计划提醒和当前
   workspace 权限状态）。尾部不进入 `ContextState.messages` 或 transcript；Anthropic wire 把它渲染为
-  不单独标记的 system suffix，稳定时由 D 覆盖，状态变更会有意使下一次缓存冷写。
+  不单独标记的 system suffix，稳定时由 D 覆盖，状态变更会有意使下一次缓存冷写；OpenAI
+  Responses wire 把它合并到顶层 `instructions`，不把它作为每轮消失的 input user item。
 - Anthropic wire 最多放四个 `cache_control: {type: "ephemeral"}` 断点：tools 末项（A）、
   最后一个非 runtime system block（B）、倒数第二条 wire user 消息末尾（C，滚动读锚）和最后一条持久 wire
   消息末尾（D，写锚）。runtime tail 是不单独标记的 system suffix；它变化时会使下一次 Anthropic 缓存失效。
@@ -1437,10 +1438,94 @@ tools（稳定排序） → system（稳定说明） → 持久化历史 → 本
   快照，不会改写缓存；未切换 boundary 时保持历史字节不变，真正改变历史的是 Layer 2/L3
   的必要应用。
 
+#### 7.5.4.1 2026-08-05 Responses 缓存异常：移动 tail 截断 input 前缀
+
+`cache_read_tokens` 是服务端实际命中的**量化后的前缀长度**，不是「本轮新增历史字数」。
+因此它可以连续数轮不变；只有服务端选择更深的缓存块时才会跳变。遇到曲线平台时，先验证 wire
+是否真的改变了稳定前缀，不能仅凭单个数值推断客户端没有缓存。
+
+```text
+旧 Responses wire：
+
+请求 N:    durable history → EphemeralTail（临时 user input）
+请求 N+1:  durable history → 新 assistant/reasoning/tool → EphemeralTail
+                             ↑
+                  取代了请求 N 中 tail 的位置，前缀在此断开
+
+结果：只能读取 tail 之前的静态 system / tool 区（实际约 8.7K）。
+```
+
+根因不是 `prompt_cache_key`、完整工具目录或历史 opaque reasoning：
+
+- 固定 cache key 只能选择服务端缓存桶，不能让不同位置的 item 拼接成前缀；
+- 完整 agent tool catalog 的 40K 对照请求第二次读取 42,496；
+- 真实 transcript 依次保留全部、仅最新或删除 `reasoning.encrypted_content`，均仍停在约 8.7K；
+- 真正首个漂移由 `TOMCAT_PROMPT_PREFIX_FINGERPRINT=1` 的滚动 input hash 定位：请求 N 的
+  EphemeralTail 对应请求 N+1 的 reasoning / assistant / function call / tool result。
+
+修复将 tail 保持为 request-only，但改由顶层 instructions 承载：
+
+```text
+instructions = stable system prompt + runtime tail
+input(N+1)   = input(N) + assistant / reasoning / tool result
+                         ↑ 仅追加，允许 Responses 自动缓存继续扩展
+```
+
+这也校正了旧的简化马拉松结论：该测试把约 35K 稳定文本放在 system instructions 内，报告的深度命中
+只能证明 system 命中，不能证明 tail 之后的工具历史被写入后续前缀。
+
+真实 Agent-shaped fcodex gpt-5.6-sol / XHigh 实验：
+
+```text
+旧 tail 作为 input user:    0 → 8,704 → 8,704 → 8,704 → 8,704 → 8,704
+正式 wire，稳定 tail:        0 → 9,728 → 10,752 → 10,752 → 10,752 → 10,752
+正式 wire，每轮变 grant:     0 → 9,728 → 9,728 → 9,728 → 9,728 → 9,728
+                                           ↑
+                          state 稳定时量化块推进；频繁变 state 不承诺更深命中
+```
+
+tail 真正变化（plan mode、workspace permission / session grant 改变）会改变 instructions，因此 fcodex
+不承诺该轮的深度命中；状态稳定后的请求仍保持 append-only input，具备恢复增长的必要条件。不得为了
+命中率把 workspace state 伪装成普通 user 消息或持久写回 transcript。
+
+最终用用户提供的同一 session JSONL 截到最后一个 tool output，再按真实 Agent loop 继续六个小工具
+回合，裁决了「fcodex 是否无法缓存 40K 历史」：
+
+```text
+旧 tail-in-input 重放：    0 → 8,704 → 8,704 → 8,704 → 8,704 → 8,704
+正式 Responses wire 重放：0 → 48,640 → 48,640 → 48,640 → 48,640 → 48,640
+第六轮 prompt_tokens：49,634
+```
+
+所以 8.7K 不是 transcript 的固有限制，也不是完整工具目录或 39–44 个历史 reasoning item 的限制；
+它是移动 tail 之前的共享前缀。48.6K 后的平台符合量化缓存块行为，不能要求每个小 tool output 都使
+`cache_read_tokens` 立即上升。
+
+两个候选方案也已被真机排除：
+
+```text
+previous_response_id（HTTP）
+  └─ fcodex 返回 400：only supported on Responses WebSocket v2
+     └─ 只能回退为显式 replay；默认打开会平白多一次失败请求
+
+explicit breakpoint（GPT-5.6+）
+  └─ 合法锚点是 input_text / image / file
+     ├─ 最后的持久项常是 function_call_output，不能可靠地写入 cache
+     └─ 追加伪造 user checkpoint 虽可改变锚点，但会改变模型语义
+```
+
+不向 fcodex HTTP 默认发送 `previous_response_id`，也不注入语义性 checkpoint。
+`previous_response_id` 的 opt-in 路径仍只向**确实支持它的路由**发送锚点之后的增量 input，避免把
+已经由服务端恢复的历史再次重复发送。
+
+重新评估此决策的条件是：fcodex 宣布 HTTP Responses 支持 `previous_response_id`、OpenAI / 网关确认
+`function_call_output` 上的 breakpoint 能产生 cache write，或者生产 fingerprint 显示 tail 已不在 input
+但仍固定只命中旧断点。最后一种情况必须继续追踪更早的历史重写项。
+
 用 `scripts/analyze_prompt_cache_baseline.py` 对同一条至少 20 轮真实会话采集改造前后
 命中率、授权次数、插件/技能变动、拒绝工具比例与 `usage_ratio` P50/P90。
 
-#### 7.5.4.1 2026-08-03 三条 wire 实测基线
+#### 7.5.4.2 2026-08-03 三条 wire 实测基线
 
 三组探针均通过真实 provider 连发 20 次 `LlmProvider::chat` 请求，并把上一轮 assistant
 回复追加到下一轮的消息历史。数据由

@@ -104,6 +104,21 @@ fn responses_wire_omits_local_message_metadata() {
     }
 }
 
+#[test]
+fn responses_wire_fingerprint_tracks_each_input_prefix() {
+    let input = vec![
+        json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "one"}]}),
+        json!({"type": "function_call", "call_id": "call-1", "name": "read", "arguments": "{}"}),
+        json!({"type": "function_call_output", "call_id": "call-1", "output": "two"}),
+    ];
+
+    let expected = (1..=input.len())
+        .map(|end| fingerprint(&serde_json::Value::Array(input[..end].to_vec())))
+        .collect::<Vec<_>>();
+
+    assert_eq!(rolling_array_fingerprints(&input), expected);
+}
+
 fn test_profile() -> crate::core::llm::ProviderCompatProfile {
     crate::core::llm::ProviderCompatProfile::openai_responses("gpt-5")
 }
@@ -112,7 +127,7 @@ fn build_responses_input_test(
     messages: &[ChatMessage],
 ) -> (Option<String>, Vec<serde_json::Value>) {
     let profile = test_profile();
-    build_responses_input(messages, &profile, true, true)
+    build_responses_input(messages, &profile, true, true, 0)
 }
 
 fn new_responses_stream<S>(stream: S, prefer_ndjson: bool) -> ResponsesStream<S> {
@@ -144,6 +159,31 @@ fn build_responses_input_extracts_first_system_to_instructions() {
     assert_eq!(input.len(), 1);
     assert_eq!(input[0]["role"], "user");
     assert_eq!(input[0]["content"][0]["type"], "input_text");
+    assert_eq!(input[0]["content"][0]["text"], "hi");
+}
+
+#[test]
+fn build_responses_input_promotes_ephemeral_tail_to_instructions() {
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+    let msgs = vec![
+        ChatMessage::system("stable instructions"),
+        ChatMessage::user("hi"),
+        tail,
+    ];
+
+    let (ins, input) = build_responses_input_test(&msgs);
+
+    assert_eq!(
+        ins.as_deref(),
+        Some("stable instructions\n\nruntime-only workspace state")
+    );
+    assert_eq!(
+        input.len(),
+        1,
+        "runtime tail must not create a moving input item"
+    );
+    assert_eq!(input[0]["role"], "user");
     assert_eq!(input[0]["content"][0]["text"], "hi");
 }
 
@@ -1045,7 +1085,7 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
 }
 
 #[test]
-fn openai_responses_roundtrip_replays_reasoning_items_before_an_ephemeral_tail() {
+fn openai_responses_roundtrip_replays_reasoning_items_and_promotes_ephemeral_tail() {
     let cfg = LlmConfig {
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         ..LlmConfig::default()
@@ -1093,17 +1133,16 @@ fn openai_responses_roundtrip_replays_reasoning_items_before_an_ephemeral_tail()
     let body = p.build_request_body(&req, true);
     assert_eq!(body["input"][1]["type"], "reasoning");
     assert_eq!(body["input"][1]["encrypted_content"], "enc_123");
-    let tail_index = body["input"]
-        .as_array()
-        .expect("Responses input must be an array")
-        .iter()
-        .position(|item| item.to_string().contains("runtime-only workspace state"))
-        .expect("ephemeral tail must remain in the request");
     assert!(
-        tail_index > 1,
-        "historical reasoning must be replayed before the ephemeral tail: {}",
+        body["input"]
+            .as_array()
+            .expect("Responses input must be an array")
+            .iter()
+            .all(|item| !item.to_string().contains("runtime-only workspace state")),
+        "the runtime tail must not become a disappearing input item: {}",
         body["input"]
     );
+    assert_eq!(body["instructions"], "runtime-only workspace state");
 }
 
 #[test]
@@ -1166,6 +1205,94 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
             .iter()
             .all(|item| item.get("type") != Some(&json!("reasoning"))),
         "previous_response_id 分支不应显式 replay reasoning items"
+    );
+}
+
+#[test]
+fn responses_build_request_body_previous_response_id_sends_only_new_items_after_anchor() {
+    let cfg = LlmConfig {
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        openai_responses: crate::infra::config::OpenAiResponsesConfig {
+            use_previous_response_id: true,
+        },
+        ..LlmConfig::default()
+    };
+    let provider = provider_from_cfg(cfg);
+    let route_profile = provider.replay_profile_for_model("gpt-5");
+    let previous_assistant = ChatMessage::assistant_with_tool_calls(
+        Some("calling read"),
+        vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read", "arguments": "{\"path\":\"old.txt\"}"}
+        })],
+    )
+    .with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: route_profile.provider.clone(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_123".to_string()),
+                replay_profile_id: Some(route_profile.profile_id),
+            }),
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let mut tail = ChatMessage::user("runtime-only tail");
+    tail.kind = MessageKind::EphemeralTail;
+    let req = ChatRequest {
+        messages: vec![
+            ChatMessage::system("stable instructions"),
+            ChatMessage::user("old user input"),
+            previous_assistant,
+            ChatMessage::tool("call_1", "new tool output"),
+            ChatMessage::user("new user input"),
+            tail,
+        ],
+        model: "gpt-5".into(),
+        stream: Some(true),
+        ..Default::default()
+    };
+
+    let body = provider.build_request_body(&req, true);
+
+    assert_eq!(body["store"], true);
+    assert_eq!(body["previous_response_id"], "resp_123");
+    assert_eq!(
+        body["instructions"],
+        "stable instructions\n\nruntime-only tail"
+    );
+    let input = body["input"].as_array().expect("input array");
+    assert_eq!(input.len(), 2, "only anchor-successor items are new input");
+    assert_eq!(input[0]["type"], "function_call_output");
+    assert_eq!(input[0]["call_id"], "call_1");
+    assert_eq!(input[0]["output"], "new tool output");
+    assert_eq!(input[1]["role"], "user");
+    assert_eq!(input[1]["content"][0]["text"], "new user input");
+    assert!(
+        input
+            .iter()
+            .all(|item| !item.to_string().contains("runtime-only tail")),
+        "the runtime tail belongs in instructions, not a moving input suffix: {input:?}"
+    );
+    assert!(
+        !body.to_string().contains("old user input"),
+        "previous_response_id must restore the old history instead of resending it: {body}"
+    );
+    assert!(
+        !body.to_string().contains("calling read"),
+        "the anchored assistant response must not be duplicated in input: {body}"
     );
 }
 
