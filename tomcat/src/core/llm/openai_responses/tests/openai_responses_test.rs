@@ -26,6 +26,7 @@ use crate::infra::error::{
     classify_llm_failure, llm_http_status, llm_http_status_error, llm_stage, llm_summary, AppError,
     LlmErrorStage, LlmFailureKind,
 };
+use crate::infra::events::ToolDisplay;
 use crate::infra::LlmConfig;
 
 use bytes::Bytes;
@@ -77,6 +78,30 @@ fn provider_from_entry(entry: ModelEntry, cfg: LlmConfig) -> OpenAiResponsesProv
 
 fn provider_with_stub_key() -> OpenAiResponsesProvider {
     provider_from_cfg(LlmConfig::default())
+}
+
+#[test]
+fn responses_wire_omits_local_message_metadata() {
+    let mut message = ChatMessage::assistant("wire-visible text");
+    message.summary_title = Some("local summary".to_string());
+    message.tool_display = Some(ToolDisplay::Text {
+        text: "local tool display".to_string(),
+    });
+    message.usage = Some(Default::default());
+    let request = ChatRequest {
+        model: "gpt-5.4".to_string(),
+        messages: vec![message],
+        ..Default::default()
+    };
+
+    let body = provider_with_stub_key().build_request_body(&request, true);
+    let serialized = serde_json::to_string(&body).expect("serialize wire body");
+    for local_field in ["tool_display", "summary_title", "usage"] {
+        assert!(
+            !serialized.contains(local_field),
+            "Responses wire leaked local field `{local_field}`: {serialized}"
+        );
+    }
 }
 
 fn test_profile() -> crate::core::llm::ProviderCompatProfile {

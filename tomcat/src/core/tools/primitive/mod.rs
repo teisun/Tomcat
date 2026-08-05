@@ -42,3 +42,8 @@ pub use types::{
 /// extension / 多个 mock / 集成测试一起改名。`replace_all` 信号通过此 marker
 /// 在调用对内传递，外部 trait 完全感知不到。
 pub(crate) const EDIT_REPLACE_ALL_MARKER: &str = "\u{0000}__PI_EDIT_REPLACE_ALL__\u{0000}";
+/// Internal transport markers for string-edit insert modes. Like
+/// `EDIT_REPLACE_ALL_MARKER`, NUL makes collisions with valid UTF-8 text
+/// impossible while keeping the primitive trait signature stable.
+pub(crate) const EDIT_INSERT_BEFORE_MARKER: &str = "\u{0000}__PI_EDIT_INSERT_BEFORE__\u{0000}";
+pub(crate) const EDIT_INSERT_AFTER_MARKER: &str = "\u{0000}__PI_EDIT_INSERT_AFTER__\u{0000}";

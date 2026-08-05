@@ -48,6 +48,35 @@ fn usage_ratio_various_levels() {
 }
 
 #[test]
+fn anthropic_total_input_usage_produces_the_actual_context_ratio() {
+    let mut state = make_state(0, 0, 872_000);
+    state.update_api_usage(209_600, 1_257);
+
+    assert!((state.usage_ratio() - 0.2418).abs() < 0.0001);
+}
+
+#[test]
+fn assistant_append_is_not_counted_twice_after_usage() {
+    let mut state = make_state(1_000, 10_000, 2_500);
+    state.update_api_usage(500, 100);
+    state.on_assistant_message_appended(400);
+
+    assert_eq!(state.estimate_context_chars, 1_400);
+    assert_eq!(
+        state.post_usage_appended_chars, 0,
+        "provider completion_tokens already account for the assistant response"
+    );
+    assert_eq!(state.estimated_token_count(), 600);
+
+    state.invalidate_api_usage();
+    assert_eq!(
+        state.estimated_token_count(),
+        350,
+        "the fallback estimate must retain the assistant response"
+    );
+}
+
+#[test]
 fn usage_ratio_zero_budget_returns_max() {
     let state = make_state(100, 100, 0);
     assert_eq!(state.usage_ratio(), f64::MAX);

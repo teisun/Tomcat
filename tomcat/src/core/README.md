@@ -64,8 +64,8 @@ Layer 3  Reasoning Loop
 
 | Layer | 函数 | 机制 | 触发条件 |
 |-------|------|------|----------|
-| 0 | `layer0_persist_large_results` | 超大 tool result 落盘 + preview 占位符 | timing ⑤ |
-| 1 | `compact_tool_results` | compactable zone 旧 tool result 替换为占位符 | timing ⑤ |
+| 0 | `layer0_persist_large_results` | 超大 tool result 落盘 + preview 占位符 | boundary 应用成功后（② / ⑤ / mid-turn） |
+| 1 | `compact_tool_results` | compactable zone 旧 tool result 替换为占位符 | boundary 应用成功后（② / ⑤ / mid-turn） |
 | 2 | preheat + `apply_boundary` | LLM 异步摘要 + boundary switch | timing ②/⑤ |
 | 3 | `force_drop_oldest_to_target` | 强制删除最旧 turn（防御性兜底） | context overflow |
 
@@ -159,13 +159,12 @@ flowchart TD
       |
       v  每轮用户输入:
       |    1. 更新 estimateContextChars（新消息）
-      |    2. timing ② check_before_request
-      |    3. build_context_from_state → messages (= state.messages.clone())
+      |    2. 先生成 messages 快照并追加已持久化的本轮输入
+      |    3. timing ② check_before_request；若成功 apply boundary（内含 L0），从 ContextState 重建快照
       |    4. set_context_state → AgentLoop
       |
       v  AgentLoop::run()
-      |    - Layer 0/1: timing ⑤ 后执行落盘/占位符
-      |    - Layer 2: timing ②/⑤ apply boundary
+      |    - Layer 2: timing ②/⑤/mid-turn apply boundary；成功分支内紧接 Layer 0 落盘/占位
       |    - Layer 3 Attempt: ContextOverflow → force_drop_oldest → 重试
       |    - 动态维护 estimate_context_chars
       |

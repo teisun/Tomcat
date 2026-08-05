@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-04 17:02 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-05 17:31 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Anthropic Prompt 缓存与 L0/水位复查收口：fcodex 实测推翻「同一 user 消息内、tail 前中间 block 作 D」的 Design X；Anthropic wire 将 `EphemeralTail` 转为不单独打 `cache_control` 的 system 后缀，D 落在最新持久消息完整末尾，OpenAI 仍把 tail 留在 messages 末尾以保住自动前缀缓存。L0 与成功 L2 boundary 结构性绑定；水位计数修掉 tool_dispatch 双计与 abort 低估；补 8 轮 CI 结构门禁与 fcodex 八轮真实门禁（r8 hit≈89.5%），并去掉 `read=0/write>0` 预热放行。版本 CLI `0.1.26 → 0.1.27`、扩展 `0.1.37 → 0.1.38`（`bundledCli=0.1.27`）。验证：`cargo test --lib`（2566 passed）、`release-version check`、定向 `prompt_cache_real_llm_tests` ignored 门禁通过。@2026-08-05
 - [✓] **[P0]** 失败回合 / `max_tokens` / Prompt 缓存整改与二次复查收口：`EffectiveModelLimits` 统一上下文与输出预算；`ChatRequest.resolved_output_limit` 按请求解析 Anthropic/OpenAI wire 上限，去掉 provider 实例缓存的输出上限；空回合守卫回到截断/`reasoning_continuation`/thinking 三选一，不再用 `completion_tokens>0` 误判；classic thinking 下限升至协议 1024；配置键迁到 `context_window_fallback` / `output_reserve_tokens` 且目录加载期校验 `0 < max_output_tokens ≤ context_window`。UI 恢复「按钮消失、错误/中断卡保留」；Retry copy-forward 旧输入 `abandoned` 仍可见；中断卡 live+hydrate 去重为 1。指纹日志默认关闭、O(n) 滚动哈希、user with/without-tail 成对指纹。版本 CLI `0.1.24 → 0.1.26`、扩展 `0.1.35 → 0.1.37`（`bundledCli=0.1.26`）。验证：`cargo fmt/clippy`、`cargo test --lib`（2537 passed）、webview unit 475、E2E 33、`release-version check` 全绿；真实 DeepSeek multi-timeout CLI 仍可能因模型少一次 `task_output` 失败（非本轮回归）。@2026-08-04
 - [✓] **[P0]** Prompt 前缀缓存实现复核补全：`ToolSurface` + `SystemPromptSnapshot` 统一 CLI/serve 刷新路径；权限与计划 reminder 进 ephemeral 尾部，稳定 system/tools 前缀；Anthropic `cache_control` 显式 ≤4 断点预算；`PromptCacheKeyFamily` 收拢 main/subagent/compaction/title/extension key；OpenAI/Responses 解析 `cached_tokens`；删除会重新引入抖动的死入口；补 P0/Layer0/真实 LLM probe 与 20 轮基线（DeepSeek ~93.87%、fcodex Anthropic ~99.98%、fcodex Responses ~71.18%）。版本 CLI `0.1.23 → 0.1.24`、扩展 `0.1.34 → 0.1.35`（`bundledCli=0.1.24`）。验证：`cargo fmt/clippy`、`gate-fast`、`npm run check:wire`/`gate:fast`、`release-version check` 全绿。@2026-08-03
 - [✓] **[P0]** PlanState 五态拆成会话模式与计划文件态：`AgentMode` 仅 `Chat|Plan`，`ActivePlan{id,path,state}` 承载 planning/pending/executing/completed；Build 回到 Chat 且不因计划完成改模式；取消 executing 降为 pending；`session.agent_mode.changed` + `activePlan` 载荷（protocol v2 / resume schema 3）；executor reminder 按 `executing_plan_id()` 注入；`MessageKind::PlanBuild` 摘要渲染与 pending→Resume 文案。门禁修复同轮落地：预览 dirty 缓冲权威 + `tomcat.plan.autoSave`；confirmed-overflow 至少删一 turn；恢复占位符对齐 PENDING/UNKNOWN_RESTART；E2E 补 interrupt→Resume 与完成后仍在 Chat。验证：`cargo fmt/clippy`、`gate-fast`、`npm run check:wire`/`gate:fast`、`test:e2e:vscode-devhost` 全绿。@2026-08-03
@@ -54,10 +55,13 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- Anthropic wire：`MessageKind::EphemeralTail` 在出站时转为 `system` 后缀文本块（无独立 `cache_control`）；断点 B 停在稳定 system，D 打最新持久 wire 消息末尾；OpenAI Completions/Responses 仍把 tail 留在 messages/input 末尾。
+- L0：成功 boundary apply 后无条件跑 `run_layer0_after_boundary`；`apply_boundary` 已 `invalidate_api_usage`，L0 不再重复失效。
+- 水位计数：`tool_dispatcher` 对含 tool_calls 的 assistant 改走 `on_assistant_message_appended`；abort 部分 assistant 用 `on_message_appended` 宁可高估。
 - Token / 输出上限：`ChatRequest.resolved_output_limit`（调用方 `max_tokens` 与 wire 解析值分离）；`EffectiveModelLimits` 去掉实例级 `wire_output_limit`；`ContextConfig` 权威键 `context_window_fallback` / `output_reserve_tokens`（旧键别名可读、混用报错）；catalog 加载期校验模型 `max_output_tokens`。
 - 空回合守卫：hidden output 仅看截断类 `finish_reason` / `reasoning_continuation` / thinking 文本；`completion_tokens` 只进诊断与 empty_turn 落盘。
 - Webview 恢复 UX：错误卡 dismiss 后保留卡片、去掉 `recoveryAction`；Retry copy-forward 源 user 带 `abandoned`；`agent.interrupted` live+history 去重恰好一张。
-- 发布版本：CLI `0.1.26`、扩展 `0.1.37`、`bundledCliVersion=0.1.26`。
+- 发布版本：CLI `0.1.27`、扩展 `0.1.38`、`bundledCliVersion=0.1.27`。
 - 会话/计划状态拆分：删除五态 `PlanState`；`AgentMode`=`chat|plan`；`ActivePlan`/`PlanFileState`；`get_state` 用 `agentMode`+`activePlan`，旧 `mode` 改名 `workspaceMode`；新增 `session.agent_mode.changed`；`RESUME_INDEX_SCHEMA_VERSION=3` 公开导出。
 - Build 用户消息：`MessageKind::PlanBuild`（`plan_build`）；扩展渲染为「开始执行计划」折叠摘要；pending 计划 Build 按钮文案 `Resume`。
 - Plan 预览：`refreshFromServeEvent` dirty 时用缓冲文本、非文本态可跟事件；设置 `tomcat.plan.autoSave`（默认 true，~1s 防抖）；`PlanPreviewDomSnapshot.refreshCounters` 保留热更新诊断四计数器。

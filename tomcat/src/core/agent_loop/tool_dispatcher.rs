@@ -64,7 +64,7 @@ fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: 
 /// ## 参数语义（**严禁混淆**，混淆即 T-017 类 token 水位漂移的孪生 bug）
 ///
 /// - `assistant_content`: 本轮 delta 累积（`outcome.content_buf`），用于
-///   `on_message_appended(assistant_chars)` 的**当次**计费。
+///   `on_assistant_message_appended(assistant_chars)` 的 fallback 上下文估算。
 ///   **不得**传跨轮累积的 `final_text`，否则历史轮 token 会被重复计入。
 /// - `partial_text_for_abort`: cancel 分支构造 `make_aborted(messages, partial)`
 ///   时使用；此处传 `&final_text`（已累积）即可，因为 partial_text 的语义就是
@@ -153,7 +153,7 @@ pub(super) async fn run_tool_calls_with_usage(
         .map(tool_exec::persisted_tool_call_arguments)
         .collect();
 
-    // ── 1. 计费：assistant 消息（含 tool_calls wire payload 估算） ──
+    // ── 1. 记录 assistant 消息（含 tool_calls wire payload 估算） ──
     if let Some(ref mut ctx_state) = agent.context_state {
         let assistant_chars = assistant_content.len()
             + tool_calls
@@ -161,7 +161,12 @@ pub(super) async fn run_tool_calls_with_usage(
                 .zip(persisted_arguments.iter())
                 .map(|(tc, persisted_args)| tc.name.len() + persisted_args.len() + tc.id.len() + 40)
                 .sum::<usize>();
-        ctx_state.on_message_appended(assistant_chars);
+        // Provider completion_tokens already cover assistant text and tool-call
+        // arguments. Keep these bytes in the no-usage fallback estimate only,
+        // rather than adding a second post-usage delta. The small 40-char
+        // per-call wire overhead follows the same path: avoiding a dedicated
+        // counter is preferable to reintroducing a large duplicate estimate.
+        ctx_state.on_assistant_message_appended(assistant_chars);
     }
 
     // ── 2. push assistant_with_tool_calls ──

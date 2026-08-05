@@ -2,7 +2,9 @@ use super::super::args::{has_real_edits, parse_edit_args, parse_edit_ops};
 use super::super::edit_sim::simulate_apply_edits;
 use super::super::guard::{check_mutation_stamp, refresh_read_stamp};
 use super::super::{ToolDisplay, ToolExecCtx, AGENT_PLUGIN_ID};
-use crate::core::tools::primitive::EditOperation;
+use crate::core::tools::primitive::{
+    EditOperation, EDIT_INSERT_AFTER_MARKER, EDIT_INSERT_BEFORE_MARKER, EDIT_REPLACE_ALL_MARKER,
+};
 use crate::infra::events::{ToolDisplayFileEntry, ToolDisplayFileStatus};
 
 /// 一次批量 edit 最多几个文件。上限存在的理由是可读性：一屏能看完的失败列表才有人会看。
@@ -20,6 +22,7 @@ pub(in super::super) async fn handle_edit(
     let (path, edits) = parse_edit_args(args)?;
     precheck_file(ctx, path)?;
     reviewer_body_guard(ctx, path, &edits)?;
+    let heading_notice = heading_replacement_notice(&edits);
 
     ctx.primitive
         .edit_file_with_cancel(path, edits, ctx.cancel, AGENT_PLUGIN_ID)
@@ -35,7 +38,11 @@ pub(in super::super) async fn handle_edit(
                     removed: r.removed,
                     diff: r.diff.clone(),
                 });
-                format!("已编辑: {}", r.path)
+                let mut message = format!("已编辑: {}", r.path);
+                if let Some(notice) = heading_notice {
+                    message.push_str(&format!("\n提示：{notice}"));
+                }
+                message
             } else {
                 let msg = format!("编辑被拒绝: {}", r.path);
                 *display_out = Some(ToolDisplay::Text { text: msg.clone() });
@@ -50,6 +57,37 @@ struct BatchFile {
     edits: Vec<EditOperation>,
 }
 
+fn heading_replacement_notice(edits: &[EditOperation]) -> Option<String> {
+    edits.iter().find_map(|edit| {
+        let raw_old = edit.old_content.as_deref()?;
+        let old = raw_old
+            .strip_prefix(EDIT_REPLACE_ALL_MARKER)
+            .unwrap_or(raw_old);
+        if old.starts_with(EDIT_INSERT_BEFORE_MARKER) || old.starts_with(EDIT_INSERT_AFTER_MARKER)
+        {
+            return None;
+        }
+        if old.contains(['\n', '\r'])
+            || !is_single_line_markdown_heading(old)
+            || edit.new_content.contains(old)
+        {
+            return None;
+        }
+        Some(format!(
+            "本次 replace 移除了 Markdown 标题 `{old}`；若本意是插入内容，请改用 mode=`insert_before`。"
+        ))
+    })
+}
+
+fn is_single_line_markdown_heading(text: &str) -> bool {
+    let hashes = text.bytes().take_while(|byte| *byte == b'#').count();
+    (1..=6).contains(&hashes)
+        && text
+            .as_bytes()
+            .get(hashes)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+}
+
 /// 顶层 `path`/`edits` 里是否还有一段 `files` 中不存在的真实编辑。
 ///
 /// 有才是真歧义。实测模型在批量编辑时会把整批编辑**原样抄一份**放进顶层槽位（`path`
@@ -59,7 +97,7 @@ fn top_level_edit_outside_files(
     args: &serde_json::Value,
     files: &[&serde_json::Value],
 ) -> Option<String> {
-    let known: std::collections::BTreeSet<(String, String)> = files
+    let known: std::collections::BTreeSet<(String, String, String)> = files
         .iter()
         .flat_map(|file| super::super::args::edit_segments(file))
         .map(super::super::args::segment_identity)
@@ -68,8 +106,8 @@ fn top_level_edit_outside_files(
     super::super::args::edit_segments(args)
         .into_iter()
         .map(super::super::args::segment_identity)
-        .find(|identity| identity.0 != identity.1 && !known.contains(identity))
-        .map(|(old, _)| old)
+        .find(|identity| identity.1 != identity.2 && !known.contains(identity))
+        .map(|(_, old, _)| old)
 }
 
 /// `files` 里的空壳条目：既没有路径也没有编辑内容。
@@ -165,6 +203,7 @@ async fn edit_batch(
             entries.push(failed_entry(file.path, err));
             continue;
         }
+        let heading_notice = heading_replacement_notice(&file.edits);
         match ctx
             .primitive
             .edit_file_with_cancel(&file.path, file.edits, ctx.cancel, AGENT_PLUGIN_ID)
@@ -181,7 +220,7 @@ async fn edit_batch(
                     diff: result.diff,
                     range: None,
                     status: Some(ToolDisplayFileStatus::Applied),
-                    note: None,
+                    note: heading_notice,
                 });
             }
             Ok(result) => entries.push(failed_entry(result.path, "编辑被拒绝".to_string())),
@@ -208,12 +247,16 @@ async fn edit_batch(
     let mut text = summary.clone();
     for entry in &entries {
         if entry.status == Some(ToolDisplayFileStatus::Applied) {
-            text.push_str(&format!(
+            let mut line = format!(
                 "\n- APPLIED {} (+{} -{})",
                 entry.file,
                 entry.added.unwrap_or(0),
                 entry.removed.unwrap_or(0)
-            ));
+            );
+            if let Some(notice) = entry.note.as_deref() {
+                line.push_str(&format!("\n  提示：{notice}"));
+            }
+            text.push_str(&line);
         } else {
             text.push_str(&format!(
                 "\n- FAILED  {}: {}",

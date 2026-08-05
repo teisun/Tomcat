@@ -1063,6 +1063,14 @@
           "id": {
             "type": "string"
           },
+          "maxOutputTokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
           "modelName": {
             "type": [
               "string",
@@ -2249,7 +2257,7 @@
         }
       },
       {
-        "description": "L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。",
+        "description": "L0 落盘 + 占位符在成功 boundary 应用后的释放估算 tokens（不计入 L1/L2）。",
         "type": "object",
         "required": [
           "persistTokensFreed",
@@ -4826,7 +4834,7 @@
             }
           },
           {
-            "description": "L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。",
+            "description": "L0 落盘 + 占位符在成功 boundary 应用后的释放估算 tokens（不计入 L1/L2）。",
             "type": "object",
             "required": [
               "persistTokensFreed",
@@ -5007,6 +5015,14 @@
       },
       "keyPresent": {
         "type": "boolean"
+      },
+      "maxOutputTokens": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0.0
       },
       "modelName": {
         "type": [
@@ -5203,6 +5219,14 @@
           "keyPresent": {
             "type": "boolean"
           },
+          "maxOutputTokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
           "modelName": {
             "type": [
               "string",
@@ -5323,6 +5347,14 @@
           },
           "keyPresent": {
             "type": "boolean"
+          },
+          "maxOutputTokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
           },
           "modelName": {
             "type": [

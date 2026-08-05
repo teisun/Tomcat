@@ -3037,13 +3037,13 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 ///
 /// 用户意图：模型必须在同一个后台任务上经历**至少两次**
 /// `wakeReason="wait_window_elapsed" && finished=false`，继续重试 `task_output(block=true, wait_ms=5000)`，
-/// 最后在一次 wait-window 结果里读到新 tail 并收尾。
+/// 最后在第三次（或之后）wait-window 结果里读到新 tail 并收尾。
 ///
 /// 验证：
 /// - exit 0；
 /// - 非 TTY 抓取 stderr **不**含 `waiting_for_output`；
 /// - transcript 中 `task_output` tool call 至少 3 次；
-/// - transcript 中 `role=tool` 的结果里，`wakeReason="wait_window_elapsed"` 至少 2 次；
+/// - transcript 中 `role=tool` 的结果里，token 出现前的 `wakeReason="wait_window_elapsed"` 至少 2 次；
 /// - transcript 中最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；
 /// - 真实产物 `multi_timeout_done.txt` 存在且内容正确；
 /// - stdout 最终包含 `MULTI_TIMEOUT_OK`。
@@ -3064,7 +3064,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
             "以下内容就是完整指令；不要要求我重复，不要反问，不要 ask_question。 ",
             "请严格执行，并只在最后回复一行 MULTI_TIMEOUT_OK： ",
             "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
-            "2. 该后台 bash 的 command 必须精确执行：sleep 12; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > \"{done_path}\"; sleep 30。 ",
+            "2. 该后台 bash 的 command 必须精确执行：sleep 30; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > \"{done_path}\"; sleep 30。 ",
             "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、wait_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
             "4. `wakeReason=wait_window_elapsed` 且 `finished=false` 在这道题里是正常现象，不是失败、不是要重来；你必须真实观察到至少两次这样的 wait-window，并且每次 wait-window 之后都继续在同一个 task_id 上再次调用 task_output(block=true, wait_ms=5000)，不要解释、不要总结、不要重启流程、不要新开任务。 ",
             "5. 在至少两次 wait-window 之后，继续沿用同一个 task_id 和最新 next_offset 等待，直到某次 task_output 返回 wakeReason=wait_window_elapsed 且内容里出现 TOKEN_MULTI_TIMEOUT。 ",
@@ -3129,6 +3129,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
 
     let mut task_output_calls = 0usize;
     let mut wait_window_elapsed_results = 0usize;
+    let mut tokenless_wait_window_results = 0usize;
     let mut saw_wait_window_token = false;
     let mut saw_task_stop = false;
     for (name, args) in &tool_calls {
@@ -3144,16 +3145,20 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
         }
     }
     for result in &tool_results {
-        if result.get("wakeReason").and_then(Value::as_str) == Some("wait_window_elapsed") {
+        let is_wait_window =
+            result.get("wakeReason").and_then(Value::as_str) == Some("wait_window_elapsed");
+        let includes_token = result
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|content| content.contains("TOKEN_MULTI_TIMEOUT"))
+            .unwrap_or(false);
+        if is_wait_window {
             wait_window_elapsed_results += 1;
         }
-        if result.get("wakeReason").and_then(Value::as_str) == Some("wait_window_elapsed")
-            && result
-                .get("content")
-                .and_then(Value::as_str)
-                .map(|content| content.contains("TOKEN_MULTI_TIMEOUT"))
-                .unwrap_or(false)
-        {
+        if is_wait_window && !includes_token {
+            tokenless_wait_window_results += 1;
+        }
+        if is_wait_window && includes_token {
             saw_wait_window_token = true;
         }
     }
@@ -3165,8 +3170,9 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
         trunc(&transcript, 1800)
     );
     assert!(
-        wait_window_elapsed_results >= 2,
-        "transcript 中 wait-window 次数应至少为 2，实际 {}；transcript: {}",
+        tokenless_wait_window_results >= 2,
+        "transcript 中 token 出现前的 wait-window 次数应至少为 2，实际 {}（总 wait-window {}）；transcript: {}",
+        tokenless_wait_window_results,
         wait_window_elapsed_results,
         trunc(&transcript, 1800)
     );

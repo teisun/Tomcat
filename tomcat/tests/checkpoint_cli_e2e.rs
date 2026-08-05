@@ -940,6 +940,12 @@ fn test_hangup_during_tool_run_allows_same_process_followup() {
     if !git_available() {
         return;
     }
+    // The child boots a complete CLI process and performs several process-backed
+    // tool operations. Keep the protocol barriers generous enough for a loaded
+    // CI runner; these are correctness barriers, not latency assertions.
+    const TOOL_ROUND_TIMEOUT: Duration = Duration::from_secs(10);
+    const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
     common::setup_logging();
     let _span = info_span!("test_hangup_during_tool_run_allows_same_process_followup").entered();
     let fx = setup_fixture();
@@ -987,21 +993,21 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     let chat_pid = child.pid();
     child.write_line("run slow tool");
 
-    wait_for_stage(&stage, 2, Duration::from_secs(5));
+    wait_for_stage(&stage, 2, TOOL_ROUND_TIMEOUT);
     wait_for_transcript(
         &transcript_path,
-        Duration::from_secs(5),
+        TOOL_ROUND_TIMEOUT,
         "assistant call_wait persisted before SIGINT",
         |entries| transcript_has_tool_call(entries, "call_wait"),
     );
-    child.wait_for_stderr("[tool] task_output", Duration::from_secs(5));
+    child.wait_for_stderr("[tool] task_output", TOOL_ROUND_TIMEOUT);
     unsafe {
         libc::kill(chat_pid as i32, libc::SIGINT);
     }
-    child.wait_for_stderr("^C 已中断（partial 已保存）", Duration::from_secs(5));
+    child.wait_for_stderr("^C 已中断（partial 已保存）", TOOL_ROUND_TIMEOUT);
     wait_for_transcript(
         &transcript_path,
-        Duration::from_secs(5),
+        TOOL_ROUND_TIMEOUT,
         "interrupted tool result persisted before followup",
         |entries| {
             entries.iter().any(|entry| matches!(
@@ -1019,6 +1025,11 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         "followup must use the original chat process"
     );
     child.write_line("continue after interrupt");
+    // stdin EOF 既是 REPL 的退出信号，也会启动关闭流程。此前立即 close 会和
+    // 第二轮的 call_stop → recovery write → final reply 竞争：mock 已发出
+    // recovery-write tool call（stage 4），子进程却可能先因 EOF 退出。先以
+    // 协议完成（stage 5）作为屏障，再验证 EOF 正常收尾。
+    wait_for_stage(&stage, 5, RECOVERY_TIMEOUT);
     child.close_stdin();
 
     let output = child.finish(Duration::from_secs(30));

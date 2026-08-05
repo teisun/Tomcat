@@ -14,8 +14,11 @@ Anthropic 必须发送 `max_tokens`，因此它取模型目录的输出能力（
 `max_completion_tokens`。thinking budget/effort 只控制推理，不得推导或抬高 wire 输出上限。
 
 请求级 workspace/plan 状态使用 `MessageKind::EphemeralTail`：它不持久化、不开启 user turn，也不切断 reasoning replay。
-Anthropic 的缓存断点落在最后一条完全不含 tail 的消息末尾；不拆成连续 user 消息，因为 Anthropic 会合并它们且 Bedrock 会拒绝。
-运行时只记录哈希形式的 `prompt_prefix_fingerprint`，用于定位前缀漂移，绝不记录 prompt 原文。
+对于 Anthropic，它在 wire 层被渲染为**不单独标记 `cache_control` 的 system 后缀**，而非与 `role=user` 的 tool
+result 合并。它仍位于 D 之前，故稳定时会被 D 的缓存前缀覆盖。原因是 fcodex 实测不复用同一 user 内容数组中 tail
+前的中间断点；system 后缀让 D 落在最新 tool result 的完整消息末尾。状态变化会使下一请求重写缓存，这是有意接受的
+正确代价。运行时只记录哈希形式的
+`prompt_prefix_fingerprint`，用于定位前缀漂移，绝不记录 prompt 原文。
 
 诊断字段以请求真相命名：`llm_request_resolved.wire_limit_source` 说明上限来自模型目录、未知模型回退还是调用方显式请求；发生 `output_truncated` 时同时写入
 `request_max_tokens`、实际 `wire_max_tokens` 与 `thinking_budget`。adaptive thinking 的 `thinking_budget = null` 是正确证据——它发送的是
@@ -47,18 +50,12 @@ M0 对 `fcodex/claude-opus-5` 发出 `max_tokens = 128000` 的真实 Messages �
 `completion_tokens = 8`。因此用户模型目录可声明 `context_window = 1000000` 和
 `max_output_tokens = 128000`；这不是从模型名猜出的值。
 
-M1 使用相同工具定义、system、三轮 tool history、adaptive thinking 与 `EphemeralTail`。诊断哈希显示：
-
-- `tool_hash`、`system_hashes`、`tail_hashes` 三轮相同；
-- 第二、三轮的既有消息前缀哈希相同；
-- 每轮选中的缓存断点都包含稳定的 `LastTool` 与 `SystemBlock(0)`，且后续完整消息断点不落在 tail 上。
-
-首次冷探针在约 19 秒内连续三次得到 `cache_read_tokens = 0`、`cache_write_tokens =
-11087 / 11168 / 15570`；同一条历史在约两分钟后重跑，三轮分别得到
-`cache_read_tokens = 11087 / 11168 / 15570`、`cache_write_tokens = 0`。这只证明该新前缀
-在 fcodex Anthropic 路由上曾延迟变为可读；它不能推出“fcodex 整体有故障”或“每条冷请求都必须等
-两分钟”。已有长会话的连续大额 `cache_read` 反而证明已预热的稳定前缀可以持续命中。冷写入的短时
-零 read 不能用来判断本地前缀失配，也不要因此再改写 tail 或拆分 user message。
+M1 使用相同工具定义、system、三轮 tool history、adaptive thinking 与 `EphemeralTail`。旧 user-tail
+布局的三轮均为 `cache_read=0`、且每轮几乎重写全部输入；这不是两分钟预热，而是 D 位于已合并 user
+消息中间块的 wire 失配。改为 system suffix 后，真实 `fcodex/claude-opus-5` 结果为：
+`r1 read/write = 0 / 11,122`、`r2 = 11,122 / 4,402`、`r3 = 15,524 / 4,402`。
+因此首次写入后，下一请求立即读取；若 `read=0/write>0`，先比较 `tool_hash`、`system_hashes`、
+`tail_hashes` 与 selected breakpoints，定位本地 wire 前缀失配，不能以“等待预热”放行。
 
 同日以 `fcodex/gpt-5.6-sol` 走 OpenAI Responses 做了同形状（三轮、tools、xhigh reasoning、
 runtime tail）的实测：预热后的三轮 `prompt_tokens = 5655 / 7868 / 10081`，分别读取
@@ -66,15 +63,106 @@ runtime tail）的实测：预热后的三轮 `prompt_tokens = 5655 / 7868 / 100
 单轮零 read 也不能当成“本地 prompt 一定坏了”的结论；实际门槛是同一稳定前缀是否在后续请求中出现
 cache read，而不是要求每一轮都读到完整历史。
 
-推翻条件：如果缓存已预热（使用同一稳定前缀等待至少两分钟）后，稳定工具/system 断点仍连续两轮
-`cache_read_tokens = 0` 且仍有 `cache_write_tokens > 0`，才将其判定为网关不复用或 usage
-语义不兼容，并携带本段哈希和 selected breakpoints 向网关排查。
+判定条件：在下一请求逐字节复用断点之前的稳定前缀后，若稳定工具/system 断点仍连续两轮
+`cache_read_tokens = 0` 且仍有 `cache_write_tokens > 0`，先判定为本地 wire 前缀或断点失配；
+携带本段哈希和 selected breakpoints 复核。确认字节前缀相同仍不读回，才向网关排查 usage 语义或
+服务端不复用。
+
+### 2026-08-05 Anthropic 缓存断点策略
+
+Anthropic 只会复用某个 `cache_control` 之前的连续字节前缀。因此断点按**出站 wire 消息的物理顺序**分配，不按“用户看见的一轮”
+这种逻辑分组分配：
+
+```text
+以下是 provider 的缓存构成顺序；不是 JSON 字段显示顺序，也不是对话发生顺序：
+
+tools:
+  ... 最后一个工具定义                                             [A]
+
+system:
+  稳定 system prompt                                               [B]
+  EphemeralTail（无独立 cache_control；稳定时由后面的 D 覆盖）
+
+messages（从旧到新）:
+  user:      原始需求
+  assistant: tool_use #1
+  user:      tool_result #1                                       [C]
+  assistant: tool_use #2
+  user:      tool_result #2                                       [D]
+
+A = tools 区末尾；B = 最后一个非 runtime system 块；
+C = 倒数第二条 wire user 消息末尾；D = 最新持久 wire 消息末尾。
+```
+
+- **D 总是完整消息末尾。** fcodex 实测不会复用同一 user 内容数组中、位于 tail 前的中间 block 断点；因此 runtime tail
+  不进入 `messages`，D 一律标记最新持久 user/tool-result 的最后 block。
+- **C 是滚动读取边界。** 下一次工具调用增长时，服务端仍可读到前一条 `tool_result` 为止的稳定历史。它是 wire 语义：工具循环中常常位于
+最后一个逻辑 turn 内部。
+- **CompactionSummary 不占 C 的名额。** system 块已经固定前缀；给 summary 再放一个断点通常只多覆盖几 K，而 C 能覆盖持续增长的工具历史。
+边界不足四个时自然退化，不造空断点。
+
+`EphemeralTail` 每轮都会重新渲染，因此它是 system 中的变化后缀。它保持不变时，D 覆盖完整的工具历史并持续读取；
+它改变时位于整个 `messages` 之前，会让下一请求缓存失效并冷写一次。这是状态正确性优先于命中率的显式取舍。
+`phase="wire_request_shape"` 的 `tail_hashes` 用于判断这一失效是否由运行时状态变化造成。
+
+**M6 实测（2026-08-05，`fcodex/claude-opus-5`，真实 8 轮 `tool_use/tool_result` 链）**：
+无 tail 的基线从 r2 起连续读回；无论把变化 tail 合并到 user，还是作为连续的独立 user，r2–r5 都是
+`read=0` 且重写全部历史。稳定 system tail 的生产布局恢复连续命中：
+`r1 read/write = 0 / 11,128`、`r2 = 11,128 / 4,371`、`r3 = 15,499 / 4,371`、`r4 = 19,870 / 4,371`，
+最终 r8 为 `37,354 / 4,371`（命中率 89.5%）。这推翻了“tail 前中间 block 的 D 可用”的旧结论。
+
+**参考实现与推翻条件**：Cline 的 `buildClineSystemPrompt`
+（`cline/sdk/packages/shared/src/prompt/cline.ts`）把 workspace 与 plan 状态放入 system；Continue CLI 的
+`constructSystemMessage`（`continue/extensions/cli/src/systemMessage.ts`）同样把 workspace/git/plan 放进 system，
+其 `systemAndToolsStrategy`（`continue/packages/openai-adapters/src/apis/AnthropicCachingStrategies.ts`）缓存 system、
+tools 与最近 user 边界。Codex 是反例而非可直接照搬的 Anthropic 方案：它的 Responses client 以稳定
+`instructions` 和 thread-scoped `prompt_cache_key` 缓存，并由
+`ContextManager::update_world_state`（`codex/codex-rs/core/src/context_manager/history.rs`）只追加 user/developer 状态 diff。
+因此角色选择不能脱离 provider wire 语义；只有 fcodex 实测支持“消息中间 block 断点 + 变化 user tail”的连续 cache read，
+且 M6 显示其成本不差于 system suffix 时，才应重新评估本方案。
+
+**回归守卫**：CI 单测
+`eight_round_marathon_keeps_rolling_c_and_d_with_a_system_tail` 重建八轮 `tool_use → tool_result`，
+逐轮断言 C 在上一条稳定 user/tool-result、D 在最新完整消息末尾，tail 是不单独标记的 system suffix，
+但稳定时仍由 D 覆盖。它防止 wire 结构回退，但不能伪造服务端 `cache_read` 计费值。需要真实验收时执行
+`cargo test --test prompt_cache_real_llm_tests fcodex_opus5_eight_round_marathon_with_system_tail_has_continuous_cache_hits -- --ignored --exact --nocapture`：
+从 r2 起必须有 `cache_read_tokens > 0` 且 cache write 小于本轮输入一半；r4–r8 命中率必须大于 80%。
+任何这些轮次的 `read=0/write>0` 都是失败，排查 wire 前缀，不得以网关预热放行。
+
+历史改写也遵循同一经济约束。设一次改写损失的原有可读前缀为 `W` tokens、每轮节省为 `S` tokens、后续可复用轮数为 `R`，Anthropic
+cache write/read 单价约为 1 : 0.08 时，只有 `R > 12.5 × W / S` 才值得主动改写。故 L0-A（大结果落盘）和 L0-B（历史占位符）
+只在成功 Boundary 切换之后运行：切换已使旧前缀失效，L0 只会缩小新前缀；实际溢出时仍由 `aggregate_precheck` 的保命路径处理。
+本轮 M4 的三次 `pwd` 没有产生 `>=50K` tool result，不能证明 L0-A 改写最后一个 turn 后仍能读到 C；保守结论是继续让
+L0-A 与 L0-B 一起留在 Boundary 后。只有后续带大结果的实测证明改写保住 C 的 cache read，才可把 L0-A 提前到 turn 末尾。
+
+**usage 失效不变量**：`ContextState::apply_boundary()` 在替换历史并重算
+`estimate_context_chars` 后已经调用 `invalidate_api_usage()`。因此
+`run_layer0_after_boundary()` 只负责继续清理、累计释放量和发事件，**不得再次使 usage
+失效**；重复失效不会更安全，只会把已明确的「boundary 改写历史」与后续 L0 清理混为两个
+会计动作。例外是 `current_tail_guard` 的保命路径：它可以在**没有**成功 boundary 的情况下
+直接执行 `compact_tool_results()`，那次本地改写没有经过 `apply_boundary()`，所以必须在
+`current_tail_guard.rs` 自己调用 `invalidate_api_usage()`。
+
+**L0 与 boundary 的绑定及推翻条件**：正常路径把 L0 绑定在成功 boundary 后，是因为
+boundary 已经打断缓存前缀，L0 不再引入额外的缓存重写成本。只有引入一种明确「应用
+boundary、但保留既有 provider usage 或缓存前缀」的机制（例如可增量拼接且不替换旧历史的
+摘要）时，才应推翻此绑定；届时必须重新给 L0 定义独立时机，并用真实 cache read/write
+实验验证，而不是把它无条件搬回每轮末尾。
+
+参考实现证据：`cc-fork-01/src/services/api/claude.ts` 的 `markerIndex` 默认取 `messages.length - 1`；Continue 在
+`packages/openai-adapters/src/apis/AnthropicCachingStrategies.ts` 对 user 内容块附加 `cache_control`；Codex 将环境状态作为
+`<environment_context>`（`codex-rs/protocol/src/protocol.rs`）维护，而非改写旧工具历史。
+
+推翻条件：若同一套 `tool_hash`、`system_hashes`、`message_prefix_hashes` 和 `tail_hashes` 在等待预热后仍连续两次 `cache_read=0`，
+停止调整断点并按网关问题处理；若 M4 证明 tail 命中但每轮尾部写成本仍不可接受，才评估把稳定状态转为仅哈希变化时追加的持久消息。
 
 ## 2026-08 Plan reminder 规则
 
 计划执行不再是第三种会话模式。请求装配按两个正交事实派生提醒：`AgentMode::Plan` 注入 planner reminder；`PlanRuntime::executing_plan_id().is_some()` 注入 executor reminder。
 
-两段提醒与当前权限状态一起作为请求级 ephemeral tail，附加在已恢复的持久消息之后；它们不进入 system prompt、`ContextState.messages` 或 JSONL。因此模式转换与计划生命周期变化不会改写已经发送过的缓存前缀。
+两段提醒与当前权限状态一起作为请求级 ephemeral tail，附加在已恢复的持久消息之后；它们不进入
+`ContextState.messages` 或 JSONL。Anthropic wire 将其转为不单独标记的 system suffix；稳定时由 D 覆盖，
+而模式转换与计划生命周期变化会使**下一次**缓存冷写，但不会污染已持久化历史或建立新的 user turn。
 
 ## 2026-05 Plan Recover 增补
 
@@ -95,7 +183,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 
 | 层级      | 名称             | 执行模式               |
 | ------- | -------------- | ------------------ |
-| Layer 0 | tool_result 清理 | 同步（每轮必跑，纯内存操作极快，用户无感知） |
+| Layer 0 | tool_result 清理 | 同步（仅在 Layer 2 成功应用 boundary 后，纯内存操作） |
 | Layer 1 | 异步预热           | 异步（后台 Task，主线程不等待） |
 | Layer 2 | 检查与应用          | 非阻塞检查 / 仅极端时同步等待   |
 | Layer 3 | 物理截断           | 同步（API 报错后兜底）      |
@@ -112,7 +200,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 - **异步摘要**：LLM 摘要从同步阻塞改为 Layer 1 异步预热 + Layer 2 延迟应用，LLM 回复后主线程零等待
 - **Preheat 状态机（单任务）**：`Preheat` 保证后台同一时间至多一个预热 task，防止竞态和 token 浪费
 - **信息保全**：Layer 0 从「截断丢弃」升级为「落盘 + preview 占位符」，大 tool_result 内容不丢失、可按需读回
-- **UI 不卡顿**：LLM 回复后（L0/L1 时机）绝不阻塞主线程；仅在发起下一次 LLM 请求前、且 ratio >= 0.98 时才可能同步等待
+- **UI 不卡顿**：LLM 回复后仅启动 Layer 1 异步预热或非阻塞地应用已就绪的 boundary；Layer 0 只作为成功 boundary 的后续清理，绝不单独阻塞主线程。仅在发起下一次 LLM 请求前、且 ratio >= 0.98 时才可能同步等待
 - **可观测性**：`ContextState` 内嵌 **`live: ContextLiveMetrics`**（瞬时利用率与预热标志）与 **`session_obs: SessionContextObservation`**（会话累计：压缩次数、释放量、工具落盘字符）；`context_metrics_update` 由二者组装，其中 `session_obs` 在 user turn 末写入 `sessions.json`；UI 状态栏反馈压缩进度（见 §10.6）。类型别名 `ContextMetrics` ≡ `ContextLiveMetrics`（见 `context_metrics.rs`）。
 
 ### 1.2 设计目标
@@ -203,10 +291,10 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
     ├───────────┼───────┼──────┼─────────────┼───┤         │
     │  正常区    │ L1    │ L2   │L1+L2        │L2 │         ▼
     │  无压缩    │预热   │请求前│回复后检查+   │请求前:    L3 物理截断
-    │  (L0每轮)  │async  │检查  │请求前检查+   │同上+      │ 目标<0.50
+    │           │async  │检查  │请求前检查+   │同上+      │ 目标<0.50
     │           │       │      │可能启动新预热│sync wait  │
 
-  注：Layer 0 每轮必跑（同步清理），不受 ratio 控制，图中省略。
+  注：Layer 0 仅在成功 Boundary 切换后运行；实际溢出时由请求前保命路径执行等价清理。
       「LLM 回复后」= user turn 结束（reasoning loop 最终回复，所有 tool 已执行）。
       「发起 LLM 请求前」= 下一个 user turn 进入时。
       100% 水位本身不触发 Layer 3；Layer 3 仅在 API 明确返回 Context Overflow 错误时触发。
@@ -217,21 +305,21 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 ### 图二：四层防护流程
 
 ```
-  User turn 结束：reasoning loop 最终回复（所有 tool 已执行，无 tool_calls）
-  当前 turn 的新消息已 push 到 messages + 写入 transcript
+  Layer 2 在② / ⑤ / mid-turn发现已完成的预热摘要
+  apply_boundary 成功：历史前缀已替换为摘要
       │
       ▼
-  ┌─ Layer 0（每轮必跑，同步，纯内存操作极快）─────────────┐
+  ┌─ Layer 0（作为成功 Boundary 的后续步骤，同步）───────────┐
   │  A. 单条 tool_result >= 50K chars？                    │
   │     → 落盘 + 500 chars preview 占位符                  │
   │  B. compactable zone (messages[..protected_start]) 中  │
   │     tool_result >= 10K chars？                         │
   │     → 占位符替换（不落盘）                             │
-  │  C. 写入 transcript JSONL（新 message entry）           │
-  │  D. 重新估算 tokens 用量和水位                          │
+  │  C. 作废被驱逐 tool_call 对应的 read stamp              │
+  │  D. 重新估算 tokens 用量和水位，非零时发释放事件          │
   └────────────────────────────────────────────────────────┘
-      │
-      ▼ 计算 ratio
+      │  （未切换时整段不运行，历史保持字节一致）
+      ▼ 计算新 ratio
       │
       ratio >= 0.50 且无进行中的异步任务？
       │  ──Yes──► 触发 Layer 1（异步，不等待）
@@ -369,11 +457,21 @@ fn usage_ratio(state: &ContextState) -> f64:
     estimated_token_count(state) / state.context_budget_tokens
 ```
 
-- `**last_api_usage**`：每次 LLM 响应结束后，从 `StreamEvent::Usage` 更新
-- `**post_usage_appended_chars**`：自最近一次 API 返回 usage 之后，新追加到对话中的消息字符数（如 tool result、用户新消息等）。由于这些消息没有 API 精确 token 数，只能用 `字符数 / 4` 近似估算其 token 数，作为增量叠加到 API Usage 基线上
+- `**last_api_usage**`：每次 LLM 响应结束后，从 `StreamEvent::Usage` 更新。`TokenUsage.prompt_tokens` 的跨 provider
+  契约是“本次请求的输入总量”：OpenAI 的 `prompt_tokens` 已是总量；Anthropic 在 wire 边界归一为
+  `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`。`cache_*` 只是该总量的计费分档，未来计费不可用总量直接乘单价。
+- `**post_usage_appended_chars**`：自最近一次 API usage 后、尚未被 usage 覆盖的新用户输入和 tool result 的字符数，以
+  `字符数 / 4` 作为增量估算。assistant 正文只增加 `estimate_context_chars`，**不**增加此计数器：同一轮 usage 的
+  `completion_tokens` 已经精确包含它，再加一次会使下一轮水位虚高。
 - **compact 后**：`last_api_usage` 失效（上下文已变），清零回退到字符 fallback，等下次 API 响应刷新
 
 > **关于 `estimate_context_chars` 的度量单位**：Rust 的 `String::len()` 返回 UTF-8 字节数而非 Unicode 字符数。`CHARS_PER_TOKEN_ESTIMATE = 4` 对英文内容（1 byte ≈ 1 char）较为准确；对中文内容（3 bytes/char，约 1.5 token/char），4 bytes/token 的估算会偏保守（低估 token 数），可能导致压缩触发略晚。**API Usage 优先模式下此偏差被消除**，字符 fallback 仅在首轮和 compact 后短暂使用。
+
+**当前决策：保持 `/4` 不变。** 真实会话曾观测到 1.3–3.5 字符/token 的范围，但修改常数会同时改变 fallback、
+`context_budget_chars` 与既有水位测试基线。本次只用 `phase="context_estimate_check"` 记录每次请求前估算与该请求
+provider usage 的误差；收集到按语言、provider、请求阶段分组的稳定分布后再决定。推翻当前决策的条件是：fallback
+或 Boundary 后的请求连续显著低估，且该误差已导致可复现的压缩延迟或 context overflow；届时应替换为经过实测校准的
+估算策略，而不是凭单个会话调整常数。
 
 ### 4.2 Ratio 水位线
 
@@ -384,7 +482,7 @@ fn usage_ratio(state: &ContextState) -> f64:
 
 | ratio 档位         | 触发层       | 检查时机              | 动作                                                                      |
 | ---------------- | --------- | ----------------- | ----------------------------------------------------------------------- |
-| 每轮结束             | Layer 0   | LLM 回复后（⑤）        | 同步清理 tool_result（主线程同步但极快，用户无感知）                                          |
+| Boundary 切换成功后      | Layer 0   | ② / ⑤ 的成功 apply 后  | 清理摘要之后的 tool_result；未切换时保持历史字节级不变                                        |
 | `>= 0.50`        | Layer 1   | LLM 回复后（⑤）        | `try_restart_if_pending` → 通过统一 `compaction_provider()` 入口异步预热 `preheat.try_start`（若无进行中的任务），主线程不等待                                                   |
 | `>= 0.70`        | Layer 2   | **发起 LLM 请求前（②）** | `try_restart_if_pending` → 检查 `preheat` 结果，完成则 Boundary 切换（非阻塞）                               |
 | `>= 0.85`        | Layer 1+2 | LLM 回复后（⑤）        | `try_restart_if_pending` → 先 `poll_result`：**已有结果则立即 Boundary 切换**（非阻塞）；再判断是否需要新一轮 `try_start`      |
@@ -394,7 +492,7 @@ fn usage_ratio(state: &ContextState) -> f64:
 
 **设计原则**：
 
-- **LLM 回复后绝不阻塞主线程**，即使 ratio 暂时超过 0.98 甚至 >1.0 也只做 L0 清理和 L1 异步预热，不卡 UI
+- **LLM 回复后绝不阻塞主线程**，即使 ratio 暂时超过 0.98 甚至 >1.0 也只做 L1 异步预热，或非阻塞地应用已完成的 Layer 2；只有 boundary 已成功应用时才紧随其后执行 L0，不卡 UI
 - 因为 `input_budget = context_window - max_output_tokens`，LLM 回复完成时实际还有 `max_output_tokens` 的空间余量，ratio 超过 1.0 不代表立即 Context Overflow
 - **仅在发起下一次 LLM 请求前**才可能阻塞（L2 化异步为同步），此时 UI 已完成当前轮的渲染，阻塞的是推理启动而非 UI 交互
 
@@ -403,8 +501,8 @@ fn usage_ratio(state: &ContextState) -> f64:
 
 | 触发条件                                                      | 层级        | 时机           | 动作                                   |
 | --------------------------------------------------------- | --------- | ------------ | ------------------------------------ |
-| 单条 tool_result >= 50K chars                               | Layer 0   | ⑤            | 落盘 + 500 chars preview 占位符           |
-| compactable zone (turn 0..N-5) 中 tool_result >= 10K chars | Layer 0   | ⑤            | 占位符替换（不落盘）                           |
+| 成功应用 boundary 后，单条 tool_result >= 50K chars          | Layer 0   | ② / ⑤ / 中途守卫 | 落盘 + 500 chars preview 占位符           |
+| 成功应用 boundary 后，compactable zone 中 tool_result >= 10K chars | Layer 0 | ② / ⑤ / 中途守卫 | 占位符替换（不落盘）                           |
 | ratio >= 0.50 且 preheat 可启动                                   | Layer 1   | ⑤            | `try_restart_if_pending` → `preheat.try_start`（后台 Task，内 3× retry）                   |
 | ratio >= 0.70                                             | Layer 2   | ② 发起 LLM 请求前 | `try_restart_if_pending` → `poll_result`/`apply`，完成则 Boundary 切换 |
 | ratio >= 0.85                                             | Layer 1+2 | ⑤ LLM 回复后    | `try_restart_if_pending` → 非阻塞 `poll_result` + 切换 + 可能 `try_start`                 |
@@ -522,13 +620,17 @@ struct CompactionResult {  // 规范语义（字段名以实现为准）
 
 ### 5.3 动态更新
 
-每次 reasoning loop 中追加新消息（包括 assistant、tool 消息），同步更新估算：
+追加消息分成两条路径，避免把 assistant 正文计两次：
 
 ```
-fn on_message_appended(state: &mut ContextState, msg: &ChatMessage):
-    state.estimate_context_chars += msg.content.len()
-    state.post_usage_appended_chars += msg.content.len()
-    state.messages.push(msg)
+fn on_message_appended(state: &mut ContextState, chars: usize):
+    // 用户输入、tool result、nudge：下一次 usage 尚未覆盖，需增量估算。
+    state.estimate_context_chars += chars
+    state.post_usage_appended_chars += chars
+
+fn on_assistant_message_appended(state: &mut ContextState, chars: usize):
+    // assistant 的 completion_tokens 已在同一轮 API usage 中，不能再叠加。
+    state.estimate_context_chars += chars
 
 fn update_api_usage(state: &mut ContextState, prompt_tokens: u32, completion_tokens: u32):
     state.last_api_usage = Some(ApiUsage { prompt_tokens, completion_tokens })
@@ -713,10 +815,9 @@ init_context_state 处理流程：
   │  此时 messages 已包含刚完成的 turn 的所有消息。                           │
   │                                                                         │
   │  → preheat.try_restart_if_pending(...)（⑤ 与 ② 双点恢复）               │
-  │  → Layer 0（同步清理 messages 中的 tool_result）                         │
-  │  → 计算 ratio → 若 >= 0.50：`preheat.try_start(...)`（异步预热，不等待）   │
   │  → 若 ratio >= 0.85：Layer 2 回复后检查                                 │
-  │    （preheat 已有结果？→ 立即 Boundary 切换；未完成→跳过）                 │
+  │    （preheat 已有结果？→ Boundary 切换 → Layer 0；未完成→跳过）            │
+  │  → 计算新 ratio → 若 >= 0.50：`preheat.try_start(...)`（异步预热，不等待） │
   └─────────────────────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -729,13 +830,12 @@ init_context_state 处理流程：
   │                                                                         │
   │  ◆ 发起 LLM 请求前检查：                                                │
   │    → preheat.try_restart_if_pending(...)                                │
-  │    → 若 ratio >= 0.70：Layer 2 检查（完成则 Boundary 切换）              │
+  │    → 若 ratio >= 0.70：Layer 2 检查（完成则 Boundary 切换 → Layer 0）     │
   │    → 若 ratio >= 0.98：Layer 2 发请求前检查                              │
   │      （完成→切换；未完成→化异步为同步，阻塞等待）                        │
   │                                                                         │
-  │  build_context_from_state(state) → state.messages.clone()               │
-  │       + 注入 system prompt                                              │
-  │       + 追加本轮 ChatMessage::user(...)                                 │
+  │  若 boundary 已切换：从已更新的 state.messages 重新拍平                   │
+  │       + 注入 system prompt + 已持久化的本轮 user 输入                     │
   │       ──► initial_messages: Vec<ChatMessage>                            │
   │                                                                         │
   │  AgentLoop::run(initial_messages) → 进入 ③                              │
@@ -747,7 +847,7 @@ init_context_state 处理流程：
 - `**ContextState.messages`**：管理**已完成的历史消息**。只在 ② 进入前读取（clone）、④ 结束后追加、⑤ 被 L0/L1/L2 修改。
 - `**reasoning loop messages`**：实时工作集，包含历史 + 当前 turn 正在产生的新消息。每次进入 ② 时从 `ContextState.messages` clone 构建。
 - **估算更新**：`estimateContextChars` 在 ③ 每次 push 时实时累加，`last_api_usage` 在每次 LLM 响应后刷新。
-- **上下文管理与工作集 `messages` 无交集**：L0/L1/L2 在 ⑤ 操作 `ContextState.messages`；reasoning loop 内的工作集 `messages` 不受压缩影响。下一轮 ② 时从更新后的 `ContextState.messages` 重建，自然包含 Boundary 切换后的摘要。
+- **上下文管理与工作集 `messages` 无交集**：⑤ 只会在 `ContextState.messages` 上轮询/应用 Layer 2；Layer 0 仅在该 boundary 成功应用后作为结构性后续操作。reasoning loop 内的工作集 `messages` 不受压缩影响。下一轮 ② 时从更新后的 `ContextState.messages` 重建，自然包含 Boundary 切换后的摘要。
 
 即：`**ContextState.messages` 是持久化 transcript 与 LLM 请求之间的内存层**——负责 Compaction 折叠与估算维护；`ChatMessage` 已是 LLM wire 格式，无需额外转换。
 
@@ -880,9 +980,24 @@ flowchart LR
 
 ## 6. 防护算法（Layer 0~3）
 
-### 6.1 Layer 0：tool_result 清理（每轮同步）
+### 6.1 Layer 0：与 boundary 成功应用结构性绑定
 
-在 user turn 完成后（步骤⑤，reasoning loop 已结束，当前 turn 的消息已追加到 `messages`）立即执行，**不受 ratio 控制**。操作对象是 `messages: Vec<ChatMessage>`（包含刚完成的当前 turn）。合并了旧方案的 Layer 0 落盘和 Layer 1 占位符为一个同步步骤。
+Layer 0 **不是独立的水位触发器**。它只能紧接 Layer 2 的 `apply_boundary` 成功分支运行：②（回合开始前）、⑤（回合结束）和 mid-turn current-tail guard 三条路径都调用同一个 `apply_and_emit_boundary`，因此三者要么同时完成「摘要应用 → L0」，要么全部不改历史。
+
+这样安排的原因是缓存成本：L0 会改写工具结果，而成功的 boundary 已经替换历史前缀；把两次改写绑定在一起不会额外破坏缓存。相反，boundary 未成功（低水位、无预热结果或 stale）时必须保持历史字节级不变。
+
+```
+apply_boundary 成功
+      │  （同时 invalidate_api_usage，随后水位回退到字符估算）
+      ▼
+run_layer0_cleanup
+      ├─ A. 上一个已完成 turn 的超大 tool_result 落盘 + preview
+      ├─ B. compactable zone 的大 tool_result 替换为 placeholder
+      ├─ 作废被驱逐 tool_call 的 ReadFileState stamp
+      └─ 累加释放量并在非零时发 layer0_context_release
+```
+
+回合执行期间 `ContextState.messages` 只含已完成的历史；当前回合的新消息还在 agent loop 的局部 `messages`，直到 `run()` 收束才同步回来。因此 A 所称的「最后一个 turn」是 **state 中最后一个已完成 turn**，天然可能比当前 in-flight turn 滞后一回合。
 
 **步骤 A：大结果落盘**
 
@@ -939,7 +1054,7 @@ Layer 0 处理后的新 message entry 写入 transcript（落盘的 tool_result 
 
 ### 6.2 Layer 1：异步预热
 
-Layer 0 完成后（仍在步骤⑤），先 **`preheat.try_restart_if_pending(...)`**，再计算 ratio；若 **ratio >= 0.50** 且 `preheat.try_start(...)` 接受启动，则通过统一的 compaction provider 访问入口 spawn 异步预热。
+时机⑤先 **`preheat.try_restart_if_pending(...)`**，再非阻塞检查 Layer 2；无论 boundary 是否切成，最后按更新后的 ratio 判断 `preheat.try_start(...)`。若 Layer 2 切成，期间已同步完成 Layer 0，再启动下一轮预热；若未切成，L0 不会单独运行。
 
 **主线程不等待**，当前 user turn 处理完毕。异步预热在用户阅读/思考/输入期间后台运行。
 
@@ -969,7 +1084,7 @@ Layer 2 在 **两个时机** 检查预热结果是否可取用，对应步骤⑤
 
 #### LLM 回复后检查（ratio >= 0.85）
 
-在 Layer 0 和 Layer 1 之后执行。**绝不阻塞主线程**——使用 **`poll_result()`**（或等价非阻塞路径），`Completed(result)` 则应用，否则跳过。
+在时机⑤，Layer 2 使用 **`poll_result()`**（或等价非阻塞路径），`Completed(result)` 则应用，否则跳过，绝不阻塞主线程。成功应用时，`apply_and_emit_boundary` 在内部立即执行 Layer 0；失败时 Layer 0 绝不运行。
 
 ```
 fn check_preheat_after_reply(state: &mut ContextState):
@@ -1300,8 +1415,8 @@ pub attempts: Option<u32>,
 
 ```text
 tools（稳定排序） → system（稳定说明） → 持久化历史 → 本轮输入 → runtime tail
-      ↑                   ↑                                   ↑
- Anthropic 断点 1      断点 2                         每轮不同，不设断点
+      ↑                   ↑                         ↑              （未缓存后缀）
+ Anthropic 断点 1      断点 2              最深断点 D（写锚）
 ```
 
 - `TokenUsage` / `StreamEvent::Usage` 记录 provider 返回的 `cache_read_tokens` 与
@@ -1310,15 +1425,17 @@ tools（稳定排序） → system（稳定说明） → 持久化历史 → 本
 - 内置工具目录在所有 mode 相同，插件工具按 `(plugin_id, name)` 排序；权限与 mode
   仍由 handler/path gate 强制执行，而不是通过删工具定义来实现。
 - `ChatRequest` 构造接缝在每个主 Agent 请求末尾临时添加 runtime tail（计划提醒和当前
-  workspace 权限状态）。尾部不进入 `ContextState.messages` 或 transcript，因而不会改写
-  缓存前缀。
-- Anthropic wire 在 tools 末项、system 末 block、压缩摘要和最后一个非 ephemeral message
-  最多放四个 `cache_control: {type: "ephemeral"}` 断点；最后一个断点绝不能落在 runtime
-  tail。OpenAI Chat Completions / Responses 使用按 `{session_id}:{family}` 分域的
+  workspace 权限状态）。尾部不进入 `ContextState.messages` 或 transcript；Anthropic wire 把它渲染为
+  不单独标记的 system suffix，稳定时由 D 覆盖，状态变更会有意使下一次缓存冷写。
+- Anthropic wire 最多放四个 `cache_control: {type: "ephemeral"}` 断点：tools 末项（A）、
+  最后一个非 runtime system block（B）、倒数第二条 wire user 消息末尾（C，滚动读锚）和最后一条持久 wire
+  消息末尾（D，写锚）。runtime tail 是不单独标记的 system suffix；它变化时会使下一次 Anthropic 缓存失效。
+  OpenAI Chat Completions / Responses 使用按 `{session_id}:{family}` 分域的
   `prompt_cache_key`。
-- Layer 0 只在 `usage_ratio >= 0.50` 时落盘/替换大 tool result。低水位保留历史字节不变；
-  Layer 1 的 preheat 本身只读快照，不会改写缓存，真正改变历史的是 Layer 2/L3 的必要
-  boundary 应用。
+- Layer 0 只在 Layer 2 boundary **成功应用后**运行一次：L0-A 落盘最后一 turn 的超大
+  tool result，L0-B 替换 compactable zone 的大 tool result。Layer 1 的 preheat 本身只读
+  快照，不会改写缓存；未切换 boundary 时保持历史字节不变，真正改变历史的是 Layer 2/L3
+  的必要应用。
 
 用 `scripts/analyze_prompt_cache_baseline.py` 对同一条至少 20 轮真实会话采集改造前后
 命中率、授权次数、插件/技能变动、拒绝工具比例与 `usage_ratio` P50/P90。
@@ -1385,7 +1502,7 @@ T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`
 | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[src/core/session/manager/types.rs](../../../src/core/session/manager/types.rs)` | `ContextState` 持有 `messages: Vec<ChatMessage>`、`preheat: Preheat`（Layer 1 状态机）、`start_idx` 等；`CompactionResult` 含 `transcript_compaction_entry_id`；`apply_boundary` 仅按 **`covered_end_id`** 定位 `end_idx`（通过 `msg_id` 匹配），无匹配返回 **`AppError::ApplyBoundaryStale`**                                           |
 | `[src/core/session/transcript.rs](../../../src/core/session/transcript.rs)` | `BranchSummaryEntry` 可选 `preheatCompactionId`；`set_branch_summary_entry_is_boundary_true` 按 id 原地升级；**`remove_branch_summary_entry_by_id`** 按 id 删除 `branch_summary` 行（陈旧 apply）                                                     |
-| `[src/core/agent_loop/run.rs](../../../src/core/agent_loop/run.rs)`               | reasoning loop 每轮 LLM 回复后：① Layer 0 同步清理 ② ratio check → Layer 1 异步预热 ③ 0.85<=r<0.98 时 Layer 2 回复后检查；发起 LLM 请求前：r>=0.70 时 Layer 2 检查、r>=0.98 时发请求前检查（可能同步等待）                |
+| `[src/core/agent_loop/turn_finalize.rs](../../../src/core/agent_loop/turn_finalize.rs)` / `[src/core/compaction/apply.rs](../../../src/core/compaction/apply.rs)` | reasoning loop 最终回复后：① 恢复 pending preheat ② ratio check 后 Layer 2 非阻塞检查（成功 boundary 在同一成功分支运行 Layer 0）③ 启动下一轮 Layer 1 预热；发起下一次 LLM 请求前：r>=0.70 时 Layer 2 检查、r>=0.98 时可能同步等待，成功后由调用方重建发送消息 |
 | `[src/infra/config/types.rs](../../../src/infra/config/types.rs)`                 | `[context]` 配置节更新 `layer0_single_result_max_chars` 为 50K、新增 `layer0_placeholder_threshold_chars`（10K）、新增 `compaction_max_tokens`（10K）                                       |
 | `[src/core/compaction/](../../../src/core/compaction/)`                           | 重构模块结构：`layer0.rs`（同步清理：落盘 + 占位符，操作 `messages` 中的 `ChatMessage`）、`preheat.rs`（异步预热：克隆整个 `messages: Vec<ChatMessage>` + 后台 Task + 写 transcript）、`apply.rs`（检查与应用：两个检查时机 + Boundary 切换，`messages.splice(..=end_idx, [summary_msg])`）、`truncation.rs`（物理截断，`messages.drain(..turn_end)`）               |
 | `[src/core/system_prompt.rs](../../../src/core/system_prompt.rs)`                 | 新增分页读取引导 section                                                                                                                                                            |
@@ -1403,14 +1520,13 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 - **⑤ LLM 回复后**（user turn 完成，绝不阻塞）：
   - `preheat.try_restart_if_pending(...)`（与 ② 双点恢复 ExhaustedPending）
-  - Layer 0 同步清理 `messages` 中的 tool_result（落盘 + 占位符，通过 `ChatMessage::set_text_content` 原地替换）
+  - ratio >= 0.85 → Layer 2 回复后检查（`poll_result` 已有 `CompactionResult` 则立即切换；成功切换在内部紧接执行 Layer 0，非阻塞）
   - ratio check → `preheat.try_start(...)`（Layer 1 异步预热，不等待）
-  - ratio >= 0.85 → Layer 2 回复后检查（`poll_result` 已有 `CompactionResult` 则立即切换，非阻塞）
 - **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：
   - `preheat.try_restart_if_pending(...)`
   - ratio >= 0.70 → Layer 2 检查（完成则 Boundary 切换）
   - ratio >= 0.98 → Layer 2 发请求前检查（未完成则**化异步为同步**阻塞等待）
-  - Boundary 切换后 `ContextState.messages` 已更新，工作集 `messages` 通过 `build_context_from_state` → `state.messages.clone()` 重建
+  - 成功 Boundary 切换后，L0 已同步完成；`ContextState.messages` 是历史的唯一事实源头，工作集必须从它重新拍平，并把已持久化的当前用户输入接回尾部
 - **③ reasoning loop 内 API 返回 Context Overflow 错误**：
   - Layer 3 物理截断 + 重试
 
@@ -1437,7 +1553,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 | Layer | Rust variants | wire names |
 | ----- | ------------- | ---------- |
-| **L0（⑤ 同步清理）** | `Layer0ContextRelease { persist_tokens_freed, placeholder_tokens_freed }` | `layer0_context_release` |
+| **L0（boundary 应用后同步清理）** | `Layer0ContextRelease { persist_tokens_freed, placeholder_tokens_freed }` | `layer0_context_release` |
 | **L1（异步预热）** | `AutoCompactionStart { covered_count, ratio_before }` / `AutoCompactionEnd { elapsed_ms, summary_chars, covered_count, ratio_after, estimated_covered_tokens_before, estimated_summary_tokens, estimated_tokens_saved }` / `CompactionError { exhausted_after_retries, attempts, error, source, ratio }` | `auto_compaction_start` / `auto_compaction_end` / `compaction_error` |
 | **L2（边界切换）** | `BoundarySwitched { ratio_before, ratio_after, covered_count, was_sync_wait, estimated_tokens_freed }` | `boundary_switched` |
 | **L3（溢出裁剪）** | `ContextOverflowTrimStart { reason, ratio }` / `ContextOverflowTrimEnd { ratio_before, ratio_after, will_retry, estimated_tokens_freed, turns_removed }` | `context_overflow_trim_start` / `context_overflow_trim_end` |
@@ -1469,7 +1585,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 - **`context_metrics_update` 节奏**：与实现一致，**每个 user turn** 内约发射两次（本轮首次流式请求前 + timing ⑤ 末尾）；中间 tool round **不**额外发射。`compactionCount` / `compactionTokensFreed` / `totalToolResultBytesPersisted`（字段名历史兼容，**值为 Unicode 字符累计**）来自 **`ContextState::session_obs`**；瞬时字段来自 **`ContextState::live`**（含 `preheatInProgress` = 预热 LLM 任务仍在跑；`preheatResultPending` = 摘要已就绪待 poll/apply，与前者互斥；`turnCount` = `state.turn_count()` 统计 `messages` 中的 turn start 数）。`AgentLoop` **不**再持有独立 `metrics` 结构。
 - **Transcript（暂缓专项）**：同一会话 JSONL 中可能出现多条 `isBoundary: false` 的 compaction 行或边界行语义重叠；合并策略与 LLM 约束待后续排查。
 - **估算函数**：分层释放量与 transcript 中三字段均通过 `estimated_tokens_from_chars`（与 `estimated_token_count()` 的 **chars/4** fallback 同阶）换算；与带 API usage 的精确计数相比均为**估算**，仅保证与水位线逻辑一致。`estimate_msg_chars` 替代旧 `estimate_turn_chars`，作用于单条 `ChatMessage`。
-- **防重复计入**：**L1** 在拿到 `summary_text` 时**一次性**计算 `estimatedCoveredTokensBefore` / `estimatedSummaryTokens` / `estimatedTokensSaved`，写入 `BranchSummaryEntry` 与 `CompactionResult`；**不在 L2** 再用 `estimated_token_count()` 前后差重算。**L2** `apply_boundary` **成功**后将会话 `compaction_tokens_freed` 加上 `estimated_tokens_saved`，并 `compaction_count += 1`。**L0** 在 timing ⑤ 将落盘与占位符释放折算为 tok 后立即计入会话累计，并发射 `layer0_context_release`。**L3** 按被 drain 消息的字符累计折算 tok 后计入会话累计；**每次成功 trim 段**计 **1** 次 compact 动作（与 `compaction_count` 语义对齐），`turns_removed` 由事件给出。
+- **防重复计入**：**L1** 在拿到 `summary_text` 时**一次性**计算 `estimatedCoveredTokensBefore` / `estimatedSummaryTokens` / `estimatedTokensSaved`，写入 `BranchSummaryEntry` 与 `CompactionResult`；**不在 L2** 再用 `estimated_token_count()` 前后差重算。**L2** `apply_boundary` **成功**后将会话 `compaction_tokens_freed` 加上 `estimated_tokens_saved`，并 `compaction_count += 1`。**L0** 作为同一成功分支的后续动作，在 ② / ⑤ / 中途守卫任一路径中将落盘与占位符释放折算为 tok 后立即计入会话累计，并在释放量非零时发射 `layer0_context_release`。**L3** 按被 drain 消息的字符累计折算 tok 后计入会话累计；**每次成功 trim 段**计 **1** 次 compact 动作（与 `compaction_count` 语义对齐），`turns_removed` 由事件给出。
 - **持久化（方案 B）**：`sessions.json` 的 `SessionEntry` 持有 `compaction_count`、`compaction_tokens_freed`、`tool_result_chars_persisted`；**仅在 user turn 结束**（含可恢复错误路径）刷盘；进程在 turn 中途崩溃可能丢失本 turn 内尚未写入 store 的观测累计，详见 [session-storage.md](session-storage.md)。
 
 

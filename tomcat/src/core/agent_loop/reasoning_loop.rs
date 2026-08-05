@@ -174,6 +174,13 @@ pub(super) async fn run_reasoning_loop(
             }
         }
 
+        // Capture the local prediction immediately before this request. The
+        // provider's Usage event below is the corresponding ground truth.
+        let estimated_prompt_tokens = agent
+            .context_state
+            .as_ref()
+            .map(|state| state.estimated_token_count());
+
         // Stream 消费（含 LLM connect + MessageStart/Update/End 发射 + cancel 抢占）
         // 整块委托给 stream_handler::run_chat_stream；aborted / Err 路径均已
         // 先发 MessageEnd，调用方仅需补 partial assistant 落盘与 make_aborted。
@@ -218,6 +225,24 @@ pub(super) async fn run_reasoning_loop(
                     cache_creation_input_tokens = ?usage.cache_write_tokens,
                 );
             }
+            if let Some(estimated_prompt_tokens) = estimated_prompt_tokens {
+                let actual_prompt_tokens = usage.prompt_tokens as usize;
+                let absolute_error_tokens = estimated_prompt_tokens.abs_diff(actual_prompt_tokens);
+                let relative_error = if actual_prompt_tokens == 0 {
+                    0.0
+                } else {
+                    absolute_error_tokens as f64 / actual_prompt_tokens as f64
+                };
+                info!(
+                    target: "tomcat_chat_diag",
+                    phase = "context_estimate_check",
+                    request_id = ?diagnostic_request_id,
+                    estimated_prompt_tokens,
+                    actual_prompt_tokens,
+                    absolute_error_tokens,
+                    relative_error,
+                );
+            }
         }
         if is_output_truncation_finish_reason(finish_reason.as_deref()) {
             info!(
@@ -244,6 +269,11 @@ pub(super) async fn run_reasoning_loop(
             }
             if !content_buf.is_empty() {
                 if let Some(ref mut ctx_state) = agent.context_state {
+                    // A cancelled stream may never emit Usage. In that case
+                    // excluding the persisted partial response from the
+                    // post-usage delta hides it from the next timing-2
+                    // boundary check. Prefer this one-shot overestimate to
+                    // risking a missed overflow safeguard.
                     ctx_state.on_message_appended(content_buf.len());
                 }
                 let forced_id = agent.take_or_mint_pending_assistant_entry_id();
@@ -383,7 +413,9 @@ pub(super) async fn run_reasoning_loop(
             summary_title.as_deref(),
         );
 
-        // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
+        // Do not synchronously compact mid-tool-loop. The final-reply path
+        // handles L1 preheat and a ready L2 boundary; L0 follows only a
+        // successful boundary application.
         agent.emit_event(AgentEvent::TurnEnd {
             turn_index,
             message: Message(serde_json::json!({})),

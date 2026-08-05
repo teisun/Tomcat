@@ -1,18 +1,18 @@
 //! C1 completion guard：EXEC 下计划没收口时，模型不能靠一段文字结束回合。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
 use super::super::turn_finalize::{
-    finalize_turn_after_text, should_run_layer0_cleanup, TurnOutcome, LAYER0_PRESSURE_GATE,
-    MAX_COMPLETION_GUARD_INJECTIONS,
+    finalize_turn_after_text, TurnOutcome, MAX_COMPLETION_GUARD_INJECTIONS,
 };
 use super::super::types::SubagentType;
 use super::super::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
-use crate::core::compaction::preheat::Preheat;
+use crate::core::compaction::{preheat::Preheat, run_layer0_cleanup};
 use crate::core::llm::{ChatMessage, MessageKind, StreamEvent};
 use crate::core::plan_runtime::file_store::{
     plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
@@ -20,20 +20,14 @@ use crate::core::plan_runtime::file_store::{
 };
 use crate::core::plan_runtime::review::Finding;
 use crate::core::plan_runtime::PlanRuntime;
-use crate::core::session::manager::{ContextState, MessageAppendSink};
+use crate::core::session::manager::{
+    estimated_tokens_from_chars, CompactionResult, ContextState, MessageAppendSink,
+};
 use crate::core::tools::pipeline::read_state::{ReadFileState, ReadStamp};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
-use crate::infra::event_bus::DefaultEventBus;
-
-#[test]
-fn layer0_pressure_gate_opens_at_the_preheat_threshold() {
-    assert!(!should_run_layer0_cleanup(
-        LAYER0_PRESSURE_GATE - f64::EPSILON
-    ));
-    assert!(should_run_layer0_cleanup(LAYER0_PRESSURE_GATE));
-    assert!(should_run_layer0_cleanup(0.70));
-}
+use crate::infra::event_bus::{DefaultEventBus, EventBus};
+use crate::infra::wire;
 
 /// 计划文件写在 `$HOME/.tomcat/plans` 下，和 plan_tool 那批测试共享同一个进程环境变量，
 /// 所以必须用同一把锁串行化，否则会互相把 HOME 抽走。
@@ -193,6 +187,12 @@ fn read_stamp(tool_call_id: &str) -> ReadStamp {
     }
 }
 
+fn user_message_with_id(id: &str, content: &str) -> ChatMessage {
+    let mut message = ChatMessage::user(content);
+    message.msg_id = Some(id.to_string());
+    message
+}
+
 async fn finalize(agent: &mut AgentLoop, messages: &mut Vec<ChatMessage>) -> TurnOutcome {
     finalize_turn_after_text(
         agent,
@@ -211,7 +211,7 @@ async fn finalize(agent: &mut AgentLoop, messages: &mut Vec<ChatMessage>) -> Tur
 }
 
 #[tokio::test]
-async fn layer0_above_gate_preserves_placeholder_and_persistence_semantics() {
+async fn layer0_does_not_rewrite_history_without_a_boundary_switch() {
     let trail = tempfile::tempdir().expect("trail directory");
     let config = ContextConfig {
         keep_recent_turns: 1,
@@ -242,8 +242,8 @@ async fn layer0_above_gate_preserves_placeholder_and_persistence_semantics() {
     agent.set_context_state(Some(ContextState {
         messages: state_messages.clone(),
         estimate_context_chars,
-        context_budget_chars: 100_000,
-        context_budget_tokens: 25_000,
+        context_budget_chars: 80_000,
+        context_budget_tokens: 20_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
@@ -261,28 +261,243 @@ async fn layer0_above_gate_preserves_placeholder_and_persistence_semantics() {
     );
 
     let state = agent.context_state.as_ref().expect("context state");
-    assert_eq!(
-        state.messages[1].text_content(),
-        Some(crate::core::compaction::TOOL_RESULT_PLACEHOLDER),
-        "a historical 12K tool result must retain the established placeholder behavior"
+    assert!(
+        state.messages[1]
+            .text_content()
+            .is_some_and(|content| content.len() > 10_000),
+        "the old 12K tool result must remain intact until a boundary applies"
     );
-    let persisted = state.messages[3].text_content().unwrap_or("");
+    assert_eq!(
+        state.messages[3].text_content().map(str::len),
+        Some(60_000),
+        "the newest 60K tool result must remain in context without a boundary"
+    );
+    assert!(
+        !trail
+            .path()
+            .join("tool-results/sess-guard/new-60k.txt")
+            .exists(),
+        "L0 must not persist a result without a successful boundary switch"
+    );
+}
+
+#[tokio::test]
+async fn successful_boundary_switch_runs_both_layer0_cleanup_steps() {
+    let trail = tempfile::tempdir().expect("trail directory");
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        layer0_placeholder_threshold_chars: 10_000,
+        layer0_single_result_max_chars: 50_000,
+        ..Default::default()
+    };
+    let mut agent = build_agent_with_config(
+        None,
+        SubagentType::User,
+        None,
+        config,
+        Arc::new(ReadFileState::new()),
+        trail.path().display().to_string(),
+    );
+    let state_messages = vec![
+        user_message_with_id("start", "covered start"),
+        user_message_with_id("covered-end", "covered end"),
+        user_message_with_id("surviving-old-turn", "old result remains after summary"),
+        ChatMessage::tool("old-12k", &"old".repeat(4_000)),
+        user_message_with_id("last-turn", "keep this final turn"),
+        ChatMessage::tool("new-60k", &"new".repeat(20_000)),
+    ];
+    let estimate_context_chars = state_messages
+        .iter()
+        .map(crate::core::session::manager::estimate_msg_chars)
+        .sum();
+    let mut preheat = Preheat::new();
+    preheat.restore_completed(CompactionResult {
+        summary_text: "summary".into(),
+        covered_start_id: "start".into(),
+        covered_end_id: "covered-end".into(),
+        covered_count: 2,
+        transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: Some(10),
+        estimated_summary_tokens: Some(2),
+        estimated_tokens_saved: Some(8),
+        preheat_elapsed_ms: 0,
+    });
+    agent.set_context_state(Some(ContextState {
+        messages: state_messages.clone(),
+        estimate_context_chars,
+        context_budget_chars: 40_000,
+        context_budget_tokens: 10_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat,
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+    let mut messages = state_messages;
+
+    assert_eq!(
+        finalize(&mut agent, &mut messages).await,
+        TurnOutcome::Finished
+    );
+
+    let state = agent.context_state.as_ref().expect("context state");
+    assert_eq!(
+        state.messages[2].text_content(),
+        Some(crate::core::compaction::TOOL_RESULT_PLACEHOLDER),
+        "a successful boundary makes the surviving old turn eligible for L0-B"
+    );
+    let persisted = state.messages[4].text_content().unwrap_or("");
     assert!(
         persisted.starts_with("[Tool result persisted:"),
-        "the newest 60K result must remain disk-backed with a preview: {persisted}"
+        "the current tail's large result must use L0-A after boundary: {persisted}"
     );
-    assert!(persisted.contains("60000 chars"), "persisted={persisted}");
     assert!(
         trail
             .path()
             .join("tool-results/sess-guard/new-60k.txt")
             .exists(),
-        "the original large result must be retained on disk"
+        "L0-A must retain the original large result on disk"
     );
 }
 
 #[tokio::test]
-async fn layer0_below_gate_keeps_read_stamp_and_tool_result_intact() {
+async fn timing5_boundary_cleanup_matches_reference_and_emits_one_release() {
+    const FINAL_TEXT: &str = "I have finished M1, let me know what to do next.";
+
+    let trail = tempfile::tempdir().expect("trail directory");
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        layer0_placeholder_threshold_chars: 10_000,
+        layer0_single_result_max_chars: 50_000,
+        ..Default::default()
+    };
+    let state_messages = vec![
+        user_message_with_id("start", "covered start"),
+        user_message_with_id("covered-end", "covered end"),
+        user_message_with_id("surviving-old-turn", "old result remains after summary"),
+        ChatMessage::tool("old-12k", &"old".repeat(4_000)),
+        user_message_with_id("last-turn", "keep this final turn"),
+        ChatMessage::tool("new-60k", &"new".repeat(20_000)),
+    ];
+    let estimate_context_chars = state_messages
+        .iter()
+        .map(crate::core::session::manager::estimate_msg_chars)
+        .sum();
+    let compaction_result = CompactionResult {
+        summary_text: "summary".into(),
+        covered_start_id: "start".into(),
+        covered_end_id: "covered-end".into(),
+        covered_count: 2,
+        transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: Some(10),
+        estimated_summary_tokens: Some(2),
+        estimated_tokens_saved: Some(8),
+        preheat_elapsed_ms: 0,
+    };
+
+    // Reference the pre-refactor timing⑤ behavior: successful L2 apply followed by one L0 pass.
+    let mut expected = ContextState {
+        messages: state_messages.clone(),
+        estimate_context_chars,
+        context_budget_chars: 40_000,
+        context_budget_tokens: 10_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    expected.on_assistant_message_appended(FINAL_TEXT.len());
+    expected.apply_boundary(compaction_result.clone()).unwrap();
+    let expected_l0 = run_layer0_cleanup(&mut expected, &config, trail.path(), "sess-guard");
+    for persisted in &expected_l0.persisted {
+        expected.session_obs.tool_result_chars_persisted += persisted.original_chars;
+    }
+    expected.session_obs.compaction_count = 1;
+    expected.session_obs.compaction_tokens_freed = 8
+        + estimated_tokens_from_chars(expected_l0.persist_chars_freed)
+        + estimated_tokens_from_chars(expected_l0.placeholder_chars_freed);
+
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let release_events = Arc::new(AtomicUsize::new(0));
+    let release_events_cb = Arc::clone(&release_events);
+    event_bus.on(
+        wire::WIRE_LAYER0_CONTEXT_RELEASE,
+        Box::new(move |_| {
+            release_events_cb.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![])), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            session_id: "sess-guard".to_string(),
+            subagent_type: SubagentType::User,
+            context_config: config,
+            read_file_state: Arc::new(ReadFileState::new()),
+            agent_trail_dir: trail.path().display().to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    let mut preheat = Preheat::new();
+    preheat.restore_completed(compaction_result);
+    agent.set_context_state(Some(ContextState {
+        messages: state_messages.clone(),
+        estimate_context_chars,
+        context_budget_chars: 40_000,
+        context_budget_tokens: 10_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat,
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+    let mut messages = state_messages;
+
+    assert_eq!(
+        finalize(&mut agent, &mut messages).await,
+        TurnOutcome::Finished
+    );
+
+    let actual = agent.context_state.as_ref().expect("context state");
+    assert_eq!(
+        serde_json::to_vec(&actual.messages).unwrap(),
+        serde_json::to_vec(&expected.messages).unwrap(),
+        "moving L0 inside apply must preserve timing⑤'s final message bytes"
+    );
+    assert_eq!(
+        actual.estimate_context_chars, expected.estimate_context_chars,
+        "timing⑤'s context estimate must remain identical to the reference sequence"
+    );
+    assert_eq!(
+        actual.session_obs.compaction_count, expected.session_obs.compaction_count,
+        "a successful boundary counts once"
+    );
+    assert_eq!(
+        actual.session_obs.compaction_tokens_freed, expected.session_obs.compaction_tokens_freed,
+        "L2 and L0 releases must be counted exactly once"
+    );
+    assert_eq!(
+        release_events.load(Ordering::SeqCst),
+        1,
+        "moving L0 into apply must not retain a second timing⑤ release emitter"
+    );
+}
+
+#[tokio::test]
+async fn layer0_without_boundary_keeps_read_stamp_and_tool_result_intact() {
     let read_state = Arc::new(ReadFileState::new());
     let stamp_path = PathBuf::from("/layer0-low-watermark-stamp");
     read_state.put(stamp_path.clone(), read_stamp("old-12k"));
@@ -331,7 +546,7 @@ async fn layer0_below_gate_keeps_read_stamp_and_tool_result_intact() {
     assert_eq!(
         state.messages[1].text_content(),
         Some(old_tool_text.as_str()),
-        "below the pressure gate, Layer 0 must not rewrite old results"
+        "without a successful boundary, Layer 0 must not rewrite old results"
     );
     assert!(
         read_state.get(&stamp_path).is_some(),

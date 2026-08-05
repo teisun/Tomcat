@@ -31,7 +31,7 @@ use crate::core::tools::pipeline::edit_normalize::{
 use crate::core::tools::primitive::diff::{build_line_diff, build_simple_diff, line_diff_stat};
 use crate::core::tools::primitive::{
     EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor, PrimitiveOperation,
-    WriteFileResult, EDIT_REPLACE_ALL_MARKER,
+    WriteFileResult, EDIT_INSERT_AFTER_MARKER, EDIT_INSERT_BEFORE_MARKER, EDIT_REPLACE_ALL_MARKER,
 };
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
@@ -408,6 +408,14 @@ struct EditSegment<'a> {
     old: &'a str,
     new: &'a str,
     replace_all: bool,
+    mode: EditSegmentMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditSegmentMode {
+    Replace,
+    InsertBefore,
+    InsertAfter,
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +435,18 @@ fn parse_segment(op: &EditOperation) -> Result<EditSegment<'_>, AppError> {
         Some(rest) => (true, rest),
         None => (false, raw_old),
     };
+    let (mode, old) = match old.strip_prefix(EDIT_INSERT_BEFORE_MARKER) {
+        Some(anchor) => (EditSegmentMode::InsertBefore, anchor),
+        None => match old.strip_prefix(EDIT_INSERT_AFTER_MARKER) {
+            Some(anchor) => (EditSegmentMode::InsertAfter, anchor),
+            None => (EditSegmentMode::Replace, old),
+        },
+    };
+    if replace_all && mode != EditSegmentMode::Replace {
+        return Err(AppError::Primitive(
+            "edit: replace_all 只能与 mode=replace 一起使用".to_string(),
+        ));
+    }
     if old.is_empty() {
         return Err(AppError::Primitive(
             "edit: old_content 不能为空字符串".to_string(),
@@ -436,6 +456,7 @@ fn parse_segment(op: &EditOperation) -> Result<EditSegment<'_>, AppError> {
         old,
         new: op.new_content.as_str(),
         replace_all,
+        mode,
     })
 }
 
@@ -551,10 +572,15 @@ fn apply_string_edits(
             let w_end = *n_to_w_map.get(n_end).ok_or_else(|| {
                 AppError::Primitive("edit: normalize map index out of range (end)".to_string())
             })?;
+            let (start, end) = match seg.mode {
+                EditSegmentMode::Replace => (w_start, w_end),
+                EditSegmentMode::InsertBefore => (w_start, w_start),
+                EditSegmentMode::InsertAfter => (w_end, w_end),
+            };
             spans.push(PlannedEditSpan {
                 edit_idx: idx,
-                start: w_start,
-                end: w_end,
+                start,
+                end,
                 replacement: lf_new.clone(),
             });
         }
@@ -569,7 +595,7 @@ fn apply_string_edits(
         let e1 = left.end;
         let s2 = right.start;
         let e2 = right.end;
-        if s2 < e1 {
+        if s2 < e1 || (s1 == e1 && s1 == s2 && s2 == e2) {
             let left_lines = format_line_range(&working_lf, s1, e1);
             let right_lines = format_line_range(&working_lf, s2, e2);
             let nested_pair = if e2 <= e1 {

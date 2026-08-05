@@ -1,15 +1,93 @@
-use super::super::apply::check_after_reply;
+use super::super::apply::{
+    apply_and_emit_boundary, check_after_reply, check_before_request, BoundaryEnv,
+};
 use super::super::layer0_persist_large_results;
 use super::mocks::*;
 use crate::core::compaction::preheat::Preheat;
-use crate::core::llm::MessageKind;
+use crate::core::llm::{ChatMessageRole, MessageKind};
 use crate::core::session::manager::compound_turn_id;
 use crate::core::session::transcript::{
     append_entry, read_header, write_header, BranchSummaryEntry, SessionHeader, TranscriptEntry,
 };
+use crate::core::tools::pipeline::read_state::{ReadFileState, ReadStamp};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::{wire, DefaultEventBus, EventBus, EventContext};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+fn boundary_env<'a>(
+    config: &'a ContextConfig,
+    work_dir: &'a Path,
+    read_file_state: &'a ReadFileState,
+) -> BoundaryEnv<'a> {
+    BoundaryEnv {
+        config,
+        work_dir,
+        session_id: "s-apply-test",
+        read_file_state,
+    }
+}
+
+fn l0_test_config() -> ContextConfig {
+    ContextConfig {
+        keep_recent_turns: 1,
+        layer0_single_result_max_chars: 500,
+        layer0_placeholder_threshold_chars: 100,
+        ..Default::default()
+    }
+}
+
+fn l0_test_state() -> crate::core::session::manager::ContextState {
+    let mut state = make_state(0, 10_000, 1_000);
+    state.messages = vec![
+        user_msg_with_id("covered-start", "covered start"),
+        user_msg_with_id("covered-end", "covered end"),
+        user_msg_with_id("old-tool-turn", "old tool turn"),
+        tool_msg("old-tool-call", &"o".repeat(250)),
+        user_msg_with_id("latest-tool-turn", "latest tool turn"),
+        tool_msg("latest-tool-call", &"n".repeat(600)),
+    ];
+    state.estimate_context_chars = state
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content())
+        .map(str::len)
+        .sum();
+    state
+}
+
+fn l0_test_result() -> crate::core::session::manager::CompactionResult {
+    crate::core::session::manager::CompactionResult {
+        summary_text: "boundary summary".into(),
+        covered_start_id: "covered-start".into(),
+        covered_end_id: "covered-end".into(),
+        covered_count: 2,
+        transcript_compaction_entry_id: Some(compound_turn_id("covered-start", "covered-end")),
+        estimated_covered_tokens_before: Some(50),
+        estimated_summary_tokens: Some(5),
+        estimated_tokens_saved: Some(45),
+        preheat_elapsed_ms: 0,
+    }
+}
+
+fn install_read_stamp(state: &ReadFileState, path: &str, tool_call_id: &str) {
+    state.put(
+        PathBuf::from(path),
+        ReadStamp {
+            mtime_ms: 1,
+            size: 1,
+            content_hash: 1,
+            offset: None,
+            limit: None,
+            is_partial_view: false,
+            covered_lines: Some((1, 1)),
+            reached_eof: true,
+            tool_call_id: Some(tool_call_id.to_string()),
+        },
+    );
+}
 
 // --- TASK-20 新增测试 ---
 
@@ -114,7 +192,11 @@ fn check_after_reply_skips_below_085() {
     let emitter = crate::infra::ScopedEventEmitter::new(eb, "s-apply-test");
     let mut state = make_state(0, 0, 1000);
     state.update_api_usage(500, 0);
-    let switched = check_after_reply(&mut state, &emitter);
+    let config = ContextConfig::default();
+    let read_file_state = ReadFileState::default();
+    let dir = tempfile::tempdir().unwrap();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let switched = check_after_reply(&mut state, &emitter, &env);
     assert!(!switched, "ratio 0.50 should not trigger check_after_reply");
 }
 
@@ -125,7 +207,11 @@ fn check_after_reply_skips_when_no_preheat() {
     let emitter = crate::infra::ScopedEventEmitter::new(eb, "s-apply-test");
     let mut state = make_state(0, 0, 1000);
     state.update_api_usage(900, 0);
-    let switched = check_after_reply(&mut state, &emitter);
+    let config = ContextConfig::default();
+    let read_file_state = ReadFileState::default();
+    let dir = tempfile::tempdir().unwrap();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let switched = check_after_reply(&mut state, &emitter, &env);
     assert!(!switched, "idle preheat should skip");
 }
 
@@ -163,7 +249,11 @@ fn check_after_reply_boundary_switched_event_carries_session_id() {
             preheat_elapsed_ms: 0,
         });
 
-    let switched = check_after_reply(&mut state, &emitter);
+    let config = ContextConfig::default();
+    let read_file_state = ReadFileState::default();
+    let dir = tempfile::tempdir().unwrap();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let switched = check_after_reply(&mut state, &emitter, &env);
     assert!(switched, "预热完成时应应用 boundary");
 
     let ctx = captured
@@ -175,6 +265,262 @@ fn check_after_reply_boundary_switched_event_carries_session_id() {
     assert_eq!(
         ctx.payload.get("sessionId").and_then(|v| v.as_str()),
         Some("sid-apply-boundary")
+    );
+}
+
+#[test]
+fn successful_boundary_runs_both_layer0_steps_invalidates_read_stamps_and_emits_once() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let layer0_events = Arc::new(AtomicUsize::new(0));
+    let layer0_events_cb = Arc::clone(&layer0_events);
+    bus.on(
+        wire::WIRE_LAYER0_CONTEXT_RELEASE,
+        Box::new(move |_| {
+            layer0_events_cb.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let emitter = crate::infra::ScopedEventEmitter::new(bus, "s-apply-test");
+    let config = l0_test_config();
+    let read_file_state = ReadFileState::default();
+    install_read_stamp(&read_file_state, "old-tool.txt", "old-tool-call");
+    install_read_stamp(&read_file_state, "latest-tool.txt", "latest-tool-call");
+    let dir = tempfile::tempdir().unwrap();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let mut state = l0_test_state();
+    let chars_before = state.estimate_context_chars;
+
+    assert!(apply_and_emit_boundary(
+        &mut state,
+        l0_test_result(),
+        0.85,
+        false,
+        &emitter,
+        &env,
+    ));
+
+    assert_eq!(
+        state
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == ChatMessageRole::Tool
+                    && message.text_content()
+                        == Some("[Previous tool result replaced to save context space]")
+            })
+            .count(),
+        1,
+        "the old, compactable tool result must become exactly one placeholder"
+    );
+    assert_eq!(
+        state
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == ChatMessageRole::Tool
+                    && message
+                        .text_content()
+                        .is_some_and(|text| text.starts_with("[Tool result persisted:"))
+            })
+            .count(),
+        1,
+        "the large result in the latest completed turn must be persisted exactly once"
+    );
+    assert!(
+        dir.path()
+            .join("tool-results")
+            .join("s-apply-test")
+            .join("latest-tool-call.txt")
+            .is_file(),
+        "persist step must leave the original large result on disk"
+    );
+    assert!(
+        read_file_state.is_empty(),
+        "all read stamps pointing at evicted results must be invalidated"
+    );
+    assert!(
+        state.estimate_context_chars < chars_before,
+        "boundary plus L0 must reduce the fallback context estimate"
+    );
+    assert_eq!(
+        layer0_events.load(Ordering::SeqCst),
+        1,
+        "the successful boundary emits one aggregate L0 release event"
+    );
+}
+
+#[test]
+fn boundary_without_layer0_savings_does_not_emit_release_event() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let layer0_events = Arc::new(AtomicUsize::new(0));
+    let layer0_events_cb = Arc::clone(&layer0_events);
+    bus.on(
+        wire::WIRE_LAYER0_CONTEXT_RELEASE,
+        Box::new(move |_| {
+            layer0_events_cb.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let emitter = crate::infra::ScopedEventEmitter::new(bus, "s-apply-test");
+    let config = ContextConfig::default();
+    let read_file_state = ReadFileState::default();
+    let dir = tempfile::tempdir().unwrap();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let mut state = make_state(100, 4_000, 1_000);
+    state.messages = vec![
+        user_msg_with_id("covered-start", "covered start"),
+        user_msg_with_id("covered-end", "covered end"),
+        user_msg_with_id("small-tail", "small tail"),
+    ];
+
+    assert!(apply_and_emit_boundary(
+        &mut state,
+        l0_test_result(),
+        0.85,
+        false,
+        &emitter,
+        &env,
+    ));
+    assert_eq!(
+        layer0_events.load(Ordering::SeqCst),
+        0,
+        "a successful boundary with no persisted or placeholdered text emits no empty release"
+    );
+    assert_eq!(
+        state.session_obs.tool_result_chars_persisted, 0,
+        "no L0 persistence should be recorded"
+    );
+}
+
+#[tokio::test]
+async fn all_boundary_entry_paths_inherit_layer0_cleanup() {
+    for prompt_tokens in [700, 980] {
+        let config = l0_test_config();
+        let read_file_state = ReadFileState::default();
+        let dir = tempfile::tempdir().unwrap();
+        let env = boundary_env(&config, dir.path(), &read_file_state);
+        let emitter =
+            crate::infra::ScopedEventEmitter::new(Arc::new(DefaultEventBus::new()), "s-apply-test");
+        let mut state = l0_test_state();
+        state.update_api_usage(prompt_tokens, 0);
+        state.preheat.restore_completed(l0_test_result());
+
+        assert!(
+            check_before_request(&mut state, &emitter, &env).await,
+            "timing② must apply the ready boundary at ratio {}",
+            prompt_tokens as f64 / 1000.0
+        );
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.text_content()
+                        == Some("[Previous tool result replaced to save context space]")
+                })
+                .count(),
+            1,
+            "timing② must inherit one placeholder cleanup"
+        );
+        let persisted_dir = dir.path().join("tool-results").join("s-apply-test");
+        assert_eq!(
+            std::fs::read_dir(&persisted_dir)
+                .expect("timing② persist directory")
+                .count(),
+            1,
+            "timing② must inherit one persisted result"
+        );
+    }
+
+    let config = l0_test_config();
+    let read_file_state = ReadFileState::default();
+    let dir = tempfile::tempdir().unwrap();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let emitter =
+        crate::infra::ScopedEventEmitter::new(Arc::new(DefaultEventBus::new()), "s-apply-test");
+    let mut state = l0_test_state();
+    state.update_api_usage(850, 0);
+    state.preheat.restore_completed(l0_test_result());
+
+    assert!(
+        check_after_reply(&mut state, &emitter, &env),
+        "timing⑤ must apply its ready boundary"
+    );
+    assert_eq!(
+        state
+            .messages
+            .iter()
+            .filter(|message| {
+                message.text_content()
+                    == Some("[Previous tool result replaced to save context space]")
+            })
+            .count(),
+        1,
+        "timing⑤ must inherit one placeholder cleanup"
+    );
+    let persisted_dir = dir.path().join("tool-results").join("s-apply-test");
+    assert_eq!(
+        std::fs::read_dir(&persisted_dir)
+            .expect("timing⑤ persist directory")
+            .count(),
+        1,
+        "timing⑤ must inherit one persisted result"
+    );
+}
+
+#[test]
+fn skipped_or_stale_boundary_never_rewrites_layer0_history() {
+    let config = l0_test_config();
+    let read_file_state = ReadFileState::default();
+    let dir = tempfile::tempdir().unwrap();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let emitter =
+        crate::infra::ScopedEventEmitter::new(Arc::new(DefaultEventBus::new()), "s-apply-test");
+
+    let mut below_threshold = l0_test_state();
+    let below_original = serde_json::to_vec(&below_threshold.messages).unwrap();
+    below_threshold.update_api_usage(840, 0);
+    below_threshold.preheat.restore_completed(l0_test_result());
+    assert!(!check_after_reply(&mut below_threshold, &emitter, &env));
+    assert_eq!(
+        serde_json::to_vec(&below_threshold.messages).unwrap(),
+        below_original,
+        "below 0.85 must not rewrite history"
+    );
+
+    let mut no_preheat = l0_test_state();
+    let no_preheat_original = serde_json::to_vec(&no_preheat.messages).unwrap();
+    no_preheat.update_api_usage(850, 0);
+    assert!(!check_after_reply(&mut no_preheat, &emitter, &env));
+    assert_eq!(
+        serde_json::to_vec(&no_preheat.messages).unwrap(),
+        no_preheat_original,
+        "an idle preheat must not rewrite history"
+    );
+
+    let mut stale = l0_test_state();
+    let stale_original = serde_json::to_vec(&stale.messages).unwrap();
+    stale.update_api_usage(850, 0);
+    let mut stale_result = l0_test_result();
+    stale_result.covered_end_id = "missing-end".to_string();
+    stale.preheat.restore_completed(stale_result);
+    assert!(!check_after_reply(&mut stale, &emitter, &env));
+    assert_eq!(
+        serde_json::to_vec(&stale.messages).unwrap(),
+        stale_original,
+        "a stale boundary must not run L0"
+    );
+    assert_eq!(
+        stale.session_obs.compaction_count, 0,
+        "a failed apply must not increment boundary compaction accounting"
+    );
+    assert_eq!(
+        stale.session_obs.compaction_tokens_freed, 0,
+        "a failed apply must not record any L2 or L0 release"
+    );
+    assert!(
+        !dir.path().join("tool-results").exists(),
+        "no skipped or stale path may write a persisted tool result"
     );
 }
 
@@ -244,7 +590,11 @@ fn check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle()
         preheat_elapsed_ms: 0,
     };
     state.preheat.restore_completed(stale_result);
-    let switched = check_after_reply(&mut state, &emitter);
+    let config = ContextConfig::default();
+    let read_file_state = ReadFileState::default();
+    let dir = tempfile::tempdir().unwrap();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let switched = check_after_reply(&mut state, &emitter, &env);
     assert!(!switched, "stale apply should not emit boundary switched");
     assert!(
         state.preheat.is_idle(),

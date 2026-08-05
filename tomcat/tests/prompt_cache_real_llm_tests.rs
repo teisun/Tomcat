@@ -6,7 +6,7 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serial_test::serial;
 use tomcat::core::llm::MessageKind;
@@ -554,9 +554,9 @@ async fn anthropic_second_request_reads_from_prompt_cache() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-#[ignore = "manual M1: classify fcodex Anthropic cache behavior across three tool-history turns"]
+#[ignore = "manual M1: require fcodex Anthropic cache reads across three tool-history turns"]
 #[serial]
-async fn fcodex_opus5_three_tool_turn_cache_probe_classifies_gateway_behavior(
+async fn fcodex_opus5_three_tool_turn_cache_probe_requires_cache_read(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     common::load_openai_test_env();
@@ -646,20 +646,134 @@ async fn fcodex_opus5_three_tool_turn_cache_probe_classifies_gateway_behavior(
     let usage = third_turn_usage.expect("the three-turn probe must record turn 3 usage");
     let hit_rate =
         usage.cache_read_tokens.unwrap_or_default() as f64 / usage.prompt_tokens.max(1) as f64;
-    if usage.cache_read_tokens.unwrap_or_default() == 0
-        && usage.cache_write_tokens.unwrap_or_default() > 0
-    {
-        eprintln!(
-            "phase=\"fcodex_m1_conclusion\" classification=\"cold_cache_not_yet_readable\" \
-             turn=3 hit_rate={hit_rate:.3} cache_write_tokens={}",
-            usage.cache_write_tokens.unwrap_or_default()
-        );
-        return Ok(());
-    }
     assert!(
-        hit_rate > 0.80,
-        "turn 3 cache hit rate was {hit_rate:.3}; expected > 0.80 \
+        usage.cache_read_tokens.unwrap_or_default() > 0,
+        "turn 3 rewrote cache without a read (usage={usage:?}); fcodex cache entries are \
+         expected to be readable immediately, so inspect cache-control placement and request \
+         prefix stability"
+    );
+    assert!(
+        hit_rate > 0.70,
+        "turn 3 cache hit rate was {hit_rate:.3}; expected > 0.70 \
          with append-only history and a stable prefix (usage={usage:?})"
+    );
+    Ok(())
+}
+
+/// Acceptance gate for the common agent shape: one user turn that runs many
+/// `tool_use -> tool_result` rounds. The test synthesizes deterministic tool
+/// exchanges after each request so provider output variability cannot change
+/// the request prefix. The runtime tail is stable within the marathon and is
+/// rendered as a system suffix with no standalone cache marker, leaving D at
+/// a completed message end that covers the unchanged suffix.
+#[tokio::test]
+#[ignore = "manual M6: require continuous fcodex cache reads with a stable system tail"]
+#[serial]
+async fn fcodex_opus5_eight_round_marathon_with_system_tail_has_continuous_cache_hits(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_fcodex_anthropic_credentials()?;
+
+    let (_home, cfg) = fcodex_anthropic_config();
+    let provider = common::resolve_main_provider(&cfg);
+    let context_budget_chars = tomcat::infra::compute_context_budget_chars(&cfg.context);
+    let read_tool = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read a file for the eight-round marathon cache probe.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }
+        }
+    });
+    let probe_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time must be after Unix epoch")
+        .as_nanos();
+    let mut messages = vec![
+        ChatMessage::system(stable_prefix()),
+        ChatMessage::user(format!(
+            "Start the eight-round cache marathon probe {probe_id}."
+        )),
+    ];
+    let mut total_tool_result_chars = 0usize;
+
+    for round in 1..=8 {
+        let mut request_messages = messages.clone();
+        let mut tail = ChatMessage::user("runtime-only cache probe tail");
+        tail.kind = MessageKind::EphemeralTail;
+        request_messages.push(tail);
+
+        let mut turn_request = request(
+            request_messages,
+            &cfg.llm.default_model,
+            "prompt-cache-real:anthropic-eight-round-marathon",
+        );
+        turn_request.thinking_level = Some(ThinkingLevel::Xhigh);
+        turn_request.tools = Some(vec![read_tool.clone()]);
+        let response = call(provider.as_ref(), turn_request).await?;
+        let usage = response
+            .usage
+            .as_ref()
+            .ok_or_else(|| format!("fcodex omitted usage on marathon round {round}"))?;
+        let cache_read = usage.cache_read_tokens.unwrap_or_default();
+        let cache_write = usage.cache_write_tokens.unwrap_or_default();
+        let hit_rate = cache_read as f64 / usage.prompt_tokens.max(1) as f64;
+        eprintln!(
+            "phase=\"fcodex_m6_marathon_usage\" model={} round={} prompt_tokens={} \
+             cache_read_tokens={} cache_write_tokens={} hit_rate={hit_rate:.3}",
+            cfg.llm.default_model, round, usage.prompt_tokens, cache_read, cache_write
+        );
+
+        if round >= 2 {
+            assert!(
+                cache_read > 0,
+                "round {round} wrote cache without reading an unchanged prefix \
+                 (usage={usage:?}); cache entries must be immediately readable"
+            );
+            assert!(
+                cache_write < usage.prompt_tokens / 2,
+                "round {round} rewrote too much history (usage={usage:?}); D may no longer \
+                 terminate at the latest stable tool result"
+            );
+        }
+        if round >= 4 {
+            assert!(
+                hit_rate > 0.80,
+                "round {round} cache hit rate was {hit_rate:.3}; expected > 0.80 \
+                 when only one tool exchange was appended (usage={usage:?})"
+            );
+        }
+
+        let call_id = format!("cache-marathon-read-{round}");
+        let tool_result = format!(
+            "tool-result round={round}\n{}",
+            "large stable diagnostic output\n".repeat(430)
+        );
+        total_tool_result_chars += tool_result.len();
+        messages.push(ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![serde_json::json!({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "arguments": format!(r#"{{"path":"/virtual/marathon-{round}.txt"}}"#),
+                }
+            })],
+        ));
+        messages.push(ChatMessage::tool(&call_id, &tool_result));
+    }
+
+    assert!(
+        total_tool_result_chars < context_budget_chars / 2,
+        "the marathon probe must stay below the Layer 0 pressure budget: \
+         {total_tool_result_chars} >= {}",
+        context_budget_chars / 2
     );
     Ok(())
 }

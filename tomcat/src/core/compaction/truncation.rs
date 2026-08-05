@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use tracing::info;
+
 use crate::core::llm::{ChatMessageContent, ChatMessageRole};
 use crate::core::session::manager::ContextState;
 use crate::infra::config::ContextConfig;
@@ -89,7 +91,10 @@ pub(crate) fn persist_tool_result_text(
     ))
 }
 
-/// L0 步骤 A+B 的汇总（timing ⑤）。
+/// L0 步骤 A+B 的汇总。
+///
+/// 正常路径仅在 Layer 2 boundary 成功应用后运行；current-tail guard 的保命路径也会
+/// 复用此结果，但不能把它误读为每次 timing ⑤ 都会触发的清理。
 #[derive(Debug, Clone, Default)]
 pub struct Layer0CleanupOutcome {
     pub persisted: Vec<PersistedResult>,
@@ -142,6 +147,19 @@ pub fn layer0_persist_large_results(
             state.estimate_context_chars = state.estimate_context_chars.saturating_sub(freed);
             results.push(result);
         }
+    }
+    if persist_chars_freed > 0 {
+        let persisted_tool_call_ids = results
+            .iter()
+            .map(|result| result.tool_call_id.as_str())
+            .collect::<Vec<_>>();
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "history_rewritten",
+            operation = "layer0_persist_large_results",
+            chars_freed = persist_chars_freed,
+            ?persisted_tool_call_ids,
+        );
     }
     (results, persist_chars_freed)
 }
@@ -200,6 +218,15 @@ pub fn compact_tool_results(
             outcome.tool_call_ids.push(id);
         }
     }
+    if outcome.chars_freed > 0 {
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "history_rewritten",
+            operation = "compact_tool_results",
+            chars_freed = outcome.chars_freed,
+            tool_call_ids = ?outcome.tool_call_ids,
+        );
+    }
     outcome
 }
 
@@ -231,7 +258,9 @@ fn find_protected_turn_start(messages: &[crate::core::llm::ChatMessage], m: usiz
 // ---------------------------------------------------------------------------
 
 /// TASK-20: L0 步骤 A（最后一 turn 落盘）+ 步骤 B（compactable zone 占位符替换）。
-/// 在时机 ⑤（reasoning loop 最终 assistant 回复后）调用。
+///
+/// 正常调用方是成功应用 boundary 后的结构性后续步骤；current-tail guard 仅在已确认的
+/// 溢出风险下复用它作为保命路径。
 pub fn run_layer0_cleanup(
     state: &mut ContextState,
     config: &ContextConfig,

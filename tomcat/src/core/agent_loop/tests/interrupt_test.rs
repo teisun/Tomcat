@@ -11,6 +11,7 @@
 //! - `token_rebuild_per_turn_allows_next_run`：预 cancel 的 token 在 run() 入口
 //!   立即返回 Interrupted；新 token 的 AgentLoop 应能正常收束（架构 §6.2）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -18,9 +19,11 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
+use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::retry_delay::sleep_provider_retry_delay;
 use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
 use crate::core::session::find_dangling_tail_tool_call_ids;
+use crate::core::session::manager::ContextState;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
@@ -149,7 +152,6 @@ async fn run_interrupt_between_tools_retains_completed_tool_result() {
         config,
         cancel.clone(),
     );
-
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(130)).await;
@@ -413,6 +415,24 @@ async fn run_interrupt_during_stream_preserves_partial_text() {
         config,
         cancel.clone(),
     );
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 4_000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    // Simulate a stale prior response usage: this stream is cancelled before
+    // it emits Usage, so the partial assistant must enter the post-usage delta.
+    state.update_api_usage(1_000, 0);
+    agent.set_context_state(Some(state));
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -441,6 +461,17 @@ async fn run_interrupt_during_stream_preserves_partial_text() {
             .iter()
             .any(|m| format!("{:?}", m.role).contains("Assistant")),
         "partial_messages 应含 assistant 消息（承载 partial_text）"
+    );
+    let state = agent.context_state.as_ref().expect("context state");
+    assert_eq!(
+        state.post_usage_appended_chars,
+        result.final_text.len(),
+        "an aborted stream without Usage must retain its partial assistant in the post-usage delta"
+    );
+    assert_eq!(
+        state.estimated_token_count(),
+        1_000 + result.final_text.len() / 4,
+        "the next timing-2 check must include the persisted partial response"
     );
 }
 

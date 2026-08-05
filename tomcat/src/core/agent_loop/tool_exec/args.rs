@@ -1,5 +1,12 @@
 use crate::core::tools::primitive::{EditOperation, EditOperationType};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditStringMode {
+    Replace,
+    InsertBefore,
+    InsertAfter,
+}
+
 pub(super) fn parse_optional_u64(args: &serde_json::Value, key: &str) -> Option<u64> {
     let v = args.get(key)?;
     if v.is_null() {
@@ -56,7 +63,10 @@ pub(super) fn parse_edit_args(
 /// 与模型拿什么字符串来填无关。删除内容是 `old` 非空、`new` 为空，不会命中。
 fn is_placeholder_segment(seg: &serde_json::Value) -> bool {
     let text = |key: &str| seg.get(key).and_then(|v| v.as_str()).unwrap_or("");
-    text("old_content") == text("new_content")
+    seg.get("mode")
+        .and_then(|value| value.as_str())
+        .is_none_or(|mode| mode == "replace")
+        && text("old_content") == text("new_content")
 }
 
 /// 这层参数里的编辑段：`edits` 数组形态，或单段的 `old_content` / `new_content`。
@@ -67,15 +77,20 @@ pub(super) fn edit_segments(args: &serde_json::Value) -> Vec<&serde_json::Value>
     }
 }
 
-/// 一条编辑段的身份：改什么、改成什么。用于判断两处写的是不是同一个意图。
-pub(super) fn segment_identity(seg: &serde_json::Value) -> (String, String) {
+/// 一条编辑段的身份：模式、改什么、改成什么。用于判断两处写的是不是同一个意图。
+pub(super) fn segment_identity(seg: &serde_json::Value) -> (String, String, String) {
     let text = |key: &str| {
         seg.get(key)
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string()
     };
-    (text("old_content"), text("new_content"))
+    let mode = seg
+        .get("mode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("replace")
+        .to_string();
+    (mode, text("old_content"), text("new_content"))
 }
 
 /// `edits` 数组里有没有非空壳的段。
@@ -125,7 +140,8 @@ pub(super) fn parse_edit_ops(
                 .get("replace_all")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            ops.push(make_edit_op(old, new_c, replace_all));
+            let mode = parse_edit_mode(seg, &format!("{scope}.edits[{i}]"))?;
+            ops.push(make_edit_op(old, new_c, replace_all, mode, scope)?);
         }
         return Ok(ops);
     }
@@ -142,26 +158,61 @@ pub(super) fn parse_edit_ops(
         .get("replace_all")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    Ok(vec![make_edit_op(old, new_c, replace_all)])
+    let mode = parse_edit_mode(args, scope)?;
+    Ok(vec![make_edit_op(old, new_c, replace_all, mode, scope)?])
 }
 
-fn make_edit_op(old: &str, new_c: &str, replace_all: bool) -> EditOperation {
-    let encoded_old = if replace_all {
-        format!(
+fn parse_edit_mode(args: &serde_json::Value, scope: &str) -> Result<EditStringMode, String> {
+    match args.get("mode") {
+        None => Ok(EditStringMode::Replace),
+        Some(value) => match value.as_str() {
+            Some("replace") => Ok(EditStringMode::Replace),
+            Some("insert_before") => Ok(EditStringMode::InsertBefore),
+            Some("insert_after") => Ok(EditStringMode::InsertAfter),
+            _ => Err(format!(
+                "edit: {scope}.mode 必须是 `replace`、`insert_before` 或 `insert_after`"
+            )),
+        },
+    }
+}
+
+fn make_edit_op(
+    old: &str,
+    new_c: &str,
+    replace_all: bool,
+    mode: EditStringMode,
+    scope: &str,
+) -> Result<EditOperation, String> {
+    if replace_all && mode != EditStringMode::Replace {
+        return Err(format!(
+            "edit: {scope}.replace_all 只能与 mode=`replace` 一起使用"
+        ));
+    }
+    let encoded_old = match mode {
+        EditStringMode::Replace if replace_all => format!(
             "{}{}",
             crate::core::tools::primitive::EDIT_REPLACE_ALL_MARKER,
             old
-        )
-    } else {
-        old.to_string()
+        ),
+        EditStringMode::Replace => old.to_string(),
+        EditStringMode::InsertBefore => format!(
+            "{}{}",
+            crate::core::tools::primitive::EDIT_INSERT_BEFORE_MARKER,
+            old
+        ),
+        EditStringMode::InsertAfter => format!(
+            "{}{}",
+            crate::core::tools::primitive::EDIT_INSERT_AFTER_MARKER,
+            old
+        ),
     };
-    EditOperation {
+    Ok(EditOperation {
         operation_type: EditOperationType::Replace,
         start_line: None,
         end_line: None,
         old_content: Some(encoded_old),
         new_content: new_c.to_string(),
-    }
+    })
 }
 
 pub(super) fn parse_hashline_edit_args(

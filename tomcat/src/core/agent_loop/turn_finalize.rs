@@ -3,10 +3,11 @@
 //! 当 LLM 本轮**没有产出 tool_calls**（纯文本回复）时，reasoning loop 不再继续，
 //! 进入"收束分支"做四步 cleanup：
 //!
-//! 1. `on_message_appended(content_buf.len())` + `messages.push(assistant)`
-//! 2. **Timing ⑤**：L0 cleanup → preheat.try_restart_if_pending → L2
-//!    `check_after_reply`（仅 ratio ≥ 0.85）→ preheat.try_start（Idle → Running）
-//! 3. 条件发射 `Layer0ContextRelease` / `AutoCompactionStart`
+//! 1. `on_assistant_message_appended(content_buf.len())` + `messages.push(assistant)`
+//! 2. **Timing ⑤**：preheat.try_restart_if_pending → L2
+//!    `check_after_reply`（仅 ratio ≥ 0.85；boundary 成功时在内部执行 L0 cleanup）
+//!    → preheat.try_start（Idle → Running）
+//! 3. 条件发射 `AutoCompactionStart`
 //! 4. `emit_context_metrics()` + `TurnEnd { tool_results: [] }`
 //!
 //! 历史：原嵌在 `run.rs::run_reasoning_loop` 的 `if tool_calls.is_empty()` 分支
@@ -15,25 +16,19 @@
 
 use std::sync::Arc;
 
-use crate::core::compaction::run_layer0_cleanup;
+use crate::core::compaction::apply::BoundaryEnv;
 use crate::core::llm::{
     ChatMessage, ContinuityMetadata, MessageKind, PromptCacheKeyFamily, ReasoningContinuation,
     TokenUsage,
 };
 use crate::core::plan_runtime::file_store::{self, TodoStatus};
 use crate::core::plan_runtime::PlanRuntime;
-use crate::core::session::manager::estimated_tokens_from_chars;
 use crate::infra::events::{AgentEvent, Message};
 
 use super::types::AgentLoop;
 
 /// 连续注入上限。到顶后停止注入、交还用户，避免模型卡在同一个坎上无限打转。
 pub(super) const MAX_COMPLETION_GUARD_INJECTIONS: u32 = 8;
-pub(super) const LAYER0_PRESSURE_GATE: f64 = 0.50;
-
-pub(super) fn should_run_layer0_cleanup(usage_ratio: f64) -> bool {
-    usage_ratio >= LAYER0_PRESSURE_GATE
-}
 
 /// text-only 回合的处理结果。
 #[derive(Debug, PartialEq, Eq)]
@@ -159,7 +154,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
     usage: Option<TokenUsage>,
 ) -> Result<TurnOutcome, crate::infra::error::AppError> {
     if let Some(ref mut ctx_state) = agent.context_state {
-        ctx_state.on_message_appended(content_buf.len());
+        ctx_state.on_assistant_message_appended(content_buf.len());
     }
     let forced_id = agent.take_or_mint_pending_assistant_entry_id();
     let assistant_message_id = agent.push_message_with_forced_id(
@@ -186,7 +181,8 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         }
     }
 
-    // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
+    // Timing ⑤: try_restart → check_after_reply (successful boundary includes L0)
+    // → try_start → metrics.
     let compaction_provider = agent.compaction_provider();
     let compaction_emitter = Arc::new(agent.emitter.clone());
     let control_snapshot = agent
@@ -196,40 +192,14 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         .map(|rt| rt.control_snapshot(Some(agent.wire_model())));
     let compaction_cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let mut preheat_started: Option<(usize, f64)> = None;
-    let mut layer0_release: Option<(usize, usize)> = None;
+    let boundary_env = BoundaryEnv {
+        config: &agent.config.context_config,
+        work_dir: std::path::Path::new(&agent.config.agent_trail_dir),
+        session_id: &agent.config.session_id,
+        read_file_state: agent.config.read_file_state.as_ref(),
+    };
     if let Some(ref mut ctx_state) = agent.context_state {
-        // Step 1: L0 cleanup. Below the preheat threshold, preserving a
-        // byte-identical history is more valuable than proactively rewriting
-        // old tool output; compaction is not yet under pressure.
-        let l0 = if should_run_layer0_cleanup(ctx_state.usage_ratio()) {
-            run_layer0_cleanup(
-                ctx_state,
-                &agent.config.context_config,
-                std::path::Path::new(&agent.config.agent_trail_dir),
-                &agent.config.session_id,
-            )
-        } else {
-            Default::default()
-        };
-        for pr in &l0.persisted {
-            ctx_state.session_obs.tool_result_chars_persisted += pr.original_chars;
-        }
-        // 正文已经不在上下文里了，对应的 read stamp 必须一起作废，否则下一次 read
-        // 会拿到「和上次一样，参考上次结果」——而上次结果现在是个占位符。
-        for tool_call_id in &l0.evicted_tool_call_ids {
-            agent
-                .config
-                .read_file_state
-                .invalidate_tool_call(tool_call_id);
-        }
-        let persist_tok = estimated_tokens_from_chars(l0.persist_chars_freed);
-        let placeholder_tok = estimated_tokens_from_chars(l0.placeholder_chars_freed);
-        if persist_tok > 0 || placeholder_tok > 0 {
-            ctx_state.session_obs.compaction_tokens_freed += persist_tok + placeholder_tok;
-            layer0_release = Some((persist_tok, placeholder_tok));
-        }
-
-        // Step 2: restore ExhaustedPending → Running
+        // Step 1: restore ExhaustedPending → Running.
         ctx_state.preheat.try_restart_if_pending(
             ctx_state.usage_ratio(),
             &ctx_state.messages,
@@ -242,12 +212,14 @@ pub(super) async fn finalize_turn_after_text_with_usage(
             control_snapshot.clone(),
         );
 
-        // Step 3: L2 non-blocking poll + apply boundary
-        if ctx_state.usage_ratio() >= 0.85 {
-            crate::core::compaction::apply::check_after_reply(ctx_state, &agent.emitter);
-        }
+        // Step 2: L2 non-blocking poll + apply boundary.
+        let _boundary_applied = crate::core::compaction::apply::check_after_reply(
+            ctx_state,
+            &agent.emitter,
+            &boundary_env,
+        );
 
-        // Step 4: Idle → Running (start new preheat if conditions met)
+        // Step 4: Idle → Running (start new preheat if conditions met).
         let ratio = ctx_state.usage_ratio();
         let turn_count = ctx_state.turn_count();
         if ctx_state.preheat.try_start(
@@ -265,12 +237,6 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         }
     }
 
-    if let Some((p, ph)) = layer0_release {
-        agent.emit_event(AgentEvent::Layer0ContextRelease {
-            persist_tokens_freed: p,
-            placeholder_tokens_freed: ph,
-        });
-    }
     if let Some((covered_count, ratio_before)) = preheat_started {
         agent.emit_event(AgentEvent::AutoCompactionStart {
             covered_count,

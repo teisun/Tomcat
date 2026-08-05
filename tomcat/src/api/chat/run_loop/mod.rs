@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::core::agent_loop::AgentRunOutcome;
-use crate::core::compaction::apply::check_before_request;
+use crate::core::compaction::apply::{check_before_request, BoundaryEnv};
 use crate::core::llm::resolver::validate_capabilities;
 use crate::core::llm::{
     degrade_unsupported_multimodal, ChatMessage, LlmScene, PromptCacheKeyFamily,
@@ -251,7 +251,13 @@ fn append_planned_messages_with_rehydrate_retry(
                 break;
             }
             context_state.on_message_appended(estimate_msg_chars(message));
-            appended_messages.push((message.clone(), false));
+            // `push_turn_message` may have minted a transcript id. Keep the exact persisted
+            // copy so a timing② rebuild can append it without writing a duplicate entry.
+            let persisted_message = messages
+                .last()
+                .cloned()
+                .expect("push_turn_message must append exactly one message");
+            appended_messages.push((persisted_message, false));
         }
 
         if let Some(err) = append_error {
@@ -273,6 +279,23 @@ fn append_planned_messages_with_rehydrate_retry(
 
         return Ok((messages, appended_messages));
     }
+}
+
+/// Rebuild the outgoing turn after `ctx_state` changed.
+///
+/// `ContextState` is the single source of truth for persisted history. Any mutation after a
+/// message snapshot was built (for example boundary apply plus L0 cleanup) must call this helper
+/// so the provider receives the new flattened history and the already-persisted current-turn
+/// messages remain at the tail.
+pub(crate) fn rebuild_turn_messages(
+    system_text: &str,
+    context_state: &crate::core::ContextState,
+    appended_messages: &[(ChatMessage, bool)],
+) -> Vec<ChatMessage> {
+    let mut rebuilt = vec![ChatMessage::system(system_text)];
+    rebuilt.extend(build_context_from_state(context_state));
+    rebuilt.extend(appended_messages.iter().map(|(message, _)| message.clone()));
+    rebuilt
 }
 
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
@@ -781,7 +804,14 @@ async fn run_chat_turn_with_message_and_tool_definitions(
                 .control_snapshot(Some(main_call.wire_model())),
         ),
     );
-    check_before_request(context_state, &root_event_emitter).await;
+    let boundary_env = BoundaryEnv {
+        config: &context_config,
+        work_dir: ctx.scope_services.agent_trail_dir.as_path(),
+        session_id: &session_id,
+        read_file_state: ctx.session_runtime.read_file_state.as_ref(),
+    };
+    let boundary_applied =
+        check_before_request(context_state, &root_event_emitter, &boundary_env).await;
     info!(
         target: "tomcat_chat_diag",
         phase = "chat_after_timing2_check",
@@ -790,7 +820,11 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         ratio = context_state.usage_ratio(),
         compaction_count = context_state.session_obs.compaction_count
     );
-    let mut messages = messages;
+    let mut messages = if boundary_applied {
+        rebuild_turn_messages(system_text, context_state, &appended_messages)
+    } else {
+        messages
+    };
     if let std::borrow::Cow::Owned(degraded) =
         degrade_unsupported_multimodal(&messages, &main_call.capabilities)
     {

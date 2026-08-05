@@ -171,11 +171,11 @@ Parameters:
 - Destructive: `true`
 - Search hint: `edit replace old_content new_content file`
 
-Edit existing text files by replacing exact text. Three input shapes:
-  Shape A (single segment): { path, old_content, new_content, replace_all? }
-  Shape B (preferred, multiple segments in one file): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }
+Edit existing text files. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Three input shapes:
+  Shape A (single segment): { path, old_content, new_content, mode?, replace_all? }
+  Shape B (preferred, multiple segments in one file): { path, edits: [ { old_content, new_content, mode?, replace_all? }, ... ] }
   Shape C (several files at once): { files: [ { path, edits: [...] }, ... ] }
-When both appear on one file, `edits` wins. In Shape C every file is validated first and only the files that pass are written, so read the per-file result: a failure means that one file was left untouched, not that the batch rolled back. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
+When both appear on one file, `edits` wins. In Shape C every file is validated first and only the files that pass are written, so read the per-file result: a failure means that one file was left untouched, not that the batch rolled back. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. `replace_all` is valid only for mode `replace`. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
 
 Guidelines:
 - Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit.
@@ -187,15 +187,24 @@ Parameters:
 
 ```json
 {
-  "description": "Edit files (read -> edit). Shape A (top-level old_content/new_content), Shape B (edits[]) for one file, or Shape C (files[]) for several files in one call; when both appear on one file, `edits` wins. All segments match each file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
+  "description": "Read before editing. Shape A uses top-level old_content/new_content; Shape B uses edits[] for one file; Shape C uses files[] for several files. `edits` wins. Segment mode: `replace` (default), `insert_before`, or `insert_after`; inserts retain old_content as anchor. Segments match the ORIGINAL snapshot. Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
   "properties": {
     "edits": {
       "description": "Shape B (preferred): edit segments applied to the file's ORIGINAL snapshot. Overlapping spans are rejected.",
       "items": {
         "additionalProperties": false,
         "properties": {
+          "mode": {
+            "description": "Defaults to replace. Insert modes preserve old_content as an anchor.",
+            "enum": [
+              "replace",
+              "insert_before",
+              "insert_after"
+            ],
+            "type": "string"
+          },
           "new_content": {
-            "description": "Replacement text for this segment.",
+            "description": "Replacement text, or text to insert for insert modes.",
             "type": "string"
           },
           "old_content": {
@@ -226,6 +235,14 @@ Parameters:
             "items": {
               "additionalProperties": false,
               "properties": {
+                "mode": {
+                  "enum": [
+                    "replace",
+                    "insert_before",
+                    "insert_after"
+                  ],
+                  "type": "string"
+                },
                 "new_content": {
                   "type": "string"
                 },
@@ -244,6 +261,15 @@ Parameters:
             },
             "minItems": 1,
             "type": "array"
+          },
+          "mode": {
+            "description": "Defaults to replace; insert modes preserve old_content as an anchor.",
+            "enum": [
+              "replace",
+              "insert_before",
+              "insert_after"
+            ],
+            "type": "string"
           },
           "new_content": {
             "description": "Replacement text for the single-segment form.",
@@ -271,8 +297,17 @@ Parameters:
       "minItems": 1,
       "type": "array"
     },
+    "mode": {
+      "description": "Shape A: defaults to replace. insert_before/insert_after preserve old_content as an anchor; replace_all is only valid with replace.",
+      "enum": [
+        "replace",
+        "insert_before",
+        "insert_after"
+      ],
+      "type": "string"
+    },
     "new_content": {
-      "description": "Shape A: replacement text.",
+      "description": "Shape A: replacement text, or text to insert for insert modes.",
       "type": "string"
     },
     "old_content": {

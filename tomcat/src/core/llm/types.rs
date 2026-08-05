@@ -1046,6 +1046,10 @@ pub struct ChatRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TokenUsage {
+    /// Total input tokens for this request, including cache reads and cache
+    /// writes. Cache fields below are a cost-accounting breakdown, not values
+    /// to add again. Future pricing must apply provider cache tiers instead of
+    /// multiplying this total by one input price.
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     /// Input tokens read from a provider prompt cache, when reported.

@@ -1,6 +1,8 @@
 use super::super::*;
 use crate::api::chat::run_loop::cleanup_plugin_sessions_on_session_end;
-use crate::api::chat::run_loop::{build_tool_definitions, compose_planned_turn_messages};
+use crate::api::chat::run_loop::{
+    build_tool_definitions, compose_planned_turn_messages, rebuild_turn_messages,
+};
 use crate::core::session::manager::init_context_state;
 use crate::SessionEntry;
 use crate::{
@@ -160,6 +162,64 @@ fn compose_planned_turn_messages_preserves_auto_turn_follow_up_order() {
     assert_eq!(planned.len(), 2);
     assert_eq!(planned[0].text_content(), first.text_content());
     assert_eq!(planned[1].text_content(), second.text_content());
+}
+
+#[test]
+fn rebuild_turn_messages_uses_context_state_and_keeps_current_input_at_tail() {
+    let mut summary = crate::ChatMessage::compaction_summary("summary replaces old history");
+    summary.msg_id = Some("summary-id".to_string());
+    let mut placeholder = crate::ChatMessage::tool(
+        "old-tool-call",
+        "[Previous tool result replaced to save context space]",
+    );
+    placeholder.msg_id = Some("placeholder-id".to_string());
+    let state = crate::core::session::manager::ContextState {
+        messages: vec![summary, placeholder],
+        estimate_context_chars: 100,
+        context_budget_chars: 4_000,
+        context_budget_tokens: 1_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    let mut current_input = crate::ChatMessage::user("current user input");
+    current_input.msg_id = Some("current-input-id".to_string());
+
+    let rebuilt = rebuild_turn_messages("system prompt", &state, &[(current_input.clone(), false)]);
+
+    assert_eq!(rebuilt.len(), 4);
+    assert_eq!(rebuilt[0].role, crate::core::llm::ChatMessageRole::System);
+    assert_eq!(
+        rebuilt[1].text_content(),
+        Some("summary replaces old history"),
+        "the summary must immediately follow the system prompt"
+    );
+    assert_eq!(
+        rebuilt[2].text_content(),
+        Some("[Previous tool result replaced to save context space]"),
+        "the rebuild must use the L0-rewritten context, not stale source text"
+    );
+    assert_eq!(
+        rebuilt.last().and_then(crate::ChatMessage::text_content),
+        Some("current user input"),
+        "the already-persisted current user input must remain at the tail"
+    );
+    assert_eq!(
+        rebuilt.last().and_then(|message| message.msg_id.as_deref()),
+        Some("current-input-id"),
+        "rebuild must reuse the persisted message rather than append a duplicate"
+    );
+    assert!(
+        rebuilt
+            .iter()
+            .all(|message| message.text_content() != Some("old full history")),
+        "covered history must not reappear after rebuild"
+    );
 }
 
 #[test]

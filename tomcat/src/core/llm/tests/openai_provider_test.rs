@@ -21,6 +21,7 @@ use crate::core::llm::{
     thinking_policy::resolve_request_fields, Capabilities, Credential, ModelEntry, ThinkingLevel,
 };
 use crate::infra::error::{llm_http_status_error, AppError};
+use crate::infra::events::ToolDisplay;
 use crate::infra::LlmConfig;
 
 fn deepseek_entry(api_key_env: &str) -> ModelEntry {
@@ -122,6 +123,25 @@ fn moonshot_multimodal_entry(api_key_env: &str) -> ModelEntry {
         max_output_tokens: None,
         supported_reasoning_levels: vec!["low".to_string(), "high".to_string(), "max".to_string()],
         thinking_format: Some("openai".to_string()),
+    }
+}
+
+#[test]
+fn chat_completions_wire_omits_local_message_metadata() {
+    let mut message = ChatMessage::assistant("wire-visible text");
+    message.summary_title = Some("local summary".to_string());
+    message.tool_display = Some(ToolDisplay::Text {
+        text: "local tool display".to_string(),
+    });
+    message.usage = Some(Default::default());
+
+    let body = transport_messages(&[message], "gpt-5", true, None);
+    let serialized = serde_json::to_string(&body).expect("serialize wire body");
+    for local_field in ["tool_display", "summary_title", "usage"] {
+        assert!(
+            !serialized.contains(local_field),
+            "Chat Completions wire leaked local field `{local_field}`: {serialized}"
+        );
     }
 }
 

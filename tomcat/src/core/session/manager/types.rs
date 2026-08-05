@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{
@@ -272,6 +272,14 @@ impl ContextState {
         self.post_usage_appended_chars += content_len;
     }
 
+    /// Record an assistant response that is already included in the provider's
+    /// `completion_tokens`. Keep it in the full fallback estimate, but do not
+    /// add it to the post-usage delta or the usage-backed estimate would count
+    /// the same output twice.
+    pub fn on_assistant_message_appended(&mut self, content_len: usize) {
+        self.estimate_context_chars += content_len;
+    }
+
     /// 估算当前上下文占用的 token 数。
     /// 有 API usage 时基于真实值 + 增量近似；否则 fallback 字符估算。
     pub fn estimated_token_count(&self) -> usize {
@@ -354,14 +362,28 @@ impl ContextState {
             .iter()
             .map(estimate_msg_chars)
             .sum();
+        let replaced_message_ids = self.messages[..=end_idx]
+            .iter()
+            .filter_map(|message| message.msg_id.as_deref())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let summary_chars = result.summary_text.len();
 
         let mut summary_msg = ChatMessage::compaction_summary(&result.summary_text);
         summary_msg.msg_id = result.transcript_compaction_entry_id.clone();
 
         self.messages.splice(..=end_idx, [summary_msg]);
         self.estimate_context_chars =
-            self.estimate_context_chars.saturating_sub(batch_chars) + result.summary_text.len();
+            self.estimate_context_chars.saturating_sub(batch_chars) + summary_chars;
         self.invalidate_api_usage();
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "history_rewritten",
+            operation = "apply_boundary",
+            chars_freed = batch_chars.saturating_sub(summary_chars),
+            ?replaced_message_ids,
+            summary_chars,
+        );
         Ok(())
     }
 

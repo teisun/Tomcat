@@ -50,6 +50,7 @@ export interface ModelEntryInput {
   capabilities?: Capabilities;
   contextWindow?: null | number;
   id: string;
+  maxOutputTokens?: null | number;
   modelName?: null | string;
   provider: string;
   supportedReasoningLevels?: null | string[];
@@ -65,6 +66,7 @@ export interface ModelView {
   contextWindow?: null | number;
   id: string;
   keyPresent: boolean;
+  maxOutputTokens?: null | number;
   modelName?: null | string;
   provider: string;
   source: ModelSource;
@@ -692,6 +694,7 @@ export interface WireModelView {
   contextWindow?: null | number;
   id: string;
   keyPresent: boolean;
+  maxOutputTokens?: null | number;
   modelName?: null | string;
   provider: string;
   source: ModelSource;

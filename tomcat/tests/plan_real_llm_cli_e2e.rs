@@ -1079,12 +1079,12 @@ fn assert_planning_phase_smoke(
     );
     let stdout_a = String::from_utf8_lossy(&out_a.stdout);
     assert!(
-        stdout_a.contains("u[Plan:planning"),
+        stdout_a.contains("u[Plan|"),
         "进程 A stdout 应展示 planning user prompt；实际前 4000 字符：{}",
         tail_chars(&out_a.stdout, 4000)
     );
     assert!(
-        stdout_a.contains("agent.main[Plan:planning]>"),
+        stdout_a.contains("agent.main[Plan]>"),
         "进程 A stdout 应展示 planning agent prompt；实际前 4000 字符：{}",
         tail_chars(&out_a.stdout, 4000)
     );
@@ -1120,16 +1120,20 @@ fn assert_exec_phase_smoke(fx: &CliFixture, out_b: &Output, plan_path: &Path) {
         "进程 B 应有用户可见 stdout 输出；日志文件：{}",
         fx.diag_log.path.display()
     );
-    let stdout_b = String::from_utf8_lossy(&out_b.stdout);
+    // CLI 只渲染当前输入提示符；执行中 plan 的状态可能在首个 LLM 回合完成前
+    // 已变为 completed，因此 stdout 不是可靠的 lifecycle 证据。验证持久化
+    // transcript 中由 `/plan build` 写入的自动开跑消息，避免把 UI 时序当成协议契约。
+    let transcript =
+        std::fs::read_to_string(&fx.transcript_path).expect("read exec smoke transcript");
     assert!(
-        stdout_b.contains("u[Plan:executing"),
-        "进程 B stdout 应展示自动开跑的 EXEC user prompt；实际前 4000 字符：{}",
-        tail_chars(&out_b.stdout, 4000)
+        transcript.contains("\"event\":\"plan.build\""),
+        "exec-only transcript 应记录 plan.build 生命周期事件；日志文件：{}",
+        fx.diag_log.path.display()
     );
     assert!(
-        stdout_b.contains("agent.main[Plan:executing]>"),
-        "进程 B stdout 应展示 EXEC agent prompt；实际前 4000 字符：{}",
-        tail_chars(&out_b.stdout, 4000)
+        transcript.contains("start building "),
+        "exec-only transcript 应包含 `/plan build` 生成的自动开跑 user 消息；日志文件：{}",
+        fx.diag_log.path.display()
     );
 }
 

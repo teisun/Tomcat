@@ -1201,6 +1201,61 @@ async fn edit_oneof_shape_b_edits_array_is_parsed() {
     );
 }
 
+#[tokio::test]
+async fn edit_insert_modes_are_parsed_and_preserve_the_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("anchor.md");
+    std::fs::write(&file, "before\n## Anchor\nafter\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let args = format!(
+        r###"{{"path":{:?},"edits":[{{"old_content":"## Anchor","new_content":"inserted before\n","mode":"insert_before"}},{{"old_content":"## Anchor","new_content":"\ninserted after","mode":"insert_after"}}]}}"###,
+        file.to_string_lossy()
+    );
+    let tool_call = make_edit_tc(&args);
+    let (message, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &tool_call).await;
+
+    assert!(!is_error, "insert modes should succeed: {message}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "before\ninserted before\n## Anchor\ninserted after\nafter\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_replace_that_consumes_a_heading_returns_an_insert_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("heading.md");
+    std::fs::write(&file, "## Milestones\nbody\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let args = format!(
+        r###"{{"path":{:?},"old_content":"## Milestones","new_content":"replacement text"}}"###,
+        file.to_string_lossy()
+    );
+    let tool_call = make_edit_tc(&args);
+    let (message, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &tool_call).await;
+
+    assert!(!is_error, "replace remains a successful edit: {message}");
+    assert!(
+        message.contains("mode=`insert_before`"),
+        "successful replacement should warn about a consumed heading: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "replacement text\nbody\n",
+        "the guard must advise rather than block a valid replacement"
+    );
+}
+
 // ─── T2-P0-016 PR-命名 / PR-C：write 工具门禁焦小测 ────────────────────────
 
 fn make_write_tc(args_json: &str) -> ToolCallInfo {

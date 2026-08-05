@@ -494,8 +494,8 @@ Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发�
 
 既有三处交互时机保持不变：
 
-- **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI），顺序为：`run_layer0_cleanup` → `preheat.try_restart_if_pending(...)`（ExhaustedPending → Running）→ `check_after_reply`（ratio >= 0.85，非阻塞 poll + apply boundary）→ `preheat.try_start()`（Idle → Running，条件满足时）→ `emit_context_metrics`
-- **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：`preheat.try_restart_if_pending(...)` → `check_before_request`：`L2` 检查 CompactionSummary → 完成则 Boundary 切换（ratio >= 0.98 时可化异步为同步等待）→ `messages` 从更新后的 `userTurnsList` 重建
+- **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI），顺序为：`preheat.try_restart_if_pending(...)`（ExhaustedPending → Running）→ `check_after_reply`（ratio >= 0.85，非阻塞 poll；成功 apply boundary 时其内部紧接执行 L0）→ `preheat.try_start()`（Idle → Running，条件满足时）→ `emit_context_metrics`
+- **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：`preheat.try_restart_if_pending(...)` → `check_before_request`：`L2` 检查 CompactionSummary → 完成则 Boundary 切换并在内部执行 L0（ratio >= 0.98 时可化异步为同步等待）→ 成功时 `messages` 从更新后的 `ctx_state.messages` 重新拍平，并接回已持久化的本轮输入
 - **③ reasoning loop 内 API 返回 Context Overflow**：L3 物理截断 + 重试（第二层 Attempt Loop）；该路径发布 `ContextOverflowTrimStart` / `ContextOverflowTrimEnd`（JSON wire：`context_overflow_trim_start` / `context_overflow_trim_end`），不再使用 `AutoCompactionStart` / `AutoCompactionEnd`
 
 **context_metrics_update 发射节奏**（单次第三层 `run_reasoning_loop`）：

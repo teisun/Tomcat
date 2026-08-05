@@ -11,7 +11,7 @@ use crate::infra::error::{
     llm_error_with_source, llm_stream_interrupted_error, AppError, LlmErrorStage,
 };
 
-use super::wire::final_stream_events;
+use super::wire::{anthropic_token_usage, final_stream_events};
 
 const PROVIDER_NAME: &str = "anthropic";
 
@@ -269,11 +269,11 @@ impl<S> AnthropicStream<S> {
         let Some(usage) = usage else {
             return;
         };
-        let prompt_tokens = usage
+        let input_tokens = usage
             .get("input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32;
-        let completion_tokens = usage
+        let output_tokens = usage
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32;
@@ -285,22 +285,19 @@ impl<S> AnthropicStream<S> {
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64)
             .map(|value| value as u32);
-        if prompt_tokens == 0
-            && completion_tokens == 0
+        if input_tokens == 0
+            && output_tokens == 0
             && cache_read_tokens.is_none()
             && cache_write_tokens.is_none()
         {
             return;
         }
-        self.usage = Some(TokenUsage {
-            prompt_tokens,
-            completion_tokens,
+        self.usage = Some(anthropic_token_usage(
+            input_tokens,
+            output_tokens,
             cache_read_tokens,
             cache_write_tokens,
-            total_tokens: Some(prompt_tokens + completion_tokens),
-            reasoning_tokens: None,
-            text_tokens: None,
-        });
+        ));
     }
 
     fn build_terminal_events(&self) -> Vec<StreamEvent> {
@@ -454,7 +451,7 @@ mod tests {
             .is_empty());
         assert!(stream
             .parse_block(
-                "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":34,\"cache_read_input_tokens\":8,\"cache_creation_input_tokens\":4}}\n\n",
+                "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":1257,\"cache_read_input_tokens\":202789,\"cache_creation_input_tokens\":6801}}\n\n",
             )
             .expect("message delta")
             .is_empty());
@@ -473,11 +470,11 @@ mod tests {
         assert!(terminal.iter().any(|event| matches!(
             event,
             StreamEvent::Usage {
-                prompt_tokens: 12,
-                completion_tokens: 34,
-                cache_read_tokens: Some(8),
-                cache_write_tokens: Some(4),
-                total_tokens: Some(46),
+                prompt_tokens: 209_600,
+                completion_tokens: 1_257,
+                cache_read_tokens: Some(202_789),
+                cache_write_tokens: Some(6_801),
+                total_tokens: Some(210_857),
                 ..
             }
         )));

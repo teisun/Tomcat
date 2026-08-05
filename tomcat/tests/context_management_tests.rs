@@ -9,9 +9,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tomcat::core::compaction::compact_tool_results;
+use tomcat::core::compaction::{apply::BoundaryEnv, compact_tool_results};
 use tomcat::core::llm::{ChatMessageRole, EffectiveModelLimits, LimitSource, MessageKind};
 use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
+use tomcat::core::tools::pipeline::read_state::ReadFileState;
 use tomcat::infra::ScopedEventEmitter;
 use tomcat::{
     build_context_from_state, compound_turn_id, init_context_state, llm_http_status_error,
@@ -1825,7 +1826,16 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
 
     info!("Act: check_after_reply");
     let emitter = scoped_emitter(event_bus.clone(), "ctx-after-reply-boundary");
-    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
+    let config = ContextConfig::default();
+    let work_dir = tempfile::tempdir().unwrap();
+    let read_file_state = ReadFileState::default();
+    let env = BoundaryEnv {
+        config: &config,
+        work_dir: work_dir.path(),
+        session_id: "ctx-after-reply-boundary",
+        read_file_state: &read_file_state,
+    };
+    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter, &env);
 
     info!("Assert: BoundarySwitched event received");
     assert!(switched, "should have applied boundary");
@@ -1913,7 +1923,16 @@ fn test_check_after_reply_stale_emits_compaction_error() {
 
     info!("Act: check_after_reply with stale covered_end_id");
     let emitter = scoped_emitter(event_bus.clone(), "ctx-after-reply-stale");
-    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
+    let config = ContextConfig::default();
+    let work_dir = tempfile::tempdir().unwrap();
+    let read_file_state = ReadFileState::default();
+    let env = BoundaryEnv {
+        config: &config,
+        work_dir: work_dir.path(),
+        session_id: "ctx-after-reply-stale",
+        read_file_state: &read_file_state,
+    };
+    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter, &env);
 
     info!("Assert: CompactionError event received, not switched");
     assert!(!switched, "stale apply should not switch");
@@ -1988,7 +2007,17 @@ async fn test_check_before_request_emits_boundary_switched() {
 
     info!("Act: check_before_request");
     let emitter = scoped_emitter(event_bus.clone(), "ctx-before-request-boundary");
-    let applied = tomcat::core::compaction::apply::check_before_request(&mut state, &emitter).await;
+    let config = ContextConfig::default();
+    let work_dir = tempfile::tempdir().unwrap();
+    let read_file_state = ReadFileState::default();
+    let env = BoundaryEnv {
+        config: &config,
+        work_dir: work_dir.path(),
+        session_id: "ctx-before-request-boundary",
+        read_file_state: &read_file_state,
+    };
+    let applied =
+        tomcat::core::compaction::apply::check_before_request(&mut state, &emitter, &env).await;
 
     info!("Assert: BoundarySwitched event + messages shortened");
     assert!(applied, "should apply boundary in check_before_request");
@@ -2030,6 +2059,15 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         "boundary_switched",
         Box::new(move |_ctx: EventContext| {
             el.lock().unwrap().push("boundary_switched".to_string());
+            Ok(())
+        }),
+    );
+    let layer0_releases = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let l0 = Arc::clone(&layer0_releases);
+    event_bus.on(
+        "layer0_context_release",
+        Box::new(move |ctx: EventContext| {
+            l0.lock().unwrap().push(ctx.payload.clone());
             Ok(())
         }),
     );
@@ -2095,6 +2133,10 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         outcome.persist_chars_freed + outcome.placeholder_chars_freed > 0,
         "L0+L1 should free some chars"
     );
+    // This full-pipeline test deliberately crosses both L0 thresholds:
+    // each tool result is 60K chars, so Step 1 covers persistence (>=50K)
+    // and placeholder replacement (>10K). The later boundary application
+    // must not release a second batch from its protected five-turn tail.
 
     // Step 2: L2 apply (simulate preheat completion)
     info!("Act Step 2: simulate preheat completed + apply_boundary");
@@ -2141,7 +2183,16 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         state.update_api_usage((state.estimated_token_count() as f64 * 0.90) as u32, 0);
 
         let emitter = scoped_emitter(event_bus.clone(), "ctx-full-pipeline");
-        let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
+        let config = ContextConfig::default();
+        let read_file_state = ReadFileState::default();
+        let env = BoundaryEnv {
+            config: &config,
+            work_dir: dir.path(),
+            session_id: "pipeline_sess",
+            read_file_state: &read_file_state,
+        };
+        let switched =
+            tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter, &env);
         info!(
             "L2: switched={}, ratio before={:.3}, after={:.3}, messages={}",
             switched,
@@ -2152,6 +2203,10 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
     }
 
     // Step 3: L3 force drop (if still over budget)
+    assert!(
+        layer0_releases.lock().unwrap().is_empty(),
+        "the boundary's protected tail should not trigger a second L0 release"
+    );
     if state.usage_ratio() >= 0.50 {
         info!("Act Step 3: force_drop_oldest_after_confirmed_overflow");
         let (turns_removed, chars_removed) =

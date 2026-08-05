@@ -1,6 +1,7 @@
 //! Layer 3: 在服务端确认 Context Overflow 后，强制删除最旧的完整 turn。
 
 use crate::core::session::manager::{estimate_msg_chars, ContextState};
+use tracing::info;
 
 /// 服务端确认 context overflow 后，至少删除一个最旧的**完整** turn；随后仅在本地估算仍
 /// 高于阈值时继续删除。返回 `(删轮数, 删除字符数之和)`。
@@ -15,6 +16,7 @@ pub fn force_drop_oldest_after_confirmed_overflow(state: &mut ContextState) -> (
     state.invalidate_api_usage();
     let mut turns_removed = 0usize;
     let mut chars_removed = 0usize;
+    let mut dropped_message_ids = Vec::new();
 
     while let Some(turn_end) = state
         .messages
@@ -29,6 +31,11 @@ pub fn force_drop_oldest_after_confirmed_overflow(state: &mut ContextState) -> (
         // between normal input, steering, and completion nudges across restarts.
         let dropped: Vec<_> = state.messages.drain(..turn_end).collect();
         let chars: usize = dropped.iter().map(estimate_msg_chars).sum();
+        dropped_message_ids.extend(
+            dropped
+                .iter()
+                .filter_map(|message| message.msg_id.as_deref().map(str::to_string)),
+        );
         chars_removed += chars;
         turns_removed += 1;
         state.estimate_context_chars = state.estimate_context_chars.saturating_sub(chars);
@@ -36,6 +43,16 @@ pub fn force_drop_oldest_after_confirmed_overflow(state: &mut ContextState) -> (
         if state.usage_ratio() < 0.50 {
             break;
         }
+    }
+    if chars_removed > 0 {
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "history_rewritten",
+            operation = "force_drop_oldest_after_confirmed_overflow",
+            turns_removed,
+            chars_freed = chars_removed,
+            ?dropped_message_ids,
+        );
     }
     (turns_removed, chars_removed)
 }

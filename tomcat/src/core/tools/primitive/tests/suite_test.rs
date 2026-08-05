@@ -1550,6 +1550,21 @@ fn edit_seg(old: &str, new: &str, replace_all: bool) -> EditOperation {
     }
 }
 
+fn insert_edit_seg(old: &str, new: &str, before: bool) -> EditOperation {
+    let marker = if before {
+        crate::core::tools::primitive::EDIT_INSERT_BEFORE_MARKER
+    } else {
+        crate::core::tools::primitive::EDIT_INSERT_AFTER_MARKER
+    };
+    EditOperation {
+        operation_type: EditOperationType::Replace,
+        start_line: None,
+        end_line: None,
+        old_content: Some(format!("{marker}{old}")),
+        new_content: new.to_string(),
+    }
+}
+
 fn temp_edit_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1582,6 +1597,53 @@ async fn edit_replace_all_replaces_every_match() {
         "replace_all 必须命中每一处且保留尾换行"
     );
     assert!(!dir.join("a.bak").exists(), "成功路径不应残留 .bak");
+}
+
+#[tokio::test]
+async fn edit_insert_modes_preserve_the_anchor_and_reject_ambiguous_anchors() {
+    let dir = temp_edit_dir("tomcat_edit_insert_modes");
+    let file = dir.join("anchor.md");
+    std::fs::write(&file, "before\n## Anchor\nafter\n").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+
+    exec.edit_file(
+        &file.to_string_lossy(),
+        vec![insert_edit_seg("## Anchor", "inserted before\n", true)],
+        "p1",
+    )
+    .await
+    .unwrap();
+    exec.edit_file(
+        &file.to_string_lossy(),
+        vec![insert_edit_seg("## Anchor", "\ninserted after", false)],
+        "p1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "before\ninserted before\n## Anchor\ninserted after\nafter\n"
+    );
+
+    let ambiguous = dir.join("ambiguous.md");
+    std::fs::write(&ambiguous, "## Anchor\none\n## Anchor\ntwo\n").unwrap();
+    let error = exec
+        .edit_file(
+            &ambiguous.to_string_lossy(),
+            vec![insert_edit_seg("## Anchor", "new section\n", true)],
+            "p1",
+        )
+        .await
+        .expect_err("insert anchors must retain replace mode's uniqueness guard");
+    assert!(
+        error.to_string().contains("Ambiguous"),
+        "unexpected insert ambiguity error: {error}"
+    );
 }
 
 #[tokio::test]

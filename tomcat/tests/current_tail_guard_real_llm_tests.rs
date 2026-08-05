@@ -443,7 +443,7 @@ async fn execute_update_plan_and_assert(
 
 #[tokio::test]
 #[serial]
-async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
+async fn real_llm_collapse_summary_includes_runtime_plan_control() {
     require_api_key();
     let _home_guard = common::TempHomeGuard::new();
     let fixture = build_plan_fixture("case-a");
@@ -468,7 +468,16 @@ async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
     );
     // 机器区块必须在最前面，且内容来自 runtime 而非模型。
     assert!(artifacts.summary_text.starts_with("<control_state>\n"));
-    assert!(artifacts.summary_text.contains("mode: exec"));
+    assert!(
+        artifacts.summary_text.contains("mode: chat"),
+        "执行中的 plan 仍可在 Chat mode 运行；mode 由 runtime 快照而非 plan 文件状态决定"
+    );
+    assert!(
+        artifacts
+            .summary_text
+            .contains("plan_file_state: executing"),
+        "执行态由 plan 文件状态表达，不能与 AgentMode 混为一谈"
+    );
     assert!(artifacts
         .summary_text
         .contains(&format!("plan_path: {}", fixture.plan_path.display())));

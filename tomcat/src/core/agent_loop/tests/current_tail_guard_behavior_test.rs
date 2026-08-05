@@ -268,6 +268,101 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
 }
 
 #[tokio::test]
+async fn mid_turn_guard_boundary_runs_layer0_before_rebuilding_messages() {
+    let mut agent = make_agent(ContextConfig {
+        keep_recent_turns: 1,
+        layer0_single_result_max_chars: 1_000,
+        layer0_placeholder_threshold_chars: 100,
+        current_tail_compactable_min_chars: 1,
+        ..Default::default()
+    });
+    let mut covered_start = ChatMessage::user("covered start");
+    covered_start.msg_id = Some("covered-start".to_string());
+    let mut covered_end = ChatMessage::user("covered end");
+    covered_end.msg_id = Some("covered-end".to_string());
+    let mut old_turn = ChatMessage::user("old tool turn");
+    old_turn.msg_id = Some("old-tool-turn".to_string());
+    let mut latest_turn = ChatMessage::user("latest tool turn");
+    latest_turn.msg_id = Some("latest-tool-turn".to_string());
+    let old_tool_content = "o".repeat(500);
+    let latest_tool_content = "n".repeat(2_000);
+    let old_tool = ChatMessage::tool("old-tool-call", &old_tool_content);
+    let latest_tool = ChatMessage::tool("latest-tool-call", &latest_tool_content);
+    let state_messages = vec![
+        covered_start,
+        covered_end,
+        old_turn,
+        old_tool,
+        latest_turn,
+        latest_tool,
+    ];
+    let total_chars: usize = state_messages.iter().map(estimate_msg_chars).sum();
+    let mut state = ContextState {
+        messages: state_messages.clone(),
+        estimate_context_chars: total_chars,
+        context_budget_chars: 800,
+        context_budget_tokens: 200,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    state.preheat.restore_completed(CompactionResult {
+        summary_text: "summary".to_string(),
+        covered_start_id: "covered-start".to_string(),
+        covered_end_id: "covered-end".to_string(),
+        covered_count: 2,
+        transcript_compaction_entry_id: Some("cmp-boundary".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    });
+    let mut messages = vec![ChatMessage::system("sys")];
+    messages.extend(state_messages);
+    agent.start_idx = messages.len();
+    agent.context_tail_start = messages.len();
+    agent.set_context_state(Some(state));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages[1].kind,
+        MessageKind::CompactionSummary,
+        "the message rebuild must observe the applied boundary"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message.text_content() == Some(TOOL_RESULT_PLACEHOLDER) }),
+        "the rebuild must observe L0's placeholder, proving L0 ran before rebuild"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|text| text.starts_with("[Tool result persisted:"))
+        }),
+        "the mid-turn path must also receive L0-A persistence"
+    );
+    let after_first_reduction = snapshot_messages(&messages);
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot_messages(&messages),
+        after_first_reduction,
+        "the follow-up compact_tool_results safety pass must be idempotent after boundary-owned L0"
+    );
+}
+
+#[tokio::test]
 async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
     let mut agent = make_agent(ContextConfig {
         current_tail_compactable_min_chars: 1,

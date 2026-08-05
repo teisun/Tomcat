@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 
 use crate::core::llm::files_api::FilesApiAdapter;
 use crate::core::llm::multimodal::degrade_placeholder;
@@ -26,22 +26,19 @@ const ANTHROPIC_MAX_CACHE_BREAKPOINTS: usize = 4;
 enum CacheBreakpoint {
     LastTool,
     SystemBlock(usize),
-    /// End of a complete wire message. This must never be a message that also
-    /// contains a volatile ephemeral tail.
+    /// End of a complete wire message.
     MessageEnd(usize),
-    MessageBlock {
-        message_idx: usize,
-        block_idx: usize,
-    },
 }
 
 struct RenderedMessages {
     system: Vec<Value>,
     messages: Vec<Value>,
-    /// Number of volatile tail blocks appended to each merged wire message.
-    /// The data is diagnostic-only; cache eligibility remains decided by
-    /// `MessageKind::EphemeralTail` while rendering.
-    ephemeral_tail_blocks: Vec<(usize, usize)>,
+    /// Runtime state was moved to the system suffix rather than merged into a
+    /// user/tool-result message, where fcodex cannot reuse an earlier block
+    /// cache-control marker.
+    has_ephemeral_system_tail: bool,
+    keep_opaque_messages: usize,
+    strip_opaque_messages: usize,
     /// Ordered from highest to lowest priority, excluding the tool candidate.
     cache_breakpoint_candidates: Vec<CacheBreakpoint>,
 }
@@ -92,6 +89,13 @@ pub(super) fn build_request_body(
         &rendered,
         tools.as_deref(),
         &cache_breakpoint_candidates,
+        &selected_cache_breakpoints,
+    );
+    log_wire_request_shape(
+        model,
+        request,
+        &rendered,
+        tools.as_deref(),
         &selected_cache_breakpoints,
     );
     // Model capabilities are resolved per request by `ResolvedCall`, not kept
@@ -170,10 +174,7 @@ fn log_prompt_prefix_fingerprint(
     let last_message_breakpoint = selected
         .iter()
         .filter_map(|breakpoint| match breakpoint {
-            CacheBreakpoint::MessageEnd(index)
-            | CacheBreakpoint::MessageBlock {
-                message_idx: index, ..
-            } => Some(*index),
+            CacheBreakpoint::MessageEnd(index) => Some(*index),
             CacheBreakpoint::LastTool | CacheBreakpoint::SystemBlock(_) => None,
         })
         .max();
@@ -191,13 +192,7 @@ fn log_prompt_prefix_fingerprint(
         .enumerate()
         .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
         .map(|(message_idx, message)| {
-            let tail_blocks = rendered
-                .ephemeral_tail_blocks
-                .iter()
-                .filter(|(idx, _)| *idx == message_idx)
-                .map(|(_, count)| *count)
-                .sum();
-            let (with_tail, without_tail) = user_message_tail_fingerprints(message, tail_blocks);
+            let (with_tail, without_tail) = user_message_tail_fingerprints(message, 0);
             (message_idx, with_tail, without_tail)
         })
         .collect::<Vec<_>>();
@@ -217,6 +212,94 @@ fn log_prompt_prefix_fingerprint(
         cache_breakpoint_candidates = ?candidates,
         cache_breakpoints_selected = ?selected,
     );
+}
+
+/// Emit request-shape facts without prompt text. This is intentionally tied to
+/// the fingerprint switch so operators can correlate it with provider usage by
+/// `request_id` without enabling a high-volume diagnostic path permanently.
+fn log_wire_request_shape(
+    model: &str,
+    request: &ChatRequest,
+    rendered: &RenderedMessages,
+    tools: Option<&[Value]>,
+    selected: &[CacheBreakpoint],
+) {
+    if !prompt_prefix_fingerprint_enabled()
+        || !tracing::enabled!(target: "tomcat_chat_diag", Level::INFO)
+    {
+        return;
+    }
+
+    let tail_hashes = request
+        .messages
+        .iter()
+        .filter(|message| matches!(message.kind, crate::core::llm::MessageKind::EphemeralTail))
+        .map(|message| fingerprint(&serde_json::to_value(message).unwrap_or(Value::Null)))
+        .collect::<Vec<_>>();
+    let message_block_count = rendered
+        .messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .map(Vec::len)
+        .sum::<usize>();
+    let message_chars = rendered
+        .messages
+        .iter()
+        .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
+        .sum::<usize>();
+    let local_metadata_fields = ["tool_display", "summary_title", "usage"]
+        .into_iter()
+        .filter(|field| {
+            rendered
+                .system
+                .iter()
+                .chain(rendered.messages.iter())
+                .chain(tools.into_iter().flatten())
+                .any(|value| value_contains_key(value, field))
+        })
+        .collect::<Vec<_>>();
+    let request_family = request.cache_key.as_deref();
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "wire_request_shape",
+        model,
+        request_id = ?request.diagnostic_request_id,
+        request_family = ?request_family,
+        message_count = rendered.messages.len(),
+        message_block_count,
+        message_chars,
+        has_ephemeral_tail = rendered.has_ephemeral_system_tail,
+        ephemeral_tail_location = "system_suffix",
+        ?tail_hashes,
+        keep_opaque_messages = rendered.keep_opaque_messages,
+        strip_opaque_messages = rendered.strip_opaque_messages,
+        cache_breakpoints_selected = ?selected,
+        local_metadata_fields = ?local_metadata_fields,
+    );
+
+    let is_main_agent_request = request_family.is_some_and(|key| key.ends_with(":main"));
+    if is_main_agent_request && !rendered.has_ephemeral_system_tail {
+        warn!(
+            target: "tomcat_chat_diag",
+            phase = "ephemeral_tail_missing",
+            model,
+            request_id = ?request.diagnostic_request_id,
+            request_family = ?request_family,
+            tail_source = "AgentLoopConfig::ephemeral_tail_provider",
+            "main-agent request was expected to include an ephemeral tail but none rendered"
+        );
+    }
+}
+
+fn value_contains_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(|item| value_contains_key(item, key)),
+        Value::Object(entries) => {
+            entries.contains_key(key)
+                || entries.values().any(|entry| value_contains_key(entry, key))
+        }
+        _ => false,
+    }
 }
 
 const PROMPT_PREFIX_FINGERPRINT_ENV: &str = "TOMCAT_PROMPT_PREFIX_FINGERPRINT";
@@ -481,35 +564,46 @@ fn build_messages(
     let mut system_chunks = Vec::new();
     let mut out: Vec<Value> = Vec::new();
     let mut last_non_ephemeral_message = None;
-    let mut last_complete_message_before_ephemeral = None;
-    let mut last_compaction_summary_block = None;
-    let mut ephemeral_message_indices = Vec::new();
-    let mut ephemeral_tail_blocks = Vec::new();
+    let mut last_non_ephemeral_system = None;
+    let mut has_ephemeral_system_tail = false;
+    let mut keep_opaque_messages = 0;
+    let mut strip_opaque_messages = 0;
     for original in messages {
         let is_ephemeral = matches!(original.kind, crate::core::llm::MessageKind::EphemeralTail);
-        if is_ephemeral && last_complete_message_before_ephemeral.is_none() {
-            // Consecutive user messages are merged for Anthropic/Bedrock
-            // compatibility. When this tail joins a preceding user/tool-result
-            // message, cache only the *previous* complete message.
-            last_complete_message_before_ephemeral = match out.last() {
-                Some(last) if last.get("role").and_then(Value::as_str) == Some("user") => {
-                    out.len().checked_sub(2)
-                }
-                Some(_) => out.len().checked_sub(1),
-                None => None,
-            };
-        }
         let action = if continuity_enabled {
             plan(target, original)
         } else {
             ReplayAction::StripOpaque
         };
+        if matches!(action, ReplayAction::KeepOpaque) {
+            keep_opaque_messages += 1;
+        } else {
+            strip_opaque_messages += 1;
+        }
         let keep_opaque = matches!(action, ReplayAction::KeepOpaque);
         let msg = match action {
             ReplayAction::KeepOpaque | ReplayAction::StripOpaque => {
                 original.without_completion_metadata()
             }
         };
+        if is_ephemeral {
+            // fcodex only reused cache controls at completed message ends. A
+            // user-role tail merges with the latest tool result, which leaves
+            // D on an ignored middle block and recreates the entire cache on
+            // every tool round. Keep runtime state as a system suffix without
+            // its own cache-control marker: D remains at the newest tool
+            // result's end and covers this stable suffix too. A state change
+            // deliberately invalidates the next request.
+            let text = flatten_message_text(&msg);
+            if !text.trim().is_empty() {
+                system_chunks.push(json!({
+                    "type": "text",
+                    "text": text,
+                }));
+                has_ephemeral_system_tail = true;
+            }
+            continue;
+        }
         match msg.role {
             ChatMessageRole::System => {
                 let text = flatten_message_text(&msg);
@@ -518,27 +612,14 @@ fn build_messages(
                         "type": "text",
                         "text": text,
                     }));
+                    last_non_ephemeral_system = system_chunks.len().checked_sub(1);
                 }
             }
             ChatMessageRole::User => {
                 let content = user_content_blocks(&msg, capabilities, files_adapter);
                 if !content.is_empty() {
-                    let ephemeral_block_count = is_ephemeral.then_some(content.len());
                     if let Some(out_idx) = push_role_message(&mut out, "user", content) {
-                        if is_ephemeral {
-                            ephemeral_message_indices.push(out_idx);
-                            if let Some(block_count) = ephemeral_block_count {
-                                ephemeral_tail_blocks.push((out_idx, block_count));
-                            }
-                        }
-                        if !is_ephemeral {
-                            last_non_ephemeral_message = Some(out_idx);
-                        }
-                        if matches!(msg.kind, crate::core::llm::MessageKind::CompactionSummary) {
-                            let last_block =
-                                last_content_block_index(&out, out_idx).map(|idx| (out_idx, idx));
-                            last_compaction_summary_block = last_block;
-                        }
+                        last_non_ephemeral_message = Some(out_idx);
                     }
                 }
             }
@@ -587,12 +668,7 @@ fn build_messages(
                 }
                 if !content.is_empty() {
                     if let Some(out_idx) = push_role_message(&mut out, "assistant", content) {
-                        if is_ephemeral {
-                            ephemeral_message_indices.push(out_idx);
-                        }
-                        if !is_ephemeral {
-                            last_non_ephemeral_message = Some(out_idx);
-                        }
+                        last_non_ephemeral_message = Some(out_idx);
                     }
                 }
             }
@@ -608,41 +684,35 @@ fn build_messages(
                         "content": text,
                     })],
                 ) {
-                    if is_ephemeral {
-                        ephemeral_message_indices.push(out_idx);
-                    }
-                    if !is_ephemeral {
-                        last_non_ephemeral_message = Some(out_idx);
-                    }
+                    last_non_ephemeral_message = Some(out_idx);
                 }
             }
         }
     }
 
     let mut cache_breakpoint_candidates = Vec::new();
-    if let Some(last_system_idx) = system_chunks.len().checked_sub(1) {
+    if let Some(last_system_idx) = last_non_ephemeral_system {
         cache_breakpoint_candidates.push(CacheBreakpoint::SystemBlock(last_system_idx));
     }
-    let last_cacheable_message = if ephemeral_message_indices.is_empty() {
-        last_non_ephemeral_message
-    } else {
-        last_complete_message_before_ephemeral
-    };
-    if let Some(message_idx) = last_cacheable_message {
+    let penultimate_user_message = out
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|(index, _)| index)
+        .rev()
+        .nth(1);
+    if let Some(message_idx) = penultimate_user_message {
         cache_breakpoint_candidates.push(CacheBreakpoint::MessageEnd(message_idx));
     }
-    if let Some((message_idx, block_idx)) = last_compaction_summary_block
-        .filter(|(message_idx, _)| !ephemeral_message_indices.contains(message_idx))
-    {
-        cache_breakpoint_candidates.push(CacheBreakpoint::MessageBlock {
-            message_idx,
-            block_idx,
-        });
+    if let Some(breakpoint) = deepest_message_breakpoint(last_non_ephemeral_message) {
+        cache_breakpoint_candidates.push(breakpoint);
     }
     RenderedMessages {
         system: system_chunks,
         messages: out,
-        ephemeral_tail_blocks,
+        has_ephemeral_system_tail,
+        keep_opaque_messages,
+        strip_opaque_messages,
         cache_breakpoint_candidates,
     }
 }
@@ -693,13 +763,35 @@ fn convert_tools(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Normalize Anthropic's three disjoint input counters to the cross-provider
+/// `TokenUsage::prompt_tokens` contract: total request input.
+pub(crate) fn anthropic_token_usage(
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_tokens: Option<u32>,
+    cache_write_tokens: Option<u32>,
+) -> TokenUsage {
+    let prompt_tokens = input_tokens
+        .saturating_add(cache_read_tokens.unwrap_or(0))
+        .saturating_add(cache_write_tokens.unwrap_or(0));
+    TokenUsage {
+        prompt_tokens,
+        completion_tokens: output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        total_tokens: Some(prompt_tokens.saturating_add(output_tokens)),
+        reasoning_tokens: None,
+        text_tokens: None,
+    }
+}
+
 fn usage_from_value(usage: Option<&Value>) -> Option<TokenUsage> {
     let usage = usage?;
-    let prompt = usage
+    let input_tokens = usage
         .get("input_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
-    let completion = usage
+    let output_tokens = usage
         .get("output_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
@@ -711,20 +803,31 @@ fn usage_from_value(usage: Option<&Value>) -> Option<TokenUsage> {
         .get("cache_creation_input_tokens")
         .and_then(Value::as_u64)
         .map(|value| value as u32);
-    if prompt == 0 && completion == 0 && cache_read_tokens.is_none() && cache_write_tokens.is_none()
+    if input_tokens == 0
+        && output_tokens == 0
+        && cache_read_tokens.is_none()
+        && cache_write_tokens.is_none()
     {
         None
     } else {
-        Some(TokenUsage {
-            prompt_tokens: prompt,
-            completion_tokens: completion,
+        Some(anthropic_token_usage(
+            input_tokens,
+            output_tokens,
             cache_read_tokens,
             cache_write_tokens,
-            total_tokens: Some(prompt + completion),
-            reasoning_tokens: None,
-            text_tokens: None,
-        })
+        ))
     }
+}
+
+/// Select D at the end of the latest persisted wire message.
+///
+/// Runtime-only state is appended to the system suffix, rather than to a user
+/// content array, so a completed message end is always available to fcodex's
+/// cache implementation.
+fn deepest_message_breakpoint(
+    last_non_ephemeral_message: Option<usize>,
+) -> Option<CacheBreakpoint> {
+    last_non_ephemeral_message.map(CacheBreakpoint::MessageEnd)
 }
 
 fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) -> Option<usize> {
@@ -787,30 +890,12 @@ fn apply_cache_breakpoints(
                 .and_then(|blocks| blocks.last_mut())
                 .map(add_cache_control)
                 .is_some(),
-            CacheBreakpoint::MessageBlock {
-                message_idx,
-                block_idx,
-            } => messages
-                .get_mut(message_idx)
-                .and_then(|message| message.get_mut("content"))
-                .and_then(Value::as_array_mut)
-                .and_then(|blocks| blocks.get_mut(block_idx))
-                .map(add_cache_control)
-                .is_some(),
         };
         if applied {
             selected.push(candidate);
         }
     }
     selected
-}
-
-fn last_content_block_index(messages: &[Value], message_idx: usize) -> Option<usize> {
-    messages
-        .get(message_idx)
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_array)
-        .and_then(|blocks| blocks.len().checked_sub(1))
 }
 
 fn user_content_blocks(
@@ -978,8 +1063,9 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        build_request_body, final_stream_events, fingerprint, response_to_chat_response,
-        rolling_array_fingerprints, user_message_tail_fingerprints,
+        build_messages, build_request_body, final_stream_events, fingerprint,
+        response_to_chat_response, rolling_array_fingerprints, usage_from_value,
+        user_message_tail_fingerprints, ANTHROPIC_MAX_CACHE_BREAKPOINTS,
     };
     use crate::core::llm::files_api::FilesApiAdapter;
     use crate::core::llm::openai_files::{FilePurpose, OpenAiFileMeta};
@@ -991,6 +1077,7 @@ mod tests {
     use crate::core::llm::Capabilities;
     use crate::infra::config::ThinkingConfig;
     use crate::infra::error::AppError;
+    use crate::infra::events::ToolDisplay;
 
     #[derive(Debug)]
     struct StaticFilesAdapter {
@@ -1033,6 +1120,54 @@ mod tests {
         }
     }
 
+    fn anthropic_body(messages: Vec<ChatMessage>) -> Value {
+        build_request_body(
+            &ChatRequest {
+                messages,
+                model: "ignored".to_string(),
+                ..Default::default()
+            },
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            true,
+            &Capabilities::default(),
+            None,
+        )
+    }
+
+    #[test]
+    fn messages_wire_omits_local_message_metadata() {
+        let mut message = ChatMessage::assistant("wire-visible text");
+        message.summary_title = Some("local summary".to_string());
+        message.tool_display = Some(ToolDisplay::Text {
+            text: "local tool display".to_string(),
+        });
+        message.usage = Some(Default::default());
+
+        let body = anthropic_body(vec![message]);
+        let serialized = serde_json::to_string(&body).expect("serialize wire body");
+        for local_field in ["tool_display", "summary_title", "usage"] {
+            assert!(
+                !serialized.contains(local_field),
+                "Anthropic Messages wire leaked local field `{local_field}`: {serialized}"
+            );
+        }
+    }
+
+    fn assistant_tool_call(id: &str, path: &str) -> ChatMessage {
+        let mut message = ChatMessage::assistant(format!("I will inspect {path}"));
+        message.tool_calls = Some(vec![json!({
+            "id": id,
+            "function": {
+                "name": "read",
+                "arguments": format!(r#"{{"path":"{path}"}}"#),
+            }
+        })]);
+        message
+    }
+
     #[test]
     fn rolling_prefix_hashes_match_the_legacy_serialized_array_hashes() {
         let messages = vec![
@@ -1065,6 +1200,23 @@ mod tests {
                 "content": [{"type": "text", "text": "persisted input"}]
             }))
         );
+    }
+
+    #[test]
+    fn non_stream_anthropic_usage_counts_the_complete_input() {
+        let usage = usage_from_value(Some(&json!({
+            "input_tokens": 10,
+            "cache_read_input_tokens": 202_789,
+            "cache_creation_input_tokens": 6_801,
+            "output_tokens": 1_257,
+        })))
+        .expect("usage fields were provided");
+
+        assert_eq!(usage.prompt_tokens, 209_600);
+        assert_eq!(usage.completion_tokens, 1_257);
+        assert_eq!(usage.total_tokens, Some(210_857));
+        assert_eq!(usage.cache_read_tokens, Some(202_789));
+        assert_eq!(usage.cache_write_tokens, Some(6_801));
     }
 
     #[test]
@@ -1178,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn last_breakpoint_precedes_the_ephemeral_tail() {
+    fn ephemeral_tail_is_an_uncached_system_suffix_and_d_ends_the_latest_message() {
         let mut summary = ChatMessage::user("compacted history");
         summary.kind = crate::core::llm::MessageKind::CompactionSummary;
         let mut tail = ChatMessage::user("<system_reminder>runtime state</system_reminder>");
@@ -1219,13 +1371,23 @@ mod tests {
             .as_array()
             .expect("merged user content");
         assert!(
-            content.iter().all(|block| block.get("cache_control").is_none()),
-            "a message which contains the volatile tail must not receive any message-level cache breakpoint"
+            content
+                .get(1)
+                .is_some_and(|block| block["cache_control"]["type"] == "ephemeral"),
+            "the latest persisted block is the deepest cache write anchor"
+        );
+        assert!(
+            body["system"][1].get("cache_control").is_none(),
+            "the runtime tail must not receive its own cache-control marker"
+        );
+        assert_eq!(
+            body["system"][1]["text"],
+            "<system_reminder>runtime state</system_reminder>"
         );
     }
 
     #[test]
-    fn cache_breakpoint_uses_the_prior_complete_message_when_tail_merges_with_tool_results() {
+    fn cache_breakpoints_mark_c_d_and_do_not_mark_the_system_tail_itself() {
         let mut assistant = ChatMessage::assistant("I will inspect it");
         assistant.tool_calls = Some(vec![json!({
             "id": "call-1",
@@ -1256,17 +1418,121 @@ mod tests {
         );
 
         assert_eq!(
-            body["messages"][1]["content"][1]["cache_control"]["type"], "ephemeral",
-            "the complete assistant tool-use message is the cache boundary"
+            body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral",
+            "the earlier user message is the rolling read boundary"
         );
-        assert!(
-            body["messages"][2]["content"]
-                .as_array()
-                .expect("tool result and tail merge as a user turn")
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral",
+            "the tool-result message is the newest stable write boundary"
+        );
+        assert_eq!(
+            body["system"][0]["text"],
+            "<system_reminder>runtime state</system_reminder>"
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
+    }
+
+    /// One user turn can contain many tool rounds. Each request receives a
+    /// transient tail, but that tail must never move either rolling cache
+    /// anchor back by one completed tool result.
+    #[test]
+    fn eight_round_marathon_keeps_rolling_c_and_d_with_a_system_tail() {
+        let read_tool = json!({
+            "type": "function",
+            "function": {
+                "name": "read",
+                "description": "Read a file for the marathon cache regression.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }
+        });
+        let mut history = vec![
+            ChatMessage::system("stable system"),
+            ChatMessage::user("Start one long tool-driven task."),
+        ];
+
+        for round in 1..=8 {
+            let mut request_messages = history.clone();
+            let mut tail = ChatMessage::user(format!(
+                "<system_reminder>round {round} runtime state</system_reminder>"
+            ));
+            tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+            request_messages.push(tail);
+
+            let body = build_request_body(
+                &ChatRequest {
+                    messages: request_messages,
+                    model: "ignored".to_string(),
+                    tools: Some(vec![read_tool.clone()]),
+                    ..Default::default()
+                },
+                "claude-opus-4-6",
+                &ThinkingConfig::default(),
+                ThinkingFormat::AnthropicAdaptive,
+                true,
+                true,
+                &Capabilities::default(),
+                None,
+            );
+            let wire_messages = body["messages"].as_array().expect("wire messages");
+            let user_indices: Vec<_> = wire_messages
                 .iter()
-                .all(|block| block.get("cache_control").is_none()),
-            "the volatile tail's merged user message must remain outside the cached prefix"
-        );
+                .enumerate()
+                .filter_map(|(idx, message)| {
+                    (message["role"].as_str() == Some("user")).then_some(idx)
+                })
+                .collect();
+            let newest_user = *user_indices.last().expect("newest wire user message");
+            let newest_content = wire_messages[newest_user]["content"]
+                .as_array()
+                .expect("newest user content");
+
+            assert_eq!(
+                newest_content.last().unwrap()["cache_control"]["type"],
+                "ephemeral",
+                "round {round}: D must mark the end of the newest stable user/tool-result"
+            );
+            assert!(
+                body["system"]
+                    .as_array()
+                    .and_then(|blocks| blocks.last())
+                    .is_some_and(|block| block.get("cache_control").is_none()),
+                "round {round}: runtime tail must not receive its own cache-control marker"
+            );
+
+            if let Some(&previous_user) = user_indices.iter().rev().nth(1) {
+                let previous_content = wire_messages[previous_user]["content"]
+                    .as_array()
+                    .expect("previous user content");
+                assert_eq!(
+                    previous_content
+                        .last()
+                        .and_then(|block| block["cache_control"]["type"].as_str()),
+                    Some("ephemeral"),
+                    "round {round}: C must remain on the previous completed user/tool-result"
+                );
+            }
+
+            let call_id = format!("marathon-read-{round}");
+            let mut assistant = ChatMessage::assistant(format!("Reading round {round}"));
+            assistant.tool_calls = Some(vec![json!({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "arguments": format!(r#"{{"path":"/virtual/round-{round}.txt"}}"#),
+                }
+            })]);
+            history.push(assistant);
+            let tool_result = format!(
+                "tool-result round {round}: {}",
+                "stable output ".repeat(200)
+            );
+            history.push(ChatMessage::tool(&call_id, &tool_result));
+        }
     }
 
     #[test]
@@ -1317,21 +1583,28 @@ mod tests {
 
     #[test]
     fn cache_breakpoints_never_exceed_the_provider_budget_with_many_summaries() {
-        let mut first_summary = ChatMessage::user("oldest compacted history");
-        first_summary.kind = crate::core::llm::MessageKind::CompactionSummary;
-        let mut second_summary = ChatMessage::user("middle compacted history");
-        second_summary.kind = crate::core::llm::MessageKind::CompactionSummary;
-        let mut latest_summary = ChatMessage::user("latest compacted history");
-        latest_summary.kind = crate::core::llm::MessageKind::CompactionSummary;
+        let mut summary = ChatMessage::user("compacted history");
+        summary.kind = crate::core::llm::MessageKind::CompactionSummary;
         let mut tail = ChatMessage::user("<system_reminder>runtime state</system_reminder>");
         tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+        let mut first_tool_call = ChatMessage::assistant("I will inspect the first file");
+        first_tool_call.tool_calls = Some(vec![json!({
+            "id": "call-1",
+            "function": {"name": "read", "arguments": "{\"path\":\"first.rs\"}"}
+        })]);
+        let mut second_tool_call = ChatMessage::assistant("I will inspect the second file");
+        second_tool_call.tool_calls = Some(vec![json!({
+            "id": "call-2",
+            "function": {"name": "read", "arguments": "{\"path\":\"second.rs\"}"}
+        })]);
         let request = ChatRequest {
             messages: vec![
                 ChatMessage::system("stable system"),
-                first_summary,
-                second_summary,
-                latest_summary,
-                ChatMessage::user("latest persisted input"),
+                summary,
+                first_tool_call,
+                ChatMessage::tool("call-1", "first file contents"),
+                second_tool_call,
+                ChatMessage::tool("call-2", "second file contents"),
                 tail,
             ],
             model: "ignored".to_string(),
@@ -1357,23 +1630,34 @@ mod tests {
             None,
         );
 
-        assert_eq!(count_cache_controls(&body), 2);
-        let content = body["messages"][0]["content"]
+        assert_eq!(count_cache_controls(&body), ANTHROPIC_MAX_CACHE_BREAKPOINTS);
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none(),
+            "CompactionSummary must not consume the rolling user breakpoint"
+        );
+        let previous_tool_result = body["messages"][2]["content"]
             .as_array()
-            .expect("contiguous user messages merge into blocks");
+            .expect("first tool result is a distinct wire user message");
         assert!(
-            content[0].get("cache_control").is_none(),
-            "the oldest summary is lower priority than the four provider-supported breakpoints"
+            previous_tool_result
+                .last()
+                .is_some_and(|block| block["cache_control"]["type"] == "ephemeral"),
+            "the third slot must stay on the penultimate wire user message"
         );
         assert!(
-            content[1].get("cache_control").is_none(),
-            "only the latest summary may receive the summary breakpoint"
+            body["messages"][4]["content"]
+                .as_array()
+                .and_then(|blocks| blocks.first())
+                .is_some_and(|block| block["cache_control"]["type"] == "ephemeral"),
+            "the fourth slot must mark the newest stable tool-result block"
         );
         assert!(
-            content
-                .iter()
-                .all(|block| block.get("cache_control").is_none()),
-            "a merged tail makes the entire user message ineligible as a cache breakpoint"
+            body["messages"][4]["content"][1]
+                .get("cache_control")
+                .is_none(),
+            "the tail remains outside the deepest write prefix"
         );
     }
 
@@ -1400,13 +1684,15 @@ mod tests {
             None,
         );
 
-        assert_eq!(count_cache_controls(&body), 0);
+        assert_eq!(count_cache_controls(&body), 1);
         let content = body["messages"][0]["content"]
             .as_array()
             .expect("contiguous user messages merge into blocks");
-        assert!(content
-            .iter()
-            .all(|block| block.get("cache_control").is_none()));
+        assert_eq!(
+            content[0]["cache_control"]["type"], "ephemeral",
+            "the persisted summary is the only cacheable message"
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -1448,9 +1734,206 @@ mod tests {
         );
 
         assert_eq!(count_cache_controls(&body), 0);
-        assert!(body["messages"][0]["content"][0]
-            .get("cache_control")
-            .is_none());
+        assert_eq!(body["messages"], json!([]));
+        assert_eq!(
+            body["system"][0]["text"],
+            "<system_reminder>runtime-only state</system_reminder>"
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn deepest_breakpoint_ends_the_real_message_before_the_system_tail() {
+        let mut tail = ChatMessage::user("<system_reminder>runtime-only state</system_reminder>");
+        tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+        let body = anthropic_body(vec![
+            ChatMessage::user("persisted input"),
+            ChatMessage::assistant("plain assistant response"),
+            tail,
+        ]);
+
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"]["type"], "ephemeral",
+            "D ends the latest persisted message before the system suffix"
+        );
+        assert_eq!(
+            body["system"][0]["text"],
+            "<system_reminder>runtime-only state</system_reminder>"
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn cache_breakpoints_mark_a_single_persisted_message_without_a_tail() {
+        let body = anthropic_body(vec![ChatMessage::user("persisted input")]);
+
+        assert_eq!(count_cache_controls(&body), 1);
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoints_ignore_an_empty_rendered_tail() {
+        let mut tail = ChatMessage::user_with_parts(Vec::new());
+        tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+        let body = anthropic_body(vec![ChatMessage::user("persisted input"), tail]);
+
+        assert_eq!(
+            body["messages"],
+            json!([{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "persisted input",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }])
+        );
+    }
+
+    #[test]
+    fn rolling_breakpoint_c_marks_the_penultimate_wire_tool_result() {
+        let mut first_tool_call = ChatMessage::assistant("I will inspect the first file");
+        first_tool_call.tool_calls = Some(vec![json!({
+            "id": "call-1",
+            "function": {"name": "read", "arguments": "{\"path\":\"first.rs\"}"}
+        })]);
+        let mut second_tool_call = ChatMessage::assistant("I will inspect the second file");
+        second_tool_call.tool_calls = Some(vec![json!({
+            "id": "call-2",
+            "function": {"name": "read", "arguments": "{\"path\":\"second.rs\"}"}
+        })]);
+        let mut tail = ChatMessage::user("<system_reminder>runtime state</system_reminder>");
+        tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+
+        let body = anthropic_body(vec![
+            ChatMessage::user("original question"),
+            first_tool_call,
+            ChatMessage::tool("call-1", "first result"),
+            second_tool_call,
+            ChatMessage::tool("call-2", "second result"),
+            tail,
+        ]);
+
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(
+            body["messages"][0]["content"][0].get("cache_control"),
+            None,
+            "breakpoint C is a wire-message position, not the logical user prompt"
+        );
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral",
+            "breakpoint C must mark the previous tool-result wire message"
+        );
+        assert_eq!(
+            body["messages"][4]["content"][0]["cache_control"]["type"], "ephemeral",
+            "breakpoint D must mark the newest complete tool-result message"
+        );
+        assert_eq!(
+            body["system"][0]["text"],
+            "<system_reminder>runtime state</system_reminder>"
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn rolling_boundary_is_explicitly_remarked_across_tool_rounds() {
+        let mut first_tail = ChatMessage::user("<system_reminder>runtime state</system_reminder>");
+        first_tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+        let first_round = anthropic_body(vec![
+            ChatMessage::user("original question"),
+            assistant_tool_call("call-1", "first.rs"),
+            ChatMessage::tool("call-1", "first result"),
+            first_tail,
+        ]);
+        assert_eq!(
+            first_round["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral",
+            "round N writes the newest stable tool-result boundary"
+        );
+
+        let mut second_tail = ChatMessage::user("<system_reminder>runtime state</system_reminder>");
+        second_tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+        let second_round = anthropic_body(vec![
+            ChatMessage::user("original question"),
+            assistant_tool_call("call-1", "first.rs"),
+            ChatMessage::tool("call-1", "first result"),
+            assistant_tool_call("call-2", "second.rs"),
+            ChatMessage::tool("call-2", "second result"),
+            second_tail,
+        ]);
+
+        assert_eq!(
+            second_round["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral",
+            "round N+1 must explicitly remark round N's tool-result boundary"
+        );
+        assert_eq!(
+            second_round["messages"][4]["content"][0]["cache_control"]["type"], "ephemeral",
+            "round N+1 also writes its new stable boundary"
+        );
+    }
+
+    #[test]
+    fn persistent_wire_prefix_is_byte_identical_across_main_and_subagent_requests() {
+        let persistent_messages = vec![
+            ChatMessage::system("stable system"),
+            ChatMessage::user("original question"),
+            assistant_tool_call("call-1", "src/lib.rs"),
+            ChatMessage::tool("call-1", "file contents"),
+        ];
+        let mut main_messages = persistent_messages.clone();
+        let mut tail = ChatMessage::user("<system_reminder>runtime state</system_reminder>");
+        tail.kind = crate::core::llm::MessageKind::EphemeralTail;
+        main_messages.push(tail);
+
+        let target = ProviderCompatProfile::anthropic_messages("claude-opus-4-6");
+        let main_wire = build_messages(
+            &main_messages,
+            &target,
+            true,
+            &Capabilities::default(),
+            None,
+        );
+        let repeated_main_wire = build_messages(
+            &main_messages,
+            &target,
+            true,
+            &Capabilities::default(),
+            None,
+        );
+        let subagent_wire = build_messages(
+            &persistent_messages,
+            &target,
+            true,
+            &Capabilities::default(),
+            None,
+        );
+
+        assert_eq!(
+            serde_json::to_vec(&main_wire.system).unwrap(),
+            serde_json::to_vec(&repeated_main_wire.system).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(&main_wire.messages).unwrap(),
+            serde_json::to_vec(&repeated_main_wire.messages).unwrap(),
+            "without compaction, a repeated request must preserve its full wire prefix byte-for-byte"
+        );
+
+        assert_eq!(
+            serde_json::to_vec(&main_wire.messages).unwrap(),
+            serde_json::to_vec(&subagent_wire.messages).unwrap(),
+            "runtime state is a system suffix, so main and subagent messages match exactly"
+        );
+        assert!(main_wire.has_ephemeral_system_tail);
+        assert_eq!(&main_wire.system[..1], &subagent_wire.system);
+        assert_eq!(
+            main_wire
+                .system
+                .last()
+                .and_then(|block| block["text"].as_str()),
+            Some("<system_reminder>runtime state</system_reminder>")
+        );
     }
 
     #[test]

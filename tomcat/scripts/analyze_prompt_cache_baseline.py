@@ -112,12 +112,6 @@ def read_diag(path: Path, baseline: Baseline) -> None:
                 baseline.model_turns += 1
                 prompt_tokens = int(parsed.get("prompt_tokens", "0"))
                 cache_read_tokens = int(parsed.get("cache_read_tokens", "0") or 0)
-                # OpenAI reports prompt_tokens as total input (including cached
-                # tokens), while Anthropic's input_tokens excludes the separate
-                # cache_read_input_tokens field. Normalize both to total prompt
-                # input before calculating a cross-wire hit rate.
-                if parsed.get("wire") == "anthropic-messages":
-                    prompt_tokens += cache_read_tokens
                 baseline.prompt_tokens += prompt_tokens
                 baseline.cache_read_tokens += cache_read_tokens
                 baseline.cache_write_tokens += int(

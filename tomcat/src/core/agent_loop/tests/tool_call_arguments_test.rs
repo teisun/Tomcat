@@ -1,13 +1,18 @@
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::tool_dispatcher::run_tool_calls;
-use crate::core::agent_loop::tool_exec::{execute_tool, NORMALIZED_TOOL_CALL_ARGUMENTS};
+use crate::core::agent_loop::tool_exec::{
+    execute_tool, persisted_tool_call_arguments, NORMALIZED_TOOL_CALL_ARGUMENTS,
+};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
+use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::ChatMessage;
+use crate::core::session::manager::ContextState;
 use crate::core::tools::contract::registry::{DefaultToolRegistry, Tool, ToolRegistry};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::ext::{
@@ -310,6 +315,158 @@ async fn run_tool_calls_keeps_valid_arguments_unchanged() {
         .and_then(|call| call["function"]["arguments"].as_str())
         .expect("assistant tool_call arguments should be present");
     assert_eq!(stored_args, raw_arguments);
+}
+
+#[tokio::test]
+async fn tool_dispatch_counts_assistant_only_in_fallback_estimate() {
+    let mut agent = make_agent();
+    let mut messages = Vec::<ChatMessage>::new();
+    let tool_calls = vec![ToolCallInfo {
+        id: "call_1".into(),
+        name: "read".into(),
+        arguments: r#"{"path":"/abc"}"#.into(),
+    }];
+    let persisted_args = persisted_tool_call_arguments(&tool_calls[0]);
+    let assistant_content = "abc";
+    let assistant_chars = assistant_content.len()
+        + tool_calls[0].name.len()
+        + persisted_args.len()
+        + tool_calls[0].id.len()
+        + 40;
+    assert_eq!(
+        assistant_chars % 4,
+        0,
+        "fixture keeps usage-backed and fallback estimates comparable"
+    );
+
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 4_000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    state.update_api_usage(1_000, (assistant_chars / 4) as u32);
+    agent.set_context_state(Some(state));
+
+    run_tool_calls(
+        &mut agent,
+        &mut messages,
+        &tool_calls,
+        assistant_content,
+        "",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("tool dispatch should succeed");
+
+    let tool_result_chars = messages[1]
+        .text_content()
+        .expect("tool result should contain text")
+        .len();
+    assert_eq!(tool_result_chars, 12, "MockPrimitiveExecutor read fixture");
+    let state = agent.context_state.as_mut().expect("context state");
+    assert_eq!(
+        state.post_usage_appended_chars, tool_result_chars,
+        "provider usage already accounts for assistant text and tool-call arguments"
+    );
+    assert_eq!(
+        state.estimate_context_chars,
+        4_000 + assistant_chars + tool_result_chars,
+        "fallback estimate must retain the complete assistant and tool payload"
+    );
+    let usage_backed_estimate = state.estimated_token_count();
+    assert_eq!(usage_backed_estimate, 1_020);
+
+    state.invalidate_api_usage();
+    assert_eq!(
+        state.estimated_token_count(),
+        usage_backed_estimate,
+        "invalidating usage must preserve the fallback estimate"
+    );
+}
+
+#[tokio::test]
+async fn tool_dispatch_does_not_double_count_large_tool_call_arguments() {
+    let mut agent = make_agent();
+    let mut messages = Vec::<ChatMessage>::new();
+    let tool_calls = vec![ToolCallInfo {
+        id: "call_large".into(),
+        name: "read".into(),
+        arguments: format!(r#"{{"path":"/{}"}}"#, "x".repeat(40_000)),
+    }];
+    let persisted_args = persisted_tool_call_arguments(&tool_calls[0]);
+    let assistant_content = "calling read";
+    let assistant_chars = assistant_content.len()
+        + tool_calls[0].name.len()
+        + persisted_args.len()
+        + tool_calls[0].id.len()
+        + 40;
+
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 4_000,
+        context_budget_chars: 500_000,
+        context_budget_tokens: 125_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    state.update_api_usage(1_000, (assistant_chars / 4) as u32);
+    agent.set_context_state(Some(state));
+
+    run_tool_calls(
+        &mut agent,
+        &mut messages,
+        &tool_calls,
+        assistant_content,
+        "",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("large tool call should succeed");
+
+    let tool_result_chars = messages[1]
+        .text_content()
+        .expect("tool result should contain text")
+        .len();
+    assert!(
+        tool_result_chars >= 40_000,
+        "fixture must retain a large tool result"
+    );
+    let state = agent.context_state.as_ref().expect("context state");
+    let provider_total = 1_000 + assistant_chars / 4;
+    assert_eq!(
+        state.post_usage_appended_chars, tool_result_chars,
+        "only the tool result is new after provider usage"
+    );
+    assert_eq!(
+        state.estimated_token_count() - provider_total,
+        tool_result_chars / 4,
+        "large tool-call arguments must not add a second ~10K-token delta"
+    );
 }
 
 #[tokio::test]

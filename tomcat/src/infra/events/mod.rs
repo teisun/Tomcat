@@ -582,7 +582,7 @@ pub enum AgentEvent {
         #[serde(rename = "estimatedTokensFreed")]
         estimated_tokens_freed: usize,
     },
-    /// L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。
+    /// L0 落盘 + 占位符在成功 boundary 应用后的释放估算 tokens（不计入 L1/L2）。
     Layer0ContextRelease {
         #[serde(rename = "persistTokensFreed")]
         persist_tokens_freed: usize,

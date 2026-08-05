@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tracing::{info, warn};
 
-use crate::core::compaction::apply::check_after_reply;
+use crate::core::compaction::apply::{check_after_reply, BoundaryEnv};
 use crate::core::compaction::preheat::generate_summary_with_output_limit;
 use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
@@ -271,12 +271,18 @@ fn reduce_before_next_llm(
     messages: &mut Vec<ChatMessage>,
 ) -> Result<ReductionResult, AppError> {
     let mut result = ReductionResult::default();
+    let boundary_env = BoundaryEnv {
+        config: &agent.config.context_config,
+        work_dir: Path::new(&agent.config.agent_trail_dir),
+        session_id: &agent.config.session_id,
+        read_file_state: agent.config.read_file_state.as_ref(),
+    };
 
     let applied_history = {
         let Some(ctx_state) = agent.context_state.as_mut() else {
             return Ok(result);
         };
-        check_after_reply(ctx_state, &agent.emitter)
+        check_after_reply(ctx_state, &agent.emitter, &boundary_env)
     };
     if applied_history {
         rebuild_messages_from_context(agent, messages);
@@ -813,7 +819,13 @@ fn apply_placeholder_wave(
     evicted_tool_call_ids: &mut Vec<String>,
 ) {
     let wave = std::cmp::max(1, candidates.len() / 2);
+    let chars_before = *freed_chars;
+    let mut rewritten_messages = Vec::new();
     for candidate in candidates.into_iter().take(wave) {
+        let message_identity = candidate
+            .message_id
+            .clone()
+            .unwrap_or_else(|| format!("wire_index:{}", candidate.msg_idx));
         if let Some(id) = messages[candidate.msg_idx].tool_call_id.clone() {
             evicted_tool_call_ids.push(id);
         }
@@ -824,12 +836,23 @@ fn apply_placeholder_wave(
         *text = TOOL_RESULT_PLACEHOLDER.to_string();
         *freed_chars += old_len.saturating_sub(text.len());
         ctx_state.rewrite_local_tail_chars(old_len, text.len());
+        rewritten_messages.push(message_identity);
         if let Some(message_id) = candidate.message_id {
             transcript_rewrites.push(MessageTextRewrite {
                 message_id,
                 new_content: text.clone(),
             });
         }
+    }
+    let chars_freed = (*freed_chars).saturating_sub(chars_before);
+    if chars_freed > 0 {
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "history_rewritten",
+            operation = "apply_placeholder_wave",
+            chars_freed,
+            rewritten_messages = ?rewritten_messages,
+        );
     }
 }
 
