@@ -244,7 +244,9 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         });
     }
 
-    agent.emit_context_metrics();
+    // Timing ⑤ may have rewritten history; this is a fresh best-effort
+    // estimate, not a newly returned provider Usage sample.
+    agent.emit_context_metrics(false);
     agent.emit_event(AgentEvent::TurnEnd {
         turn_index,
         message: Message(serde_json::json!({})),

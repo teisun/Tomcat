@@ -1532,10 +1532,11 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// [ContextMetricsUpdate 事件发射] 设置 ContextState 后：首次 LLM 请求前 + 本轮最终回复后各一次
+/// [ContextMetricsUpdate 事件发射] 设置 ContextState 后：首次 LLM 请求前发估算，
+/// provider 每次返回 Usage 时立即发实测，最终回复后再发边界处理快照
 ///
 /// 验证：至少一次 context_metrics_update，payload 含合法字段；首次 metrics 出现在首次 turn_end 之前
-/// 意义：ContextMetricsUpdate 双点发射（中间 tool round 不发）——可观测性与 CLI 刷屏平衡
+/// 意义：水位不等待整次 Agent 回合结束，工具链运行期间也能显示首个真实 usage
 #[tokio::test]
 async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();

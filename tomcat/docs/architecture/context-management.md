@@ -1694,7 +1694,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 | **L3（溢出裁剪）** | `ContextOverflowTrimStart { reason, ratio }` / `ContextOverflowTrimEnd { ratio_before, ratio_after, will_retry, estimated_tokens_freed, turns_removed }` | `context_overflow_trim_start` / `context_overflow_trim_end` |
 
 
-其他与本模块相关的通用事件（未归入上表分层）：`tool_result_persisted`（Layer 0 单条落盘）、`context_metrics_update`（**每个 user turn** 内约两次：本轮首次 `chat_stream` 前与 timing ⑤ 末尾；payload 中累计字段来自 `ContextState`）等，见 `events` 模块定义。
+其他与本模块相关的通用事件（未归入上表分层）：`tool_result_persisted`（Layer 0 单条落盘）、`context_metrics_update`（首次 `chat_stream` 前发估算值；每次 provider `Usage` 到达后立即发实测值；timing ⑤、压缩或重载后再发最佳估算快照；payload 中累计字段来自 `ContextState`）等，见 `events` 模块定义。
 
 **CLI / 宿主按 wire name 订阅时的语义对应**：
 
@@ -1717,9 +1717,9 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 ### 10.6 可观测性与 token 估算约定
 
-- **`context_metrics_update` 节奏**：与实现一致，**每个 user turn** 内约发射两次（本轮首次流式请求前 + timing ⑤ 末尾）；中间 tool round **不**额外发射。`compactionCount` / `compactionTokensFreed` / `totalToolResultBytesPersisted`（字段名历史兼容，**值为 Unicode 字符累计**）来自 **`ContextState::session_obs`**；瞬时字段来自 **`ContextState::live`**（含 `preheatInProgress` = 预热 LLM 任务仍在跑；`preheatResultPending` = 摘要已就绪待 poll/apply，与前者互斥；`turnCount` = `state.turn_count()` 统计 `messages` 中的 turn start 数）。`AgentLoop` **不**再持有独立 `metrics` 结构。
-- **Ctx% 显示语义**：输入框的 Ctx% 是「本进程当前 slot 已收到的最近一次 provider usage 实测值」，不是 `sessions.json` 的历史观测快照。`ContextMetricsUpdate.providerUsageMeasured=false` 表示首个请求发出前（或 usage 被压缩/重载失效后）的 `chars/4` fallback；serve 事件泵不得把它缓存为水位，webview 也必须隐藏标签。provider 返回 usage 后，同一事件的 `providerUsageMeasured=true` 才会把 `contextUtilizationRatio` 写入 `SessionSlot.last_context_ratio` 并显示 `Ctx x%`。
-- **重启、重连与改写历史**：新 slot 的 `last_context_ratio=None`，`get_state` 返回 `null`，Composer 隐藏 Ctx 文字但以固定宽度保留位置，避免按钮跳动。相同进程中切换或重连已测过的会话可从 slot 缓存立即回放；进程重启、`/compact`、`/restore` 或其他 `rehydrate_slot_context_state` 路径均清空缓存，直到下一次 provider usage。持久化的 `SessionEntry.context_utilization_ratio` 可继续用于离线可观测性，但**绝不**作为实时 UI 水位来源。
+- **`context_metrics_update` 节奏**：本轮首次流式请求前先发一条 fallback 估算；随后**每一次** provider `Usage` 事件到达时，stream handler 立即以该实测值发一条更新——它发生在工具调用被调度之前，不能等待整次 Agent 回合结束；timing ⑤、current-tail reduction、L3 截断与 rehydrate 后仍会发出边界处理后的最佳估算快照。故工具轮数本身不决定事件数，provider 实际返回的 usage 次数才决定。`providerUsageMeasured=true` 只表示**本条事件**直接来自刚收到的 provider usage；`false` 表示本条是估算，而不是对已存在实测基线的否定。`compactionCount` / `compactionTokensFreed` / `totalToolResultBytesPersisted`（字段名历史兼容，**值为 Unicode 字符累计**）来自 **`ContextState::session_obs`**；瞬时字段来自 **`ContextState::live`**（含 `preheatInProgress` = 预热 LLM 任务仍在跑；`preheatResultPending` = 摘要已就绪待 poll/apply，与前者互斥；`turnCount` = `state.turn_count()` 统计 `messages` 中的 turn start 数）。`AgentLoop` **不**再持有独立 `metrics` 结构。
+- **Ctx% 显示语义**：输入框的 Ctx% 是「本进程当前 slot 最近一次可信占用快照」，不是 `sessions.json` 的历史观测快照。冷启动 slot 的 `last_context_ratio=None` 收到 `providerUsageMeasured=false` 时必须继续留空，避免把 `chars/4` 粗估伪装成首个实测值；provider 返回 usage 后的 `true` 事件定基并显示 `Ctx x%`。一旦已定基，后续 `false` 估算（下一条 prompt、系统提示刷新、L0/L2/L3、rehydrate 或模型预算变化）必须更新该快照而**不得隐藏**，直到下一次 provider usage 再以真值刷新。
+- **重启、重连与改写历史**：新 slot 的 `last_context_ratio=None`，`get_state` 返回 `null`，Composer 隐藏 Ctx 文字但以固定宽度保留位置，避免按钮跳动。相同进程中切换或重连已测过的会话可从 slot 缓存立即回放；`/compact`、`/restore` 与其他 `rehydrate_slot_context_state` 路径会用重建后的上下文主动发估算事件：已定基的会话立即显示新水位，未定基会话仍留空。`SetModel` 同理：更新 `ContextState` 的输入预算并重估，不复用旧模型的百分比。持久化的 `SessionEntry.context_utilization_ratio` 可继续用于离线可观测性，但**绝不**作为实时 UI 水位来源。
 - **Transcript（暂缓专项）**：同一会话 JSONL 中可能出现多条 `isBoundary: false` 的 compaction 行或边界行语义重叠；合并策略与 LLM 约束待后续排查。
 - **估算函数**：分层释放量与 transcript 中三字段均通过 `estimated_tokens_from_chars`（与 `estimated_token_count()` 的 **chars/4** fallback 同阶）换算；与带 API usage 的精确计数相比均为**估算**，仅保证与水位线逻辑一致。`estimate_msg_chars` 替代旧 `estimate_turn_chars`，作用于单条 `ChatMessage`。
 - **防重复计入**：**L1** 在拿到 `summary_text` 时**一次性**计算 `estimatedCoveredTokensBefore` / `estimatedSummaryTokens` / `estimatedTokensSaved`，写入 `BranchSummaryEntry` 与 `CompactionResult`；**不在 L2** 再用 `estimated_token_count()` 前后差重算。**L2** `apply_boundary` **成功**后将会话 `compaction_tokens_freed` 加上 `estimated_tokens_saved`，并 `compaction_count += 1`。**L0** 作为同一成功分支的后续动作，在 ② / ⑤ / 中途守卫任一路径中将落盘与占位符释放折算为 tok 后立即计入会话累计，并在释放量非零时发射 `layer0_context_release`。**L3** 按被 drain 消息的字符累计折算 tok 后计入会话累计；**每次成功 trim 段**计 **1** 次 compact 动作（与 `compaction_count` 语义对齐），`turns_removed` 由事件给出。

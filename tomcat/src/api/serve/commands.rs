@@ -1017,10 +1017,29 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             }
+            let previous_entry = slot.ctx.session_runtime.session.current_session_entry()?;
+            let model_changed = slot.ctx.effective_model(previous_entry.as_ref()) != model;
             slot.ctx
                 .session_runtime
                 .session
                 .switch_current_model(None, Some(model.as_str()))?;
+            if model_changed {
+                let entry = slot.ctx.session_runtime.session.current_session_entry()?;
+                let main_call = slot.ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
+                let updated_runtime_context = {
+                    let mut turn_state = slot.turn_state.lock();
+                    if let Some(state) = turn_state.as_mut() {
+                        state.context_state.apply_limits(&main_call.limits);
+                        state.context_budget_chars = state.context_state.context_budget_chars;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if updated_runtime_context {
+                    emit_estimated_context_metrics_snapshot(&slot);
+                }
+            }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
@@ -1576,6 +1595,48 @@ pub(crate) async fn start_turn(
     Ok(())
 }
 
+/// 从当前 slot 上下文生成一条估算 metrics。
+///
+/// 冷启动 slot 还没有 provider usage 时，事件泵会保持水位未知；已有实测水位时，
+/// 这条事件会用压缩、回滚或模型预算变化后的最佳估算刷新 UI。
+fn emit_estimated_context_metrics_snapshot(slot: &Arc<super::registry::SessionSlot>) {
+    let event = {
+        let mut turn_state = slot.turn_state.lock();
+        let Some(state) = turn_state.as_mut() else {
+            return;
+        };
+        let context_state = &mut state.context_state;
+        let input_tokens_used = context_state.estimated_token_count();
+        let context_utilization_ratio = context_state.usage_ratio();
+        let preheat_in_progress = context_state.preheat.is_warmup_task_active();
+        let preheat_result_pending =
+            context_state.preheat.preheat_result_pending() && !preheat_in_progress;
+        context_state.live.input_tokens_used = input_tokens_used;
+        context_state.live.context_utilization_ratio = context_utilization_ratio;
+        context_state.live.preheat_in_progress = preheat_in_progress;
+        context_state.live.preheat_result_pending = preheat_result_pending;
+
+        AgentEvent::ContextMetricsUpdate {
+            input_tokens_used,
+            context_utilization_ratio,
+            provider_usage_measured: false,
+            compaction_count: context_state.session_obs.compaction_count,
+            compaction_tokens_freed: context_state.session_obs.compaction_tokens_freed,
+            total_tool_result_bytes_persisted: context_state
+                .session_obs
+                .tool_result_chars_persisted,
+            preheat_in_progress,
+            preheat_result_pending,
+        }
+    };
+
+    let emitter = crate::infra::event_bus::ScopedEventEmitter::new(
+        Arc::clone(&slot.ctx.global_services.event_bus),
+        slot.session_id.clone(),
+    );
+    let _ = emitter.emit(event);
+}
+
 /// 任何直接改写 transcript 历史的 serve 命令都经此处同步内存 context。
 ///
 /// `/compact`、`/restore` 与 pending-question 结算都会改变逻辑消息链；只改 JSONL 会让
@@ -1599,14 +1660,15 @@ fn rehydrate_slot_context_state(slot: &Arc<super::registry::SessionSlot>) -> Res
         &system_text,
         &main_call.limits,
     )?;
+    let context_budget_chars = context_state.context_budget_chars;
     let mut turn_state = slot.turn_state.lock();
     let state = turn_state
         .as_mut()
         .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
-    // 历史被直接改写后，旧 usage 已不再描述将要发送的上下文。
-    // 下一次 provider usage 到达前，get_state 应如实返回未测量。
-    *slot.last_context_ratio.lock() = None;
     state.context_state = context_state;
+    state.context_budget_chars = context_budget_chars;
+    drop(turn_state);
+    emit_estimated_context_metrics_snapshot(slot);
     Ok(())
 }
 

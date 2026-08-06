@@ -30,10 +30,11 @@ pub struct SessionSlot {
     pub busy: AtomicBool,
     pub terminal_emitted: AtomicBool,
     pub turn_state: Mutex<Option<SessionTurnState>>,
-    /// 最近一次向该会话前端广播的 provider 实测水位。
+    /// 最近一次向该会话前端广播的可信水位（实测定基后的后续估算也会刷新它）。
     ///
     /// 它刻意不放进 `turn_state`：运行中的 turn 会临时取走后者，重连时仍须回放
-    /// 已广播的水位。`None` 表示本进程加载该会话后尚未收到 provider 的 usage。
+    /// 已广播的水位。`None` 表示本进程加载该会话后尚未收到 provider 的 usage，
+    /// 以避免把冷启动的 fallback 估算显示成实测值。
     pub last_context_ratio: Mutex<Option<f64>>,
     pub run_task: Mutex<Option<JoinHandle<()>>>,
     pub background_task_listener: Mutex<Option<JoinHandle<()>>>,

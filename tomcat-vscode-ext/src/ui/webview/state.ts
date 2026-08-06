@@ -2990,9 +2990,12 @@ export class WebviewStateStore {
         pushMessage(session, "error", `${frame.event}: ${frame.error}`);
         return sessionRenderMutation(session.sessionId);
       case "context_metrics_update":
-        session.contextRatio = frame.providerUsageMeasured
-          ? frame.contextUtilizationRatio
-          : null;
+        if (
+          frame.providerUsageMeasured ||
+          typeof session.contextRatio === "number"
+        ) {
+          session.contextRatio = frame.contextUtilizationRatio;
+        }
         return sessionRenderMutation(session.sessionId);
       case "compaction_error":
         pushMessage(

@@ -102,10 +102,17 @@ pub fn register_session_event_pump(
                         {
                             *last_context_ratio = Some(ratio);
                         }
-                    } else {
-                        // A fallback estimate is deliberately not a UI waterline. It also
-                        // means a compaction or rehydrate invalidated the prior measurement.
-                        *last_context_ratio = None;
+                    } else if last_context_ratio.is_some() {
+                        // An estimate is not allowed to bootstrap a cold slot, but once the
+                        // UI has a provider-backed baseline it is the best available update
+                        // after a prompt edit, compaction, or model-budget change.
+                        if let Some(ratio) = ctx
+                            .payload
+                            .get("contextUtilizationRatio")
+                            .and_then(serde_json::Value::as_f64)
+                        {
+                            *last_context_ratio = Some(ratio);
+                        }
                     }
                 }
                 let _ = writer.send(OutFrame::Event(ctx.payload.clone()));

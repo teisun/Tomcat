@@ -1,8 +1,8 @@
-//! # ContextMetricsUpdate 五个用例
+//! # ContextMetricsUpdate 用例
 //!
-//! 覆盖 timing ⑤ + turn_index==1 两个发射点的所有等价类：
+//! 覆盖首请求估算、provider usage 到达、timing ⑤ 边界快照等发射点：
 //!
-//! 1. `*_emitted_before_turn_end`：metrics 必须在 turn_end 之前；
+//! 1. `*_before_tool_execution`：provider 实测 metrics 必须在工具开始前发射；
 //! 2. `*_payload_contains_valid_values`：payload 字段类型 / 取值范围；
 //! 3. `*_compaction_count_accumulates_across_rounds`：多轮 tool 时 compaction_count 单调不减；
 //! 4. `*_skipped_when_no_context_state`：无 context_state 时不发射；
@@ -24,9 +24,9 @@ use crate::infra::{DefaultEventBus, EventContext};
 
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
-/// 工具轮场景：metrics 必须在 turn_end 之前。
+/// 工具轮场景：provider usage 到达后，水位必须在工具开始执行前可见。
 #[tokio::test]
-async fn context_metrics_update_emitted_before_turn_end() {
+async fn provider_usage_metric_is_emitted_before_tool_execution() {
     let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
@@ -36,6 +36,15 @@ async fn context_metrics_update_emitted_before_turn_end() {
         }),
         Ok(StreamEvent::FinishReason {
             reason: "tool_calls".to_string(),
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 2_000,
+            completion_tokens: 20,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(2_020),
+            reasoning_tokens: None,
+            text_tokens: None,
         }),
     ];
     let stream_text: Vec<Result<StreamEvent, AppError>> = vec![
@@ -50,13 +59,31 @@ async fn context_metrics_update_emitted_before_turn_end() {
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    for ev in &[wire::WIRE_CONTEXT_METRICS_UPDATE, wire::WIRE_TURN_END] {
+    for ev in &[
+        wire::WIRE_CONTEXT_METRICS_UPDATE,
+        wire::WIRE_TOOL_EXECUTION_START,
+        wire::WIRE_TURN_END,
+    ] {
         let list = Arc::clone(&order);
         let name = (*ev).to_string();
         event_bus.on(
             &name,
             Box::new(move |ctx: EventContext| {
-                list.lock().unwrap().push(ctx.event_name.clone());
+                let observed = if ctx.event_name == wire::WIRE_CONTEXT_METRICS_UPDATE {
+                    let measured = ctx
+                        .payload
+                        .get("providerUsageMeasured")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    format!(
+                        "{}:{}",
+                        ctx.event_name,
+                        if measured { "measured" } else { "estimated" }
+                    )
+                } else {
+                    ctx.event_name.clone()
+                };
+                list.lock().unwrap().push(observed);
                 Ok(())
             }),
         );
@@ -90,18 +117,26 @@ async fn context_metrics_update_emitted_before_turn_end() {
     let messages = vec![ChatMessage::user("read")];
     let _ = loop_.run(messages).await.unwrap();
     let observed = order.lock().unwrap().clone();
-    let metrics_pos = observed
+    let measured_metrics_pos = observed
         .iter()
-        .position(|e| e == wire::WIRE_CONTEXT_METRICS_UPDATE);
+        .position(|e| e == &format!("{}:measured", wire::WIRE_CONTEXT_METRICS_UPDATE));
+    let tool_start_pos = observed
+        .iter()
+        .position(|e| e == wire::WIRE_TOOL_EXECUTION_START);
     let turn_end_pos = observed.iter().position(|e| e == wire::WIRE_TURN_END);
     assert!(
-        metrics_pos.is_some(),
-        "context_metrics_update should be emitted, observed: {:?}",
+        measured_metrics_pos.is_some(),
+        "provider-backed context_metrics_update should be emitted, observed: {:?}",
         observed
     );
     assert!(
-        metrics_pos.unwrap() < turn_end_pos.unwrap(),
-        "context_metrics_update must precede turn_end, observed: {:?}",
+        measured_metrics_pos.unwrap() < tool_start_pos.unwrap(),
+        "provider-backed waterline must arrive before tool execution, observed: {:?}",
+        observed
+    );
+    assert!(
+        measured_metrics_pos.unwrap() < turn_end_pos.unwrap(),
+        "provider-backed context_metrics_update must precede turn_end, observed: {:?}",
         observed
     );
 }
@@ -201,12 +236,15 @@ async fn context_metrics_update_payload_contains_valid_values() {
         Some(false),
         "the first metric is emitted before the provider returns usage"
     );
+    let sample_kinds: Vec<Option<bool>> = captured
+        .iter()
+        .map(|payload| payload["providerUsageMeasured"].as_bool())
+        .collect();
     assert_eq!(
-        captured
-            .last()
-            .and_then(|payload| payload["providerUsageMeasured"].as_bool()),
-        Some(true),
-        "the final metric must become displayable only after provider usage arrives"
+        sample_kinds,
+        vec![Some(false), Some(true), Some(false)],
+        "only the event emitted directly from StreamEvent::Usage is provider-measured; \
+         the trailing timing-⑤ snapshot is an estimate"
     );
 }
 
@@ -472,8 +510,8 @@ async fn normalized_usage_starts_preheat_at_half_watermark() {
     );
 }
 
-/// 多轮工具时仅发射两次 context_metrics（首请求前 + 最终 timing ⑤ 后）；
-/// compaction_count 在后一次 payload 中单调不减于前一次。
+/// 本 mock 不返回 provider usage，因此多轮工具仅发射两次 context_metrics
+/// （首请求前 + 最终 timing ⑤ 后）；compaction_count 在后一次 payload 中单调不减。
 #[tokio::test]
 async fn context_metrics_compaction_count_accumulates_across_rounds() {
     let stream_tool1: Vec<Result<StreamEvent, AppError>> = vec![

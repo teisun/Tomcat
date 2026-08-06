@@ -169,7 +169,9 @@ async fn maybe_reduce_before_next_llm_inner(
     log_aggregate_precheck_decision(&decision);
 
     if mutated {
-        agent.emit_context_metrics();
+        // The reduction changed the request payload, so publish the new
+        // best-effort estimate. It is not a fresh provider Usage sample.
+        agent.emit_context_metrics(false);
     }
     Ok(Some(decision))
 }

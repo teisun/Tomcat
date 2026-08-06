@@ -64,7 +64,7 @@ async fn serve_event_pump_streams_agent_events() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_event_pump_caches_only_its_session_context_measurement() {
+async fn serve_event_pump_updates_only_a_provider_primed_session_waterline() {
     let _api_key = install_test_api_key();
     let (_state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
 
@@ -122,8 +122,8 @@ async fn serve_event_pump_caches_only_its_session_context_measurement() {
         .unwrap();
     assert_eq!(
         *slot.last_context_ratio.lock(),
-        None,
-        "a fallback estimate must hide a now-invalid provider measurement"
+        Some(0.7),
+        "a fallback estimate must refresh an already displayed waterline"
     );
 
     let lines = wait_for_lines(&buffer, 2).await;
@@ -137,6 +137,43 @@ async fn serve_event_pump_caches_only_its_session_context_measurement() {
             .count(),
         2,
         "only the matching session's metrics should be forwarded"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_event_pump_does_not_bootstrap_waterline_from_an_estimate() {
+    let _api_key = install_test_api_key();
+    let (_state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    slot.ctx
+        .global_services
+        .event_bus
+        .emit_sync(
+            wire::WIRE_CONTEXT_METRICS_UPDATE,
+            EventContext::new(
+                wire::WIRE_CONTEXT_METRICS_UPDATE,
+                serde_json::json!({
+                    "type": wire::WIRE_CONTEXT_METRICS_UPDATE,
+                    "sessionId": slot.session_id.clone(),
+                    "contextUtilizationRatio": 0.3,
+                    "providerUsageMeasured": false,
+                }),
+            )
+            .with_session_id(slot.session_id.clone()),
+        )
+        .unwrap();
+
+    assert_eq!(
+        *slot.last_context_ratio.lock(),
+        None,
+        "a cold slot must remain unknown until a provider Usage sample arrives"
+    );
+    let lines = wait_for_lines(&buffer, 1).await;
+    assert_eq!(
+        lines[0].get("contextUtilizationRatio"),
+        Some(&serde_json::json!(0.3)),
+        "the estimate is still forwarded for live metrics consumers"
     );
 }
 

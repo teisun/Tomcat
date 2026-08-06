@@ -406,6 +406,11 @@ pub(super) async fn run_chat_stream(
                 if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.update_api_usage(prompt_tokens, completion_tokens);
                 }
+                // A tool-using turn may remain active for many more LLM/tool
+                // rounds. Publish the provider-backed measurement here rather
+                // than waiting for logical TurnEnd, so the composer waterline
+                // becomes visible immediately after the first real usage.
+                agent.emit_context_metrics(true);
             }
             Err(e) => {
                 // Err 分支先发 MessageEnd 再返回，保证 UI 配对。

@@ -500,8 +500,9 @@ Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发�
 
 **context_metrics_update 发射节奏**（单次第三层 `run_reasoning_loop`）：
 
-- 至多 **两次**：(1) **首次**向 LLM 发起 `chat_stream` **之前**（`turn_index == 1`）；(2) **该次 run 正常收尾**——assistant **无** `tool_calls` 时与 timing ⑤ 末尾的 `emit_context_metrics` 同路径；若因 **`max_tool_rounds`** 耗尽退出且最后一轮仍有 `tool_calls`，在该轮 `TurnEnd` **之后**、`return` **之前**再发射一次。
-- **中间**各 tool round（执行完工具、尚未发起下一轮 LLM）**不**发射 `context_metrics_update`，避免 CLI/扩展与「每轮工具后一条」刷屏。
+- **首次**向 LLM 发起 `chat_stream` **之前**（`turn_index == 1`）发一条估算；每一次 provider `Usage` 到达时，`stream_handler` 立即发一条实测 metrics，发生在工具调用被调度之前；assistant **无** `tool_calls` 时 timing ⑤ 再发最终估算，若因 **`max_tool_rounds`** 耗尽退出则在该轮 `TurnEnd` 后再发估算。
+- tool round 之间只有 current-tail guard 实际改写上下文时才追加一条估算 metrics；正常工具执行不会为每一轮额外刷事件。`providerUsageMeasured=true` 仅标记直接来自当前 `Usage` 的事件，所有其余快照均为 `false`。
+- 水位消费者对 cold slot 的 `false` 保持未知；一旦已有 provider 实测基线，`false` 是压缩、提示词变化或预算重算后的刷新，必须更新显示而不能清空。
 
 > 步骤编号（②③⑤）对应 [context-management.md §5.6](context-management.md) 的完整链路图。
 

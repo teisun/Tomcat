@@ -1167,6 +1167,25 @@ function emitContextMetrics(sessionId, ratio = 0.42) {
   });
 }
 
+function emitEstimatedContextMetrics(sessionId, ratio) {
+  const session = touchSession(ensureSession(sessionId));
+  if (typeof session.contextRatio === "number") {
+    session.contextRatio = ratio;
+  }
+  send({
+    compactionCount: 0,
+    compactionTokensFreed: 0,
+    contextUtilizationRatio: ratio,
+    inputTokensUsed: 256,
+    preheatInProgress: false,
+    preheatResultPending: false,
+    providerUsageMeasured: false,
+    sessionId,
+    totalToolResultBytesPersisted: 0,
+    type: "context_metrics_update",
+  });
+}
+
 function finishTurn(sessionId, error = null) {
   const session = touchSession(ensureSession(sessionId));
   clearPendingAssistantMessageId(sessionId);
@@ -1321,6 +1340,16 @@ function handlePrompt(frame) {
   if (!frame.resume) {
     recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
     emitSessionTitleUpdated(sessionId, normalizedUserContent);
+  }
+  if (text.includes("waterline pending second request")) {
+    emitEstimatedContextMetrics(sessionId, 0.53);
+    setTimeout(() => {
+      emitMessageDelta(sessionId, "waterline refreshed");
+      recordHistoryMessage(sessionId, "assistant", "waterline refreshed");
+      emitContextMetrics(sessionId, 0.57);
+      finishTurn(sessionId, null);
+    }, 300);
+    return;
   }
   if (text.includes("answer card showcase")) {
     const requestId = \`ask-answer-\${sessionId}\`;

@@ -150,6 +150,19 @@ describe("webview dual-channel state store", () => {
       totalToolResultBytesPersisted: 0,
       type: "context_metrics_update",
     });
+    expect(store.snapshot().sessionViews.s1.contextRatio).toBe(0.5);
+    store.applyEvent({
+      compactionCount: 1,
+      compactionTokensFreed: 256,
+      contextUtilizationRatio: 0.4,
+      inputTokensUsed: 100,
+      preheatInProgress: false,
+      preheatResultPending: false,
+      providerUsageMeasured: false,
+      totalToolResultBytesPersisted: 1024,
+      type: "context_metrics_update",
+    });
+    expect(store.snapshot().sessionViews.s1.contextRatio).toBe(0.4);
     store.applyEvent({
       args: { path: "src/app.ts" },
       sessionId: "s1",
@@ -246,7 +259,7 @@ describe("webview dual-channel state store", () => {
       planId: "plan-1",
       state: "planning",
     });
-    expect(snapshot.sessionViews.s1.contextRatio).toBe(0.5);
+    expect(snapshot.sessionViews.s1.contextRatio).toBe(0.4);
     expect(snapshot.sessionViews.s1.pendingAttachments[0]).toMatchObject({
       id: "att-1",
       label: "README.md",

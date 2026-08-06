@@ -9,7 +9,7 @@ use std::time::Duration;
 use serial_test::serial;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
@@ -88,6 +88,52 @@ impl LlmProvider for CompactOnlyProvider {
             AppError::Llm("unexpected chat_stream after manual compact".to_string())
         })?;
         Ok(Box::new(tokio_stream::iter(events)))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+/// A scripted stream whose final Usage can be held back so tests can inspect
+/// serve state while a second request is still in flight.
+struct ChannelMockLlm {
+    streams: parking_lot::Mutex<VecDeque<mpsc::UnboundedReceiver<Result<StreamEvent, AppError>>>>,
+}
+
+impl ChannelMockLlm {
+    fn new(streams: Vec<mpsc::UnboundedReceiver<Result<StreamEvent, AppError>>>) -> Self {
+        Self {
+            streams: parking_lot::Mutex::new(streams.into()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ChannelMockLlm {
+    fn provider_name(&self) -> &str {
+        "channel-mock"
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AppError> {
+        Err(AppError::Llm("channel mock chat not used".to_string()))
+    }
+
+    async fn chat_stream(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<
+        Box<dyn futures_util::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        let receiver = self
+            .streams
+            .lock()
+            .pop_front()
+            .ok_or_else(|| AppError::Llm("ChannelMockLlm: no more streams".to_string()))?;
+        Ok(Box::new(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(receiver),
+        ))
     }
 
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
@@ -1055,6 +1101,124 @@ async fn serve_prompt_drives_agent_run() {
     assert!(
         slot.last_context_ratio.lock().is_some(),
         "matching metrics event must populate the slot cache"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_second_prompt_keeps_waterline_while_usage_is_pending() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let (first_tx, first_rx) = mpsc::unbounded_channel();
+    for event in [
+        StreamEvent::ContentDelta {
+            delta: "first".to_string(),
+        },
+        StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        },
+        StreamEvent::Usage {
+            prompt_tokens: 120,
+            completion_tokens: 10,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(130),
+            reasoning_tokens: None,
+            text_tokens: None,
+        },
+    ] {
+        first_tx.send(Ok(event)).expect("queue first stream event");
+    }
+    drop(first_tx);
+
+    let (second_tx, second_rx) = mpsc::unbounded_channel();
+    for event in [
+        StreamEvent::ContentDelta {
+            delta: "second".to_string(),
+        },
+        StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        },
+    ] {
+        second_tx
+            .send(Ok(event))
+            .expect("queue second stream prefix");
+    }
+    let provider: Arc<dyn LlmProvider> = Arc::new(ChannelMockLlm::new(vec![first_rx, second_rx]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    let session_id = slot.session_id.clone();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("waterline-first".to_string()),
+            session_id: Some(session_id.clone()),
+            text: "first".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .expect("first prompt");
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("sessionId").and_then(serde_json::Value::as_str)
+                == Some(session_id.as_str())
+    })
+    .await;
+    assert!(
+        slot.last_context_ratio.lock().is_some(),
+        "the first provider Usage must establish a displayable waterline"
+    );
+    buffer.0.lock().clear();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("waterline-second".to_string()),
+            session_id: Some(session_id.clone()),
+            text: "second".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .expect("second prompt");
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str)
+            == Some(wire::WIRE_CONTEXT_METRICS_UPDATE)
+            && line
+                .get("providerUsageMeasured")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+    })
+    .await;
+    assert!(
+        slot.last_context_ratio.lock().is_some(),
+        "the second request's pre-Usage estimate must refresh, never blank, the waterline"
+    );
+
+    second_tx
+        .send(Ok(StreamEvent::Usage {
+            prompt_tokens: 150,
+            completion_tokens: 12,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(162),
+            reasoning_tokens: None,
+            text_tokens: None,
+        }))
+        .expect("release second Usage");
+    drop(second_tx);
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("sessionId").and_then(serde_json::Value::as_str)
+                == Some(session_id.as_str())
+    })
+    .await;
+    assert!(
+        slot.last_context_ratio.lock().is_some(),
+        "the second provider Usage must continue to refresh the established waterline"
     );
 }
 
@@ -4863,6 +5027,79 @@ async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models(
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_set_model_reestimates_an_already_displayed_waterline() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    *slot.last_context_ratio.lock() = Some(0.5);
+    let current_entry = slot
+        .ctx
+        .session_runtime
+        .session
+        .current_session_entry()
+        .unwrap();
+    let current_model = slot.ctx.effective_model(current_entry.as_ref());
+    let target_model = if current_model == "deepseek-v4-pro" {
+        "gpt-5.4"
+    } else {
+        "deepseek-v4-pro"
+    };
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetModel {
+            id: Some("switch-waterline-model".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: target_model.to_string(),
+        },
+    )
+    .await
+    .expect("switch model");
+
+    let expected_ratio = slot
+        .turn_state
+        .lock()
+        .as_ref()
+        .expect("idle slot")
+        .context_state
+        .usage_ratio();
+    let displayed_ratio = (*slot.last_context_ratio.lock())
+        .expect("model switch must refresh a provider-primed waterline");
+    assert!(
+        (displayed_ratio - expected_ratio).abs() < f64::EPSILON,
+        "model switch must apply the new input budget before publishing its estimate: displayed={displayed_ratio}, expected={expected_ratio}"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-waterline-model-switch".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .expect("get state");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str)
+            == Some("state-after-waterline-model-switch")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str)
+                == Some("state-after-waterline-model-switch")
+        })
+        .expect("get_state response");
+    assert!(
+        response["payload"]["contextUtilizationRatio"]
+            .as_f64()
+            .is_some_and(|ratio| (ratio - expected_ratio).abs() < f64::EPSILON),
+        "get_state must replay the model-budget estimate: {response:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_get_state_reports_interrupted_alongside_busy() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
@@ -6399,9 +6636,19 @@ async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
             line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-compact")
         })
         .expect("get_state response after compact");
+    let displayed_ratio = state_response["payload"]["contextUtilizationRatio"]
+        .as_f64()
+        .expect("compaction must refresh an already displayed waterline with its estimate");
+    let rehydrated_ratio = slot
+        .turn_state
+        .lock()
+        .as_ref()
+        .expect("idle slot")
+        .context_state
+        .usage_ratio();
     assert!(
-        state_response["payload"]["contextUtilizationRatio"].is_null(),
-        "compaction replaces context, so the prior provider measurement must be invalidated"
+        (displayed_ratio - rehydrated_ratio).abs() < f64::EPSILON,
+        "get_state must replay the rehydrated context estimate: displayed={displayed_ratio}, rehydrated={rehydrated_ratio}"
     );
 
     handle_command(

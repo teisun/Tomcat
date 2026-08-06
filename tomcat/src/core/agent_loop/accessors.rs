@@ -376,10 +376,17 @@ impl AgentLoop {
     }
 
     /// 刷新实时 token 指标并发射 `ContextMetricsUpdate` 事件（仅当 `context_state`
-    /// 存在时）。先用 `&mut ctx_state` 把 `live` 字段刷新一次，再用 `&ctx_state`
+    /// 存在时）。
+    ///
+    /// `provider_usage_measured` describes this event's sample, rather than
+    /// whether an older API-usage baseline happens to be present in
+    /// `ContextState`. A provider `Usage` event passes `true`; pre-request and
+    /// post-compaction snapshots pass `false` and remain useful estimates.
+    ///
+    /// 先用 `&mut ctx_state` 把 `live` 字段刷新一次，再用 `&ctx_state`
     /// 拿快照构造事件——分段借用避免 `emit_event` 的 `&self` 与 `ctx_state`
     /// 的可变借用冲突。
-    pub(super) fn emit_context_metrics(&mut self) {
+    pub(super) fn emit_context_metrics(&mut self, provider_usage_measured: bool) {
         if let Some(ref mut ctx_state) = self.context_state {
             let input_tokens_used = ctx_state.estimated_token_count();
             let context_utilization_ratio = ctx_state.usage_ratio();
@@ -394,7 +401,7 @@ impl AgentLoop {
             self.emit_event(AgentEvent::ContextMetricsUpdate {
                 input_tokens_used: ctx_state.live.input_tokens_used,
                 context_utilization_ratio: ctx_state.live.context_utilization_ratio,
-                provider_usage_measured: ctx_state.last_api_usage.is_some(),
+                provider_usage_measured,
                 compaction_count: ctx_state.session_obs.compaction_count,
                 compaction_tokens_freed: ctx_state.session_obs.compaction_tokens_freed,
                 total_tool_result_bytes_persisted: ctx_state

@@ -2902,6 +2902,44 @@ export async function assertWebviewSessionSwitchRestoreFlow(
     "expected session A transcript to be visible before switching away",
   );
 
+  api.__testing.clearObservedEvents();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId: sessionA,
+        text: "waterline pending second request",
+      },
+      messageId: "webview-waterline-second-prompt",
+      type: "prompt",
+    }),
+  );
+  await waitForEvent(api, {
+    sessionId: sessionA,
+    type: "context_metrics_update",
+  });
+  const estimatedWhileBusy = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionA && snapshot.ctxLabel === "Ctx 53%"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.equal(
+    estimatedWhileBusy.composerControlMetrics["context-ratio"]?.width,
+    reservedContextWidth,
+    "an estimate after a measured waterline must update in place without hiding or shifting controls",
+  );
+  await waitForEvent(api, { sessionId: sessionA, type: "agent_end" });
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionA && snapshot.ctxLabel === "Ctx 57%"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+
   const sessionB = await createFreshWebviewSession(
     api,
     "webview-restore-new-session-b",
@@ -2919,7 +2957,7 @@ export async function assertWebviewSessionSwitchRestoreFlow(
     api,
     (snapshot) =>
       snapshot.activeSessionId === sessionA &&
-      snapshot.ctxLabel === "Ctx 55%" &&
+      snapshot.ctxLabel === "Ctx 57%" &&
       snapshot.planCardCount === 1 &&
       snapshot.planStateText === "Plan: planning" &&
       !snapshot.disabledTestIds.includes("build-plan")

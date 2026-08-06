@@ -159,9 +159,10 @@ pub(super) async fn run_reasoning_loop(
             wire_limit_source = wire_limit_source.as_str(),
         );
 
-        // context_metrics_update：单次 run_reasoning_loop 内仅在首次 LLM 请求前发一次（中间 tool round 不发）。
+        // 首次请求前只发一条 fallback 估算。每次 provider Usage 到达时，
+        // stream_handler 会立即另发一条实测 metrics，不必等整个工具链结束。
         if turn_index == 1 {
-            agent.emit_context_metrics();
+            agent.emit_context_metrics(false);
             if let Some(ref ctx_state) = agent.context_state {
                 info!(
                     target: "tomcat_chat_diag",
@@ -434,7 +435,7 @@ pub(super) async fn run_reasoning_loop(
 
         if turn_index >= agent.config.max_tool_rounds {
             agent.reasoning_turn_budget_exhausted = true;
-            agent.emit_context_metrics();
+            agent.emit_context_metrics(false);
             return Ok(final_text);
         }
 
