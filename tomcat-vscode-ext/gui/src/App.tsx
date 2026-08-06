@@ -1232,7 +1232,7 @@ function answerQuestion(
 
 function buildContextLabel(contextRatio?: number | null): string {
   if (typeof contextRatio !== "number" || Number.isNaN(contextRatio)) {
-    return "Ctx —";
+    return "";
   }
   return `Ctx ${Math.round(contextRatio * 100)}%`;
 }

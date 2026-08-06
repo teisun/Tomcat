@@ -45,7 +45,10 @@ async function emitState(frame: HostToWebviewFrame) {
   });
 }
 
-async function emitReadySessionState(sessionId = "s1") {
+async function emitReadySessionState(
+  sessionId = "s1",
+  contextRatio: number | null = null,
+) {
   await emitState({
     channel: "state",
     content: {
@@ -65,7 +68,7 @@ async function emitReadySessionState(sessionId = "s1") {
       sessionViews: {
         [sessionId]: {
           busy: false,
-          contextRatio: null,
+          contextRatio,
           hasMoreHistory: false,
           historyLoading: false,
           model: "gpt-5.4",
@@ -471,6 +474,18 @@ describe("Tomcat webview App", () => {
     expect(screen.getByText("Ready to chat")).toBeTruthy();
     expect(screen.queryByText("No active Tomcat session")).toBeNull();
     expect(screen.queryByTestId("loading-state")).toBeNull();
+  });
+
+  it("hides the context label until the first measured usage arrives", async () => {
+    mount();
+    expect(screen.getByTestId("context-ratio").textContent).toBe("");
+
+    await emitReadySessionState();
+    expect(screen.getByTestId("context-ratio").textContent).toBe("");
+
+    await emitReadySessionState("s1", 0.6);
+
+    expect(screen.getByTestId("context-ratio").textContent).toBe("Ctx 60%");
   });
 
   it("renders transcript timeline, plan UI, attachments, and context ratio", async () => {

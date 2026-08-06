@@ -3777,6 +3777,7 @@ span.tc-attachment-strip__file-chip {
   font-size: 12px;
   margin-left: auto;
   max-width: 72px;
+  min-width: 72px;
   overflow: hidden;
   text-align: right;
   text-overflow: ellipsis;
@@ -3997,6 +3998,7 @@ span.tc-attachment-strip__file-chip {
   .tc-composer__context {
     font-size: 11px;
     max-width: 40px;
+    min-width: 40px;
   }
 }
 

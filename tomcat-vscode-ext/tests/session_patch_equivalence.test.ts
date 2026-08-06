@@ -200,6 +200,7 @@ const BUILDERS: EventBuilder[] = [
     inputTokensUsed: step * 100,
     preheatInProgress: step % 5 === 0,
     preheatResultPending: step % 7 === 0,
+    providerUsageMeasured: true,
     sessionId: SESSION_ID,
     totalToolResultBytesPersisted: step * 64,
     type: "context_metrics_update",

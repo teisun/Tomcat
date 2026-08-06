@@ -984,7 +984,7 @@ async fn serve_prompt_drives_agent_run() {
             text_tokens: None,
         }),
     ];
-    let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![stream]).await;
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
     let session_id = state.registry.active_session_id().unwrap();
 
     handle_command(
@@ -1025,6 +1025,36 @@ async fn serve_prompt_drives_agent_run() {
                     == Some(session_id.as_str())
         }),
         "expected agent_end, got {lines:?}"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-usage".to_string()),
+            session_id: Some(session_id),
+        },
+    )
+    .await
+    .unwrap();
+    let state_lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-usage")
+    })
+    .await;
+    let state_response = state_lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-usage")
+        })
+        .expect("get_state response after usage");
+    assert!(
+        state_response["payload"]["contextUtilizationRatio"]
+            .as_f64()
+            .is_some_and(|ratio| ratio > 0.0),
+        "get_state must replay the nonzero provider measurement: {state_response:?}"
+    );
+    assert!(
+        slot.last_context_ratio.lock().is_some(),
+        "matching metrics event must populate the slot cache"
     );
 }
 
@@ -5256,7 +5286,7 @@ async fn serve_get_state_contains_plan_and_session_todos() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
+async fn serve_get_state_ignores_persisted_context_ratio() {
     use crate::core::plan_runtime::file_store::{
         write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
         PLAN_FILE_SCHEMA_VERSION,
@@ -5267,7 +5297,7 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     let session_mgr = &slot.ctx.session_runtime.session;
     session_mgr
         .update_session(session_mgr.current_session_key(), |entry| {
-            entry.context_utilization_ratio = Some(0.42);
+            entry.context_utilization_ratio = Some(0.9);
         })
         .unwrap();
     slot.ctx
@@ -5331,7 +5361,10 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
         payload["activePlan"]["path"].as_str(),
         Some(plan_path.to_string_lossy().as_ref())
     );
-    assert_eq!(payload["contextUtilizationRatio"].as_f64(), Some(0.42));
+    assert!(
+        payload["contextUtilizationRatio"].is_null(),
+        "a fresh slot must not replay a stale persisted context ratio"
+    );
     assert_eq!(payload["agentMode"].as_str(), Some("plan"));
     assert_eq!(payload["activePlan"]["id"].as_str(), Some("plan-1"));
     assert_eq!(payload["activePlan"]["state"].as_str(), Some("planning"));
@@ -6285,6 +6318,7 @@ async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
     let large_history = format!("historical detail {}", "x".repeat(32_000));
     append_history_message(&slot, "user", &large_history);
     append_history_message(&slot, "assistant", &large_history);
+    *slot.last_context_ratio.lock() = Some(0.42);
 
     handle_command(
         Arc::clone(&state),
@@ -6345,6 +6379,29 @@ async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
     assert!(
         uses_compacted_context,
         "serve must use the compacted context immediately, without a restart"
+    );
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-compact".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .expect("get state after compact");
+    let state_lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-compact")
+    })
+    .await;
+    let state_response = state_lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-compact")
+        })
+        .expect("get_state response after compact");
+    assert!(
+        state_response["payload"]["contextUtilizationRatio"].is_null(),
+        "compaction replaces context, so the prior provider measurement must be invalidated"
     );
 
     handle_command(

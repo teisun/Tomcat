@@ -87,6 +87,27 @@ pub fn register_session_event_pump(
                 if event_name == &wire::WIRE_AGENT_END {
                     slot_for_listener.mark_terminal_emitted();
                 }
+                if event_name == &wire::WIRE_CONTEXT_METRICS_UPDATE {
+                    let provider_usage_measured = ctx
+                        .payload
+                        .get("providerUsageMeasured")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let mut last_context_ratio = slot_for_listener.last_context_ratio.lock();
+                    if provider_usage_measured {
+                        if let Some(ratio) = ctx
+                            .payload
+                            .get("contextUtilizationRatio")
+                            .and_then(serde_json::Value::as_f64)
+                        {
+                            *last_context_ratio = Some(ratio);
+                        }
+                    } else {
+                        // A fallback estimate is deliberately not a UI waterline. It also
+                        // means a compaction or rehydrate invalidated the prior measurement.
+                        *last_context_ratio = None;
+                    }
+                }
                 let _ = writer.send(OutFrame::Event(ctx.payload.clone()));
                 Ok(())
             }),

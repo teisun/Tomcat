@@ -748,9 +748,7 @@ pub(crate) async fn handle_command(
             let agent_mode = slot.ctx.session_runtime.plan_runtime.mode();
             let active_plan = slot.ctx.session_runtime.plan_runtime.active_plan();
             let active_plan_path_raw = active_plan.as_ref().map(|plan| plan.path.clone());
-            let context_utilization_ratio = entry
-                .as_ref()
-                .and_then(|session| session.context_utilization_ratio);
+            let context_utilization_ratio = *slot.last_context_ratio.lock();
             let session_todos = crate::core::tools::plan_tool::shared_todo_ops::items_json(
                 &slot
                     .ctx
@@ -1605,6 +1603,9 @@ fn rehydrate_slot_context_state(slot: &Arc<super::registry::SessionSlot>) -> Res
     let state = turn_state
         .as_mut()
         .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
+    // 历史被直接改写后，旧 usage 已不再描述将要发送的上下文。
+    // 下一次 provider usage 到达前，get_state 应如实返回未测量。
+    *slot.last_context_ratio.lock() = None;
     state.context_state = context_state;
     Ok(())
 }

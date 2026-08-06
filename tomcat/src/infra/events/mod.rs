@@ -535,6 +535,10 @@ pub enum AgentEvent {
         input_tokens_used: usize,
         #[serde(rename = "contextUtilizationRatio")]
         context_utilization_ratio: f64,
+        /// `true` only after the provider has returned usage for this loaded context.
+        /// `false` means the ratio is the pre-request chars/4 fallback estimate.
+        #[serde(rename = "providerUsageMeasured")]
+        provider_usage_measured: bool,
         #[serde(rename = "compactionCount")]
         compaction_count: u32,
         #[serde(rename = "compactionTokensFreed")]

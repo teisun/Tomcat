@@ -129,10 +129,24 @@ describe("webview dual-channel state store", () => {
     store.applyEvent({
       compactionCount: 0,
       compactionTokensFreed: 0,
+      contextUtilizationRatio: 0.1,
+      inputTokensUsed: 128,
+      preheatInProgress: false,
+      preheatResultPending: false,
+      providerUsageMeasured: false,
+      totalToolResultBytesPersisted: 0,
+      type: "context_metrics_update",
+    });
+    expect(store.snapshot().sessionViews.s1.contextRatio).toBeNull();
+
+    store.applyEvent({
+      compactionCount: 0,
+      compactionTokensFreed: 0,
       contextUtilizationRatio: 0.5,
       inputTokensUsed: 128,
       preheatInProgress: false,
       preheatResultPending: false,
+      providerUsageMeasured: true,
       totalToolResultBytesPersisted: 0,
       type: "context_metrics_update",
     });

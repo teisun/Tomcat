@@ -30,6 +30,11 @@ pub struct SessionSlot {
     pub busy: AtomicBool,
     pub terminal_emitted: AtomicBool,
     pub turn_state: Mutex<Option<SessionTurnState>>,
+    /// 最近一次向该会话前端广播的 provider 实测水位。
+    ///
+    /// 它刻意不放进 `turn_state`：运行中的 turn 会临时取走后者，重连时仍须回放
+    /// 已广播的水位。`None` 表示本进程加载该会话后尚未收到 provider 的 usage。
+    pub last_context_ratio: Mutex<Option<f64>>,
     pub run_task: Mutex<Option<JoinHandle<()>>>,
     pub background_task_listener: Mutex<Option<JoinHandle<()>>>,
     pub listener_ids: Mutex<Vec<EventListenerId>>,
@@ -51,6 +56,7 @@ impl SessionSlot {
             busy: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
             turn_state: Mutex::new(Some(turn_state)),
+            last_context_ratio: Mutex::new(None),
             run_task: Mutex::new(None),
             background_task_listener: Mutex::new(None),
             listener_ids: Mutex::new(Vec::new()),

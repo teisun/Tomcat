@@ -1160,6 +1160,7 @@ function emitContextMetrics(sessionId, ratio = 0.42) {
     inputTokensUsed: 256,
     preheatInProgress: false,
     preheatResultPending: false,
+    providerUsageMeasured: true,
     sessionId,
     totalToolResultBytesPersisted: 0,
     type: "context_metrics_update",

@@ -394,6 +394,7 @@ impl AgentLoop {
             self.emit_event(AgentEvent::ContextMetricsUpdate {
                 input_tokens_used: ctx_state.live.input_tokens_used,
                 context_utilization_ratio: ctx_state.live.context_utilization_ratio,
+                provider_usage_measured: ctx_state.last_api_usage.is_some(),
                 compaction_count: ctx_state.session_obs.compaction_count,
                 compaction_tokens_freed: ctx_state.session_obs.compaction_tokens_freed,
                 total_tool_result_bytes_persisted: ctx_state

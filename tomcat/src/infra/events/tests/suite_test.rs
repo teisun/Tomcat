@@ -129,6 +129,7 @@ fn wire_envelope_preserves_agent_event_shape_plus_session_id() {
     let event = AgentEvent::ContextMetricsUpdate {
         input_tokens_used: 100,
         context_utilization_ratio: 0.5,
+        provider_usage_measured: true,
         compaction_count: 2,
         compaction_tokens_freed: 128,
         total_tool_result_bytes_persisted: 256,
@@ -375,6 +376,7 @@ fn context_metrics_update_serializes_preheat_result_pending() {
     let e = AgentEvent::ContextMetricsUpdate {
         input_tokens_used: 100,
         context_utilization_ratio: 0.5,
+        provider_usage_measured: true,
         compaction_count: 0,
         compaction_tokens_freed: 0,
         total_tool_result_bytes_persisted: 0,
@@ -388,4 +390,5 @@ fn context_metrics_update_serializes_preheat_result_pending() {
     );
     assert_eq!(j["preheatInProgress"].as_bool(), Some(false));
     assert_eq!(j["preheatResultPending"].as_bool(), Some(true));
+    assert_eq!(j["providerUsageMeasured"].as_bool(), Some(true));
 }

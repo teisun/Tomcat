@@ -598,6 +598,7 @@ export type WireEvent = ({
   inputTokensUsed: number;
   preheatInProgress: boolean;
   preheatResultPending: boolean;
+  providerUsageMeasured: boolean;
   totalToolResultBytesPersisted: number;
   type: "context_metrics_update";
 } | {

@@ -127,6 +127,15 @@ async fn context_metrics_update_payload_contains_valid_values() {
         Ok(StreamEvent::FinishReason {
             reason: "stop".to_string(),
         }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 2_000,
+            completion_tokens: 20,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(2_020),
+            reasoning_tokens: None,
+            text_tokens: None,
+        }),
     ];
     let llm = Arc::new(MockLlmProvider::new(vec![stream_tool, stream_text]));
     let primitive = Arc::new(MockPrimitiveExecutor);
@@ -187,6 +196,18 @@ async fn context_metrics_update_payload_contains_valid_values() {
     assert!(p["totalToolResultBytesPersisted"].is_u64());
     assert_eq!(p["preheatInProgress"].as_bool(), Some(false));
     assert_eq!(p["preheatResultPending"].as_bool(), Some(false));
+    assert_eq!(
+        p["providerUsageMeasured"].as_bool(),
+        Some(false),
+        "the first metric is emitted before the provider returns usage"
+    );
+    assert_eq!(
+        captured
+            .last()
+            .and_then(|payload| payload["providerUsageMeasured"].as_bool()),
+        Some(true),
+        "the final metric must become displayable only after provider usage arrives"
+    );
 }
 
 #[tokio::test]

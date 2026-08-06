@@ -64,6 +64,84 @@ async fn serve_event_pump_streams_agent_events() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_event_pump_caches_only_its_session_context_measurement() {
+    let _api_key = install_test_api_key();
+    let (_state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    assert_eq!(*slot.last_context_ratio.lock(), None);
+
+    for (session_id, ratio) in [("other-session", 0.9), (slot.session_id.as_str(), 0.6)] {
+        slot.ctx
+            .global_services
+            .event_bus
+            .emit_sync(
+                wire::WIRE_CONTEXT_METRICS_UPDATE,
+                EventContext::new(
+                    wire::WIRE_CONTEXT_METRICS_UPDATE,
+                    serde_json::json!({
+                        "type": wire::WIRE_CONTEXT_METRICS_UPDATE,
+                        "sessionId": session_id,
+                        "contextUtilizationRatio": ratio,
+                        "providerUsageMeasured": true,
+                    }),
+                )
+                .with_session_id(session_id),
+            )
+            .unwrap();
+
+        if session_id == "other-session" {
+            assert_eq!(
+                *slot.last_context_ratio.lock(),
+                None,
+                "a child or other session's metric must not affect this slot"
+            );
+        }
+    }
+
+    assert_eq!(
+        *slot.last_context_ratio.lock(),
+        Some(0.6),
+        "the matching session's last broadcast metric must be replayable"
+    );
+    slot.ctx
+        .global_services
+        .event_bus
+        .emit_sync(
+            wire::WIRE_CONTEXT_METRICS_UPDATE,
+            EventContext::new(
+                wire::WIRE_CONTEXT_METRICS_UPDATE,
+                serde_json::json!({
+                    "type": wire::WIRE_CONTEXT_METRICS_UPDATE,
+                    "sessionId": slot.session_id.clone(),
+                    "contextUtilizationRatio": 0.7,
+                    "providerUsageMeasured": false,
+                }),
+            )
+            .with_session_id(slot.session_id.clone()),
+        )
+        .unwrap();
+    assert_eq!(
+        *slot.last_context_ratio.lock(),
+        None,
+        "a fallback estimate must hide a now-invalid provider measurement"
+    );
+
+    let lines = wait_for_lines(&buffer, 2).await;
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| {
+                line.get("type").and_then(serde_json::Value::as_str)
+                    == Some(wire::WIRE_CONTEXT_METRICS_UPDATE)
+            })
+            .count(),
+        2,
+        "only the matching session's metrics should be forwarded"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_lifecycle_events_not_dropped_for_other_sessions() {
     let _api_key = install_test_api_key();
     let (_state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;

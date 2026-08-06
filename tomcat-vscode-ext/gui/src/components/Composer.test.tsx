@@ -39,6 +39,7 @@ function renderComposer({
   busy = false,
   canInterrupt = true,
   canPrompt = true,
+  contextLabel = "Ctx 42%",
   contextSearchLoading = false,
   contextSearchMatches = [],
   contextSearchQuery = "",
@@ -67,6 +68,7 @@ function renderComposer({
   busy?: boolean;
   canInterrupt?: boolean;
   canPrompt?: boolean;
+  contextLabel?: string;
   contextSearchLoading?: boolean;
   contextSearchMatches?: Array<{
     description?: string | null;
@@ -117,7 +119,7 @@ function renderComposer({
       contextSearchMatches={contextSearchMatches}
       contextSearchQuery={contextSearchQuery}
       contextSearchTruncated={contextSearchTruncated}
-      contextLabel="Ctx 42%"
+      contextLabel={contextLabel}
       modelCapabilities={modelCapabilities}
       modeValue={modeValue}
       modelValue={modelValue}
@@ -196,6 +198,12 @@ describe("Composer", () => {
       type: "reference" as const,
     },
   };
+
+  it("keeps the context slot mounted when no measurement is available", () => {
+    renderComposer({ contextLabel: "" });
+
+    expect(screen.getByTestId("context-ratio").textContent).toBe("");
+  });
 
   it("renders plan status in the notice rail instead of the control bar", () => {
     const { container } = renderComposer();

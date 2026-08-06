@@ -2853,6 +2853,20 @@ export async function assertWebviewSessionSwitchRestoreFlow(
     api,
     "webview-restore-new-session-a",
   );
+  const beforeFirstUsage = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionA && snapshot.ctxLabel === ""
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  const reservedContextWidth =
+    beforeFirstUsage.composerControlMetrics["context-ratio"]?.width;
+  assert.ok(
+    reservedContextWidth && reservedContextWidth > 0,
+    "an unmeasured context label must retain its reserved layout width",
+  );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -2878,6 +2892,11 @@ export async function assertWebviewSessionSwitchRestoreFlow(
   );
   assert.match(initial.html, /data-testid="build-plan"/u);
   assert.ok(!initial.disabledTestIds.includes("build-plan"), "expected Build to be enabled");
+  assert.equal(
+    initial.composerControlMetrics["context-ratio"]?.width,
+    reservedContextWidth,
+    "showing the first measured context ratio must not shift the composer controls",
+  );
   assert.ok(
     initial.messageTexts.some((text) => /transcript ui/i.test(text)),
     "expected session A transcript to be visible before switching away",
