@@ -228,7 +228,7 @@ function PlanFileCardComponent({
             onSelectContextWindow={modelPicker.onSelectContextWindow}
             onSelectModel={modelPicker.onSetBuildModel}
             onSelectThinkingLevel={modelPicker.onSelectThinkingLevel}
-            placement="below"
+            placement="above"
             selectedModelId={selectedModelId}
             testId="plan-card-build-model"
           />

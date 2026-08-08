@@ -648,11 +648,24 @@ span.tc-attachment-strip__file-chip {
   position: relative;
 }
 
+/* Flat chrome for all ModelPicker surfaces (Composer / PlanFileCard /
+ * PlanActionStrip). Do not put this on .tc-topbar__trigger — SessionBar still
+ * needs the bordered dropdown look. */
 .tc-model-picker-trigger {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--vscode-foreground);
   flex: 0 1 auto;
   max-width: 260px;
   min-width: 0;
+  padding: 4px 6px;
   width: auto;
+}
+
+.tc-model-picker-trigger:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.16));
+  border-color: transparent;
 }
 
 .tc-model-picker-trigger:focus-visible,
@@ -4434,60 +4447,6 @@ span.tc-attachment-strip__file-chip {
 
 .tc-plan-build-button:hover:not(:disabled) {
   filter: brightness(1.06);
-}
-
-/* Shared flat dropdown: borderless, transparent, self-drawn chevron. Applies to
- * both the action strip and the chat PlanFileCard (the only two users of this
- * class), so they stay visually consistent. Scoped to a native `select` so the
- * composer's custom `.tc-topbar__trigger` dropdown is never affected. */
-.tc-plan-model-select {
-  align-items: center;
-  display: inline-flex;
-  flex: 0 0 auto;
-  position: relative;
-}
-
-.tc-plan-model-select select {
-  appearance: none;
-  -webkit-appearance: none;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  color: var(--vscode-foreground);
-  cursor: pointer;
-  font: inherit;
-  min-width: 0;
-  padding: 2px 18px 2px 6px;
-  width: auto;
-}
-
-.tc-plan-model-select select:hover:not(:disabled) {
-  background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.16));
-}
-
-.tc-plan-model-select select:focus-visible {
-  outline: 1px solid var(--vscode-focusBorder, rgba(127, 127, 127, 0.6));
-  outline-offset: -1px;
-}
-
-.tc-plan-model-select select:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
-.tc-plan-model-select::after {
-  background-color: currentColor;
-  content: "";
-  height: 9px;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4z' fill='%23000'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4z' fill='%23000'/%3E%3C/svg%3E") center / contain no-repeat;
-  opacity: 0.7;
-  pointer-events: none;
-  position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 9px;
 }
 
 .tc-plan-preview__content {

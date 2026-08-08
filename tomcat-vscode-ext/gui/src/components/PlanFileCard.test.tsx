@@ -236,7 +236,10 @@ describe("PlanFileCard", () => {
 
     const picker = screen.getByTestId("plan-card-build-model") as HTMLButtonElement;
     expect(picker.textContent).toContain("gpt-5.6");
+    expect(picker.classList.contains("tc-model-picker-trigger")).toBe(true);
     fireEvent.click(picker);
+    expect(document.querySelector(".tc-model-picker-dropdown--above")).toBeTruthy();
+    expect(picker.querySelector(".codicon-chevron-up")).toBeTruthy();
     fireEvent.click(screen.getAllByTestId("model-option")[1]);
     expect(onSetBuildModel).toHaveBeenCalledWith("claude-opus");
 

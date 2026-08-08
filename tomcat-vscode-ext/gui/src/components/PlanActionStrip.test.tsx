@@ -49,7 +49,11 @@ describe("PlanActionStrip", () => {
 
   it("routes model selection to onSetBuildModel", () => {
     const props = renderStrip();
-    fireEvent.click(screen.getByTestId("plan-build-model-select"));
+    const picker = screen.getByTestId("plan-build-model-select");
+    expect(picker.classList.contains("tc-model-picker-trigger")).toBe(true);
+    fireEvent.click(picker);
+    expect(document.querySelector(".tc-model-picker-dropdown--below")).toBeTruthy();
+    expect(picker.querySelector(".codicon-chevron-down")).toBeTruthy();
     fireEvent.click(screen.getAllByTestId("model-option")[1]);
     expect(props.onSetBuildModel).toHaveBeenCalledWith("claude-opus");
   });

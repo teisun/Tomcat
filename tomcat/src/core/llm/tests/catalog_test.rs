@@ -47,7 +47,7 @@ fn resolve_known_model() {
 fn builtin_models_toml_parses() {
     let parsed =
         toml::from_str::<UserModelsFile>(builtin_seed_toml_text()).expect("parse embedded seed");
-    assert_eq!(parsed.models.len(), 21);
+    assert_eq!(parsed.models.len(), 18);
 }
 
 #[test]
@@ -79,9 +79,6 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
             "claude-opus-5",
             "claude-sonnet-5",
             "claude-sonnet-4-6",
-            "claude-sonnet-4-5",
-            "claude-opus-4-5",
-            "claude-opus-4-1",
         ]
     );
 
@@ -98,15 +95,6 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
         assert_eq!(entry.context_window, Some(1_000_000), "{id}");
         assert_eq!(entry.context_window_options, vec![400_000, 1_000_000], "{id}");
         assert_eq!(entry.max_output_tokens, Some(128_000), "{id}");
-    }
-    for (id, max_output_tokens) in [
-        ("claude-sonnet-4-5", 64_000),
-        ("claude-opus-4-5", 64_000),
-        ("claude-opus-4-1", 32_000),
-    ] {
-        let entry = entries.iter().find(|entry| entry.id == id).unwrap();
-        assert_eq!(entry.context_window, Some(200_000), "{id}");
-        assert_eq!(entry.max_output_tokens, Some(max_output_tokens), "{id}");
     }
 
     let utility = entries

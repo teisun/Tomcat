@@ -136,7 +136,6 @@ glm-5.2                             1M              128K          PaaS 标准接
 gpt-5.2                             400K            128K          400K / 128K
 kimi-k2.7-code                      256K            按剩余窗      256K；输出是剩余 context，
                                                                     不是固定模型上限
-claude-sonnet-4-5 / opus-4-5 / 4-1  200K            64K / 64K / 32K  200K 各自固定上限
 ```
 
 `gpt` 真实窗约 1.05M，本期统一取整到 1M（50K 差异是噪声，图各模型整齐）。
@@ -367,7 +366,8 @@ top  = clamp(centeredTop, 8, innerHeight - configHeight - 8)
 
 ### 7.6 触发器与底栏布局
 
-- 触发器 `className` 复用 `tc-topbar__trigger tc-topbar__trigger--compact tc-model-picker-trigger`（`ModelPicker.tsx:238-242`），继承 composer 的脱边框规则；`tc-model-picker-trigger` 只留布局属性。
+- 触发器 `className` 复用 `tc-topbar__trigger tc-topbar__trigger--compact tc-model-picker-trigger`。**扁平（无边框、透明底）是 `.tc-model-picker-trigger` 自身契约**，三表面（Composer / PlanFileCard / PlanActionStrip）共用；不要依赖 Composer 祖先选择器，也不要把扁平规则写进基类 `.tc-topbar__trigger`（SessionBar 会话下拉仍要有边框）。Composer 底栏里 Mode 下拉继续靠 `.tc-composer__bar .tc-field--dropdown .tc-topbar__trigger` 覆盖保持扁平。
+- **弹出方向（`placement`）按表面固定，不做视口自动 flip**：Composer 默认 `above`；PlanFileCard 显式 `above`（与 Composer 同，避免盖住下方 transcript）；PlanActionStrip（计划预览顶栏）显式 `below`。对应 class：`tc-model-picker-dropdown--above` / `--below`；chevron 随方向（up / down）。
 - `.tc-field--model` 改 `flex: 0 1 auto` + `max-width`，按内容宽但封顶，长名字 ellipsis，不再吃掉全部剩余空间。
 - `.tc-model-picker-dropdown` 固定 `width: min(320px, calc(100vw - 24px))`，删掉 `max-content`，宽度与内容解耦，搜索过滤不再缩。
 - 搜索框直接 `aria-label="Search models"`，删掉未定义的 `sr-only` span。
