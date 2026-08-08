@@ -63,7 +63,11 @@ pub struct ModelEntry {
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
+    pub context_window_options: Vec<u32>,
+    #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub thinking_format: Option<String>,
     #[serde(default)]
@@ -98,6 +102,45 @@ pub(crate) fn validate_model_limit_values(
         }
     }
     Ok(())
+}
+
+/// Normalize and validate the selectable context tiers for one model.
+///
+/// The catalog and the model upsert path both call this helper so a model
+/// cannot be accepted with one set of tier rules and later rejected with
+/// another. An empty list deliberately means "there is no selectable tier".
+pub(crate) fn validate_context_window_options(
+    model_id: &str,
+    context_window: Option<u32>,
+    options: &[u32],
+    max_output_tokens: Option<u32>,
+) -> Result<Vec<u32>, AppError> {
+    let mut normalized = options.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+
+    for option in &normalized {
+        validate_model_limit_values(
+            model_id,
+            *option as usize,
+            max_output_tokens.map(|value| value as usize),
+        )?;
+    }
+
+    if !normalized.is_empty() {
+        let Some(default_window) = context_window else {
+            return Err(AppError::Config(format!(
+                "模型 `{model_id}` 设置了 context_window_options，但没有默认 context_window。"
+            )));
+        };
+        if !normalized.contains(&default_window) {
+            return Err(AppError::Config(format!(
+                "模型 `{model_id}` 的 context_window ({default_window}) 必须是 context_window_options 的一项。"
+            )));
+        }
+    }
+
+    Ok(normalized)
 }
 
 #[derive(Debug, Clone)]
@@ -136,7 +179,7 @@ impl ModelCatalog {
             for raw in file.models {
                 let model_id = raw.id.clone();
                 user_ids.insert(model_id.clone());
-                let merged = merge_user_model(raw, by_id.remove(&model_id), &config.context)?;
+                let merged = merge_user_model(raw, by_id.remove(&model_id), &config.context, true)?;
                 if !ordered_ids.iter().any(|existing| existing == &merged.id) {
                     ordered_ids.push(merged.id.clone());
                 }
@@ -302,7 +345,13 @@ pub(crate) struct UserModelEntry {
     pub(crate) context_window: Option<u32>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) context_window_options: Option<Vec<u32>>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_output_tokens: Option<u32>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) thinking_format: Option<String>,
@@ -367,7 +416,7 @@ pub(crate) fn builtin_seed_entries_result(
         .map_err(|e| AppError::Config(format!("解析内嵌 builtin_models.toml 失败: {e}")))?;
     file.models
         .into_iter()
-        .map(|raw| merge_user_model(raw, None, context))
+        .map(|raw| merge_user_model(raw, None, context, false))
         .collect()
 }
 
@@ -375,6 +424,7 @@ fn merge_user_model(
     raw: UserModelEntry,
     existing: Option<ModelEntry>,
     context: &ContextConfig,
+    degrade_invalid_context_options: bool,
 ) -> Result<ModelEntry, AppError> {
     let mut merged = existing.unwrap_or_else(|| ModelEntry {
         id: raw.id.clone(),
@@ -385,7 +435,9 @@ fn merge_user_model(
         base_url: None,
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         thinking_format: None,
         supported_reasoning_levels: Vec::new(),
     });
@@ -420,11 +472,23 @@ fn merge_user_model(
     if let Some(capabilities) = raw.capabilities {
         apply_partial_capabilities(&mut merged.capabilities, capabilities);
     }
+    let context_window_overridden = raw.context_window.is_some();
+    let context_window_options = raw.context_window_options;
     if let Some(context_window) = raw.context_window {
         merged.context_window = Some(context_window);
     }
+    if let Some(options) = context_window_options {
+        merged.context_window_options = options;
+    } else if context_window_overridden {
+        // An explicit single-value override means this user model has one
+        // supported tier; never inherit builtin options into a contradictory state.
+        merged.context_window_options.clear();
+    }
     if let Some(max_output_tokens) = raw.max_output_tokens {
         merged.max_output_tokens = Some(max_output_tokens);
+    }
+    if let Some(description) = raw.description {
+        merged.description = Some(description);
     }
     if let Some(thinking_format) = raw.thinking_format {
         merged.thinking_format = Some(thinking_format);
@@ -445,6 +509,24 @@ fn merge_user_model(
             merged.thinking_format.as_deref(),
         );
     }
+    match validate_context_window_options(
+        &merged.id,
+        merged.context_window,
+        &merged.context_window_options,
+        merged.max_output_tokens,
+    ) {
+        Ok(options) => merged.context_window_options = options,
+        Err(error) if degrade_invalid_context_options => {
+            tracing::warn!(
+                model_id = %merged.id,
+                error = %error,
+                "discarding invalid user context_window_options; model remains a single-tier model"
+            );
+            merged.context_window_options.clear();
+        }
+        Err(error) => return Err(error),
+    }
+
     validate_model_limit_values(
         &merged.id,
         merged

@@ -10,7 +10,10 @@ function renderStrip(overrides: Partial<Parameters<typeof PlanActionStrip>[0]> =
     canBuild: true,
     fileState: "planning" as const,
     onBuild: vi.fn(),
+    onSelectContextWindow: vi.fn(),
+    onSelectThinkingLevel: vi.fn(),
     onSetBuildModel: vi.fn(),
+    sessionModel: "gpt-5.6",
     ...overrides,
   };
   render(<PlanActionStrip {...props} />);
@@ -46,9 +49,8 @@ describe("PlanActionStrip", () => {
 
   it("routes model selection to onSetBuildModel", () => {
     const props = renderStrip();
-    fireEvent.change(screen.getByTestId("plan-build-model-select"), {
-      target: { value: "claude-opus" },
-    });
+    fireEvent.click(screen.getByTestId("plan-build-model-select"));
+    fireEvent.click(screen.getAllByTestId("model-option")[1]);
     expect(props.onSetBuildModel).toHaveBeenCalledWith("claude-opus");
   });
 

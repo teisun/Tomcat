@@ -1,4 +1,11 @@
+# Verified 2026-08-07. `context_window` is the default selection and
+# `context_window_options` declares selectable windows. A user's choice belongs
+# in model-thinking.json, never in this capability catalog. We expose a 400K
+# compact tier plus the true 1M maximum whenever both exist; the default is the
+# largest window that does not trigger a provider long-context price multiplier.
+
 [[models]]
+# Source (checked 2026-08-07): https://developers.openai.com/api/docs/models/gpt-5.2
 id = "gpt-5.2"
 model_name = "gpt-5.2"
 api = "openai-responses"
@@ -8,9 +15,13 @@ base_url = "https://api.openai.com"
 thinking_format = "openai"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
+max_output_tokens = 128000
+description = "OpenAI GPT-5.2：400K context、128K maximum output 的通用推理模型。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://developers.openai.com/api/docs/pricing
+# GPT-5.4+ charges long-context rates above 272K input, so 400K stays default.
 id = "gpt-5.4"
 model_name = "gpt-5.4"
 api = "openai-responses"
@@ -20,9 +31,13 @@ base_url = "https://api.openai.com"
 thinking_format = "openai"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+description = "OpenAI GPT-5.4：可选 400K 或 1M context；1M 属于长上下文计费，默认 400K。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://developers.openai.com/api/docs/pricing
 id = "gpt-5.5"
 model_name = "gpt-5.5"
 api = "openai-responses"
@@ -32,9 +47,13 @@ base_url = "https://api.openai.com"
 thinking_format = "openai"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+description = "OpenAI GPT-5.5：可选 400K 或 1M context；1M 属于长上下文计费，默认 400K。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://developers.openai.com/api/docs/models/gpt-5.6-sol
 id = "gpt-5.6"
 model_name = "gpt-5.6"
 api = "openai-responses"
@@ -44,9 +63,14 @@ base_url = "https://api.openai.com"
 thinking_format = "openai"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+description = "OpenAI GPT-5.6：可选 400K 或 1M context；官方最大值约 1.05M，本目录统一为 1M；默认 400K 以避开长上下文计费。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://api-docs.deepseek.com/quick_start/pricing
+# Official DeepSeek V4 uses 1M context at one per-token price.
 id = "deepseek-v4-pro"
 model_name = "deepseek-v4-pro"
 api = "openai"
@@ -55,10 +79,14 @@ api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
 supported_reasoning_levels = ["high", "max"]
-context_window = 400000
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 384000
+description = "DeepSeek V4 Pro：1M context 和最高 384K output，按统一每 token 费率计价。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://api-docs.deepseek.com/quick_start/pricing
 id = "deepseek-v4-flash"
 model_name = "deepseek-v4-flash"
 api = "openai"
@@ -67,10 +95,14 @@ api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
 supported_reasoning_levels = ["high", "max"]
-context_window = 400000
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 384000
+description = "DeepSeek V4 Flash：1M context 和最高 384K output，按统一每 token 费率计价。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Same upstream model and limits as deepseek-v4-flash; this is Tomcat's utility role.
 id = "utility-flash"
 model_name = "deepseek-v4-flash"
 api = "openai"
@@ -79,10 +111,15 @@ api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
 supported_reasoning_levels = ["high", "max"]
-context_window = 400000
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 384000
+description = "DeepSeek V4 Flash 的 Tomcat utility 角色：1M context、最高 384K output。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://platform.xiaomimimo.com/static/docs/quick-start/model.md
+# MiMo removed length-based tiered billing: https://platform.xiaomimimo.com/docs/en-US/updates/feature
 id = "mimo-v2.5-pro"
 model_name = "mimo-v2.5-pro"
 api = "openai"
@@ -90,11 +127,21 @@ provider = "mimo"
 api_key_env = "MIMO_API_KEY"
 base_url = "https://token-plan-cn.xiaomimimo.com"
 thinking_format = "doubao"
-supported_reasoning_levels = []
+# Source: https://platform.xiaomimimo.com/docs/en-US/api/chat/openai-api
+# MiMo exposes thinking on/off rather than multiple effort values; High is its
+# fixed enabled mode and Tomcat's shared Off control disables it.
+supported_reasoning_levels = ["high"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+description = "Xiaomi MiMo V2.5 Pro：1M context、128K maximum output；上下文长度不再改变单价。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2
+# The standard PaaS API identifies this 1M model as `glm-5.2`. The separate
+# Coding Plan Anthropic relay documents a `[1m]` suffix; Tomcat uses PaaS, so
+# context-tier selection must not alter this model name.
 id = "glm-5.2"
 model_name = "glm-5.2"
 api = "openai"
@@ -102,11 +149,18 @@ provider = "zhipu"
 api_key_env = "ZHIPU_API_KEY"
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 thinking_format = "zai"
-supported_reasoning_levels = ["high", "max"]
-context_window = 400000
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+description = "Zhipu GLM-5.2：1M context、128K maximum output；支持可调 Effort，默认 1M。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://platform.moonshot.cn/docs/guide/start-using-kimi-api
+# Moonshot documents this model's output ceiling as the remaining context after
+# the prompt, not as a fixed model-wide cap. Omit max_output_tokens so Tomcat
+# uses its configured conservative reserve instead of treating 256K as reserve.
 id = "kimi-k2.7-code"
 model_name = "kimi-k2.7-code"
 api = "openai"
@@ -114,11 +168,15 @@ provider = "moonshot"
 api_key_env = "MOONSHOT_API_KEY"
 base_url = "https://api.moonshot.cn"
 thinking_format = "doubao"
-supported_reasoning_levels = []
-context_window = 400000
+# Source: https://platform.moonshot.cn/docs/guide/start-using-kimi-api
+# K2.7 Code supports thinking mode but does not document tunable effort tiers.
+supported_reasoning_levels = ["high"]
+context_window = 256000
+description = "Kimi K2.7 Code：256K context 的 coding 模型，支持图片、视频输入和思考模式。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://platform.moonshot.cn/docs/guide/faq
 id = "kimi-k3"
 model_name = "kimi-k3"
 api = "openai"
@@ -128,9 +186,14 @@ base_url = "https://api.moonshot.cn"
 thinking_format = "openai"
 supported_reasoning_levels = ["low", "high", "max"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 131072
+description = "Kimi K3：1M context、默认 128K output 的长程推理与软件工程模型。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
+# Claude 4.6+ 1M context uses standard per-token pricing.
 id = "claude-opus-4-8"
 model_name = "claude-opus-4-8"
 api = "anthropic-messages"
@@ -140,10 +203,13 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
 max_output_tokens = 128000
+description = "Claude Opus 4.8：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-opus-4-7"
 model_name = "claude-opus-4-7"
 api = "anthropic-messages"
@@ -153,10 +219,13 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
 max_output_tokens = 128000
+description = "Claude Opus 4.7：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-opus-4-6"
 model_name = "claude-opus-4-6"
 api = "anthropic-messages"
@@ -166,10 +235,13 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "max"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
 max_output_tokens = 128000
+description = "Claude Opus 4.6：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-fable-5"
 model_name = "claude-fable-5"
 api = "anthropic-messages"
@@ -179,10 +251,13 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
 max_output_tokens = 128000
+description = "Claude Fable 5：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-opus-5"
 model_name = "claude-opus-5"
 api = "anthropic-messages"
@@ -192,10 +267,13 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
 max_output_tokens = 128000
+description = "Claude Opus 5：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-sonnet-5"
 model_name = "claude-sonnet-5"
 api = "anthropic-messages"
@@ -205,10 +283,13 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
 max_output_tokens = 128000
+description = "Claude Sonnet 5：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-sonnet-4-6"
 model_name = "claude-sonnet-4-6"
 api = "anthropic-messages"
@@ -218,10 +299,13 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
 max_output_tokens = 128000
+description = "Claude Sonnet 4.6：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-sonnet-4-5"
 model_name = "claude-sonnet-4-5"
 api = "anthropic-messages"
@@ -232,6 +316,7 @@ thinking_format = "anthropic"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 200000
 max_output_tokens = 64000
+description = "Claude Sonnet 4.5：200K context、64K maximum output 的单档模型。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -245,6 +330,7 @@ thinking_format = "anthropic"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 200000
 max_output_tokens = 64000
+description = "Claude Opus 4.5：200K context、64K maximum output 的单档模型。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -258,4 +344,5 @@ thinking_format = "anthropic"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 200000
 max_output_tokens = 32000
+description = "Claude Opus 4.1：200K context、32K maximum output 的单档模型。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }

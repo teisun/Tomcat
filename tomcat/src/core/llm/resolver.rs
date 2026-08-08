@@ -101,9 +101,23 @@ pub struct EffectiveModelLimits {
 
 impl EffectiveModelLimits {
     pub fn resolve(entry: &ModelEntry, config: &ContextConfig) -> Result<Self, AppError> {
-        let (context_window, context_source) = match entry.context_window {
+        Self::resolve_with_context_window(entry, config, None)
+    }
+
+    pub fn resolve_with_context_window(
+        entry: &ModelEntry,
+        config: &ContextConfig,
+        selected_context_window: Option<u32>,
+    ) -> Result<Self, AppError> {
+        let selected_context_window = selected_context_window.filter(|value| {
+            !entry.context_window_options.is_empty() && entry.context_window_options.contains(value)
+        });
+        let (context_window, context_source) = match selected_context_window {
             Some(value) => (value as usize, LimitSource::ModelCatalog),
-            None => (config.context_window_fallback, LimitSource::LegacyFallback),
+            None => match entry.context_window {
+                Some(value) => (value as usize, LimitSource::ModelCatalog),
+                None => (config.context_window_fallback, LimitSource::LegacyFallback),
+            },
         };
         let (model_max_output_tokens, output_source) = match entry.max_output_tokens {
             Some(value) => (Some(value as usize), LimitSource::ModelCatalog),
@@ -403,15 +417,21 @@ pub struct DefaultLlmResolver {
     catalog: SharedModelCatalog,
     auth: AuthStore,
     provider_cache: Mutex<HashMap<ProviderCacheKey, Arc<dyn LlmProvider>>>,
+    model_prefs: Arc<crate::core::session::ModelPrefsStore>,
 }
 
 impl DefaultLlmResolver {
-    pub fn new(config: AppConfig, catalog: impl Into<SharedModelCatalog>) -> Self {
+    pub fn new(
+        config: AppConfig,
+        catalog: impl Into<SharedModelCatalog>,
+        model_prefs: Arc<crate::core::session::ModelPrefsStore>,
+    ) -> Self {
         Self {
             config,
             catalog: catalog.into(),
             auth: AuthStore,
             provider_cache: Mutex::new(HashMap::new()),
+            model_prefs,
         }
     }
 
@@ -585,7 +605,18 @@ impl DefaultLlmResolver {
         let credential = self.credential_for(&entry, compatible_fallback_env.as_deref())?;
         let provider_impl = self.resolve_cached_provider(&entry, &credential)?;
         let base_url = self.effective_base_url(&entry);
-        let limits = EffectiveModelLimits::resolve(&entry, &self.config.context)?;
+        let selected_context_window = if entry.context_window_options.is_empty() {
+            None
+        } else {
+            self.model_prefs
+                .context_window_for(&entry.id)
+                .filter(|value| entry.context_window_options.contains(value))
+        };
+        let limits = EffectiveModelLimits::resolve_with_context_window(
+            &entry,
+            &self.config.context,
+            selected_context_window,
+        )?;
         Ok(ResolvedCall {
             provider_impl,
             model: entry.request_model_name().to_string(),

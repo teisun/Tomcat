@@ -1285,8 +1285,8 @@ async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach(
     ]]));
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
-    let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
-    let state = ServeState::new(cfg.clone(), writer, shared_model_thinking).expect("serve state");
+    let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
+    let state = ServeState::new(cfg.clone(), writer, shared_model_prefs).expect("serve state");
     let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let sessions_dir = crate::resolve_sessions_dir(&cfg).expect("sessions dir");
     std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
@@ -1301,7 +1301,7 @@ async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach(
     let overrides = crate::api::chat::ChatContextOverrides::default()
         .suppress_cli_output()
         .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
-        .with_shared_model_thinking(Arc::clone(&state.shared_model_thinking))
+        .with_shared_model_prefs(Arc::clone(&state.shared_model_prefs))
         .with_session_cwd_override(cwd_path.clone());
     let mut ctx = crate::api::chat::ChatContext::from_config_with_mode_and_overrides(
         cfg.clone(),
@@ -4705,7 +4705,9 @@ async fn upsert_model_response_includes_non_fatal_warnings() {
                     ..Capabilities::default()
                 },
                 context_window: Some(200_000),
+                context_window_options: None,
                 max_output_tokens: None,
+                description: None,
                 supported_reasoning_levels: None,
                 thinking_format: Some("anthropic".to_string()),
             },
@@ -4763,7 +4765,9 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
                     ..Capabilities::default()
                 },
                 context_window: Some(200_000),
+                context_window_options: None,
                 max_output_tokens: Some(128_000),
+                description: None,
                 supported_reasoning_levels: None,
                 thinking_format: Some("anthropic".to_string()),
             },
@@ -5662,6 +5666,255 @@ async fn serve_set_thinking_level_invalid_value_returns_error_without_breaking_l
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_set_context_window_persists_and_lists_selected_tier() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("tiered-upsert".to_string()),
+            model: ModelEntryInput {
+                id: "tiered-model".to_string(),
+                model_name: Some("gpt-5.4".to_string()),
+                api: "openai-responses".to_string(),
+                provider: "openai".to_string(),
+                api_key_env: Some(TEST_API_KEY_ENV.to_string()),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                capabilities: Capabilities::default(),
+                context_window: Some(400_000),
+                context_window_options: Some(vec![1_000_000, 400_000]),
+                max_output_tokens: None,
+                description: Some("测试 Context 档位".to_string()),
+                supported_reasoning_levels: None,
+                thinking_format: Some("openai".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("tiered-upsert")
+    })
+    .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetContextWindow {
+            id: Some("set-context-tier".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "tiered-model".to_string(),
+            context_window: 1_000_000,
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("list-context-tier".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-context-tier")
+    })
+    .await;
+    let set_response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("set-context-tier"))
+        .expect("set context response");
+    assert_eq!(set_response["success"].as_bool(), Some(true));
+    assert_eq!(
+        set_response["payload"]["contextWindow"].as_u64(),
+        Some(1_000_000)
+    );
+
+    let listed = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-context-tier")
+        })
+        .expect("list models response");
+    let model = listed["payload"]["models"]
+        .as_array()
+        .and_then(|models| models.iter().find(|model| model["id"] == "tiered-model"))
+        .expect("tiered model in list");
+    assert_eq!(
+        model["contextWindowOptions"],
+        serde_json::json!([400000, 1000000])
+    );
+    assert_eq!(model["selectedContextWindow"].as_u64(), Some(1_000_000));
+    assert_eq!(model["description"].as_str(), Some("测试 Context 档位"));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetContextWindow {
+            id: Some("bad-context-tier".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "tiered-model".to_string(),
+            context_window: 123_456,
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("bad-context-tier")
+    })
+    .await;
+    let error = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("bad-context-tier"))
+        .expect("invalid context response");
+    assert_eq!(error["success"].as_bool(), Some(false));
+    assert!(error["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("invalid_context_window"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_thinking_level_for_relay_persists_under_catalog_id_and_lists_selection() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let relay_id = "relay/gpt-sol";
+    let wire_model_name = "gpt-sol";
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("relay-effort-upsert".to_string()),
+            model: ModelEntryInput {
+                id: relay_id.to_string(),
+                model_name: Some(wire_model_name.to_string()),
+                api: "openai-responses".to_string(),
+                provider: "relay".to_string(),
+                api_key_env: Some(TEST_API_KEY_ENV.to_string()),
+                base_url: Some("https://relay.example.test/v1".to_string()),
+                capabilities: Capabilities::default(),
+                context_window: Some(400_000),
+                context_window_options: None,
+                max_output_tokens: None,
+                description: None,
+                supported_reasoning_levels: Some(vec!["high".to_string(), "xhigh".to_string()]),
+                thinking_format: Some("openai".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("relay-effort-upsert")
+    })
+    .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-relay-effort".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: relay_id.to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("list-relay-effort".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-relay-effort")
+    })
+    .await;
+    let set_response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("set-relay-effort"))
+        .expect("set relay effort response");
+    assert_eq!(set_response["success"].as_bool(), Some(true));
+
+    let listed = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("list-relay-effort"))
+        .expect("list relay models response");
+    let relay = listed["payload"]["models"]
+        .as_array()
+        .and_then(|models| models.iter().find(|model| model["id"] == relay_id))
+        .expect("relay model in list");
+    assert_eq!(relay["modelName"].as_str(), Some(wire_model_name));
+    assert_eq!(relay["selectedReasoningLevel"].as_str(), Some("xhigh"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_context_window_applies_resolved_limits_to_current_session() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.llm.default_model = "tiered-model".to_string();
+    cfg.context.compaction_model = "tiered-model".to_string();
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "tiered-model"
+model_name = "tiered-model"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "{env}"
+base_url = "http://127.0.0.1:1"
+context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 64000
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+        ),
+    )
+    .expect("write tiered model");
+
+    let (state, _buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    assert_eq!(
+        slot.turn_state
+            .lock()
+            .as_ref()
+            .expect("session context")
+            .context_state
+            .context_budget_tokens,
+        336_000,
+        "the baseline model tier should initialize the session budget"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetContextWindow {
+            id: Some("apply-context-tier".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "tiered-model".to_string(),
+            context_window: 1_000_000,
+        },
+    )
+    .await
+    .expect("set context tier");
+
+    let turn_state = slot.turn_state.lock();
+    let session_context = turn_state.as_ref().expect("session context");
+    assert_eq!(session_context.context_state.context_budget_tokens, 936_000);
+    assert_eq!(session_context.context_budget_chars, 3_744_000);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_set_thinking_level_persists_across_restart() {
     let _api_key = install_test_api_key();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -5712,17 +5965,17 @@ async fn serve_set_thinking_level_persists_across_restart() {
 }
 
 #[test]
-fn build_shared_model_thinking_uses_global_store_path() {
+fn build_shared_model_prefs_uses_global_store_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
     cfg.llm.thinking.level = "medium".to_string();
     ensure_work_dir_structure(&cfg).expect("work dir");
 
-    let store = build_shared_model_thinking(&cfg).expect("shared model thinking");
+    let store = build_shared_model_prefs(&cfg).expect("shared model preferences");
     let global_path = crate::resolve_model_thinking_path(&cfg).expect("global model thinking path");
 
     assert_eq!(
-        store.get("gpt-5.4"),
+        store.reasoning_for("gpt-5.4"),
         crate::core::llm::ThinkingLevel::Medium
     );
     assert!(
@@ -5879,7 +6132,9 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
                     web_search: false,
                 },
                 context_window: Some(400_000),
+                context_window_options: None,
                 max_output_tokens: None,
+                description: None,
                 supported_reasoning_levels: Some(vec![
                     "low".to_string(),
                     "medium".to_string(),

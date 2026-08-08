@@ -23,7 +23,9 @@ fn entry_with_api(api: &str) -> ModelEntry {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),

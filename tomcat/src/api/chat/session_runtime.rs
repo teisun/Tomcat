@@ -15,14 +15,14 @@ use crate::core::tools::contract::registry::ToolRegistry;
 use crate::core::tools::primitive::{BashTaskId, BashTaskRegistry, PrimitiveExecutor};
 use crate::core::tools::web_fetch::WebFetchRuntime;
 use crate::core::tools::web_search::WebSearchRuntime;
-use crate::core::{CheckpointStore, LlmResolver, ModelThinkingStore, SessionManager};
+use crate::core::{CheckpointStore, LlmResolver, ModelPrefsStore, SessionManager};
 use crate::ext::{FunctionRegistry, HostApiDispatcher, PluginFunctionInvoker, PluginManager};
 use crate::infra::{AuditRecorder, EventBus};
 
 pub struct GlobalServices {
     pub model_catalog: SharedModelCatalog,
     pub llm_resolver: Arc<dyn LlmResolver>,
-    pub model_thinking: Arc<ModelThinkingStore>,
+    pub model_prefs: Arc<ModelPrefsStore>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub tool_registry: Arc<dyn ToolRegistry>,
     pub function_registry: Arc<FunctionRegistry>,

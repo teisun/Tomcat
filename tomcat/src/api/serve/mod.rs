@@ -41,7 +41,7 @@ use crate::core::tools::primitive::BashTaskStatus;
 use crate::infra::{wire, ScopedEventEmitter};
 use crate::{
     ensure_work_dir_structure, resolve_model_thinking_path, resolve_sessions_dir,
-    session_key_for_agent, AppConfig, AppError, ModelThinkingStore, SessionManager, SessionMode,
+    session_key_for_agent, AppConfig, AppError, ModelPrefsStore, SessionManager, SessionMode,
     ThinkingLevel,
 };
 
@@ -66,7 +66,7 @@ pub(crate) struct ServeState {
     pub writer: WriterHandle,
     pub ask_question: ServeAskQuestionBridge,
     pub shared_model_catalog: crate::core::llm::SharedModelCatalog,
-    pub shared_model_thinking: Arc<ModelThinkingStore>,
+    pub shared_model_prefs: Arc<ModelPrefsStore>,
     pub shared_agent_registry: Arc<AgentRegistry>,
     pub shared_event_bus: Arc<FanoutEventBus>,
     pub initialized: AtomicBool,
@@ -76,7 +76,7 @@ impl ServeState {
     fn new(
         cfg: AppConfig,
         writer: WriterHandle,
-        shared_model_thinking: Arc<ModelThinkingStore>,
+        shared_model_prefs: Arc<ModelPrefsStore>,
     ) -> Result<Arc<Self>, AppError> {
         let registry = Arc::new(ChatContextRegistry::new(cfg.serve.max_sessions));
         let ask_question = ServeAskQuestionBridge::new(writer.clone());
@@ -89,7 +89,7 @@ impl ServeState {
             writer,
             ask_question,
             shared_model_catalog,
-            shared_model_thinking,
+            shared_model_prefs,
             shared_agent_registry,
             shared_event_bus,
             initialized: AtomicBool::new(false),
@@ -97,11 +97,9 @@ impl ServeState {
     }
 }
 
-pub(crate) fn build_shared_model_thinking(
-    cfg: &AppConfig,
-) -> Result<Arc<ModelThinkingStore>, AppError> {
+pub(crate) fn build_shared_model_prefs(cfg: &AppConfig) -> Result<Arc<ModelPrefsStore>, AppError> {
     let default_level = ThinkingLevel::parse_or_medium(&cfg.llm.thinking.level).0;
-    Ok(Arc::new(ModelThinkingStore::load(
+    Ok(Arc::new(ModelPrefsStore::load(
         resolve_model_thinking_path(cfg)?,
         default_level,
     )?))
@@ -136,9 +134,9 @@ pub(crate) fn run_serve(args: ServeCliArgs, cfg: &AppConfig) -> Result<(), AppEr
 
 async fn run_stdio(cfg: AppConfig) -> Result<(), AppError> {
     ensure_work_dir_structure(&cfg)?;
-    let shared_model_thinking = build_shared_model_thinking(&cfg)?;
+    let shared_model_prefs = build_shared_model_prefs(&cfg)?;
     let writer = writer::spawn_stdout_writer(WriterConfig::from(&cfg.serve));
-    let state = ServeState::new(cfg, writer, shared_model_thinking)?;
+    let state = ServeState::new(cfg, writer, shared_model_prefs)?;
     let initial_slot =
         create_session_slot(Arc::clone(&state), NewSessionParams::default(), false).await?;
     state.registry.insert(Arc::clone(&initial_slot))?;
@@ -283,7 +281,7 @@ pub(crate) async fn create_session_slot(
     let overrides = ChatContextOverrides::default()
         .suppress_cli_output()
         .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
-        .with_shared_model_thinking(Arc::clone(&state.shared_model_thinking))
+        .with_shared_model_prefs(Arc::clone(&state.shared_model_prefs))
         .with_session_cwd_override(cwd_path.clone());
     let ctx = ChatContext::from_config_with_mode_and_overrides(state.cfg.clone(), mode, overrides)?;
     state.shared_event_bus.register_session_bus(

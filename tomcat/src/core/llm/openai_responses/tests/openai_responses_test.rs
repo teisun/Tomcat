@@ -51,7 +51,9 @@ fn responses_entry() -> ModelEntry {
             web_search: false,
         },
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),

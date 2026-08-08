@@ -18,7 +18,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::TlsAcceptor;
-use tomcat::{AppConfig, DefaultLlmResolver, LlmProvider, LlmResolver, LlmScene, ModelCatalog};
+use tomcat::{
+    AppConfig, DefaultLlmResolver, LlmProvider, LlmResolver, LlmScene, ModelCatalog,
+    ModelPrefsStore, ThinkingLevel,
+};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static INIT: Once = Once::new();
@@ -314,9 +317,19 @@ pub fn resolve_main_provider(cfg: &AppConfig) -> Arc<dyn LlmProvider> {
     resolve_main_call(cfg).provider_impl
 }
 
+pub fn model_prefs_for(cfg: &AppConfig) -> Arc<ModelPrefsStore> {
+    Arc::new(
+        ModelPrefsStore::load(
+            tomcat::resolve_model_thinking_path(cfg).expect("model preference path"),
+            ThinkingLevel::parse_or_medium(&cfg.llm.thinking.level).0,
+        )
+        .expect("model preferences"),
+    )
+}
+
 pub fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
     let catalog = Arc::new(ModelCatalog::load(cfg).expect("load model catalog for test"));
-    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog);
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, model_prefs_for(cfg));
     resolver
         .resolve(LlmScene::Main, None)
         .expect("resolve main provider for test")

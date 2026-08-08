@@ -1,7 +1,13 @@
 import { memo } from "react";
 
-import { PlanBuildModelSelect } from "./PlanBuildModelSelect";
-import type { WebviewPlanFileCard, WebviewTodo } from "../types";
+import { buildPickerModels } from "./buildPickerModels";
+import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
+import type {
+  WebviewPlanFileCard,
+  WebviewPlanFileState,
+  WebviewTodo,
+  WebviewToolCard,
+} from "../types";
 import { LoadingDots } from "./LoadingDots";
 
 function basename(filePath: string): string {
@@ -41,33 +47,119 @@ function todoCountLabel(count: number): string {
   return `${count} ${count === 1 ? "todo" : "todos"}`;
 }
 
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function planPathForTool(item: WebviewToolCard): string | undefined {
+  return item.planPath ?? asString(item.args?.path);
+}
+
+function createPlanTodosFromArgs(
+  args: Record<string, unknown> | undefined,
+): WebviewTodo[] | undefined {
+  const todos = args?.todos;
+  if (!Array.isArray(todos)) {
+    return undefined;
+  }
+  const parsed = todos.flatMap((todo, index) => {
+    if (typeof todo !== "object" || todo === null) {
+      return [];
+    }
+    const entry = todo as Record<string, unknown>;
+    const content = asString(entry.content) ?? `Todo ${index + 1}`;
+    const id = asString(entry.id) ?? `todo-${index + 1}`;
+    const status =
+      entry.status === "cancelled" ||
+      entry.status === "completed" ||
+      entry.status === "in_progress" ||
+      entry.status === "pending"
+        ? entry.status
+        : "pending";
+    return [{ content, id, status } satisfies WebviewTodo];
+  });
+  return parsed.length > 0 ? parsed : undefined;
+}
+
+export function createPlanFileCardFromTool(
+  item: WebviewToolCard,
+  options: {
+    currentPlanId?: string | null;
+    currentPlanState?: WebviewPlanFileState | null;
+    planTodos?: WebviewTodo[];
+  },
+): WebviewPlanFileCard | null {
+  if (item.toolName !== "create_plan" || item.isError) {
+    return null;
+  }
+  const creating = item.status === "running" || item.status === "streaming";
+  if (!creating && item.status !== "complete") {
+    return null;
+  }
+  const path = planPathForTool(item);
+  if (!path) {
+    return null;
+  }
+  const isActivePlan = !!item.planId && item.planId === options.currentPlanId;
+  const argTodos = createPlanTodosFromArgs(item.args);
+  const ambientTodos =
+    options.planTodos && options.planTodos.length > 0
+      ? options.planTodos
+      : undefined;
+  return {
+    id: item.id,
+    overview: item.planActivity?.overview ?? undefined,
+    path,
+    planId: item.planId ?? null,
+    state: isActivePlan
+      ? (options.currentPlanState ?? item.planActivity?.stateAfter ?? null)
+      : (item.planActivity?.stateAfter ?? null),
+    title: item.planActivity?.title ?? asString(item.args?.goal) ?? undefined,
+    todos: isActivePlan ? (ambientTodos ?? argTodos) : argTodos,
+    type: "plan",
+  };
+}
+
+export interface PlanFileCardModelPicker {
+  availableModelDetails?: Record<string, ModelPickerModel>;
+  availableModels: readonly string[];
+  buildModel?: string;
+  onSelectContextWindow(modelId: string, contextWindow: number): void;
+  onSelectThinkingLevel(modelId: string, level: string): void;
+  onSetBuildModel(modelId: string): void;
+  sessionModel?: string;
+}
+
 function PlanFileCardComponent({
-  availableModels = [],
-  buildModel = "",
   canBuild,
   creating = false,
   item,
+  modelPicker,
   onBuild,
   onOpenPlanFile,
-  onSetBuildModel,
   planTodos = [],
-  sessionModel = "",
 }: {
-  availableModels?: string[];
-  buildModel?: string;
   canBuild: boolean;
   creating?: boolean;
   item: WebviewPlanFileCard;
+  modelPicker?: PlanFileCardModelPicker;
   onBuild(planId: string | null, path: string): void;
   onOpenPlanFile(path: string): void;
-  onSetBuildModel?(modelId: string): void;
   planTodos?: WebviewTodo[];
-  sessionModel?: string;
 }) {
   const fileName = basename(item.path);
   const title = derivePlanTitle(item, fileName);
   const buildAllowed =
     canBuild && (item.state === "planning" || item.state === "pending");
+  const selectedModelId = modelPicker?.buildModel || modelPicker?.sessionModel || null;
+  const pickerModels = modelPicker
+    ? buildPickerModels({
+        activeModelId: modelPicker.sessionModel,
+        availableModelDetails: modelPicker.availableModelDetails,
+        availableModels: modelPicker.availableModels,
+        selectedModelId,
+      })
+    : [];
 
   return (
     <section className="tc-card tc-plan-card" data-testid="plan-card">
@@ -123,14 +215,18 @@ function PlanFileCardComponent({
             View Plan
           </button>
         )}
-        {onSetBuildModel ? (
-          <PlanBuildModelSelect
-            availableModels={availableModels}
+        {modelPicker ? (
+          <ModelPicker
+            className="tc-plan-model-picker"
+            disabled={pickerModels.length === 0}
             label="Model"
-            onChange={onSetBuildModel}
-            sessionModel={sessionModel}
+            models={pickerModels}
+            onSelectContextWindow={modelPicker.onSelectContextWindow}
+            onSelectModel={modelPicker.onSetBuildModel}
+            onSelectThinkingLevel={modelPicker.onSelectThinkingLevel}
+            placement="below"
+            selectedModelId={selectedModelId}
             testId="plan-card-build-model"
-            value={buildModel}
           />
         ) : null}
         <button
@@ -152,15 +248,12 @@ function arePlanFileCardPropsEqual(
   next: Readonly<Parameters<typeof PlanFileCardComponent>[0]>,
 ): boolean {
   return (
-    previous.availableModels === next.availableModels &&
-    previous.buildModel === next.buildModel &&
     previous.canBuild === next.canBuild &&
     previous.creating === next.creating &&
     previous.item === next.item &&
+    previous.modelPicker === next.modelPicker &&
     previous.onBuild === next.onBuild &&
     previous.onOpenPlanFile === next.onOpenPlanFile &&
-    previous.onSetBuildModel === next.onSetBuildModel &&
-    previous.sessionModel === next.sessionModel &&
     previous.planTodos === next.planTodos
   );
 }

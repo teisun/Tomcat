@@ -169,36 +169,80 @@ async function pause(ms: number): Promise<void> {
  * Bounds of the test VS Code window, as `x,y,w,h` for `screencapture -R`.
  *
  * Whole-screen shots pick up whatever else is on the reviewer's desktop, which buries the
- * thing under review and puts unrelated windows into an artifact. Returns null if the
- * window cannot be located, in which case the caller falls back to the full screen.
+ * thing under review and puts unrelated windows into an artifact. Returns null when the
+ * window cannot be located so the caller can fail the acceptance run rather than silently
+ * producing an unverifiable screenshot.
  */
 function testWindowRegion(): string | null {
   try {
+    // VS Code's native process is named "Visual Studio Code" (or an Insiders/
+    // derivative name), not "Electron". Query CoreGraphics by the app name that
+    // the extension host reports, so capture follows the actual VS Code window
+    // without requiring Accessibility permission for System Events.
+    const scriptPath = path.join(repoRoot, "scripts", "find-macos-window.swift");
     const output = execFileSync(
-      "osascript",
-      [
-        "-e",
-        'tell application "System Events" to tell (first process whose name is "Electron") to get {position, size} of window 1',
-      ],
-      { encoding: "utf8" },
-    );
-    const bounds = output.trim().split(/,\s*/u).map(Number);
-    if (bounds.length !== 4 || bounds.some((value) => !Number.isFinite(value))) {
+      "swift",
+      [scriptPath, vscode.env.appName || "Visual Studio Code"],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+    const windowInfo = output
+      ? (JSON.parse(output) as {
+          bounds?: { height?: number; width?: number; x?: number; y?: number };
+        })
+      : null;
+    const bounds = windowInfo?.bounds;
+    if (
+      !bounds ||
+      ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
+    ) {
       return null;
     }
-    return bounds.join(",");
+    return `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
   } catch {
     return null;
   }
 }
 
+// CoreGraphics can transiently omit an otherwise visible VS Code window while
+// Electron changes focus. The acceptance run never moves or resizes its window,
+// so reuse an earlier verified rectangle rather than falling back to an
+// unrelated full-screen capture. The very first capture still requires a fresh
+// successful lookup.
+let lastKnownTestWindowRegion: string | null = null;
+
 async function captureScreenshot(name: string): Promise<string> {
   const targetPath = path.join(requireEnv("TOMCAT_ACCEPT_SCREENSHOTS_DIR"), name);
   await pause(500);
-  const region = testWindowRegion();
+  let freshRegion = testWindowRegion();
+  if (!freshRegion) {
+    // @vscode/test-electron can launch Code behind the IDE that started this
+    // test. An off-screen/background window is intentionally absent from
+    // CGWindowList's on-screen query, so activate the exact app first and then
+    // retry once before treating visual acceptance as impossible.
+    const appName = vscode.env.appName || "Visual Studio Code";
+    try {
+      execFileSync("open", ["-a", appName], { stdio: "ignore" });
+      await pause(350);
+      freshRegion = testWindowRegion();
+    } catch {
+      // The assertion below names the capture and app that failed. It is much
+      // more useful than producing a full-desktop artifact for the wrong app.
+    }
+  }
+  if (freshRegion) {
+    lastKnownTestWindowRegion = freshRegion;
+  }
+  const region = freshRegion ?? lastKnownTestWindowRegion;
+  assert.ok(
+    region,
+    `could not locate the ${vscode.env.appName || "Visual Studio Code"} window for ${name}`,
+  );
   execFileSync(
     "screencapture",
-    region ? ["-x", "-R", region, targetPath] : ["-x", targetPath],
+    ["-x", "-R", region, targetPath],
     { stdio: "inherit" },
   );
   return targetPath;
@@ -231,6 +275,7 @@ async function waitForDom<T>(
     `Timed out waiting for chat DOM: ${JSON.stringify({
       activeSessionId: lastSnapshot?.activeSessionId,
       historyAttachmentThumbCount: lastSnapshot?.historyAttachmentThumbCount,
+      historyPdfChipTitles: lastSnapshot?.historyPdfChipTitles,
       messageTexts: lastSnapshot?.messageTexts.slice(-8),
       pendingAttachmentStripClientWidth: lastSnapshot?.pendingAttachmentStripClientWidth,
       pendingAttachmentStripScrollWidth: lastSnapshot?.pendingAttachmentStripScrollWidth,
@@ -999,7 +1044,13 @@ suite("Tomcat image attachment visual acceptance", () => {
       const historyPdfChip = await waitForDom(
         api,
         (snapshot) =>
-          snapshot.historyPdfChipTitles.includes(pdfWorkspacePath)
+          // The draft owns the local source path, but the serve protocol only
+          // persists a filename/hash in transcript history. Requiring an
+          // absolute workstation path here would both contradict that boundary
+          // and falsely fail a correct reload of the same file attachment.
+          snapshot.historyPdfChipTitles.some((title) =>
+            title.startsWith(`${pdfAttachment.filename} ·`),
+          )
             ? snapshot
             : undefined,
         20_000,
@@ -1284,7 +1335,9 @@ suite("Tomcat image attachment visual acceptance", () => {
             titles: pendingPdfChip.pendingPdfChipTitles,
           },
           pdfHistoryRendering: {
-            passed: historyPdfChip.historyPdfChipTitles.includes(pdfWorkspacePath),
+            passed: historyPdfChip.historyPdfChipTitles.some((title) =>
+              title.startsWith(`${pdfAttachment.filename} ·`),
+            ),
             titles: historyPdfChip.historyPdfChipTitles,
           },
           // Placeholders while thumbnails are generated, rather than originals: the

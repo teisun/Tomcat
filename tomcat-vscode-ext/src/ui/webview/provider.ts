@@ -221,35 +221,92 @@ function extractPlanPreviewRefreshArgs(
 export function parseModelCatalog(payload: unknown): {
   capabilities: Record<string, string[]>;
   ids: string[];
+  modelDetails: Record<string, {
+    capabilities: string[];
+    contextWindow?: number | null;
+    contextWindowOptions: number[];
+    description?: string | null;
+    id: string;
+    modelName?: string | null;
+    selectedContextWindow?: number | null;
+    selectedReasoningLevel?: string | null;
+    supportedReasoningLevels: string[];
+  }>;
   reasoningLevels: Record<string, string[]>;
 } {
   if (typeof payload !== "object" || payload === null) {
-    return { capabilities: {}, ids: [], reasoningLevels: {} };
+    return { capabilities: {}, ids: [], modelDetails: {}, reasoningLevels: {} };
   }
   const models = (payload as { models?: unknown }).models;
   if (!Array.isArray(models)) {
-    return { capabilities: {}, ids: [], reasoningLevels: {} };
+    return { capabilities: {}, ids: [], modelDetails: {}, reasoningLevels: {} };
   }
   const ids: string[] = [];
   const capabilities: Record<string, string[]> = {};
+  const modelDetails: Record<string, {
+    capabilities: string[];
+    contextWindow?: number | null;
+    contextWindowOptions: number[];
+    description?: string | null;
+    id: string;
+    modelName?: string | null;
+    selectedContextWindow?: number | null;
+    selectedReasoningLevel?: string | null;
+    supportedReasoningLevels: string[];
+  }> = {};
   const reasoningLevels: Record<string, string[]> = {};
   for (const entry of models) {
     if (typeof entry !== "object" || entry === null || typeof (entry as { id?: unknown }).id !== "string") {
       continue;
     }
+    // A model without credentials remains visible in Settings but cannot be
+    // selected from an active-session picker.
     if ((entry as { keyPresent?: unknown }).keyPresent === false) {
       continue;
     }
     const id = (entry as { id: string }).id;
-    ids.push(id);
-    capabilities[id] = parseCapabilityNames((entry as { capabilities?: unknown }).capabilities);
-    reasoningLevels[id] = Array.isArray((entry as { supportedReasoningLevels?: unknown }).supportedReasoningLevels)
+    const modelCapabilities = parseCapabilityNames((entry as { capabilities?: unknown }).capabilities);
+    const supportedReasoningLevels = Array.isArray((entry as { supportedReasoningLevels?: unknown }).supportedReasoningLevels)
       ? ((entry as { supportedReasoningLevels?: unknown }).supportedReasoningLevels as unknown[]).filter(
           (level): level is string => typeof level === "string",
         )
       : [];
+    const contextWindowOptions = Array.isArray((entry as { contextWindowOptions?: unknown }).contextWindowOptions)
+      ? ((entry as { contextWindowOptions?: unknown }).contextWindowOptions as unknown[]).filter(
+          (value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0,
+        )
+      : [];
+    const optionalNumber = (value: unknown): number | null | undefined =>
+      value === null ? null : typeof value === "number" && Number.isInteger(value) ? value : undefined;
+    const contextWindow = optionalNumber((entry as { contextWindow?: unknown }).contextWindow);
+    const selectedContextWindow = optionalNumber(
+      (entry as { selectedContextWindow?: unknown }).selectedContextWindow,
+    );
+    ids.push(id);
+    capabilities[id] = modelCapabilities;
+    reasoningLevels[id] = supportedReasoningLevels;
+    modelDetails[id] = {
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      capabilities: modelCapabilities,
+      contextWindowOptions,
+      description:
+        typeof (entry as { description?: unknown }).description === "string"
+          ? (entry as { description: string }).description
+          : null,
+      id,
+      modelName:
+        typeof (entry as { modelName?: unknown }).modelName === "string"
+          ? (entry as { modelName: string }).modelName
+          : null,
+      ...(selectedContextWindow === undefined ? {} : { selectedContextWindow }),
+      selectedReasoningLevel:
+        typeof (entry as { selectedReasoningLevel?: unknown }).selectedReasoningLevel === "string"
+          ? (entry as { selectedReasoningLevel: string }).selectedReasoningLevel
+          : null,
+      supportedReasoningLevels,
+    };
   }
-  return { capabilities, ids, reasoningLevels };
+  return { capabilities, ids, modelDetails, reasoningLevels };
 }
 
 function guessMimeType(filePath: string): string {
@@ -621,6 +678,22 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const sessionId = await this.sessionPool.createSession(cwd ?? this.deps.getDefaultCwd());
     await this.selectSession(sessionId);
     return sessionId;
+  }
+
+  /**
+   * A serve restart starts a new process whose session IDs may overlap the old
+   * process. Discard the old process's local projection before re-bootstrapping,
+   * so a recycled ID cannot point to stale transcript or model state.
+   */
+  async refreshAfterServeRestart(): Promise<void> {
+    this.initialized = undefined;
+    this.stateStore.resetForReload();
+    this.stateStore.setReady(this.isReady);
+    if (!this.isReady) {
+      return;
+    }
+    await this.bootstrap();
+    await this.postState();
   }
 
   private async requestDraftForkCapture(operation: PendingDraftForkOperation): Promise<void> {
@@ -1312,6 +1385,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private async handleIntent(intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>): Promise<void> {
     switch (intent.type) {
+      case "webviewError":
+        console.error(
+          `[Tomcat webview] ${intent.data.message}`,
+          intent.data.stack ?? "",
+        );
+        return;
       case "ready":
         this.isReady = true;
         this.stateStore.setReady(true);
@@ -1774,6 +1853,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
               "error",
               response.error ?? "Unable to change reasoning effort",
             );
+          } else {
+            await this.refreshModels();
           }
         } catch (error) {
           this.stateStore.appendMessage(
@@ -1782,6 +1863,38 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             formatBridgeError("change reasoning effort", error),
           );
         }
+        await this.refreshSessionState(sessionId, { trustBusy: true });
+        await this.postState();
+        return;
+      }
+      case "setContextWindow": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        try {
+          const response = await this.deps.messenger.sendSetContextWindow(
+            sessionId,
+            intent.data.modelId,
+            intent.data.contextWindow,
+          );
+          if (!response.success) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              response.error ?? "Unable to change context window",
+            );
+          }
+        } catch (error) {
+          this.stateStore.appendMessage(
+            sessionId,
+            "error",
+            formatBridgeError("change context window", error),
+          );
+        }
+        await this.refreshModels();
         await this.refreshSessionState(sessionId, { trustBusy: true });
         await this.postState();
         return;
@@ -2604,6 +2717,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       catalog.ids,
       catalog.capabilities,
       catalog.reasoningLevels,
+      catalog.modelDetails,
     );
   }
 

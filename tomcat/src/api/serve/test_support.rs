@@ -21,7 +21,7 @@ use super::registry::SessionSlot;
 use super::types::NewSessionParams;
 use super::writer::{spawn_writer, WriterConfig, WriterHandle};
 use super::{
-    build_shared_model_thinking, create_session_slot, register_slot_hooks, ServeState,
+    build_shared_model_prefs, create_session_slot, register_slot_hooks, ServeState,
     SessionTurnState,
 };
 use crate::{
@@ -149,8 +149,8 @@ pub async fn build_initialized_state(
     let cfg = serve_test_config(temp.path(), base_url);
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
-    let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
-    let state = ServeState::new(cfg, writer, shared_model_thinking).expect("serve state");
+    let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
+    let state = ServeState::new(cfg, writer, shared_model_prefs).expect("serve state");
     let slot = create_session_slot(Arc::clone(&state), NewSessionParams::default(), false)
         .await
         .expect("initial session");
@@ -333,8 +333,8 @@ pub async fn build_initialized_state_with_provider(
 ) {
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
-    let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
-    let state = ServeState::new(cfg.clone(), writer, shared_model_thinking).expect("serve state");
+    let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
+    let state = ServeState::new(cfg.clone(), writer, shared_model_prefs).expect("serve state");
 
     let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let sessions_dir = resolve_sessions_dir(&cfg).expect("sessions dir");
@@ -350,7 +350,7 @@ pub async fn build_initialized_state_with_provider(
     let overrides = ChatContextOverrides::default()
         .suppress_cli_output()
         .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
-        .with_shared_model_thinking(Arc::clone(&state.shared_model_thinking))
+        .with_shared_model_prefs(Arc::clone(&state.shared_model_prefs))
         .with_session_cwd_override(cwd_path.clone());
     let mut ctx =
         ChatContext::from_config_with_mode_and_overrides(cfg.clone(), SessionMode::Code, overrides)
@@ -422,8 +422,8 @@ pub async fn build_initialized_state_with_config(
 ) {
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
-    let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
-    let state = ServeState::new(cfg, writer, shared_model_thinking).expect("serve state");
+    let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
+    let state = ServeState::new(cfg, writer, shared_model_prefs).expect("serve state");
     let slot = create_session_slot(Arc::clone(&state), NewSessionParams::default(), false)
         .await
         .expect("initial session");

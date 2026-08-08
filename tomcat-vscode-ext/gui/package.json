@@ -5,6 +5,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
+    "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "license": "MIT",

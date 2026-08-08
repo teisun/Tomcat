@@ -2,6 +2,7 @@
 
 mod cmd_ckpt;
 mod cmd_compact;
+mod cmd_context;
 mod cmd_effort;
 mod cmd_help;
 mod cmd_install;

@@ -11,6 +11,7 @@ import { PlanPreviewApp } from "./PlanPreviewApp";
 
 function makeState(overrides: Partial<PlanPreviewStateSnapshot> = {}): PlanPreviewStateSnapshot {
   return {
+    availableModelDetails: {},
     availableModels: ["gpt-5.6", "claude-opus"],
     // 6 body lines → mapped to arbitrary absolute file lines 10..15.
     bodyLineMap: [10, 11, 12, 13, 14, 15],
@@ -267,9 +268,8 @@ describe("PlanPreviewApp", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);
     pushState(makeState({ toolbarStyle: "hybrid" }));
-    fireEvent.change(screen.getByTestId("plan-build-model-select"), {
-      target: { value: "claude-opus" },
-    });
+    fireEvent.click(screen.getByTestId("plan-build-model-select"));
+    fireEvent.click(screen.getAllByTestId("model-option")[1]);
     const intents = intentsOfType(api, "setBuildModel");
     expect(intents).toHaveLength(1);
     expect((intents[0] as { data: { modelId: string } }).data.modelId).toBe("claude-opus");

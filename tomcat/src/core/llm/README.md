@@ -72,6 +72,29 @@ base_url = "https://gateway.example.com"
 - **serve 门面**：`list_models` / `upsert_model` / `remove_model` / `set_provider_key` / `list_provider_keys` 走同一个中枢。
 - **安全边界**：协议与状态里只暴露 `envName` / `keyPresent`，从不回显明文 key。
 
+### 1.5 能力、默认值与个人选择
+
+模型目录描述的是**这个模型能做什么**，个人偏好描述的是**这次要怎么用它**。两者不能混在 `models.toml`，否则一个人的 Context 或 Reasoning 选择会改写所有人的模型定义。
+
+```text
+builtin_models.toml / models.toml             model-thinking.json
+(能力与默认值，团队可审阅)                    (个人选择，可持久化)
+
+context_window + context_window_options       { reasoning, contextWindow }
+supported_reasoning_levels                    └─ 按 catalog model id 存储
+             │                                             │
+             └──────── ModelCatalog + ModelPrefsStore ─────┘
+                                      │
+                                      v
+                         EffectiveModelLimits / serve list_models
+```
+
+- `context_window` 是默认上限；`context_window_options` 是可选档位，空数组表示没有可选档位。选项必须升序、唯一，并且默认值必须在选项中。
+- `supported_reasoning_levels` 同样是能力数据。`reasoning` 与 `contextWindow` 是独立选择：换 Reasoning 不会偷偷改 Context，反之亦然。
+- 用户档位失效（例如模型更新后删掉一个档位）会安全回落到模型默认 Context；内置 TOML 的无效档位是发布错误，加载会失败，避免把错误预置静默带给用户。
+- 偏好文件仍叫 `model-thinking.json`。真实模型键继续写入旧格式的 Reasoning 字符串；Context 选择写在同一个 `models` 映射中的保留 `__tomcat_context_window__:<model>:<tokens>` 键，值固定为 `"off"`。因此新代码可读旧值，旧二进制也只会把保留键当成一个未使用、关闭推理的模型，不会因对象值而重置整个文件。
+- Chat 可用 `/effort <level>` 选择 Reasoning，用 `/context <tokens>` 选择当前模型声明的 Context 档位；两条命令都只写个人偏好。serve/UI 则使用 `set_thinking_level` 与 `set_context_window`，随后以 `list_models` 回显实际选中的值。
+
 ### 1.2 LLM 调用路径（ASCII）
 
 ```text

@@ -1,8 +1,14 @@
 import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createRef } from "react";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, type Mock, vi } from "vitest";
 
 import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
+
+type DraftChange = (draft: {
+  hasContent: boolean;
+  segments: unknown[];
+  text: string;
+}) => void;
 
 /**
  * jsdom omits `Blob.arrayBuffer`, which the paste path uses to get at the bytes.
@@ -51,6 +57,7 @@ function renderComposer({
   onContextSearchClose = vi.fn(),
   onContextSearchOpen = vi.fn(),
   onContextSearchQueryChange = vi.fn(),
+  onContextWindowChange = vi.fn(),
   onPickContext = vi.fn(),
   onInterrupt = vi.fn(),
   onDraftChange = vi.fn(),
@@ -95,8 +102,9 @@ function renderComposer({
   onContextSearchClose?: () => void;
   onContextSearchOpen?: () => void;
   onContextSearchQueryChange?: (query: string) => void;
+  onContextWindowChange?: (modelId: string, contextWindow: number) => void;
   onPickContext?: () => void;
-  onDraftChange?: (draft: { hasContent: boolean; segments: unknown[]; text: string }) => void;
+  onDraftChange?: Mock<DraftChange>;
   onModeChange?: (value: "chat" | "plan") => void;
   onModelChange?: (model: string) => void;
   onOpenModelSettings?: (() => void) | null;
@@ -106,7 +114,7 @@ function renderComposer({
   planState?: "planning" | "pending" | "executing" | "completed" | null;
   supportedReasoningLevels?: string[];
   thinkingLevelValue?: string;
-  onThinkingLevelChange?: (value: string) => void;
+  onThinkingLevelChange?: (modelId: string, value: string) => void;
 } = {}) {
   const ref = createRef<ComposerHandle>();
   const renderResult = render(
@@ -129,6 +137,7 @@ function renderComposer({
       onContextSearchClose={onContextSearchClose}
       onContextSearchOpen={onContextSearchOpen}
       onContextSearchQueryChange={onContextSearchQueryChange}
+      onContextWindowChange={onContextWindowChange}
       onPickContext={onPickContext}
       onDraftChange={onDraftChange}
       onModeChange={onModeChange}
@@ -256,7 +265,7 @@ describe("Composer", () => {
     expect(onModelChange).toHaveBeenCalledWith("claude-opus-4-6");
   });
 
-  it("falls back to the native select when model admin is unavailable", () => {
+  it("uses the same model picker when model admin is unavailable", () => {
     const onModelChange = vi.fn();
     renderComposer({
       availableModels: ["gpt-5.4", "claude-opus-4-6"],
@@ -265,11 +274,9 @@ describe("Composer", () => {
       onOpenModelSettings: null,
     });
 
-    const modelSelect = screen.getByTestId("model-select") as HTMLSelectElement;
-    expect(modelSelect.tagName).toBe("SELECT");
+    fireEvent.click(screen.getByTestId("model-select"));
     expect(screen.queryByTestId("model-open-settings")).toBeNull();
-
-    fireEvent.change(modelSelect, { target: { value: "claude-opus-4-6" } });
+    fireEvent.click(screen.getAllByTestId("model-option")[1]);
     expect(onModelChange).toHaveBeenCalledWith("claude-opus-4-6");
   });
 
@@ -289,7 +296,7 @@ describe("Composer", () => {
     expect(onModeChange).toHaveBeenCalledWith("chat");
   });
 
-  it("selects the reasoning effort from the custom dropdown", () => {
+  it("selects reasoning from the model configuration popover", () => {
     const onThinkingLevelChange = vi.fn();
     renderComposer({
       onThinkingLevelChange,
@@ -304,43 +311,32 @@ describe("Composer", () => {
         screen.getAllByTestId("thinking-level-option")[0],
     );
 
-    expect(onThinkingLevelChange).toHaveBeenCalledWith("xhigh");
+    expect(onThinkingLevelChange).toHaveBeenCalledWith("gpt-5.4", "xhigh");
   });
 
-  it("renders only the supported reasoning tiers for deepseek/glm-style models", () => {
+  it("renders only the supported reasoning tiers in the model configuration popover", () => {
     renderComposer({
       supportedReasoningLevels: ["high", "max"],
       thinkingLevelValue: "max",
     });
 
-    expect(screen.getByText("Effort")).toBeTruthy();
-    expect(screen.getByTestId("thinking-level-select").textContent).toContain("Max");
+    expect(screen.getByTestId("model-select").textContent).toContain("gpt-5.4 Max");
     fireEvent.click(screen.getByTestId("thinking-level-select"));
     expect(
       screen.getAllByTestId("thinking-level-option").map((node) => node.textContent),
     ).toEqual(["High", "Max"]);
   });
 
-  it("falls back to a Thinking On/Off toggle when the model exposes no effort tiers", () => {
-    const onThinkingLevelChange = vi.fn();
+  it("keeps Edit available when the model exposes no reasoning tiers", () => {
     renderComposer({
-      onThinkingLevelChange,
       supportedReasoningLevels: [],
       thinkingLevelValue: "high",
     });
 
-    expect(screen.getByText("Thinking")).toBeTruthy();
-    expect(screen.getByTestId("thinking-level-select").textContent).toContain("On");
-    fireEvent.click(screen.getByTestId("thinking-level-select"));
-    expect(
-      screen.getAllByTestId("thinking-level-option").map((node) => node.textContent),
-    ).toEqual(["On", "Off"]);
-    fireEvent.click(
-      screen
-        .getAllByTestId("thinking-level-option")
-        .find((node) => node.textContent === "Off") ?? screen.getAllByTestId("thinking-level-option")[1],
-    );
-    expect(onThinkingLevelChange).toHaveBeenCalledWith("off");
+    fireEvent.click(screen.getByTestId("model-select"));
+    const selectedOption = screen.getByTestId("model-option");
+    fireEvent.mouseEnter(selectedOption.parentElement!);
+    expect(screen.getByRole("button", { name: "Edit gpt-5.4" })).toBeTruthy();
   });
 
   it("omits the plan notice when no plan is attached", () => {

@@ -24,6 +24,7 @@ import {
   type PlanPreviewEvent,
   type PlanPreviewHostFrame,
   type PlanPreviewIntent,
+  type PlanPreviewModelInfo,
   type PlanPreviewStateSnapshot,
   type PlanToolbarStyle,
 } from "../../shared/planPreviewProtocol";
@@ -49,17 +50,25 @@ function normalizeToolbarStyle(value: unknown): PlanToolbarStyle {
 }
 
 function normalizePlanFileState(value: unknown): PlanFileState | null {
-  return value === "planning" || value === "pending" || value === "executing" || value === "completed"
+  return value === "planning" ||
+    value === "pending" ||
+    value === "executing" ||
+    value === "completed"
     ? value
     : null;
 }
 
 function getNonce(): string {
-  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  return (
+    Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+  );
 }
 
 /** `state ∈ {planning, pending}` and serve exposes `set_plan_mode`. */
-export function deriveCanBuild(state: PlanFileState | null, hasSetPlanModeCapability: boolean): boolean {
+export function deriveCanBuild(
+  state: PlanFileState | null,
+  hasSetPlanModeCapability: boolean,
+): boolean {
   if (!hasSetPlanModeCapability) {
     return false;
   }
@@ -85,7 +94,10 @@ function normalizePlanPath(value: string): string {
  * exported for unit testing: external URLs open in the browser, anchors are
  * ignored, and everything else resolves relative to the plan file on disk.
  */
-export function classifyPlanLink(href: string, planPath: string): PlanLinkTarget {
+export function classifyPlanLink(
+  href: string,
+  planPath: string,
+): PlanLinkTarget {
   const target = classifyLink(href);
   if (target.kind !== "file") {
     return target;
@@ -119,6 +131,8 @@ export interface PlanPreviewEditorProviderDeps {
   /** Kick off a plan build for the given planId (host owns session + model). */
   buildPlan(planId: string | null): Promise<void> | void;
   ensureInitialized(): Promise<InitializeResult>;
+  /** Focus the chat surface and return a usable serve session for preference updates. */
+  ensureSession?: () => Promise<string | null>;
   extensionUri: vscode.Uri;
   /** Current global build model (`tomcat.plan.buildModel`), "" when unset. */
   getBuildModel(): string;
@@ -151,14 +165,19 @@ export class PlanPreviewEditorProvider
   private readonly panelPlanId = new Map<string, string | null>();
   /** fsPath of the plan editor VS Code currently has focused, or null. */
   private activePanelPath: string | null = null;
-  private readonly domSnapshots = new PendingMessageTracker<PlanPreviewDomSnapshot>();
-  private readonly activeEmitter = new vscode.EventEmitter<PlanActivePanelInfo | null>();
+  private readonly domSnapshots =
+    new PendingMessageTracker<PlanPreviewDomSnapshot>();
+  private readonly activeEmitter =
+    new vscode.EventEmitter<PlanActivePanelInfo | null>();
   private readonly pathResolver = new ContextSearchService();
   /** Test-only: where a serve-triggered refresh has progressed in the host. */
   private hostRefreshCalls = 0;
   private hostStatePostAttempts = 0;
   private hostStatePostDeliveries = 0;
-  private readonly autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly autoSaveTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   /** A failed save awaits an explicit user save before automatic attempts resume. */
   private readonly autoSaveBlockedDocuments = new Set<string>();
   private readonly documentSubscriptions: vscode.Disposable[];
@@ -168,9 +187,15 @@ export class PlanPreviewEditorProvider
 
   constructor(private readonly deps: PlanPreviewEditorProviderDeps) {
     this.documentSubscriptions = [
-      vscode.workspace.onDidChangeTextDocument((event) => this.handleDocumentChange(event)),
-      vscode.workspace.onDidSaveTextDocument((document) => this.handleDocumentSave(document)),
-      vscode.workspace.onDidChangeConfiguration((event) => this.handleConfigurationChange(event)),
+      vscode.workspace.onDidChangeTextDocument((event) =>
+        this.handleDocumentChange(event),
+      ),
+      vscode.workspace.onDidSaveTextDocument((document) =>
+        this.handleDocumentSave(document),
+      ),
+      vscode.workspace.onDidChangeConfiguration((event) =>
+        this.handleConfigurationChange(event),
+      ),
     ];
   }
 
@@ -192,7 +217,9 @@ export class PlanPreviewEditorProvider
   ): void {
     webviewPanel.webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist")],
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist"),
+      ],
     };
     webviewPanel.webview.html = this.renderHtml(webviewPanel.webview);
 
@@ -214,23 +241,25 @@ export class PlanPreviewEditorProvider
       path: document.uri.fsPath,
     };
 
-    const messageSub = webviewPanel.webview.onDidReceiveMessage((message: unknown) => {
-      if (isPlanPreviewDomSnapshotReply(message)) {
-        this.domSnapshots.resolve(message.messageId, message.data);
-        return;
-      }
-      if (!isPlanPreviewIntent(message)) {
-        return;
-      }
-      void this.handleIntent(message, doc, post, async (event) => {
-        const frame: PlanPreviewHostFrame = {
-          channel: "event",
-          content: event,
-          messageId: `plan-event-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        };
-        await webviewPanel.webview.postMessage(frame);
-      });
-    });
+    const messageSub = webviewPanel.webview.onDidReceiveMessage(
+      (message: unknown) => {
+        if (isPlanPreviewDomSnapshotReply(message)) {
+          this.domSnapshots.resolve(message.messageId, message.data);
+          return;
+        }
+        if (!isPlanPreviewIntent(message)) {
+          return;
+        }
+        void this.handleIntent(message, doc, post, async (event) => {
+          const frame: PlanPreviewHostFrame = {
+            channel: "event",
+            content: event,
+            messageId: `plan-event-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          };
+          await webviewPanel.webview.postMessage(frame);
+        });
+      },
+    );
     const viewStateSub = webviewPanel.onDidChangeViewState(() => {
       if (webviewPanel.active) {
         this.activePanelPath = fsPath;
@@ -259,7 +288,9 @@ export class PlanPreviewEditorProvider
 
   /** Build a plan for whichever plan editor is focused (native title-bar Build). */
   async runBuildForActive(): Promise<void> {
-    const entry = this.activePanelPath ? this.panels.get(this.activePanelPath) : undefined;
+    const entry = this.activePanelPath
+      ? this.panels.get(this.activePanelPath)
+      : undefined;
     if (!entry) {
       return;
     }
@@ -315,8 +346,8 @@ export class PlanPreviewEditorProvider
   }
 
   /** Ready model ids exposed by the serve, for the native QuickPick. */
-  getAvailableModels(): Promise<string[]> {
-    return this.fetchAvailableModels();
+  async getAvailableModels(): Promise<string[]> {
+    return (await this.fetchModelCatalog()).ids;
   }
 
   private emitActive(): void {
@@ -362,8 +393,14 @@ export class PlanPreviewEditorProvider
     this.autoSaveBlockedDocuments.delete(documentKey);
   }
 
-  private handleConfigurationChange(event: vscode.ConfigurationChangeEvent): void {
-    if (event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.${TOMCAT_PLAN_AUTO_SAVE_SETTING}`)) {
+  private handleConfigurationChange(
+    event: vscode.ConfigurationChangeEvent,
+  ): void {
+    if (
+      event.affectsConfiguration(
+        `${TOMCAT_CONFIG_SECTION}.${TOMCAT_PLAN_AUTO_SAVE_SETTING}`,
+      )
+    ) {
       if (!this.isAutoSaveEnabled()) {
         for (const documentKey of [...this.autoSaveTimers.keys()]) {
           this.clearAutoSaveTimer(documentKey);
@@ -371,8 +408,12 @@ export class PlanPreviewEditorProvider
       }
     }
     if (
-      event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.${PLAN_BUILD_MODEL_SETTING}`)
-      || event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.${TOMCAT_PLAN_TOOLBAR_STYLE_SETTING}`)
+      event.affectsConfiguration(
+        `${TOMCAT_CONFIG_SECTION}.${PLAN_BUILD_MODEL_SETTING}`,
+      ) ||
+      event.affectsConfiguration(
+        `${TOMCAT_CONFIG_SECTION}.${TOMCAT_PLAN_TOOLBAR_STYLE_SETTING}`,
+      )
     ) {
       for (const panelPath of this.panels.keys()) {
         void this.postFor(panelPath);
@@ -391,9 +432,9 @@ export class PlanPreviewEditorProvider
   private scheduleAutoSave(document: vscode.TextDocument): void {
     const documentKey = document.uri.toString();
     if (
-      !document.isDirty
-      || !this.isAutoSaveEnabled()
-      || this.autoSaveBlockedDocuments.has(documentKey)
+      !document.isDirty ||
+      !this.isAutoSaveEnabled() ||
+      this.autoSaveBlockedDocuments.has(documentKey)
     ) {
       return;
     }
@@ -408,9 +449,9 @@ export class PlanPreviewEditorProvider
   private async savePlanDocument(document: vscode.TextDocument): Promise<void> {
     const documentKey = document.uri.toString();
     if (
-      !document.isDirty
-      || !this.isAutoSaveEnabled()
-      || this.autoSaveBlockedDocuments.has(documentKey)
+      !document.isDirty ||
+      !this.isAutoSaveEnabled() ||
+      this.autoSaveBlockedDocuments.has(documentKey)
     ) {
       return;
     }
@@ -428,7 +469,9 @@ export class PlanPreviewEditorProvider
     );
     if (action === "Compare") {
       await vscode.window.showTextDocument(document, { preview: false });
-      await vscode.commands.executeCommand("workbench.files.action.compareWithSaved");
+      await vscode.commands.executeCommand(
+        "workbench.files.action.compareWithSaved",
+      );
     }
   }
 
@@ -501,9 +544,14 @@ export class PlanPreviewEditorProvider
     }
   }
 
-  private findPanelPath(planId: string | null, pathHint?: string | null): string | null {
+  private findPanelPath(
+    planId: string | null,
+    pathHint?: string | null,
+  ): string | null {
     if (planId) {
-      const byPlanId = [...this.panelPlanId.entries()].find(([, value]) => value === planId)?.[0];
+      const byPlanId = [...this.panelPlanId.entries()].find(
+        ([, value]) => value === planId,
+      )?.[0];
       if (byPlanId) {
         return byPlanId;
       }
@@ -513,9 +561,9 @@ export class PlanPreviewEditorProvider
     }
     const normalizedHint = normalizePlanPath(pathHint);
     return (
-      [...this.panels.entries()]
-        .find(([, entry]) => entry.canonicalPath === normalizedHint)?.[0]
-      ?? null
+      [...this.panels.entries()].find(
+        ([, entry]) => entry.canonicalPath === normalizedHint,
+      )?.[0] ?? null
     );
   }
 
@@ -543,7 +591,10 @@ export class PlanPreviewEditorProvider
   }
 
   /** Test-only: drive a DOM interaction in the panel showing `planPath`. */
-  async dispatchDomAction(planPath: string, action: PlanPreviewDomAction): Promise<void> {
+  async dispatchDomAction(
+    planPath: string,
+    action: PlanPreviewDomAction,
+  ): Promise<void> {
     const panel = this.requirePanel(planPath);
     const frame: PlanPreviewHostFrame = {
       channel: "event",
@@ -565,19 +616,28 @@ export class PlanPreviewEditorProvider
   async buildState(
     text: string,
     planPath: string,
-    ui: { stateHint?: PlanFileState | null; toolbarStyle: PlanToolbarStyle } = { toolbarStyle: "hybrid" },
+    ui: { stateHint?: PlanFileState | null; toolbarStyle: PlanToolbarStyle } = {
+      toolbarStyle: "hybrid",
+    },
   ): Promise<PlanPreviewStateSnapshot> {
     const parsed = parsePlanDocument(text);
-    const availableModels = await this.fetchAvailableModels();
+    const modelCatalog = await this.fetchModelCatalog();
+    const availableModels = modelCatalog.ids;
     const rawBuildModel = this.deps.getBuildModel();
     const buildModel =
-      rawBuildModel && availableModels.length > 0 && !availableModels.includes(rawBuildModel)
+      rawBuildModel &&
+      availableModels.length > 0 &&
+      !availableModels.includes(rawBuildModel)
         ? ""
         : rawBuildModel;
     const state = ui.stateHint ?? parsed.state;
-    const canBuild = deriveCanBuild(state, await this.hasSetPlanModeCapability());
+    const canBuild = deriveCanBuild(
+      state,
+      await this.hasSetPlanModeCapability(),
+    );
     return {
       availableModels,
+      availableModelDetails: modelCatalog.modelDetails,
       bodyLineMap: parsed.bodyLineMap,
       bodyMarkdown: parsed.bodyMarkdown,
       buildModel,
@@ -599,7 +659,8 @@ export class PlanPreviewEditorProvider
     intent: PlanPreviewIntent,
     doc: PlanPreviewDocumentLike,
     postState: () => Promise<void>,
-    postEvent: (event: PlanPreviewEvent) => Promise<void> = async () => undefined,
+    postEvent: (event: PlanPreviewEvent) => Promise<void> = async () =>
+      undefined,
   ): Promise<void> {
     switch (intent.type) {
       case "plan.ready":
@@ -627,7 +688,9 @@ export class PlanPreviewEditorProvider
           await this.deps.openFile(intent.data.path, intent.data.line);
         } catch (error) {
           await vscode.window.showErrorMessage(
-            error instanceof Error ? error.message : `Unable to open file: ${intent.data.path}`,
+            error instanceof Error
+              ? error.message
+              : `Unable to open file: ${intent.data.path}`,
           );
         }
         return;
@@ -646,6 +709,28 @@ export class PlanPreviewEditorProvider
         await this.deps.setBuildModel(intent.data.modelId);
         await postState();
         return;
+      case "setContextWindow": {
+        const sessionId = (await this.deps.ensureSession?.()) ?? null;
+        if (!sessionId) return;
+        await this.deps.messenger.sendSetContextWindow(
+          sessionId,
+          intent.data.modelId,
+          intent.data.contextWindow,
+        );
+        await postState();
+        return;
+      }
+      case "setThinkingLevel": {
+        const sessionId = (await this.deps.ensureSession?.()) ?? null;
+        if (!sessionId) return;
+        await this.deps.messenger.sendSetThinkingLevel(
+          sessionId,
+          intent.data.modelId,
+          intent.data.level,
+        );
+        await postState();
+        return;
+      }
       case "build": {
         const { planId } = parsePlanDocument(doc.getText());
         await this.deps.buildPlan(planId);
@@ -672,19 +757,26 @@ export class PlanPreviewEditorProvider
     }
   }
 
-  private async fetchAvailableModels(): Promise<string[]> {
+  private async fetchModelCatalog(): Promise<{
+    ids: string[];
+    modelDetails: Record<string, PlanPreviewModelInfo>;
+  }> {
+    const empty = { ids: [], modelDetails: {} };
     try {
       const init = await this.deps.ensureInitialized();
       if (!hasServeCapability(init, SERVE_CAPABILITY_LIST_MODELS)) {
-        return [];
+        return empty;
       }
-      const response = await this.deps.messenger.sendListModels().catch(() => null);
+      const response = await this.deps.messenger
+        .sendListModels()
+        .catch(() => null);
       if (!response || !response.success) {
-        return [];
+        return empty;
       }
-      return parseModelCatalog(response.payload).ids;
+      const catalog = parseModelCatalog(response.payload);
+      return { ids: catalog.ids, modelDetails: catalog.modelDetails };
     } catch {
-      return [];
+      return empty;
     }
   }
 

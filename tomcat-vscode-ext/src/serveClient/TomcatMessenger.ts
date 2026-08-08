@@ -403,6 +403,23 @@ export class TomcatMessenger {
     );
   }
 
+  sendSetContextWindow(
+    sessionId: string | null | undefined,
+    model: string,
+    contextWindow: number,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request(
+      {
+        contextWindow,
+        model,
+        sessionId,
+        type: "set_context_window",
+      },
+      timeoutMs,
+    );
+  }
+
   sendSetPlanMode(
     command: SetPlanModeRequest,
     timeoutMs = this.timeoutMs(),

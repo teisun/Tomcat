@@ -1700,6 +1700,7 @@ fn build_runtime_with_builtin_plugin_and_fetch_client_with_patch(
         .with_llm_resolver(Arc::new(DefaultLlmResolver::new(
             config.clone(),
             catalog.clone(),
+            common::model_prefs_for(&config),
         )));
     if let Some(fetch_client) = fetch_client {
         dispatcher = dispatcher.with_fetch_http_client(fetch_client);

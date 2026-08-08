@@ -40,6 +40,8 @@ function baseState(): WebviewStateSnapshot {
     ],
     sessionViews: {
       s1: {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         checkpoints: [],
         contextRatio: null,
@@ -48,9 +50,6 @@ function baseState(): WebviewStateSnapshot {
         model: "gpt-5.4",
         ownedByThisFrontend: true,
         pendingAttachments: [],
-        planFile: null,
-        planId: null,
-        planState: "chat",
         planTodos: [],
         sessionId: "s1",
         sessionTodos: [],

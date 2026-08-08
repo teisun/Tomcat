@@ -49,6 +49,8 @@ export interface ModelEntryInput {
   baseUrl?: null | string;
   capabilities?: Capabilities;
   contextWindow?: null | number;
+  contextWindowOptions?: null | number[];
+  description?: null | string;
   id: string;
   maxOutputTokens?: null | number;
   modelName?: null | string;
@@ -64,11 +66,15 @@ export interface ModelView {
   baseUrl?: null | string;
   capabilities: Capabilities;
   contextWindow?: null | number;
+  contextWindowOptions?: number[];
+  description?: null | string;
   id: string;
   keyPresent: boolean;
   maxOutputTokens?: null | number;
   modelName?: null | string;
   provider: string;
+  selectedContextWindow?: null | number;
+  selectedReasoningLevel?: null | string;
   source: ModelSource;
   supportedReasoningLevels?: string[];
   thinkingFormat?: null | string;
@@ -390,6 +396,12 @@ export type ServeCommand = {
   sessionId?: null | string;
   type: "restore_checkpoint";
 } | {
+  contextWindow: number;
+  id?: null | string;
+  model: string;
+  sessionId?: null | string;
+  type: "set_context_window";
+} | {
   envName: string;
   id?: null | string;
   type: "set_provider_key";
@@ -693,11 +705,15 @@ export interface WireModelView {
   baseUrl?: null | string;
   capabilities: Capabilities;
   contextWindow?: null | number;
+  contextWindowOptions?: number[];
+  description?: null | string;
   id: string;
   keyPresent: boolean;
   maxOutputTokens?: null | number;
   modelName?: null | string;
   provider: string;
+  selectedContextWindow?: null | number;
+  selectedReasoningLevel?: null | string;
   source: ModelSource;
   supportedReasoningLevels?: string[];
   thinkingFormat?: null | string;

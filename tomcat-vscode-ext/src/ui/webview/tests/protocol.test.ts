@@ -9,6 +9,26 @@ import {
 } from "../protocol";
 
 describe("webview protocol helpers", () => {
+  it("accepts a bounded webview crash report", () => {
+    expect(
+      isWebviewIntent({
+        data: {
+          message: "render exploded",
+          stack: "Error: render exploded",
+        },
+        messageId: "webview-error-1",
+        type: "webviewError",
+      }),
+    ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: { stack: "missing message" },
+        messageId: "webview-error-invalid",
+        type: "webviewError",
+      }),
+    ).toBe(false);
+  });
+
   it("accepts valid host and webview frames", () => {
     expect(
       isHostToWebviewFrame({

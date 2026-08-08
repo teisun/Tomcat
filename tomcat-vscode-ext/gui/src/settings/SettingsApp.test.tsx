@@ -69,7 +69,9 @@ async function emitState(content: SettingsStateSnapshot) {
   });
 }
 
-function readyState(overrides: Partial<SettingsStateSnapshot> = {}): SettingsStateSnapshot {
+function readyState(
+  overrides: Partial<SettingsStateSnapshot> = {},
+): SettingsStateSnapshot {
   return {
     capabilities: {
       listModels: true,
@@ -100,9 +102,7 @@ function getPasswordInput(scope: HTMLElement): HTMLInputElement {
 }
 
 describe("SettingsApp", () => {
-  it(
-    "posts a ready handshake, defaults to the official tab, and supports keyboard tab switching",
-    async () => {
+  it("posts a ready handshake, defaults to the official tab, and supports keyboard tab switching", async () => {
     const { postMessage } = mount();
 
     expect(postMessage).toHaveBeenCalledTimes(1);
@@ -137,7 +137,9 @@ describe("SettingsApp", () => {
     );
 
     const dialog = openAddModelDialog();
-    expect(within(dialog).getByRole("tablist", { name: /add model mode/i })).toBeTruthy();
+    expect(
+      within(dialog).getByRole("tablist", { name: /add model mode/i }),
+    ).toBeTruthy();
     const officialTab = within(dialog).getByRole("tab", {
       name: /official new model/i,
     });
@@ -149,24 +151,28 @@ describe("SettingsApp", () => {
     expect(officialTab.tabIndex).toBe(0);
     expect(relayTab.tabIndex).toBe(-1);
     expect(within(dialog).getByLabelText("Provider")).toBeTruthy();
-    expect(within(dialog).queryByRole("textbox", { name: /base url/i })).toBeNull();
+    expect(
+      within(dialog).queryByRole("textbox", { name: /base url/i }),
+    ).toBeNull();
 
     fireEvent.keyDown(officialTab, { key: "ArrowRight" });
     expect(relayTab.getAttribute("aria-selected")).toBe("true");
     expect(relayTab.tabIndex).toBe(0);
     expect(officialTab.tabIndex).toBe(-1);
-    expect(within(dialog).getByRole("textbox", { name: /base url/i })).toBeTruthy();
+    expect(
+      within(dialog).getByRole("textbox", { name: /base url/i }),
+    ).toBeTruthy();
     expect(within(dialog).queryByLabelText("Provider")).toBeNull();
 
     fireEvent.keyDown(relayTab, { key: "Home" });
     expect(officialTab.getAttribute("aria-selected")).toBe("true");
-    expect(within(dialog).queryByRole("textbox", { name: /base url/i })).toBeNull();
+    expect(
+      within(dialog).queryByRole("textbox", { name: /base url/i }),
+    ).toBeNull();
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
-    },
-    15000,
-  );
+  }, 15000);
 
   it("falls back to the relay tab when no official presets are available and explains the empty state", async () => {
     mount();
@@ -193,7 +199,9 @@ describe("SettingsApp", () => {
     });
 
     expect(relayTab.getAttribute("aria-selected")).toBe("true");
-    expect(within(dialog).getByRole("textbox", { name: /base url/i })).toBeTruthy();
+    expect(
+      within(dialog).getByRole("textbox", { name: /base url/i }),
+    ).toBeTruthy();
 
     fireEvent.click(officialTab);
     expect(officialTab.getAttribute("aria-selected")).toBe("true");
@@ -204,8 +212,11 @@ describe("SettingsApp", () => {
       within(dialog).getByText(/switch to relay \/ custom endpoint/i),
     ).toBeTruthy();
     expect(
-      (within(dialog).getByRole("button", { name: "Save Model" }) as HTMLButtonElement)
-        .disabled,
+      (
+        within(dialog).getByRole("button", {
+          name: "Save Model",
+        }) as HTMLButtonElement
+      ).disabled,
     ).toBe(true);
   });
 
@@ -233,15 +244,20 @@ describe("SettingsApp", () => {
             thinkingFormat: "anthropic",
           }),
         ],
-        providerKeys: [providerKey({ envName: "ANTHROPIC_API_KEY", keyPresent: true })],
+        providerKeys: [
+          providerKey({ envName: "ANTHROPIC_API_KEY", keyPresent: true }),
+        ],
       }),
     );
     postMessage.mockClear();
 
     const dialog = openAddModelDialog();
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
-      target: { value: "gpt-5.6" },
-    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.6" },
+      },
+    );
     fireEvent.change(getPasswordInput(dialog), {
       target: { value: "openai-secret" },
     });
@@ -261,7 +277,7 @@ describe("SettingsApp", () => {
             vision: true,
             webSearch: false,
           },
-          contextWindow: null,
+          contextWindow: 400000,
           id: "gpt-5.6",
           modelName: "gpt-5.6",
           provider: "openai",
@@ -290,24 +306,35 @@ describe("SettingsApp", () => {
     fireEvent.click(
       within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
     );
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
-      target: { value: "https://api.chatanywhere.tech/v1" },
-    });
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
-      target: { value: "gpt-5.4" },
-    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /base url/i }),
+      {
+        target: { value: "https://api.chatanywhere.tech/v1" },
+      },
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.4" },
+      },
+    );
 
     expect(within(dialog).getByText("chatanywhere")).toBeTruthy();
-    expect(within(dialog).getByText("CHATANYWHERE_OPENAI_API_KEY")).toBeTruthy();
+    expect(
+      within(dialog).getByText("CHATANYWHERE_OPENAI_API_KEY"),
+    ).toBeTruthy();
     expect(within(dialog).getByText("chatanywhere/gpt-5.4")).toBeTruthy();
 
     fireEvent.change(getPasswordInput(dialog), {
       target: { value: "relay-secret" },
     });
     fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    fireEvent.change(within(dialog).getByPlaceholderText("chatanywhere/gpt-5.4"), {
-      target: { value: "custom-relay-id" },
-    });
+    fireEvent.change(
+      within(dialog).getByPlaceholderText("chatanywhere/gpt-5.4"),
+      {
+        target: { value: "custom-relay-id" },
+      },
+    );
     fireEvent.change(within(dialog).getByLabelText(/thinking format/i), {
       target: { value: "deepseek" },
     });
@@ -318,17 +345,17 @@ describe("SettingsApp", () => {
     expect(postMessage.mock.calls[0][0]).toMatchObject({
       data: {
         model: {
-          api: "openai",
+          api: "openai-responses",
           apiKeyEnv: "CHATANYWHERE_OPENAI_API_KEY",
           baseUrl: "https://api.chatanywhere.tech/v1",
           capabilities: {
-            files: false,
+            files: true,
             reasoning: true,
             tools: true,
             vision: true,
             webSearch: false,
           },
-          contextWindow: null,
+          contextWindow: 400000,
           id: "custom-relay-id",
           modelName: "gpt-5.4",
           provider: "chatanywhere",
@@ -408,7 +435,11 @@ describe("SettingsApp", () => {
         .getAttribute("aria-selected"),
     ).toBe("true");
     expect(
-      (within(dialog).getByRole("textbox", { name: /base url/i }) as HTMLInputElement).value,
+      (
+        within(dialog).getByRole("textbox", {
+          name: /base url/i,
+        }) as HTMLInputElement
+      ).value,
     ).toBe("https://api.chatanywhere.tech/v1");
     expect(within(dialog).queryByLabelText("Provider")).toBeNull();
   }, 15_000);
@@ -443,9 +474,12 @@ describe("SettingsApp", () => {
     postMessage.mockClear();
 
     let dialog = openAddModelDialog();
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
-      target: { value: "gpt-5.4" },
-    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.4" },
+      },
+    );
     expect(
       within(dialog).getByText(/override the built-in model `gpt-5\.4`/i),
     ).toBeTruthy();
@@ -455,12 +489,18 @@ describe("SettingsApp", () => {
     fireEvent.click(
       within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
     );
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
-      target: { value: "https://" },
-    });
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
-      target: { value: "gpt-5.4" },
-    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /base url/i }),
+      {
+        target: { value: "https://" },
+      },
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.4" },
+      },
+    );
     fireEvent.change(getPasswordInput(dialog), {
       target: { value: "relay-secret" },
     });
@@ -476,12 +516,18 @@ describe("SettingsApp", () => {
     fireEvent.click(
       within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
     );
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
-      target: { value: "https://api.chatanywhere.tech/v1" },
-    });
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
-      target: { value: "gpt-5.4" },
-    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /base url/i }),
+      {
+        target: { value: "https://api.chatanywhere.tech/v1" },
+      },
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.4" },
+      },
+    );
     fireEvent.change(within(dialog).getByLabelText("Key slot"), {
       target: { value: "OPENAI_API_KEY" },
     });
@@ -491,7 +537,7 @@ describe("SettingsApp", () => {
     expect(postMessage.mock.calls[0][0]).toMatchObject({
       data: {
         model: {
-          api: "openai",
+          api: "openai-responses",
           apiKeyEnv: "OPENAI_API_KEY",
           baseUrl: "https://api.chatanywhere.tech/v1",
           id: "chatanywhere/gpt-5.4",
@@ -531,12 +577,16 @@ describe("SettingsApp", () => {
             thinkingFormat: null,
           },
         ],
-        providerKeys: [providerKey({ envName: "CHATANYWHERE_API_KEY", keyPresent: false })],
+        providerKeys: [
+          providerKey({ envName: "CHATANYWHERE_API_KEY", keyPresent: false }),
+        ],
       }),
     );
     postMessage.mockClear();
 
-    const inlineInput = screen.getByPlaceholderText("Save CHATANYWHERE_API_KEY") as HTMLInputElement;
+    const inlineInput = screen.getByPlaceholderText(
+      "Save CHATANYWHERE_API_KEY",
+    ) as HTMLInputElement;
     expect(inlineInput.type).toBe("password");
     expect(inlineInput.autocomplete).toBe("off");
 
@@ -589,7 +639,9 @@ describe("SettingsApp", () => {
             thinkingFormat: null,
           },
         ],
-        providerKeys: [providerKey({ envName: "CHATANYWHERE_API_KEY", keyPresent: false })],
+        providerKeys: [
+          providerKey({ envName: "CHATANYWHERE_API_KEY", keyPresent: false }),
+        ],
       }),
     );
 
@@ -599,16 +651,21 @@ describe("SettingsApp", () => {
     expect(modalKeyInput.type).toBe("password");
     expect(modalKeyInput.autocomplete).toBe("off");
 
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
-      target: { value: "gpt-5.6" },
-    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.6" },
+      },
+    );
     fireEvent.change(modalKeyInput, {
       target: { value: "secret-value" },
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
 
     expect(
-      within(dialog).getByText("当前后端不支持保存 API Key，请先升级 `tomcat serve`。"),
+      within(dialog).getByText(
+        "当前后端不支持保存 API Key，请先升级 `tomcat serve`。",
+      ),
     ).toBeTruthy();
   });
 
@@ -618,33 +675,48 @@ describe("SettingsApp", () => {
     postMessage.mockClear();
 
     const dialog = openAddModelDialog();
-    fireEvent.click(within(dialog).getByRole("button", { name: /refresh key slots/i }));
-    expect(postMessage.mock.calls[0][0]).toMatchObject({ type: "listProviderKeys" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /refresh key slots/i }),
+    );
+    expect(postMessage.mock.calls[0][0]).toMatchObject({
+      type: "listProviderKeys",
+    });
     postMessage.mockClear();
 
     await emitState(
       readyState({
         models: [builtinModel()],
-        providerKeys: [providerKey({ envName: "FCODEX_OPENAI_API_KEY", keyPresent: true })],
+        providerKeys: [
+          providerKey({ envName: "FCODEX_OPENAI_API_KEY", keyPresent: true }),
+        ],
       }),
     );
     expect(within(dialog).getByText("Key slots refreshed.")).toBeTruthy();
 
     const keySlot = within(dialog).getByRole("combobox", { name: "Key slot" });
     fireEvent.focus(keySlot);
-    expect(within(dialog).getByRole("option", { name: /FCODEX_OPENAI_API_KEY/i })).toBeTruthy();
+    expect(
+      within(dialog).getByRole("option", { name: /FCODEX_OPENAI_API_KEY/i }),
+    ).toBeTruthy();
 
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
-      target: { value: "gpt-5.6" },
-    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.6" },
+      },
+    );
     fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
     expect(within(dialog).queryByText("API key env override")).toBeNull();
 
     fireEvent.change(keySlot, { target: { value: "bad-key-slot" } });
-    expect(within(dialog).getByText("Key slot must match ^[A-Z_][A-Z0-9_]*$.")).toBeTruthy();
+    expect(
+      within(dialog).getByText("Key slot must match ^[A-Z_][A-Z0-9_]*$."),
+    ).toBeTruthy();
     fireEvent.change(keySlot, { target: { value: "FCODEX_OPENAI_API_KEY" } });
 
-    const keyInput = within(dialog).getByLabelText("API key") as HTMLInputElement;
+    const keyInput = within(dialog).getByLabelText(
+      "API key",
+    ) as HTMLInputElement;
     fireEvent.focus(keyInput);
     fireEvent.change(keyInput, { target: { value: "sk-1234567890abcdef" } });
     expect(keyInput.type).toBe("password");
@@ -670,7 +742,9 @@ describe("SettingsApp", () => {
     expect(fieldChildren).toHaveLength(2);
 
     for (const field of fieldChildren) {
-      expect(field.firstElementChild?.classList.contains("tc-field__label-row")).toBe(true);
+      expect(
+        field.firstElementChild?.classList.contains("tc-field__label-row"),
+      ).toBe(true);
     }
   });
 
@@ -683,7 +757,9 @@ describe("SettingsApp", () => {
     const apiKeyInput = within(dialog).getByTestId("settings-api-key-input");
 
     expect(keySlotBox.classList.contains("tc-settings-combobox")).toBe(true);
-    expect(apiKeyInput.classList.contains("tc-settings-api-key-input")).toBe(true);
+    expect(apiKeyInput.classList.contains("tc-settings-api-key-input")).toBe(
+      true,
+    );
   });
 
   it("requires confirmation before replacing a configured key shared by other models", async () => {
@@ -692,7 +768,11 @@ describe("SettingsApp", () => {
       readyState({
         models: [
           builtinModel({ keyPresent: true }),
-          builtinModel({ id: "gpt-4.1", keyPresent: true, modelName: "gpt-4.1" }),
+          builtinModel({
+            id: "gpt-4.1",
+            keyPresent: true,
+            modelName: "gpt-4.1",
+          }),
         ],
         providerKeys: [providerKey({ keyPresent: true })],
       }),
@@ -700,9 +780,12 @@ describe("SettingsApp", () => {
     postMessage.mockClear();
 
     const dialog = openAddModelDialog();
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
-      target: { value: "gpt-5.6" },
-    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.6" },
+      },
+    );
     const keyInput = within(dialog).getByLabelText("API key");
     fireEvent.focus(keyInput);
     fireEvent.change(keyInput, { target: { value: "rotated-secret" } });
@@ -712,7 +795,9 @@ describe("SettingsApp", () => {
     const confirmation = screen.getByRole("alertdialog");
     expect(within(confirmation).getByText("gpt-5.4")).toBeTruthy();
     expect(within(confirmation).getByText("gpt-4.1")).toBeTruthy();
-    fireEvent.click(within(confirmation).getByRole("button", { name: /replace shared key/i }));
+    fireEvent.click(
+      within(confirmation).getByRole("button", { name: /replace shared key/i }),
+    );
     expect(postMessage).toHaveBeenCalledTimes(1);
     expect(postMessage.mock.calls[0][0]).toMatchObject({
       data: {
@@ -721,6 +806,210 @@ describe("SettingsApp", () => {
       },
       type: "upsertModel",
     });
+  });
+
+  it("copies matching built-in capability tiers into a new relay without manual context configuration", async () => {
+    const { postMessage } = mount();
+    await emitState(
+      readyState({
+        models: [
+          builtinModel({
+            contextWindow: 400000,
+            contextWindowOptions: [400000, 1000000],
+            id: "gpt-5.6",
+            keyPresent: true,
+            maxOutputTokens: 32768,
+            modelName: "gpt-5.6",
+            supportedReasoningLevels: ["high", "xhigh"],
+          }),
+        ],
+        providerKeys: [
+          providerKey({
+            envName: "CHATANYWHERE_OPENAI_API_KEY",
+            keyPresent: true,
+          }),
+        ],
+      }),
+    );
+    postMessage.mockClear();
+
+    const dialog = openAddModelDialog();
+    fireEvent.click(
+      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /base url/i }),
+      {
+        target: { value: "https://api.chatanywhere.tech/v1" },
+      },
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "gpt-5.6" },
+      },
+    );
+
+    expect(
+      within(dialog).getByTestId("settings-builtin-capability-source")
+        .textContent,
+    ).toContain("built-in gpt-5.6");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+    expect(
+      within(dialog).getByTestId("settings-context-window-auto").textContent,
+    ).toBe("400000");
+    expect(
+      within(dialog).queryByTestId("settings-context-window-input"),
+    ).toBeNull();
+
+    fireEvent.change(
+      within(dialog).getByTestId("settings-max-output-tokens-input"),
+      {
+        target: { value: "65536" },
+      },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage.mock.calls[0][0]).toMatchObject({
+      data: {
+        model: {
+          contextWindow: 400000,
+          contextWindowOptions: [400000, 1000000],
+          id: "chatanywhere/gpt-5.6",
+          maxOutputTokens: 65536,
+          supportedReasoningLevels: ["high", "xhigh"],
+        },
+      },
+      type: "upsertModel",
+    });
+  });
+
+  it("copies a matched 1M Claude tier into a new relay without manual configuration", async () => {
+    const { postMessage } = mount();
+    await emitState(
+      readyState({
+        models: [
+          builtinModel({
+            api: "anthropic-messages",
+            apiKeyEnv: "ANTHROPIC_API_KEY",
+            contextWindow: 1_000_000,
+            contextWindowOptions: [400_000, 1_000_000],
+            id: "claude-opus-5",
+            keyPresent: true,
+            maxOutputTokens: 128_000,
+            modelName: "claude-opus-5",
+            provider: "anthropic",
+            supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+            thinkingFormat: "anthropic-adaptive",
+          }),
+        ],
+        providerKeys: [
+          providerKey({
+            envName: "FCODEX_ANTHROPIC_API_KEY",
+            keyPresent: true,
+          }),
+        ],
+      }),
+    );
+    postMessage.mockClear();
+
+    const dialog = openAddModelDialog();
+    fireEvent.click(
+      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /base url/i }),
+      {
+        target: { value: "https://fcodex.top" },
+      },
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "claude-opus-5" },
+      },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+
+    expect(
+      within(dialog).getByTestId("settings-context-window-auto").textContent,
+    ).toBe("1000000");
+    expect(
+      within(dialog).queryByTestId("settings-context-window-input"),
+    ).toBeNull();
+
+    fireEvent.change(within(dialog).getByLabelText("API key"), {
+      target: { value: "new-relay-key" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          model: expect.objectContaining({
+            api: "anthropic-messages",
+            capabilities: {
+              files: false,
+              reasoning: true,
+              tools: true,
+              vision: true,
+              webSearch: false,
+            },
+            contextWindow: 1_000_000,
+            contextWindowOptions: [400_000, 1_000_000],
+            maxOutputTokens: 128_000,
+            supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+            thinkingFormat: "anthropic-adaptive",
+          }),
+        }),
+        type: "upsertModel",
+      }),
+    );
+  });
+
+  it("uses the 400K default and never exposes a manual context field for an unmatched relay", async () => {
+    mount();
+    await emitState(
+      readyState({
+        models: [builtinModel({ keyPresent: true })],
+        providerKeys: [
+          providerKey({
+            envName: "CHATANYWHERE_OPENAI_API_KEY",
+            keyPresent: true,
+          }),
+        ],
+      }),
+    );
+
+    const dialog = openAddModelDialog();
+    fireEvent.click(
+      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /base url/i }),
+      {
+        target: { value: "https://api.chatanywhere.tech/v1" },
+      },
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      {
+        target: { value: "custom-upstream" },
+      },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+
+    expect(
+      within(dialog).queryByTestId("settings-builtin-capability-source"),
+    ).toBeNull();
+    expect(
+      within(dialog).getByTestId("settings-context-window-auto").textContent,
+    ).toBe("400000");
+    expect(
+      within(dialog).queryByTestId("settings-context-window-input"),
+    ).toBeNull();
   });
 
   it("renders warning banners pushed from the settings host", async () => {

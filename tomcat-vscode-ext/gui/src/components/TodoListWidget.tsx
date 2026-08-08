@@ -21,7 +21,7 @@ function statusClass(status: WebviewTodo["status"]): string {
   return `tc-todo-widget__status--${status.replace("_", "-")}`;
 }
 
-function collapsedTitle(progress: ReturnType<typeof useActiveTodoProgress>): string {
+function collapsedTitle(progress: NonNullable<ReturnType<typeof useActiveTodoProgress>>): string {
   if (progress.isComplete || !progress.activeTodo) {
     return `Todos (${progress.current}/${progress.total})`;
   }

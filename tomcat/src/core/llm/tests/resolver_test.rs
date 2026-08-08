@@ -9,6 +9,14 @@ use crate::core::llm::{
     SharedModelCatalog,
 };
 use crate::infra::config::{AppConfig, ContextConfig};
+use crate::{ModelPrefsStore, ThinkingLevel};
+
+fn model_prefs(path: &std::path::Path) -> Arc<ModelPrefsStore> {
+    Arc::new(
+        ModelPrefsStore::load(path.join("model-thinking.json"), ThinkingLevel::Medium)
+            .expect("model preferences"),
+    )
+}
 
 fn limit_test_entry(
     api: &str,
@@ -24,7 +32,9 @@ fn limit_test_entry(
         base_url: None,
         capabilities: Capabilities::default(),
         context_window,
+        context_window_options: Vec::new(),
         max_output_tokens,
+        description: None,
         thinking_format: None,
         supported_reasoning_levels: Vec::new(),
     }
@@ -148,13 +158,90 @@ fn per_request_output_limit_clamps_explicit_requests_without_forcing_openai_defa
 }
 
 #[test]
+fn selected_context_tier_changes_effective_input_budget_and_invalid_choice_falls_back() {
+    let mut entry = limit_test_entry("openai-responses", Some(400_000), Some(64_000));
+    entry.context_window_options = vec![400_000, 1_000_000];
+
+    let selected = EffectiveModelLimits::resolve_with_context_window(
+        &entry,
+        &ContextConfig::default(),
+        Some(1_000_000),
+    )
+    .expect("selected context tier resolves");
+    assert_eq!(selected.context_window, 1_000_000);
+    assert_eq!(selected.input_budget_tokens, 936_000);
+
+    let invalid = EffectiveModelLimits::resolve_with_context_window(
+        &entry,
+        &ContextConfig::default(),
+        Some(123_456),
+    )
+    .expect("the resolver itself keeps byte-compatible fallback behavior");
+    assert_eq!(invalid.context_window, 400_000);
+}
+
+#[test]
+fn no_selected_prefs_keep_limits_byte_identical() {
+    let entry = limit_test_entry("openai-responses", Some(400_000), Some(64_000));
+    let config = ContextConfig::default();
+    let legacy = EffectiveModelLimits::resolve(&entry, &config).expect("legacy limits");
+    let no_store = EffectiveModelLimits::resolve_with_context_window(&entry, &config, None)
+        .expect("no-store limits");
+    assert_eq!(no_store, legacy);
+}
+
+#[test]
+#[serial(env_lock)]
+fn resolver_applies_persisted_context_choice_to_effective_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "tiered-model"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com"
+context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 64000
+"#,
+    )
+    .unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "tiered-model".to_string();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let prefs = model_prefs(dir.path());
+    prefs
+        .set_context_window("tiered-model", Some(1_000_000))
+        .unwrap();
+    let resolver = DefaultLlmResolver::new(cfg, catalog, prefs);
+
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "stub");
+    }
+
+    let resolved = resolver
+        .resolve(LlmScene::Main, None)
+        .expect("resolve selected tier");
+    assert_eq!(resolved.limits.context_window, 1_000_000);
+    assert_eq!(resolved.limits.input_budget_tokens, 936_000);
+
+    unsafe {
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+}
+
+#[test]
 #[serial(env_lock)]
 fn scene_fallback_to_main() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("OPENAI_API_KEY", "stub");
@@ -178,7 +265,7 @@ fn override_priority() {
     let path = dir.path().join("models.toml");
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("DEEPSEEK_API_KEY", "stub");
@@ -219,7 +306,7 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("MIMO_API_KEY", "tp-stub");
@@ -265,7 +352,7 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("RELAY_API_KEY", "stub");
@@ -314,7 +401,7 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
     let mut cfg = AppConfig::default();
     cfg.llm.thinking.format = Some("deepseek".to_string());
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("RELAY_API_KEY", "stub");
@@ -356,7 +443,7 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
     .unwrap();
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("OPENAI_API_KEY", "stub");
@@ -396,7 +483,7 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
     .unwrap();
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("OPENAI_API_KEY", "stub");
@@ -478,7 +565,8 @@ api_key_env = "OPENAI_API_KEY"
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
 
     let shared = SharedModelCatalog::load(&cfg).expect("load shared catalog");
-    let resolver = DefaultLlmResolver::new(cfg.clone(), shared.clone());
+    let resolver =
+        DefaultLlmResolver::new(cfg.clone(), shared.clone(), model_prefs(work_dir.path()));
     assert!(
         resolver
             .resolve(LlmScene::Main, Some("custom-after-reload"))
@@ -525,7 +613,7 @@ fn compaction_falls_back_to_default_model_when_selected_provider_key_is_missing(
     cfg.llm.default_model = "deepseek-v4-pro".to_string();
     cfg.context.compaction_model = "gpt-5.4".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("DEEPSEEK_API_KEY", "stub");
@@ -553,7 +641,7 @@ fn compaction_keeps_original_error_when_already_on_default_model() {
     cfg.llm.default_model = "deepseek-v4-pro".to_string();
     cfg.context.compaction_model = "deepseek-v4-pro".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::remove_var("DEEPSEEK_API_KEY");
@@ -601,7 +689,7 @@ base_url = "https://fcodex.top"
     let mut cfg = AppConfig::default();
     cfg.llm.default_model = "deepseek-v4-flash".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("DEEPSEEK_API_KEY", "stub-deepseek");
@@ -637,7 +725,7 @@ fn main_scene_is_unchanged_by_compaction_fallback() {
     let mut cfg = AppConfig::default();
     cfg.context.compaction_model = "deepseek-v4-pro".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
     unsafe {
         std::env::set_var("OPENAI_API_KEY", "stub");

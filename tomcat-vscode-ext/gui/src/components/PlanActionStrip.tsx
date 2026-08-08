@@ -1,4 +1,5 @@
-import { PlanBuildModelSelect } from "./PlanBuildModelSelect";
+import { buildPickerModels } from "./buildPickerModels";
+import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
 import type { PlanFileState } from "../../../src/shared/planPreviewProtocol";
 
 /**
@@ -8,29 +9,49 @@ import type { PlanFileState } from "../../../src/shared/planPreviewProtocol";
  * it does not stick — VS Code's own editor title bar already floats.
  */
 export function PlanActionStrip({
+  availableModelDetails,
   availableModels,
   buildModel,
   canBuild,
   fileState,
   onBuild,
+  onSelectContextWindow,
+  onSelectThinkingLevel,
   onSetBuildModel,
   sessionModel,
 }: {
+  availableModelDetails?: Record<string, ModelPickerModel>;
   availableModels: string[];
   buildModel: string;
   canBuild: boolean;
   fileState: PlanFileState | null;
   onBuild(): void;
+  onSelectContextWindow(modelId: string, contextWindow: number): void;
+  onSelectThinkingLevel(modelId: string, level: string): void;
   onSetBuildModel(modelId: string): void;
   sessionModel: string;
 }) {
+  const selectedModelId = buildModel || sessionModel || null;
+  const pickerModels = buildPickerModels({
+    activeModelId: sessionModel,
+    availableModelDetails,
+    availableModels,
+    selectedModelId,
+  });
+
   return (
     <div className="tc-plan-action-strip" data-testid="plan-action-strip">
-      <PlanBuildModelSelect
-        availableModels={availableModels}
-        onChange={onSetBuildModel}
-        sessionModel={sessionModel}
-        value={buildModel}
+      <ModelPicker
+        className="tc-plan-model-picker"
+        disabled={pickerModels.length === 0}
+        label="Build model"
+        models={pickerModels}
+        onSelectContextWindow={onSelectContextWindow}
+        onSelectModel={onSetBuildModel}
+        onSelectThinkingLevel={onSelectThinkingLevel}
+        placement="below"
+        selectedModelId={selectedModelId}
+        testId="plan-build-model-select"
       />
       <button
         className="tc-button tc-plan-build-button"

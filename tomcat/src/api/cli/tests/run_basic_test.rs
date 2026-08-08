@@ -628,7 +628,9 @@ fn apply_model_choice_updates_provider_and_key_env() {
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: crate::core::llm::Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: Vec::new(),
         thinking_format: Some("deepseek".to_string()),
     };
@@ -722,7 +724,9 @@ fn apply_model_choice_skips_default_openai_base_url() {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: crate::core::llm::Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: Vec::new(),
         thinking_format: None,
     };

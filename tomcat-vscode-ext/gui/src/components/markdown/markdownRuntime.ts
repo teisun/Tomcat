@@ -101,7 +101,7 @@ function stampTokenSourceLines(
 
     if (token.type === "list") {
       stampListItemSourceLines(token.items, sourceLineMap, bodyLine);
-    } else if (token.type === "blockquote") {
+    } else if (token.type === "blockquote" && token.tokens) {
       // Blockquote child tokens omit the leading `> ` markers but preserve line
       // breaks, so their first child shares the quote's source-line origin.
       stampTokenSourceLines(token.tokens, sourceLineMap, bodyLine);

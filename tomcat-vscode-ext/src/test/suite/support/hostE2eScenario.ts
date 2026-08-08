@@ -109,9 +109,8 @@ export async function getTomcatExtensionApi(): Promise<TomcatExtensionApi> {
     );
   }
 
-  const extension = vscode.extensions.getExtension<TomcatExtensionApi>(
-    EXTENSION_ID,
-  );
+  const extension =
+    vscode.extensions.getExtension<TomcatExtensionApi>(EXTENSION_ID);
 
   assert.ok(extension, "expected Tomcat extension to be discoverable");
   const exports = await extension.activate();
@@ -132,7 +131,11 @@ async function waitForEvent(
 
 async function waitForSessionState<T>(
   api: TomcatExtensionApi,
-  predicate: (state: Awaited<ReturnType<TomcatExtensionApi["__testing"]["getSessionState"]>>) => T | undefined,
+  predicate: (
+    state: Awaited<
+      ReturnType<TomcatExtensionApi["__testing"]["getSessionState"]>
+    >,
+  ) => T | undefined,
   timeoutMs = 15_000,
 ): Promise<T> {
   const startedAt = Date.now();
@@ -144,12 +147,16 @@ async function waitForSessionState<T>(
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Timed out waiting for session state to match the expected condition");
+  throw new Error(
+    "Timed out waiting for session state to match the expected condition",
+  );
 }
 
 async function waitForWebviewState<T>(
   api: TomcatExtensionApi,
-  predicate: (state: ReturnType<TomcatExtensionApi["__testing"]["getWebviewState"]>) => T | undefined,
+  predicate: (
+    state: ReturnType<TomcatExtensionApi["__testing"]["getWebviewState"]>,
+  ) => T | undefined,
   timeoutMs = 15_000,
 ): Promise<T> {
   const startedAt = Date.now();
@@ -161,17 +168,23 @@ async function waitForWebviewState<T>(
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Timed out waiting for webview state to match the expected condition");
+  throw new Error(
+    "Timed out waiting for webview state to match the expected condition",
+  );
 }
 
 async function waitForPreparedChange(
   api: TomcatExtensionApi,
   toolCallId: string,
   predicate?: (
-    change: NonNullable<ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>>,
+    change: NonNullable<
+      ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>
+    >,
   ) => boolean,
   timeoutMs = 15_000,
-): Promise<NonNullable<ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>>> {
+): Promise<
+  NonNullable<ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>>
+> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const change = api.__testing.getPreparedChange(toolCallId);
@@ -199,13 +212,17 @@ async function waitForSettingsPanelState<T>(
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Timed out waiting for settings panel state to match the expected condition");
+  throw new Error(
+    "Timed out waiting for settings panel state to match the expected condition",
+  );
 }
 
 async function waitForSettingsPanelDom<T>(
   api: TomcatExtensionApi,
   predicate: (
-    dom: Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureSettingsDom"]>>,
+    dom: Awaited<
+      ReturnType<TomcatExtensionApi["__testing"]["captureSettingsDom"]>
+    >,
   ) => T | undefined,
   timeoutMs = 15_000,
 ): Promise<T> {
@@ -228,7 +245,9 @@ async function waitForSettingsPanelDom<T>(
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Timed out waiting for settings panel DOM to match the expected condition");
+  throw new Error(
+    "Timed out waiting for settings panel DOM to match the expected condition",
+  );
 }
 
 async function waitForVisiblePreparedDiffEditors(
@@ -240,15 +259,18 @@ async function waitForVisiblePreparedDiffEditors(
   while (Date.now() - startedAt < timeoutMs) {
     const editors = vscode.window.visibleTextEditors.filter(
       (editor) =>
-        editor.document.uri.scheme === "tomcat-diff"
-        && editor.document.uri.path.split("/").filter(Boolean)[0] === encodedToolCallId,
+        editor.document.uri.scheme === "tomcat-diff" &&
+        editor.document.uri.path.split("/").filter(Boolean)[0] ===
+          encodedToolCallId,
     );
     if (editors.length >= 2) {
       return editors;
     }
     await pause(100);
   }
-  throw new Error(`Timed out waiting for visible diff editors for ${toolCallId}`);
+  throw new Error(
+    `Timed out waiting for visible diff editors for ${toolCallId}`,
+  );
 }
 
 async function waitForWebviewBootstrapSettled(
@@ -287,7 +309,10 @@ async function claimActiveWebviewSession(
     return createFreshWebviewSession(api, `${messageId}-bootstrap`, timeoutMs);
   }
   const sessionId = bootstrapState.activeSessionId;
-  assert.ok(sessionId, "expected a bootstrapped active session before switching sessions");
+  assert.ok(
+    sessionId,
+    "expected a bootstrapped active session before switching sessions",
+  );
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { sessionId },
@@ -298,8 +323,8 @@ async function claimActiveWebviewSession(
   await waitForWebviewState(
     api,
     (state) =>
-      state.activeSessionId === sessionId
-      && state.sessionViews[sessionId]?.ownedByThisFrontend
+      state.activeSessionId === sessionId &&
+      state.sessionViews[sessionId]?.ownedByThisFrontend
         ? state
         : undefined,
     timeoutMs,
@@ -316,8 +341,9 @@ async function claimDifferentWebviewSession(
   await waitForWebviewBootstrapSettled(api);
   const candidate = api.__testing
     .getWebviewState()
-    .sessions.find((session) => session.sessionId !== currentSessionId)
-    ?.sessionId;
+    .sessions.find(
+      (session) => session.sessionId !== currentSessionId,
+    )?.sessionId;
   if (candidate) {
     await api.__testing.sendWebviewIntent(
       buildWebviewIntent({
@@ -329,8 +355,8 @@ async function claimDifferentWebviewSession(
     await waitForWebviewState(
       api,
       (state) =>
-        state.activeSessionId === candidate
-        && state.sessionViews[candidate]?.ownedByThisFrontend
+        state.activeSessionId === candidate &&
+        state.sessionViews[candidate]?.ownedByThisFrontend
           ? state
           : undefined,
       timeoutMs,
@@ -338,7 +364,11 @@ async function claimDifferentWebviewSession(
     return candidate;
   }
 
-  const createdSessionId = await createFreshWebviewSession(api, messageId, timeoutMs);
+  const createdSessionId = await createFreshWebviewSession(
+    api,
+    messageId,
+    timeoutMs,
+  );
   assert.notEqual(createdSessionId, currentSessionId);
   return createdSessionId;
 }
@@ -350,7 +380,9 @@ async function createFreshWebviewSession(
 ): Promise<string> {
   await waitForWebviewBootstrapSettled(api);
   const knownSessionIds = new Set(
-    api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
+    api.__testing
+      .getWebviewState()
+      .sessions.map((session) => session.sessionId),
   );
   const sessionId = await api.__testing.createFreshWebviewSession(null);
   assert.ok(
@@ -360,8 +392,8 @@ async function createFreshWebviewSession(
   await waitForWebviewState(
     api,
     (state) =>
-      state.activeSessionId === sessionId
-      && state.sessionViews[sessionId]?.ownedByThisFrontend
+      state.activeSessionId === sessionId &&
+      state.sessionViews[sessionId]?.ownedByThisFrontend
         ? state
         : undefined,
     timeoutMs,
@@ -382,7 +414,9 @@ async function createDraftForkWebviewSession(
 ): Promise<string> {
   await waitForWebviewBootstrapSettled(api);
   const knownSessionIds = new Set(
-    api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
+    api.__testing
+      .getWebviewState()
+      .sessions.map((session) => session.sessionId),
   );
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -404,8 +438,8 @@ async function createDraftForkWebviewSession(
   await waitForWebviewState(
     api,
     (state) =>
-      state.activeSessionId === sessionId
-      && state.sessionViews[sessionId]?.ownedByThisFrontend
+      state.activeSessionId === sessionId &&
+      state.sessionViews[sessionId]?.ownedByThisFrontend
         ? state
         : undefined,
     timeoutMs,
@@ -415,7 +449,9 @@ async function createDraftForkWebviewSession(
 
 async function waitForWebviewDomSnapshot<T>(
   api: TomcatExtensionApi,
-  predicate: Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>> extends infer Snapshot
+  predicate: Awaited<
+    ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>
+  > extends infer Snapshot
     ? (snapshot: Snapshot) => T | undefined
     : never,
   timeoutMs = 15_000,
@@ -537,14 +573,24 @@ function stripTerminalNewline(value: string): string {
 }
 
 function assertPreparedChangeMatches(
-  change: NonNullable<ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>>,
+  change: NonNullable<
+    ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>
+  >,
   displayPath: string,
   expectedBefore: string,
   expectedAfter: string,
 ): void {
   assert.equal(change.displayPath, displayPath);
-  assert.notEqual(change.originalContent.length, 0, "expected reconstructed original content");
-  assert.notEqual(change.proposedContent.length, 0, "expected reconstructed proposed content");
+  assert.notEqual(
+    change.originalContent.length,
+    0,
+    "expected reconstructed original content",
+  );
+  assert.notEqual(
+    change.proposedContent.length,
+    0,
+    "expected reconstructed proposed content",
+  );
   assert.equal(stripTerminalNewline(change.originalContent), expectedBefore);
   assert.equal(stripTerminalNewline(change.proposedContent), expectedAfter);
 }
@@ -591,7 +637,9 @@ export async function assertWebviewPlanModeSwitchFlow(
     api,
     (state) => {
       const session = state.sessionViews[sessionId];
-      return session?.agentMode === "chat" && session.activePlan?.state === "executing" && session.busy
+      return session?.agentMode === "chat" &&
+        session.activePlan?.state === "executing" &&
+        session.busy
         ? session
         : undefined;
     },
@@ -618,7 +666,9 @@ export async function assertWebviewPlanModeSwitchFlow(
     api,
     (state) => {
       const session = state.sessionViews[sessionId];
-      return session?.agentMode === "chat" && session.activePlan?.state === "pending" && !session.busy
+      return session?.agentMode === "chat" &&
+        session.activePlan?.state === "pending" &&
+        !session.busy
         ? session
         : undefined;
     },
@@ -645,7 +695,7 @@ export async function assertWebviewPlanModeSwitchFlow(
   );
   assert.ok(
     !resumed.timelineKinds.includes("error"),
-    "Resume 回到 Chat 且绑定 executing 计划后不应出现 error 气泡/错误消息"
+    "Resume 回到 Chat 且绑定 executing 计划后不应出现 error 气泡/错误消息",
   );
   await waitForEvent(api, { sessionId, type: "agent_end" });
 }
@@ -689,7 +739,8 @@ export async function assertWebviewCompletedPlanStaysInChat(
     api,
     (state) => {
       const session = state.sessionViews[sessionId];
-      return session?.agentMode === "chat" && session.activePlan?.state === "completed"
+      return session?.agentMode === "chat" &&
+        session.activePlan?.state === "completed"
         ? session
         : undefined;
     },
@@ -752,14 +803,14 @@ async function assertSettingsKeyFieldsAligned(
   const topDelta = Math.abs(keySlot.top - apiKey.top);
   assert.ok(
     topDelta <= 1,
-    `expected key-slot and API-key inputs to align within 1px, got ${topDelta.toFixed(2)}px `
-      + `(keySlot.top=${keySlot.top.toFixed(2)}, apiKey.top=${apiKey.top.toFixed(2)})`,
+    `expected key-slot and API-key inputs to align within 1px, got ${topDelta.toFixed(2)}px ` +
+      `(keySlot.top=${keySlot.top.toFixed(2)}, apiKey.top=${apiKey.top.toFixed(2)})`,
   );
   const heightDelta = Math.abs(keySlot.height - apiKey.height);
   assert.ok(
     heightDelta <= 1,
-    `expected key-slot and API-key controls to share height within 1px, got ${heightDelta.toFixed(2)}px `
-      + `(keySlot.height=${keySlot.height.toFixed(2)}, apiKey.height=${apiKey.height.toFixed(2)})`,
+    `expected key-slot and API-key controls to share height within 1px, got ${heightDelta.toFixed(2)}px ` +
+      `(keySlot.height=${keySlot.height.toFixed(2)}, apiKey.height=${apiKey.height.toFixed(2)})`,
   );
 
   await api.__testing.sendSettingsDomAction({
@@ -799,10 +850,10 @@ export async function assertWebviewAddModelsFlow(
   const settingsSnapshot = await waitForSettingsPanelState(
     api,
     (snapshot) =>
-      snapshot.visible
-      && snapshot.route === "models"
-      && snapshot.state.ready
-      && snapshot.webviewReady
+      snapshot.visible &&
+      snapshot.route === "models" &&
+      snapshot.state.ready &&
+      snapshot.webviewReady
         ? snapshot
         : undefined,
     20_000,
@@ -827,8 +878,9 @@ export async function assertWebviewAddModelsFlow(
   await waitForSettingsPanelDom(
     api,
     (dom) =>
-      dom.html.includes(`Extension v${settingsSnapshot.state.extensionVersion}`)
-      && dom.html.includes(`Serve v${settingsSnapshot.state.serverVersion}`)
+      dom.html.includes(
+        `Extension v${settingsSnapshot.state.extensionVersion}`,
+      ) && dom.html.includes(`Serve v${settingsSnapshot.state.serverVersion}`)
         ? dom
         : undefined,
     20_000,
@@ -850,7 +902,9 @@ export async function assertWebviewAddModelsFlow(
           return;
         }
       }
-      throw new Error("Timed out waiting for the add-model form to open in the settings panel");
+      throw new Error(
+        "Timed out waiting for the add-model form to open in the settings panel",
+      );
     };
     await openAddModelForm();
     await pause(400);
@@ -879,6 +933,7 @@ export async function assertWebviewAddModelsFlow(
             webSearch: false,
           },
           contextWindow: 16_384,
+          contextWindowOptions: [16_384, 32_768],
           id: modelId,
           modelName,
           provider: relayProvider,
@@ -904,10 +959,13 @@ export async function assertWebviewAddModelsFlow(
   const materializedModel = await waitForSettingsPanelState(
     api,
     (snapshot) => {
-      const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
+      const model = snapshot.state.models.find(
+        (candidate) => candidate.id === modelId,
+      );
       return model?.keyPresent &&
           model.thinkingFormat === "openai" &&
-          model.supportedReasoningLevels?.includes("xhigh")
+        model.supportedReasoningLevels?.includes("xhigh") &&
+        model.contextWindowOptions?.includes(32_768)
         ? model
         : undefined;
     },
@@ -917,7 +975,10 @@ export async function assertWebviewAddModelsFlow(
     materializedModel.supportedReasoningLevels?.includes("xhigh"),
     "expected the materialized relay model to expose xhigh in supportedReasoningLevels",
   );
-
+  assert.ok(
+    materializedModel.contextWindowOptions?.includes(32_768),
+    "expected the materialized relay model to expose the second Context tier",
+  );
   await api.__testing.sendSettingsIntent(
     buildSettingsIntent({
       data: {
@@ -933,6 +994,7 @@ export async function assertWebviewAddModelsFlow(
             webSearch: false,
           },
           contextWindow: 16_384,
+          contextWindowOptions: [16_384, 32_768],
           id: modelId,
           modelName,
           provider: relayProvider,
@@ -947,16 +1009,22 @@ export async function assertWebviewAddModelsFlow(
   const warningState = await waitForSettingsPanelState(
     api,
     (snapshot) => {
-      const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
+      const model = snapshot.state.models.find(
+        (candidate) => candidate.id === modelId,
+      );
       return model?.thinkingFormat === "anthropic" &&
-          snapshot.state.warnings?.some((warning) => warning.includes("reasoning effort"))
+        snapshot.state.warnings?.some((warning) =>
+          warning.includes("reasoning effort"),
+        )
         ? snapshot
         : undefined;
     },
     20_000,
   );
   assert.ok(
-    warningState.state.warnings?.some((warning) => warning.includes("reasoning effort")),
+    warningState.state.warnings?.some((warning) =>
+      warning.includes("reasoning effort"),
+    ),
     "expected mismatched anthropic thinking format to surface a reasoning effort warning",
   );
 
@@ -975,6 +1043,7 @@ export async function assertWebviewAddModelsFlow(
             webSearch: false,
           },
           contextWindow: 16_384,
+          contextWindowOptions: [16_384, 32_768],
           id: modelId,
           modelName,
           provider: relayProvider,
@@ -989,7 +1058,9 @@ export async function assertWebviewAddModelsFlow(
   await waitForSettingsPanelState(
     api,
     (snapshot) => {
-      const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
+      const model = snapshot.state.models.find(
+        (candidate) => candidate.id === modelId,
+      );
       return model?.thinkingFormat === "openai" &&
           (!snapshot.state.warnings || snapshot.state.warnings.length === 0)
         ? model
@@ -1002,12 +1073,14 @@ export async function assertWebviewAddModelsFlow(
     api,
     (state) =>
       state.availableModels.includes(modelId) &&
-        state.availableModelReasoningLevels?.[modelId]?.includes("xhigh")
+      state.availableModelReasoningLevels?.[modelId]?.includes("xhigh") &&
+      state.availableModelDetails?.[modelId]?.contextWindowOptions?.includes(
+        32_768,
+      )
         ? state
         : undefined,
     20_000,
   );
-
   await api.__testing.sendWebviewDomAction({
     kind: "clickTestId",
     testId: "model-select",
@@ -1023,9 +1096,14 @@ export async function assertWebviewAddModelsFlow(
     10_000,
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual("model-dropdown-open", "window", "Extension Development Host");
+    captureTranscriptVisual(
+      "model-dropdown-open",
+      "window",
+      "Extension Development Host",
+    );
   }
-  const modelSelectTop = dropdown.composerControlMetrics["model-select"]?.top ?? null;
+  const modelSelectTop =
+    dropdown.composerControlMetrics["model-select"]?.top ?? null;
   assert.ok(
     dropdown.modelDropdownFullyVisible,
     `expected the model dropdown to be fully visible, got top=${dropdown.modelDropdownTop}, bottom=${dropdown.modelDropdownBottom}, left=${dropdown.modelDropdownLeft}, right=${dropdown.modelDropdownRight}, height=${dropdown.modelDropdownHeight}, triggerTop=${modelSelectTop}`,
@@ -1055,40 +1133,89 @@ export async function assertWebviewAddModelsFlow(
   await waitForSessionState(
     api,
     (state) =>
-      state.sessionId === sessionId && state.model === modelId ? state : undefined,
+      state.sessionId === sessionId && state.model === modelId
+        ? state
+        : undefined,
     20_000,
   );
-  await api.__testing.sendWebviewDomAction({
-    kind: "clickTestId",
-    testId: "model-select",
-  });
+  const editTestId = `model-edit-${modelId}`;
+  const beforeOpeningConfig = await api.__testing.captureWebviewDom();
+  if (!beforeOpeningConfig.html.includes(`data-testid="${editTestId}"`)) {
+    await api.__testing.sendWebviewDomAction({
+      kind: "clickTestId",
+      testId: "model-select",
+    });
+  }
   await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.html.includes('data-testid="model-dropdown"')
-        ? undefined
-        : snapshot,
-    10_000,
-  );
-
-  await api.__testing.sendWebviewDomAction({
-    kind: "clickTestId",
-    testId: "thinking-level-select",
-  });
-  await waitForWebviewDomSnapshot(
-    api,
-    (snapshot) =>
-      snapshot.html.includes('data-testid="thinking-level-dropdown"') &&
-        snapshot.html.includes("Xhigh")
+      snapshot.html.includes('data-testid="model-dropdown"') &&
+      snapshot.html.includes(`data-testid="${editTestId}"`)
         ? snapshot
         : undefined,
     10_000,
   );
+  // Edit remains mounted while its row is inactive so the checkmark can swap
+  // without layout jitter. Focus it here to exercise the same visible action
+  // keyboard users receive after focusing a model row.
   await api.__testing.sendWebviewDomAction({
-    index: 3,
-    kind: "clickTestId",
-    testId: "thinking-level-option",
+    kind: "focusTestId",
+    testId: editTestId,
   });
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: editTestId,
+  });
+  const configPopover = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.html.includes('data-testid="thinking-level-dropdown"')
+        ? snapshot
+        : undefined,
+    10_000,
+  );
+  assert.ok(
+    configPopover.html.includes("Xhigh"),
+    "expected the Edit popover to show the resolved Xhigh Effort tier",
+  );
+  assert.ok(
+    configPopover.html.includes("32.8K"),
+    "expected the Edit popover to show the second Context tier",
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    captureTranscriptVisual(
+      "model-config-open",
+      "window",
+      "Extension Development Host",
+    );
+  }
+  await api.__testing.sendWebviewDomAction({
+    index: 1,
+    kind: "clickTestId",
+    testId: "context-window-option",
+  });
+  await waitForWebviewState(
+    api,
+    (state) =>
+      state.availableModelDetails?.[modelId]?.selectedContextWindow === 32_768
+        ? state
+        : undefined,
+    20_000,
+  );
+  // The picker component tests exercise the Xhigh button interaction itself.
+  // This host test owns the webview-to-serve route and state refresh, avoiding
+  // a brittle test-driver index across dynamically supplied effort tiers.
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        level: "xhigh",
+        modelId,
+        sessionId,
+      },
+      messageId: "webview-set-added-model-xhigh",
+      type: "setThinkingLevel",
+    }),
+  );
   await waitForSessionState(
     api,
     (state) =>
@@ -1099,15 +1226,19 @@ export async function assertWebviewAddModelsFlow(
         : undefined,
     20_000,
   );
-  await waitForWebviewDomSnapshot(
+  const selectedLabel = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.html.includes('data-testid="thinking-level-dropdown"')
-        ? undefined
-        : snapshot,
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes(`${modelId} Xhigh`)
+        ? snapshot
+        : undefined,
     10_000,
   );
-
+  assert.ok(
+    selectedLabel.html.includes(`${modelId} Xhigh`),
+    "expected the model trigger to show the selected model and reasoning tier",
+  );
   api.__testing.clearObservedEvents();
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -1128,6 +1259,35 @@ export async function assertWebviewAddModelsFlow(
     sessionId,
     type: "agent_idle",
   });
+  await api.__testing.restartServe();
+  await api.__testing.waitForWebviewReady();
+  const restartedState = api.__testing.getWebviewState();
+  if (restartedState.activeSessionId) {
+    await api.__testing.sendWebviewIntent(
+      buildWebviewIntent({
+        data: { sessionId: restartedState.activeSessionId },
+        messageId: "webview-refresh-model-prefs-after-serve-restart",
+        type: "switchSession",
+      }),
+    );
+  }
+  try {
+    await waitForWebviewState(
+      api,
+      (state) =>
+        state.availableModelDetails?.[modelId]?.selectedContextWindow ===
+          32_768 &&
+        state.availableModelDetails?.[modelId]?.selectedReasoningLevel ===
+          "xhigh"
+          ? state
+          : undefined,
+      30_000,
+    );
+  } catch (error) {
+    throw new Error(
+      `${String(error)}: ${JSON.stringify(api.__testing.getWebviewState().availableModelDetails?.[modelId])}`,
+    );
+  }
 }
 
 export async function assertWebviewMaxReasoningAndLoadingGapFlow(
@@ -1135,7 +1295,10 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
 ): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
-  const sessionId = await createFreshWebviewSession(api, "webview-max-loading-gap-session");
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-max-loading-gap-session",
+  );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -1150,13 +1313,32 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
   await waitForSessionState(
     api,
     (state) =>
-      state.sessionId === sessionId && state.model === "claude-4.6-sonnet" ? state : undefined,
+      state.sessionId === sessionId && state.model === "claude-4.6-sonnet"
+        ? state
+        : undefined,
     20_000,
   );
 
+  const editTestId = "model-edit-claude-4.6-sonnet";
+  const beforeOpeningModelPicker = await api.__testing.captureWebviewDom();
+  if (!beforeOpeningModelPicker.html.includes(`data-testid="${editTestId}"`)) {
+    await api.__testing.sendWebviewDomAction({
+      kind: "clickTestId",
+      testId: "model-select",
+    });
+  }
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes(`data-testid="${editTestId}"`)
+        ? snapshot
+        : undefined,
+    10_000,
+  );
   await api.__testing.sendWebviewDomAction({
     kind: "clickTestId",
-    testId: "thinking-level-select",
+    testId: editTestId,
   });
   const dropdown = await waitForWebviewDomSnapshot(
     api,
@@ -1233,7 +1415,11 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
         : undefined,
     15_000,
   );
-  assert.equal(progressSnapshot.progressRow, true, "expected a pre-stream inline progress row");
+  assert.equal(
+    progressSnapshot.progressRow,
+    true,
+    "expected a pre-stream inline progress row",
+  );
   assert.ok(
     progressSnapshot.html.includes('data-testid="progress-row-dots"'),
     "expected the pre-stream gap to render a dots-only progress row",
@@ -1307,12 +1493,12 @@ export async function assertWebviewStreamingFlow(
     type: "message_update",
   });
   await waitForEvent(api, { type: "agent_idle" });
-  const snapshot = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.messageTexts.some((text) => /hello from fake tomcat/i.test(text))
-      && candidate.html.includes('data-testid="send-button"')
-      && !candidate.html.includes('data-testid="stop-button"')
+  const snapshot = await waitForWebviewDomSnapshot(api, (candidate) =>
+    candidate.messageTexts.some((text) =>
+      /hello from fake tomcat/i.test(text),
+    ) &&
+    candidate.html.includes('data-testid="send-button"') &&
+    !candidate.html.includes('data-testid="stop-button"')
         ? candidate
         : undefined,
   );
@@ -1321,12 +1507,15 @@ export async function assertWebviewStreamingFlow(
     "expected webview DOM to render the streamed assistant text",
   );
   assert.ok(
-    snapshot.html.includes('data-testid="send-button"')
-      && !snapshot.html.includes('data-testid="stop-button"'),
+    snapshot.html.includes('data-testid="send-button"') &&
+      !snapshot.html.includes('data-testid="stop-button"'),
     "expected normal completion to return the webview composer to send mode",
   );
   const sessionId = snapshot.activeSessionId;
-  assert.ok(sessionId, "expected an active session after the streaming flow completes");
+  assert.ok(
+    sessionId,
+    "expected an active session after the streaming flow completes",
+  );
 
   await api.__testing.injectServeEvent({
     args: { command: "npm test -- --watch=false" },
@@ -1397,7 +1586,9 @@ export async function assertWebviewStreamingFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
-      candidate.toolTitles.some((title) => title.includes("Check git status")) &&
+      candidate.toolTitles.some((title) =>
+        title.includes("Check git status"),
+      ) &&
       candidate.html.includes("git status &amp;&amp; echo done")
         ? candidate
         : undefined,
@@ -1410,7 +1601,9 @@ export async function assertWebviewStreamingFlow(
     `expected the bash header to show the utility purpose + command tags, got ${JSON.stringify(summarySnapshot.toolTitles)}`,
   );
   assert.ok(
-    !summarySnapshot.toolTitles.some((title) => title.includes("git status && echo done")),
+    !summarySnapshot.toolTitles.some((title) =>
+      title.includes("git status && echo done"),
+    ),
     "expected the full command to stay out of the bash header",
   );
 
@@ -1457,7 +1650,9 @@ export async function assertWebviewStreamingFlow(
     "expected the live context group header to shimmer while its tool is running",
   );
   assert.ok(
-    runningGroupSnapshot.groupFoldTitles.some((title) => title.includes("README.md")),
+    runningGroupSnapshot.groupFoldTitles.some((title) =>
+      title.includes("README.md"),
+    ),
     `expected the live context group title to reflect the README read, got ${JSON.stringify(runningGroupSnapshot.groupFoldTitles)}`,
   );
 
@@ -1477,7 +1672,9 @@ export async function assertWebviewStreamingFlow(
       candidate.progressRow &&
       candidate.html.includes('data-testid="progress-row-dots"') &&
       !candidate.html.includes("tc-thinking__title--shimmer") &&
-      candidate.groupFoldTitles.some((title) => title.includes("Read file README.md")) &&
+      candidate.groupFoldTitles.some((title) =>
+        title.includes("Read file README.md"),
+      ) &&
       !candidate.html.includes("tc-codicon-spin") &&
       !candidate.html.includes("codicon-loading")
         ? candidate
@@ -1510,14 +1707,18 @@ export async function assertWebviewStreamingFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.progressRow &&
-      candidate.groupFoldTitles.some((title) => title.includes("Used 1 tool")) &&
+      candidate.groupFoldTitles.some((title) =>
+        title.includes("Used 1 tool"),
+      ) &&
       !candidate.html.includes("tc-thinking__title--shimmer")
         ? candidate
         : undefined,
     20_000,
   );
   assert.ok(
-    fallbackSummarySnapshot.groupFoldTitles.some((title) => title.includes("Used 1 tool")),
+    fallbackSummarySnapshot.groupFoldTitles.some((title) =>
+      title.includes("Used 1 tool"),
+    ),
     `expected the grouped transcript header to show the fallback count title first, got ${JSON.stringify(fallbackSummarySnapshot.groupFoldTitles)}`,
   );
   assert.equal(
@@ -1538,7 +1739,9 @@ export async function assertWebviewStreamingFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.progressRow &&
-      candidate.groupFoldTitles.some((title) => title.includes("Used 1 tool for checking the README")) &&
+      candidate.groupFoldTitles.some((title) =>
+        title.includes("Used 1 tool for checking the README"),
+      ) &&
       !candidate.html.includes("tc-thinking__title--shimmer")
         ? candidate
         : undefined,
@@ -1546,7 +1749,7 @@ export async function assertWebviewStreamingFlow(
   );
   assert.ok(
     upgradedSummarySnapshot.groupFoldTitles.some((title) =>
-      title.includes("Used 1 tool for checking the README")
+      title.includes("Used 1 tool for checking the README"),
     ),
     `expected turn.summary_updated to upgrade the folded transcript title, got ${JSON.stringify(upgradedSummarySnapshot.groupFoldTitles)}`,
   );
@@ -1571,7 +1774,9 @@ export async function assertWebviewStreamingFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.progressRow &&
-      candidate.messageTexts.some((text) => text.includes("The README checks out."))
+      candidate.messageTexts.some((text) =>
+        text.includes("The README checks out."),
+      )
         ? candidate
         : undefined,
     20_000,
@@ -1678,7 +1883,8 @@ export async function assertWebviewInterruptFlow(
       !snapshot.html.includes('data-testid="stop-button"') &&
       snapshot.loadingShimmerCount === 0 &&
       snapshot.messageTexts.includes("interrupt please") &&
-      snapshot.messageTexts.filter((text) => text === "Tomcat turn interrupted").length === 1
+      snapshot.messageTexts.filter((text) => text === "Tomcat turn interrupted")
+        .length === 1
         ? snapshot
         : undefined,
     20_000,
@@ -1747,8 +1953,10 @@ export async function assertWebviewAnswerCardFlow(
       const pending = session?.timeline.find(
         (
           item,
-        ): item is Extract<typeof session.timeline[number], { type: "approval" }> =>
-          item.type === "approval" && !item.resolved,
+        ): item is Extract<
+          (typeof session.timeline)[number],
+          { type: "approval" }
+        > => item.type === "approval" && !item.resolved,
       );
       return pending ? { pending } : undefined;
     },
@@ -1773,7 +1981,8 @@ export async function assertWebviewAnswerCardFlow(
   assert.notEqual(otherSessionId, sessionId);
   const switchedAway = await waitForWebviewDomSnapshot(
     api,
-    (candidate) => candidate.activeSessionId === otherSessionId ? candidate : undefined,
+    (candidate) =>
+      candidate.activeSessionId === otherSessionId ? candidate : undefined,
     20_000,
   );
   void switchedAway;
@@ -1882,8 +2091,10 @@ export async function assertWebviewQuestionDisconnectFlow(
       const pending = session?.timeline.find(
         (
           item,
-        ): item is Extract<typeof session.timeline[number], { type: "approval" }> =>
-          item.type === "approval" && !item.resolved,
+        ): item is Extract<
+          (typeof session.timeline)[number],
+          { type: "approval" }
+        > => item.type === "approval" && !item.resolved,
       );
       return pending ? { requestId: pending.request.requestId } : undefined;
     },
@@ -1904,8 +2115,12 @@ export async function assertWebviewQuestionDisconnectFlow(
     (state) => {
       const session = state.sessionViews[sessionId];
       const resumedQuestion = session?.timeline.find(
-        (item): item is Extract<typeof session.timeline[number], { type: "approval" }> =>
-          item.type === "approval" && !item.resolved,
+        (
+          item,
+        ): item is Extract<
+          (typeof session.timeline)[number],
+          { type: "approval" }
+        > => item.type === "approval" && !item.resolved,
       );
       return resumedQuestion ? { resumedQuestion, session } : undefined;
     },
@@ -1919,8 +2134,7 @@ export async function assertWebviewQuestionDisconnectFlow(
   const resumed = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId &&
-      candidate.approvalCount >= 1
+      candidate.activeSessionId === sessionId && candidate.approvalCount >= 1
         ? candidate
         : undefined,
     30_000,
@@ -1961,10 +2175,7 @@ export async function assertWebviewDiffFlow(
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
-  const sessionId = await claimActiveWebviewSession(
-    api,
-    "webview-diff-claim",
-  );
+  const sessionId = await claimActiveWebviewSession(api, "webview-diff-claim");
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -1983,8 +2194,10 @@ export async function assertWebviewDiffFlow(
         const pendingApproval = session.timeline.find(
           (
             item,
-          ): item is Extract<typeof session.timeline[number], { type: "approval" }> =>
-            item.type === "approval" && !item.resolved,
+          ): item is Extract<
+            (typeof session.timeline)[number],
+            { type: "approval" }
+          > => item.type === "approval" && !item.resolved,
         );
         if (pendingApproval) {
           return {
@@ -2028,7 +2241,10 @@ export async function assertWebviewDiffFlow(
     "toolCallId" in toolEnd && typeof toolEnd.toolCallId === "string"
       ? toolEnd.toolCallId
       : undefined;
-  assert.ok(diffToolCallId, "expected tool_execution_end to include a toolCallId");
+  assert.ok(
+    diffToolCallId,
+    "expected tool_execution_end to include a toolCallId",
+  );
   const snapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
@@ -2062,8 +2278,8 @@ export async function assertWebviewDiffFlow(
     api,
     diffToolCallId,
     (change) =>
-      stripTerminalNewline(change.originalContent) === "before"
-      && stripTerminalNewline(change.proposedContent) === "after",
+      stripTerminalNewline(change.originalContent) === "before" &&
+      stripTerminalNewline(change.proposedContent) === "after",
   );
   assertPreparedChangeMatches(preparedChange, editFile, "before", "after");
   await waitForVisiblePreparedDiffEditors(diffToolCallId, 20_000);
@@ -2083,7 +2299,11 @@ export async function assertWebviewDiffFlow(
     // Anchor to the always-present dev-host window title (the diff editor is the
     // active full-width editor here); a diff-tab-specific title does not reliably
     // resolve to window bounds and would skip the capture.
-    captureTranscriptVisual("diff-double-pane", "window", "Extension Development Host");
+    captureTranscriptVisual(
+      "diff-double-pane",
+      "window",
+      "Extension Development Host",
+    );
     // Restore the Tomcat webview for the remainder of the flow.
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady();
@@ -2092,7 +2312,10 @@ export async function assertWebviewDiffFlow(
 
   await api.__testing.injectServeEvent({
     assistantMessageId: "assistant-read-standalone",
-    assistantMessageEvent: { delta: "Inspecting README.md", kind: "content_delta" },
+    assistantMessageEvent: {
+      delta: "Inspecting README.md",
+      kind: "content_delta",
+    },
     message: {},
     sessionId: activeSessionId,
     type: "message_update",
@@ -2124,7 +2347,10 @@ export async function assertWebviewDiffFlow(
         : undefined,
     20_000,
   );
-  assert.ok(readSnapshot.fileChipVisible, "expected a standalone read row to render a file chip");
+  assert.ok(
+    readSnapshot.fileChipVisible,
+    "expected a standalone read row to render a file chip",
+  );
 }
 
 export async function assertWebviewEditDisplayReplayFlow(
@@ -2138,7 +2364,11 @@ export async function assertWebviewEditDisplayReplayFlow(
     "webview-edit-display-replay-session",
   );
   const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
-  const fixtureDir = path.join(workspaceDir, "test-stuff", "edit-display-replay");
+  const fixtureDir = path.join(
+    workspaceDir,
+    "test-stuff",
+    "edit-display-replay",
+  );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -2159,13 +2389,13 @@ export async function assertWebviewEditDisplayReplayFlow(
     api,
     (snapshot) => {
       const diffButtons = snapshot.html.match(/View diff/gu) ?? [];
-      return snapshot.activeSessionId === sessionId
-        && snapshot.actionToolRowCount >= 3
-        && snapshot.html.includes("single.ts")
-        && snapshot.html.includes("batch-single.ts")
-        && snapshot.html.includes("Edited 2 files")
-        && snapshot.html.includes("1 applied · 1 failed")
-        && diffButtons.length >= 2
+      return snapshot.activeSessionId === sessionId &&
+        snapshot.actionToolRowCount >= 3 &&
+        snapshot.html.includes("single.ts") &&
+        snapshot.html.includes("batch-single.ts") &&
+        snapshot.html.includes("Edited 2 files") &&
+        snapshot.html.includes("1 applied · 1 failed") &&
+        diffButtons.length >= 2
         ? snapshot
         : undefined;
     },
@@ -2188,8 +2418,10 @@ export async function assertWebviewEditDisplayReplayFlow(
     api,
     "tc-edit-display-single",
     (change) =>
-      stripTerminalNewline(change.originalContent) === "export const mode = 'before';"
-      && stripTerminalNewline(change.proposedContent) === "export const mode = 'after';",
+      stripTerminalNewline(change.originalContent) ===
+        "export const mode = 'before';" &&
+      stripTerminalNewline(change.proposedContent) ===
+        "export const mode = 'after';",
   );
   assertPreparedChangeMatches(
     singlePreparedChange,
@@ -2204,13 +2436,13 @@ export async function assertWebviewEditDisplayReplayFlow(
     api,
     (snapshot) => {
       const diffButtons = snapshot.html.match(/View diff/gu) ?? [];
-      return snapshot.activeSessionId === sessionId
-        && snapshot.actionToolRowCount >= 3
-        && snapshot.html.includes("single.ts")
-        && snapshot.html.includes("batch-single.ts")
-        && snapshot.html.includes("Edited 2 files")
-        && snapshot.html.includes("1 applied · 1 failed")
-        && diffButtons.length >= 2
+      return snapshot.activeSessionId === sessionId &&
+        snapshot.actionToolRowCount >= 3 &&
+        snapshot.html.includes("single.ts") &&
+        snapshot.html.includes("batch-single.ts") &&
+        snapshot.html.includes("Edited 2 files") &&
+        snapshot.html.includes("1 applied · 1 failed") &&
+        diffButtons.length >= 2
         ? snapshot
         : undefined;
     },
@@ -2229,8 +2461,10 @@ export async function assertWebviewEditDisplayReplayFlow(
     api,
     "tc-edit-display-batch-single",
     (change) =>
-      stripTerminalNewline(change.originalContent) === "export const batch = 'before';"
-      && stripTerminalNewline(change.proposedContent) === "export const batch = 'after';",
+      stripTerminalNewline(change.originalContent) ===
+        "export const batch = 'before';" &&
+      stripTerminalNewline(change.proposedContent) ===
+        "export const batch = 'after';",
   );
   assertPreparedChangeMatches(
     batchSinglePreparedChange,
@@ -2238,7 +2472,10 @@ export async function assertWebviewEditDisplayReplayFlow(
     "export const batch = 'before';",
     "export const batch = 'after';",
   );
-  await waitForVisiblePreparedDiffEditors("tc-edit-display-batch-single", 20_000);
+  await waitForVisiblePreparedDiffEditors(
+    "tc-edit-display-batch-single",
+    20_000,
+  );
 
   await api.__testing.sendWebviewDomAction({
     index: 0,
@@ -2248,8 +2485,8 @@ export async function assertWebviewEditDisplayReplayFlow(
   const expanded = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.activeSessionId === sessionId
-      && snapshot.html.includes("export const multi = 'after';")
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes("export const multi = 'after';")
         ? snapshot
         : undefined,
     20_000,
@@ -2298,9 +2535,9 @@ export async function assertWebviewReviewProgressFlow(
   const runningPass = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.activeSessionId === sessionId
-      && snapshot.html.includes("Reviewing code...")
-      && /Round 2 · 00:0\d elapsed/u.test(snapshot.html)
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes("Reviewing code...") &&
+      /Round 2 · 00:0\d elapsed/u.test(snapshot.html)
         ? snapshot
         : undefined,
     20_000,
@@ -2322,10 +2559,10 @@ export async function assertWebviewReviewProgressFlow(
   const passed = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.activeSessionId === sessionId
-      && snapshot.html.includes("PASS")
-      && snapshot.html.includes("Review verified.")
-      && !snapshot.html.includes("Reviewing code...")
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes("PASS") &&
+      snapshot.html.includes("Review verified.") &&
+      !snapshot.html.includes("Reviewing code...")
         ? snapshot
         : undefined,
     20_000,
@@ -2350,9 +2587,9 @@ export async function assertWebviewReviewProgressFlow(
   const runningFail = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.activeSessionId === sessionId
-      && snapshot.html.includes("Reviewing code...")
-      && /Round 3 · 00:0\d elapsed/u.test(snapshot.html)
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes("Reviewing code...") &&
+      /Round 3 · 00:0\d elapsed/u.test(snapshot.html)
         ? snapshot
         : undefined,
     20_000,
@@ -2374,10 +2611,10 @@ export async function assertWebviewReviewProgressFlow(
   const failed = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.activeSessionId === sessionId
-      && snapshot.html.includes("FAIL")
-      && snapshot.html.includes("Add the missing guard before proceeding.")
-      && !snapshot.html.includes("Reviewing code...")
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes("FAIL") &&
+      snapshot.html.includes("Add the missing guard before proceeding.") &&
+      !snapshot.html.includes("Reviewing code...")
         ? snapshot
         : undefined,
     20_000,
@@ -2388,7 +2625,8 @@ export async function assertWebviewReviewProgressFlow(
 export async function assertWebviewRetryRecoveryFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
-  const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
+  const failureSummary =
+    "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
   const successText = "same session retry succeeded";
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
@@ -2416,8 +2654,8 @@ export async function assertWebviewRetryRecoveryFlow(
   const failedSnapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId
-      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+      candidate.activeSessionId === sessionId &&
+      candidate.messageTexts.some((text) => text.includes(failureSummary))
         ? candidate
         : undefined,
     20_000,
@@ -2451,8 +2689,8 @@ export async function assertWebviewRetryRecoveryFlow(
   const recoveredSnapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId
-      && candidate.messageTexts.some((text) => text.includes(successText))
+      candidate.activeSessionId === sessionId &&
+      candidate.messageTexts.some((text) => text.includes(successText))
         ? candidate
         : undefined,
     20_000,
@@ -2462,7 +2700,9 @@ export async function assertWebviewRetryRecoveryFlow(
     "expected retrying in the same session to produce a successful assistant reply",
   );
   assert.ok(
-    recoveredSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
+    recoveredSnapshot.messageTexts.some((text) =>
+      text.includes(failureSummary),
+    ),
     "a successful Retry must keep its completed failure card for audit context",
   );
   assert.ok(
@@ -2490,9 +2730,9 @@ export async function assertWebviewRetryRecoveryFlow(
   const rehydratedSnapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId
-      && candidate.messageTexts.some((text) => text.includes(successText))
-      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+      candidate.activeSessionId === sessionId &&
+      candidate.messageTexts.some((text) => text.includes(successText)) &&
+      candidate.messageTexts.some((text) => text.includes(failureSummary))
         ? candidate
         : undefined,
     20_000,
@@ -2521,7 +2761,8 @@ export async function assertWebviewRetryRecoveryFlow(
 export async function assertWebviewRecoveryRejectionFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
-  const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
+  const failureSummary =
+    "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
@@ -2577,7 +2818,8 @@ export async function assertWebviewResumeCardFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
   const failureSummary = "连接中断 · 可继续";
-  const successText = "same session Resume continued from the healed tool result";
+  const successText =
+    "same session Resume continued from the healed tool result";
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
@@ -2604,17 +2846,17 @@ export async function assertWebviewResumeCardFlow(
   const failedSnapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId
-      && candidate.messageTexts.some((text) => text.includes(failureSummary))
-      && candidate.html.includes("codicon-debug-continue")
-      && candidate.html.includes(">Resume</span>")
+      candidate.activeSessionId === sessionId &&
+      candidate.messageTexts.some((text) => text.includes(failureSummary)) &&
+      candidate.html.includes("codicon-debug-continue") &&
+      candidate.html.includes(">Resume</span>")
         ? candidate
         : undefined,
     20_000,
   );
   assert.ok(
-    failedSnapshot.html.includes("codicon-debug-continue")
-      && failedSnapshot.html.includes(">Resume</span>"),
+    failedSnapshot.html.includes("codicon-debug-continue") &&
+      failedSnapshot.html.includes(">Resume</span>"),
     "a failed turn with fully paired tool results must show Resume",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
@@ -2640,10 +2882,10 @@ export async function assertWebviewResumeCardFlow(
   const resumedSnapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId
-      && candidate.messageTexts.some((text) => text.includes(successText))
-      && candidate.messageTexts.some((text) => text.includes(failureSummary))
-      && !candidate.html.includes('data-testid="recover-error-turn"')
+      candidate.activeSessionId === sessionId &&
+      candidate.messageTexts.some((text) => text.includes(successText)) &&
+      candidate.messageTexts.some((text) => text.includes(failureSummary)) &&
+      !candidate.html.includes('data-testid="recover-error-turn"')
         ? candidate
         : undefined,
     20_000,
@@ -2667,23 +2909,34 @@ export async function assertWebviewCompactControlFlow(
 ): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
-  const sessionId = await createFreshWebviewSession(api, "webview-compact-control-session");
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-compact-control-session",
+  );
   const snapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) => {
-      const newSessionIndex = candidate.html.indexOf('data-testid="new-session-button"');
-      const compactIndex = candidate.html.indexOf('data-testid="compact-context-button"');
-      return candidate.activeSessionId === sessionId
-        && newSessionIndex >= 0
-        && compactIndex > newSessionIndex
-        && candidate.html.includes("codicon-layers")
+      const newSessionIndex = candidate.html.indexOf(
+        'data-testid="new-session-button"',
+      );
+      const compactIndex = candidate.html.indexOf(
+        'data-testid="compact-context-button"',
+      );
+      return candidate.activeSessionId === sessionId &&
+        newSessionIndex >= 0 &&
+        compactIndex > newSessionIndex &&
+        candidate.html.includes("codicon-layers")
         ? candidate
         : undefined;
     },
     20_000,
   );
-  const newSessionIndex = snapshot.html.indexOf('data-testid="new-session-button"');
-  const compactIndex = snapshot.html.indexOf('data-testid="compact-context-button"');
+  const newSessionIndex = snapshot.html.indexOf(
+    'data-testid="new-session-button"',
+  );
+  const compactIndex = snapshot.html.indexOf(
+    'data-testid="compact-context-button"',
+  );
   assert.ok(
     compactIndex > newSessionIndex,
     "the compact button must be immediately to the right of the new-session button",
@@ -2709,7 +2962,10 @@ export async function assertWebviewPersistedMessageKindFlow(
 ): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
-  const sessionId = await createFreshWebviewSession(api, "webview-message-kind-session");
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-message-kind-session",
+  );
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { sessionId, text: "message kind showcase" },
@@ -2728,12 +2984,14 @@ export async function assertWebviewPersistedMessageKindFlow(
   const snapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId
-      && candidate.html.includes("please answer in Chinese")
-      && candidate.html.includes("计划未收口，已要求继续")
-      && candidate.html.includes("Finish the remaining plan tasks before stopping.")
-      && candidate.html.includes("后台任务已结束")
-      && candidate.html.includes("Background task build-1 finished successfully.")
+      candidate.activeSessionId === sessionId &&
+      candidate.html.includes("please answer in Chinese") &&
+      candidate.html.includes("计划未收口，已要求继续") &&
+      candidate.html.includes(
+        "Finish the remaining plan tasks before stopping.",
+      ) &&
+      candidate.html.includes("后台任务已结束") &&
+      candidate.html.includes("Background task build-1 finished successfully.")
         ? candidate
         : undefined,
     20_000,
@@ -2743,8 +3001,8 @@ export async function assertWebviewPersistedMessageKindFlow(
     "Steering remains a visible user bubble after hydration",
   );
   assert.ok(
-    snapshot.html.includes("计划未收口，已要求继续")
-      && snapshot.html.includes("后台任务已结束"),
+    snapshot.html.includes("计划未收口，已要求继续") &&
+      snapshot.html.includes("后台任务已结束"),
     "Nudge and Signal must rehydrate as named system-note boundaries",
   );
   assert.ok(
@@ -2758,7 +3016,10 @@ export async function assertWebviewMultiSessionFlow(
 ): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
-  const sessionA = await createFreshWebviewSession(api, "webview-new-session-a");
+  const sessionA = await createFreshWebviewSession(
+    api,
+    "webview-new-session-a",
+  );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -2772,13 +3033,16 @@ export async function assertWebviewMultiSessionFlow(
   await setComposerInputValue(api, "draft fork survives immediate new session");
   await waitForWebviewDomSnapshot(
     api,
-    (snapshot) => snapshot.html.includes("draft fork survives immediate new session")
+    (snapshot) =>
+      snapshot.html.includes("draft fork survives immediate new session")
       ? snapshot
       : undefined,
     10_000,
   );
   const knownBeforeFork = new Set(
-    api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
+    api.__testing
+      .getWebviewState()
+      .sessions.map((session) => session.sessionId),
   );
   await api.__testing.sendWebviewDomAction({
     kind: "clickTestId",
@@ -2795,8 +3059,8 @@ export async function assertWebviewMultiSessionFlow(
   await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.activeSessionId === sessionB
-      && snapshot.html.includes("draft fork survives immediate new session")
+      snapshot.activeSessionId === sessionB &&
+      snapshot.html.includes("draft fork survives immediate new session")
         ? snapshot
         : undefined,
     20_000,
@@ -2821,7 +3085,10 @@ export async function assertWebviewMultiSessionFlow(
     sessions.length >= 2,
     "expected the webview state to track multiple sessions",
   );
-  assert.ok(sessions.includes(sessionA!), "expected session A to remain tracked");
+  assert.ok(
+    sessions.includes(sessionA!),
+    "expected session A to remain tracked",
+  );
   assert.ok(sessions.includes(sessionB!), "expected session B to be tracked");
 
   await api.__testing.sendWebviewIntent(
@@ -2834,8 +3101,8 @@ export async function assertWebviewMultiSessionFlow(
   await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.activeSessionId === sessionA
-      && snapshot.html.includes("draft fork survives immediate new session")
+      snapshot.activeSessionId === sessionA &&
+      snapshot.html.includes("draft fork survives immediate new session")
         ? snapshot
         : undefined,
     20_000,
@@ -2891,7 +3158,10 @@ export async function assertWebviewSessionSwitchRestoreFlow(
     20_000,
   );
   assert.match(initial.html, /data-testid="build-plan"/u);
-  assert.ok(!initial.disabledTestIds.includes("build-plan"), "expected Build to be enabled");
+  assert.ok(
+    !initial.disabledTestIds.includes("build-plan"),
+    "expected Build to be enabled",
+  );
   assert.equal(
     initial.composerControlMetrics["context-ratio"]?.width,
     reservedContextWidth,
@@ -2966,7 +3236,10 @@ export async function assertWebviewSessionSwitchRestoreFlow(
     20_000,
   );
   assert.match(restored.html, /data-testid="build-plan"/u);
-  assert.ok(!restored.disabledTestIds.includes("build-plan"), "expected restored Build to be enabled");
+  assert.ok(
+    !restored.disabledTestIds.includes("build-plan"),
+    "expected restored Build to be enabled",
+  );
   assert.ok(
     restored.messageTexts.some((text) => /transcript ui/i.test(text)),
     "expected session A transcript to remain visible after switching back",
@@ -3031,7 +3304,9 @@ export async function assertTranscriptSwitchBackOrder(
           item.kind === "warn" &&
           item.text === "Tomcat plan warning: rounds_exhausted",
       );
-      return thinkingBlocks.length === 1 && tools.length >= 3 && warnings.length === 1
+      return thinkingBlocks.length === 1 &&
+        tools.length >= 3 &&
+        warnings.length === 1
         ? state
         : undefined;
     },
@@ -3049,7 +3324,9 @@ export async function assertTranscriptSwitchBackOrder(
   const whileViewingB = await waitForWebviewState(
     api,
     (state) =>
-      state.activeSessionId === sessionB && state.sessionViews[sessionA]?.busy ? state : undefined,
+      state.activeSessionId === sessionB && state.sessionViews[sessionA]?.busy
+        ? state
+        : undefined,
     20_000,
   );
   assert.equal(
@@ -3070,7 +3347,12 @@ export async function assertTranscriptSwitchBackOrder(
     api,
     (state) => {
       const session = state.sessionViews[sessionA];
-      if (!session || state.activeSessionId !== sessionA || !session.busy || !session.hasMoreHistory) {
+      if (
+        !session ||
+        state.activeSessionId !== sessionA ||
+        !session.busy ||
+        !session.hasMoreHistory
+      ) {
         return undefined;
       }
       return state;
@@ -3136,17 +3418,24 @@ export async function assertTranscriptSwitchBackOrder(
     },
     20_000,
   );
-  const busyUserMessages = (busyRestoredState.sessionViews[sessionA]?.timeline ?? []).flatMap((item) =>
+  const busyUserMessages = (
+    busyRestoredState.sessionViews[sessionA]?.timeline ?? []
+  ).flatMap((item) =>
     item.type === "message" && item.kind === "user" ? [item] : [],
   );
-  assert.ok(busyUserMessages.length > 0, "expected user messages after switching back");
+  assert.ok(
+    busyUserMessages.length > 0,
+    "expected user messages after switching back",
+  );
   assert.equal(
     busyUserMessages.at(-1)?.text,
     "transcript ui switch back order",
     "expected the current prompt to remain the latest user boundary while busy",
   );
   assert.ok(
-    busyUserMessages.slice(-5).every((item) => !/^ghost prompt /u.test(item.text)),
+    busyUserMessages
+      .slice(-5)
+      .every((item) => !/^ghost prompt /u.test(item.text)),
     "expected old ghost prompts to stay out of the live tail after switching back",
   );
 
@@ -3163,7 +3452,9 @@ export async function assertTranscriptSwitchBackOrder(
   );
   const restoredTimeline = restoredState.sessionViews[sessionA]?.timeline ?? [];
   const restoredUserMessages = restoredTimeline.flatMap((item) =>
-    item.type === "message" && ("kind" in item ? item.kind === "user" : false) ? [item.text] : [],
+    item.type === "message" && ("kind" in item ? item.kind === "user" : false)
+      ? [item.text]
+      : [],
   );
   assert.equal(
     restoredUserMessages.at(-1),
@@ -3171,15 +3462,19 @@ export async function assertTranscriptSwitchBackOrder(
     "expected the current prompt to remain the latest user message after the turn settles",
   );
   assert.ok(
-    restoredUserMessages.filter((text) => /^ghost prompt /u.test(text)).length >= 5,
+    restoredUserMessages.filter((text) => /^ghost prompt /u.test(text))
+      .length >= 5,
     "expected older ghost prompts to remain loaded after switching back",
   );
 
   await new Promise((resolve) => setTimeout(resolve, 200));
   const restoredDom = await api.__testing.captureWebviewDom();
-  const domCurrentPromptIndex = restoredDom.messageTexts.lastIndexOf("transcript ui switch back order");
+  const domCurrentPromptIndex = restoredDom.messageTexts.lastIndexOf(
+    "transcript ui switch back order",
+  );
   const domGhostFirstIndex = restoredDom.messageTexts.indexOf("ghost prompt 1");
-  const domGhostLastIndex = restoredDom.messageTexts.lastIndexOf("ghost prompt 5");
+  const domGhostLastIndex =
+    restoredDom.messageTexts.lastIndexOf("ghost prompt 5");
   assert.ok(
     domCurrentPromptIndex >= 0,
     "expected the current prompt to remain visible after switching back",
@@ -3226,7 +3521,8 @@ export async function assertWebviewReloadReplayFlow(
       snapshot.ctxLabel === "Ctx 62%" &&
       snapshot.planCardCount === 1 &&
       snapshot.planCardTodoCountText === "3 todos" &&
-      snapshot.planCardTitleText === "Replay the plan review and verify history" &&
+      snapshot.planCardTitleText ===
+        "Replay the plan review and verify history" &&
       snapshot.planNoticeReplayed &&
       snapshot.planStateText === "Plan: pending"
         ? snapshot
@@ -3242,7 +3538,8 @@ export async function assertWebviewReloadReplayFlow(
       snapshot.ctxLabel === "Ctx 62%" &&
       snapshot.planCardCount === 1 &&
       snapshot.planCardTodoCountText === "3 todos" &&
-      snapshot.planCardTitleText === "Replay the plan review and verify history" &&
+      snapshot.planCardTitleText ===
+        "Replay the plan review and verify history" &&
       snapshot.planNoticeReplayed &&
       snapshot.planStateText === "Plan: pending"
         ? snapshot
@@ -3250,11 +3547,14 @@ export async function assertWebviewReloadReplayFlow(
     20_000,
   );
   assert.equal(
-    reloaded.messageTexts.filter((text) => text === "Tomcat plan review: looks good").length,
+    reloaded.messageTexts.filter(
+      (text) => text === "Tomcat plan review: looks good",
+    ).length,
     1,
   );
   assert.equal(
-    reloaded.messageTexts.filter((text) => text === "Tomcat plan verify: pass").length,
+    reloaded.messageTexts.filter((text) => text === "Tomcat plan verify: pass")
+      .length,
     1,
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
@@ -3291,7 +3591,9 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
     api,
     (snapshot) =>
       snapshot.activeSessionId === sessionId &&
-      snapshot.groupFoldTitles.some((title) => title.includes("Giant history tool group"))
+      snapshot.groupFoldTitles.some((title) =>
+        title.includes("Giant history tool group"),
+      )
         ? snapshot
         : undefined,
     20_000,
@@ -3309,7 +3611,9 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
     api,
     (snapshot) =>
       snapshot.activeSessionId === sessionId &&
-      snapshot.messageTexts.some((text) => text.includes("hello from fake tomcat")) &&
+      snapshot.messageTexts.some((text) =>
+        text.includes("hello from fake tomcat"),
+      ) &&
       snapshot.toolRowCount === 0
         ? snapshot
         : undefined,
@@ -3337,8 +3641,15 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
     5_000,
   ).catch(() => undefined);
   if (loading) {
-    assert.ok(loading.historyLoaderVisible, "expected the subtle top loader while chasing the giant group");
-    assert.equal(loading.toolRowCount, 0, "expected no partial tool rows while older pages are still loading");
+    assert.ok(
+      loading.historyLoaderVisible,
+      "expected the subtle top loader while chasing the giant group",
+    );
+    assert.equal(
+      loading.toolRowCount,
+      0,
+      "expected no partial tool rows while older pages are still loading",
+    );
   }
 
   const restored = await waitForWebviewDomSnapshot(
@@ -3346,13 +3657,17 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
     (snapshot) =>
       snapshot.activeSessionId === sessionId &&
       !snapshot.historyLoaderVisible &&
-      snapshot.groupFoldTitles.some((title) => title.includes("Giant history tool group"))
+      snapshot.groupFoldTitles.some((title) =>
+        title.includes("Giant history tool group"),
+      )
         ? snapshot
         : undefined,
     20_000,
   );
   assert.ok(
-    restored.groupFoldTitles.some((title) => title.includes("Giant history tool group")),
+    restored.groupFoldTitles.some((title) =>
+      title.includes("Giant history tool group"),
+    ),
     "expected the giant tool group header to appear once the head arrives",
   );
   assert.equal(
@@ -3386,8 +3701,12 @@ export async function assertWebviewSelectionReferenceFlow(
     "utf8",
   );
 
-  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
-  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  const document = await vscode.workspace.openTextDocument(
+    vscode.Uri.file(filePath),
+  );
+  const editor = await vscode.window.showTextDocument(document, {
+    preview: false,
+  });
   await vscode.workspace
     .getConfiguration("editor")
     .update("codeLens", true, vscode.ConfigurationTarget.Global);
@@ -3398,7 +3717,11 @@ export async function assertWebviewSelectionReferenceFlow(
   );
   await pause(1_100);
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual("selection-reference-codelens", "editor", "selection-context.ts");
+    captureTranscriptVisual(
+      "selection-reference-codelens",
+      "editor",
+      "selection-context.ts",
+    );
   }
 
   await api.__testing.executeCommand(TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND);
@@ -3406,14 +3729,16 @@ export async function assertWebviewSelectionReferenceFlow(
   const composerSnapshot = await waitForWebviewDomSnapshot(
     api,
     (snapshot) => {
-      const chipCount = (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
-      const sendDisabled = /data-testid="send-button"[^>]*disabled/u.test(snapshot.html);
-      return (
-        snapshot.activeSessionId === sessionId &&
+      const chipCount = (
+        snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []
+      ).length;
+      const sendDisabled = /data-testid="send-button"[^>]*disabled/u.test(
+        snapshot.html,
+      );
+      return snapshot.activeSessionId === sessionId &&
         chipCount === 1 &&
         snapshot.html.includes(`title="${filePath}:2-3"`) &&
         !sendDisabled
-      )
         ? snapshot
         : undefined;
     },
@@ -3424,14 +3749,22 @@ export async function assertWebviewSelectionReferenceFlow(
     "expected the composer chip label to include the selected file and lines",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual("selection-reference-composer", "sidebar", "selection-context.ts");
+    captureTranscriptVisual(
+      "selection-reference-composer",
+      "sidebar",
+      "selection-context.ts",
+    );
   }
 
   await api.__testing.sendWebviewDomAction({
     kind: "clickTestId",
     testId: "send-button",
   });
-  await api.__testing.waitForEvent({ sessionId, timeoutMs: 30_000, type: "agent_end" });
+  await api.__testing.waitForEvent({
+    sessionId,
+    timeoutMs: 30_000,
+    type: "agent_end",
+  });
 
   await api.__testing.reloadWebview();
 
@@ -3447,7 +3780,10 @@ export async function assertWebviewSelectionReferenceFlow(
       const timeline = state.sessionViews[sessionId]?.timeline ?? [];
       const userMessage = [...timeline]
         .reverse()
-        .find((item) => item.type === "message" && "kind" in item && item.kind === "user");
+        .find(
+          (item) =>
+            item.type === "message" && "kind" in item && item.kind === "user",
+        );
       const segments =
         userMessage && "segments" in userMessage
           ? (userMessage.segments as RestoredReferenceSegment[] | undefined)
@@ -3486,11 +3822,17 @@ export async function assertWebviewSelectionReferenceFlow(
     20_000,
   );
   assert.ok(
-    restoredSnapshot.messageTexts.some((text) => text.includes("selection-context.ts:2-3")),
+    restoredSnapshot.messageTexts.some((text) =>
+      text.includes("selection-context.ts:2-3"),
+    ),
     "expected the restored transcript bubble to render the selection reference label",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual("selection-reference-history", "sidebar", "selection-context.ts");
+    captureTranscriptVisual(
+      "selection-reference-history",
+      "sidebar",
+      "selection-context.ts",
+    );
   }
 }
 
@@ -3526,7 +3868,8 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
       api,
       (state) =>
         state.sessionViews[sourceSessionId]?.composerDraft?.segments.some(
-          (segment) => segment.type === "reference" && segment.path === filePath,
+          (segment) =>
+            segment.type === "reference" && segment.path === filePath,
         )
           ? state
           : undefined,
@@ -3540,8 +3883,10 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
     assert.notEqual(targetSessionId, sourceSessionId);
     const targetDraft = await waitForWebviewState(
       api,
-      (state) => state.sessionViews[targetSessionId]?.composerDraft?.segments.some(
-        (segment) => segment.type === "reference" && segment.path === filePath,
+      (state) =>
+        state.sessionViews[targetSessionId]?.composerDraft?.segments.some(
+          (segment) =>
+            segment.type === "reference" && segment.path === filePath,
       )
         ? state.sessionViews[targetSessionId].composerDraft
         : undefined,
@@ -3599,7 +3944,8 @@ export async function assertWebviewFileDropReferenceFlow(
   const draft = await waitForWebviewState(
     api,
     (state) => {
-      const segments = state.sessionViews[sessionId]?.composerDraft?.segments ?? [];
+      const segments =
+        state.sessionViews[sessionId]?.composerDraft?.segments ?? [];
       const references = segments.filter(
         (segment) => segment.type === "reference",
       );
@@ -3620,10 +3966,10 @@ export async function assertWebviewFileDropReferenceFlow(
   const rendered = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.activeSessionId === sessionId
-      && snapshot.html.includes('data-testid="composer-reference-chip"')
-      && snapshot.html.includes("drop-context.md")
-      && snapshot.html.includes("drop-context-2.md")
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="composer-reference-chip"') &&
+      snapshot.html.includes("drop-context.md") &&
+      snapshot.html.includes("drop-context-2.md")
         ? snapshot
         : undefined,
     20_000,
@@ -3647,7 +3993,10 @@ export async function assertWebviewAtMentionReferenceFlow(
   await clearComposerDraft(api, sessionId);
 
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  assert.ok(workspaceRoot, "expected a real workspace folder for @ mention E2E");
+  assert.ok(
+    workspaceRoot,
+    "expected a real workspace folder for @ mention E2E",
+  );
   const scratchDir = path.join(
     workspaceRoot,
     `tmp-at-mention-file-${Date.now().toString(36)}`,
@@ -3657,14 +4006,21 @@ export async function assertWebviewAtMentionReferenceFlow(
     await fs.mkdir(scratchDir, { recursive: true });
     const stem = `at-mention-target-${Date.now().toString(36)}`;
     const filePath = path.join(scratchDir, `${stem}.ts`);
-    await fs.writeFile(filePath, "export const atMentionTarget = true;\n", "utf8");
-    const fileReference = await resolveUriToFileReference(vscode.Uri.file(filePath));
+    await fs.writeFile(
+      filePath,
+      "export const atMentionTarget = true;\n",
+      "utf8",
+    );
+    const fileReference = await resolveUriToFileReference(
+      vscode.Uri.file(filePath),
+    );
 
     await setComposerInputValue(api, `@${stem}`);
 
     await waitForContextSearchIntent(
       api,
-      (intent) => intent.data.sessionId === sessionId && intent.data.query === stem,
+      (intent) =>
+        intent.data.sessionId === sessionId && intent.data.query === stem,
       20_000,
     );
 
@@ -3690,15 +4046,17 @@ export async function assertWebviewAtMentionReferenceFlow(
     const composerSnapshot = await waitForWebviewDomSnapshot(
       api,
       (snapshot) => {
-        const chipCount = (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
-        const sendDisabled = /data-testid="send-button"[^>]*disabled/u.test(snapshot.html);
-        return (
-          snapshot.activeSessionId === sessionId &&
+        const chipCount = (
+          snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []
+        ).length;
+        const sendDisabled = /data-testid="send-button"[^>]*disabled/u.test(
+          snapshot.html,
+        );
+        return snapshot.activeSessionId === sessionId &&
           chipCount === 1 &&
           snapshot.html.includes(`title="${fileReference.path}"`) &&
           !sendDisabled &&
           !snapshot.html.includes('data-testid="context-search-dropdown"')
-        )
           ? snapshot
           : undefined;
       },
@@ -3731,7 +4089,10 @@ export async function assertWebviewAtMentionReferenceFlow(
         const timeline = state.sessionViews[sessionId]?.timeline ?? [];
         const userMessage = [...timeline]
           .reverse()
-          .find((item) => item.type === "message" && "kind" in item && item.kind === "user");
+          .find(
+            (item) =>
+              item.type === "message" && "kind" in item && item.kind === "user",
+          );
         const segments =
           userMessage && "segments" in userMessage
             ? (userMessage.segments as RestoredReferenceSegment[] | undefined)
@@ -3772,7 +4133,9 @@ export async function assertWebviewAtMentionReferenceFlow(
       20_000,
     );
     assert.ok(
-      restoredSnapshot.messageTexts.some((text) => text.includes(fileReference.label)),
+      restoredSnapshot.messageTexts.some((text) =>
+        text.includes(fileReference.label),
+      ),
       "expected the reloaded transcript to render the @ file reference chip",
     );
   } finally {
@@ -3793,7 +4156,10 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
   await clearComposerDraft(api, sessionId);
 
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  assert.ok(workspaceRoot, "expected a real workspace folder for @ directory E2E");
+  assert.ok(
+    workspaceRoot,
+    "expected a real workspace folder for @ directory E2E",
+  );
   const scratchDir = path.join(
     workspaceRoot,
     `tmp-at-mention-scratch-${Date.now().toString(36)}`,
@@ -3804,12 +4170,16 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
   const dirPath = path.join(scratchDir, dirStem);
   await fs.mkdir(dirPath, { recursive: true });
   await fs.writeFile(path.join(dirPath, "nested.txt"), "nested\n", "utf8");
-  const dirReference = await resolveUriToFileReference(vscode.Uri.file(dirPath));
+  const dirReference = await resolveUriToFileReference(
+    vscode.Uri.file(dirPath),
+  );
 
   await setComposerInputValue(api, `@${dirReference.label}`);
   await waitForContextSearchIntent(
     api,
-    (intent) => intent.data.sessionId === sessionId && intent.data.query === dirReference.label,
+    (intent) =>
+      intent.data.sessionId === sessionId &&
+      intent.data.query === dirReference.label,
     20_000,
   );
 
@@ -3823,7 +4193,9 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
         : undefined,
     20_000,
   ).catch((error: Error) => {
-    throw new Error(`ATMENTION directory dropdown stage failed: ${error.message}`);
+    throw new Error(
+      `ATMENTION directory dropdown stage failed: ${error.message}`,
+    );
   });
 
   await api.__testing.sendWebviewDomAction({
@@ -3835,13 +4207,13 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
   const directorySnapshot = await waitForWebviewDomSnapshot(
     api,
     (snapshot) => {
-      const chipCount = (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
-      return (
-        snapshot.activeSessionId === sessionId &&
+      const chipCount = (
+        snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []
+      ).length;
+      return snapshot.activeSessionId === sessionId &&
         chipCount === 1 &&
         snapshot.html.includes(`title="${dirReference.path}"`) &&
         snapshot.html.includes(dirReference.label)
-      )
         ? snapshot
         : undefined;
     },
@@ -3946,9 +4318,9 @@ export async function assertWebviewPickContextFlow(
   const baseline = api.__testing.getWebviewState().sessionViews[sessionId];
   assert.ok(baseline, "expected the active session to have a webview state");
   const baselineAttachmentCount = baseline.pendingAttachments.length;
-  const baselineReferenceCount = (baseline.composerDraft?.segments ?? []).filter(
-    (segment) => segment.type === "reference",
-  ).length;
+  const baselineReferenceCount = (
+    baseline.composerDraft?.segments ?? []
+  ).filter((segment) => segment.type === "reference").length;
 
   api.__testing.setOpenDialogHandler(() => [
     vscode.Uri.file(imagePath),
@@ -3969,7 +4341,10 @@ export async function assertWebviewPickContextFlow(
       api,
       (state) => {
         const view = state.sessionViews[sessionId];
-        if (!view || view.pendingAttachments.length !== baselineAttachmentCount + 1) {
+        if (
+          !view ||
+          view.pendingAttachments.length !== baselineAttachmentCount + 1
+        ) {
           return undefined;
         }
         const references = (view.composerDraft?.segments ?? []).filter(
@@ -4003,17 +4378,20 @@ export async function assertWebviewPickContextFlow(
       "expected picker classification to retain the image kind",
     );
     assert.deepEqual(
-      settled.references.map((segment) => segment.label).slice(-2).sort(),
+      settled.references
+        .map((segment) => segment.label)
+        .slice(-2)
+        .sort(),
       ["pick-context-folder/", "pick-context.ts"],
       "expected the picked code file and folder to become references",
     );
     const rendered = await waitForWebviewDomSnapshot(
       api,
       (snapshot) =>
-        snapshot.activeSessionId === sessionId
-        && snapshot.html.includes('data-testid="composer-reference-chip"')
-        && snapshot.html.includes("pick-context.ts")
-        && snapshot.html.includes("pick-context-folder/")
+        snapshot.activeSessionId === sessionId &&
+        snapshot.html.includes('data-testid="composer-reference-chip"') &&
+        snapshot.html.includes("pick-context.ts") &&
+        snapshot.html.includes("pick-context-folder/")
           ? snapshot
           : undefined,
       20_000,
@@ -4052,15 +4430,20 @@ export async function assertWebviewSessionTitleFlow(
   const plainTitle = await waitForWebviewState(
     api,
     (state) =>
-      state.sessions.find((session) => session.sessionId === plainSessionId)?.title === "hello"
+      state.sessions.find((session) => session.sessionId === plainSessionId)
+        ?.title === "hello"
         ? "hello"
         : undefined,
     20_000,
   );
   assert.equal(plainTitle, "hello");
   assert.ok(
-    api.__testing.getObservedEvents().some(
-      (event) => event.sessionId === plainSessionId && event.type === "session.title_updated",
+    api.__testing
+      .getObservedEvents()
+      .some(
+        (event) =>
+          event.sessionId === plainSessionId &&
+          event.type === "session.title_updated",
     ),
     "expected a session.title_updated event for the pure-text first message",
   );
@@ -4096,15 +4479,21 @@ export async function assertWebviewSessionTitleFlow(
   const referencedTitle = await waitForWebviewState(
     api,
     (state) => {
-      const title = state.sessions.find((session) => session.sessionId === referencedSessionId)?.title;
+      const title = state.sessions.find(
+        (session) => session.sessionId === referencedSessionId,
+      )?.title;
       return title && title !== "New session" ? title : undefined;
     },
     20_000,
   );
   assert.equal(referencedTitle, "before after");
   assert.ok(
-    api.__testing.getObservedEvents().some(
-      (event) => event.sessionId === referencedSessionId && event.type === "session.title_updated",
+    api.__testing
+      .getObservedEvents()
+      .some(
+        (event) =>
+          event.sessionId === referencedSessionId &&
+          event.type === "session.title_updated",
     ),
     "expected a session.title_updated event for the reference-bearing first message",
   );
@@ -4127,7 +4516,8 @@ function resolveCaptureRect(
     return bounds;
   }
 
-  const topInset = region === "editor"
+  const topInset =
+    region === "editor"
     ? Math.min(52, Math.max(18, Math.round(bounds.height * 0.03)))
     : Math.min(86, Math.max(62, Math.round(bounds.height * 0.09)));
   const bottomInset = 28;
@@ -4165,15 +4555,11 @@ function tryResolveVsCodeWindowWithTitle(
     if (titleHint && titleHint.trim().length > 0) {
       args.push("--title", titleHint);
     }
-    const raw = execFileSync(
-      "swift",
-      args,
-      {
+    const raw = execFileSync("swift", args, {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
-      },
-    ).trim();
-    return raw ? JSON.parse(raw) as MacWindowInfo : null;
+    }).trim();
+    return raw ? (JSON.parse(raw) as MacWindowInfo) : null;
   } catch {
     return null;
   }
@@ -4188,6 +4574,7 @@ function captureTranscriptVisual(
     | "file-drop-reference"
     | "file-drop-reference-hover"
     | "file-chip"
+    | "model-config-open"
     | "model-dropdown-open"
     | "progress"
     | "reload-replay"
@@ -4215,8 +4602,12 @@ function captureTranscriptVisual(
       timeout: 2_000,
     });
     execSync("sleep 0.35");
-    const targetPath = transcriptVisualArtifactPath(`tomcat-vsix-visual-${name}.png`);
-    const windowInfo = tryResolveVsCodeWindowWithTitle(appName, titleHint) ?? tryResolveVsCodeWindow(appName);
+    const targetPath = transcriptVisualArtifactPath(
+      `tomcat-vsix-visual-${name}.png`,
+    );
+    const windowInfo =
+      tryResolveVsCodeWindowWithTitle(appName, titleHint) ??
+      tryResolveVsCodeWindow(appName);
     if (windowInfo) {
       const rect = resolveCaptureRect(windowInfo.bounds, region);
       execFileSync(
@@ -4234,8 +4625,12 @@ function captureTranscriptVisual(
     execFileSync("screencapture", ["-x", targetPath], {
       stdio: "ignore",
     });
-  } catch {
-    /* screencapture unavailable in this environment */
+  } catch (error) {
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Visual capture requested but failed: ${detail}`);
+    }
+    /* Visual capture is optional unless the dedicated acceptance flag is set. */
   }
 }
 
@@ -4259,7 +4654,11 @@ export async function assertTranscriptUiFlow(
   );
   const requireBusyProgress = process.env.TOMCAT_E2E_CAPTURE_PROGRESS === "1";
   const busyStageTimeoutMs = requireBusyProgress ? 15_000 : 3_000;
-  const collapsedPredicate = (candidate: Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>) =>
+  const collapsedPredicate = (
+    candidate: Awaited<
+      ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>
+    >,
+  ) =>
     candidate.assistantResponseGroups >= 1 &&
     candidate.actionToolRowCount >= 1 &&
     candidate.planCardCount >= 1 &&
@@ -4274,9 +4673,9 @@ export async function assertTranscriptUiFlow(
     candidate.composerFooterPlanStatus === "Plan: planning"
       ? candidate
       : undefined;
-  let collapsedFromBusyFallback:
-    | Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>
-    | null = null;
+  let collapsedFromBusyFallback: Awaited<
+    ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>
+  > | null = null;
   try {
     const busyTodo = await waitForWebviewDomSnapshot(
       api,
@@ -4304,7 +4703,10 @@ export async function assertTranscriptUiFlow(
       "Plan: planning",
       `expected plan status to render in the composer footer, got ${busyTodo.composerFooterPlanStatus}`,
     );
-    assert.ok(busyTodo.planFooterSameRow, "expected View Plan and Build to stay on one row");
+    assert.ok(
+      busyTodo.planFooterSameRow,
+      "expected View Plan and Build to stay on one row",
+    );
     assert.ok(
       !busyTodo.html.includes("Tomcat is responding..."),
       "expected busy hint text to be removed from the composer",
@@ -4359,8 +4761,8 @@ export async function assertTranscriptUiFlow(
   await waitForEvent(api, { type: "agent_end" });
 
   const collapsed =
-    collapsedFromBusyFallback
-    ?? await waitForWebviewDomSnapshot(api, collapsedPredicate);
+    collapsedFromBusyFallback ??
+    (await waitForWebviewDomSnapshot(api, collapsedPredicate));
   assert.ok(
     collapsed.assistantResponseGroups >= 1,
     "expected at least one assistant response group",
@@ -4375,7 +4777,9 @@ export async function assertTranscriptUiFlow(
     `expected the successful bash showcase row to render once, got ${collapsed.commandBlockCount}`,
   );
   assert.ok(
-    !collapsed.expandedToolTitles.some((title) => title.includes("Ran git status --short")),
+    !collapsed.expandedToolTitles.some((title) =>
+      title.includes("Ran git status --short"),
+    ),
     `expected the successful bash showcase row to stay collapsed, got ${JSON.stringify(collapsed.expandedToolTitles)}`,
   );
   assert.ok(
@@ -4409,13 +4813,24 @@ export async function assertTranscriptUiFlow(
     "Plan: planning",
     `expected plan status footer text, got ${collapsed.composerFooterPlanStatus}`,
   );
-  assert.ok(collapsed.planFooterSameRow, "expected the merged plan footer to stay on one row");
+  assert.ok(
+    collapsed.planFooterSameRow,
+    "expected the merged plan footer to stay on one row",
+  );
   assert.ok(
     !collapsed.html.includes("Tomcat is responding..."),
     "expected no responding hint after the composer cleanup",
   );
-  assert.equal(collapsed.todoWidgetVisible, false, "expected no docked todo widget after the turn completes");
-  assert.equal(collapsed.progressRow, false, "expected no inline progress row after the turn completes");
+  assert.equal(
+    collapsed.todoWidgetVisible,
+    false,
+    "expected no docked todo widget after the turn completes",
+  );
+  assert.equal(
+    collapsed.progressRow,
+    false,
+    "expected no inline progress row after the turn completes",
+  );
   assert.ok(
     collapsed.html.includes("View Plan"),
     "expected the merged plan card footer to include View Plan",
@@ -4429,11 +4844,15 @@ export async function assertTranscriptUiFlow(
     captureTranscriptVisual("collapsed");
   }
   assert.ok(
-    collapsed.groupFoldTitles.some((title) => title.includes("Reviewed 1 file")),
+    collapsed.groupFoldTitles.some((title) =>
+      title.includes("Reviewed 1 file"),
+    ),
     `expected the first context segment to fold into "Reviewed 1 file", got ${JSON.stringify(collapsed.groupFoldTitles)}`,
   );
   assert.ok(
-    collapsed.toolTitles.some((title) => title.includes('Searched "vscode chat thinking collapsible"')),
+    collapsed.toolTitles.some((title) =>
+      title.includes('Searched "vscode chat thinking collapsible"'),
+    ),
     `expected the trailing single web_search context tool to render as a standalone row, got ${JSON.stringify(collapsed.toolTitles)}`,
   );
   assert.equal(
@@ -4467,12 +4886,30 @@ export async function assertTranscriptRichRenderingFlow(
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   await waitForWebviewBootstrapSettled(api);
-  const sessionId = await createFreshWebviewSession(api, "webview-rich-render-session");
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-rich-render-session",
+  );
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  assert.ok(workspaceRoot, "expected a workspace root for transcript rich-render E2E");
+  assert.ok(
+    workspaceRoot,
+    "expected a workspace root for transcript rich-render E2E",
+  );
 
-  const richFilePath = path.join(workspaceRoot, "src", "test", "fixtures", "rich-render.ts");
-  const inlineLinkPath = path.join(workspaceRoot, "src", "test", "fixtures", "inline-link.ts");
+  const richFilePath = path.join(
+    workspaceRoot,
+    "src",
+    "test",
+    "fixtures",
+    "rich-render.ts",
+  );
+  const inlineLinkPath = path.join(
+    workspaceRoot,
+    "src",
+    "test",
+    "fixtures",
+    "inline-link.ts",
+  );
   await fs.mkdir(path.dirname(richFilePath), { recursive: true });
   await fs.writeFile(
     richFilePath,
@@ -4488,7 +4925,11 @@ export async function assertTranscriptRichRenderingFlow(
     ].join("\n"),
     "utf8",
   );
-  await fs.writeFile(inlineLinkPath, "export const inlineLink = true;\n", "utf8");
+  await fs.writeFile(
+    inlineLinkPath,
+    "export const inlineLink = true;\n",
+    "utf8",
+  );
 
   await api.__testing.hydrateWebviewHistory({
     messages: [
@@ -4544,9 +4985,15 @@ export async function assertTranscriptRichRenderingFlow(
       );
     }
   }
-  assert.ok(streamingHighlightSnapshot, "expected a streaming snapshot after the first code block completed");
+  assert.ok(
+    streamingHighlightSnapshot,
+    "expected a streaming snapshot after the first code block completed",
+  );
   assert.match(streamingHighlightSnapshot.html, /hljs-[\w-]+/u);
-  assert.doesNotMatch(streamingHighlightSnapshot.html, /data-testid="plan-mermaid"/u);
+  assert.doesNotMatch(
+    streamingHighlightSnapshot.html,
+    /data-testid="plan-mermaid"/u,
+  );
   await api.__testing.injectServeEvent({
     assistantMessageEvent: {
       delta: "## Inspect\n\nStart with `src/thinking/plain.ts:9`.",
@@ -4591,19 +5038,25 @@ export async function assertTranscriptRichRenderingFlow(
   );
   assert.match(snapshot.html, /assistant-code-copy/u);
   assert.match(snapshot.html, />rich-render\.ts:6</u);
-  assert.match(snapshot.html, /title="src\/test\/fixtures\/rich-render\.ts:6"/u);
+  assert.match(
+    snapshot.html,
+    /title="src\/test\/fixtures\/rich-render\.ts:6"/u,
+  );
   assert.match(snapshot.html, />inline-link\.ts:1</u);
-  assert.match(snapshot.html, /title="src\/test\/fixtures\/inline-link\.ts:1"/u);
+  assert.match(
+    snapshot.html,
+    /title="src\/test\/fixtures\/inline-link\.ts:1"/u,
+  );
   assert.match(snapshot.html, /A --&gt; B --&gt; C/u);
   assert.match(snapshot.html, /tc-code-card--bare/u);
   assert.doesNotMatch(snapshot.html, /tc-code-card__lang/u);
   const settledSnapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId
-      && /hljs-[\w-]+/u.test(candidate.html)
-      && candidate.html.includes('data-testid="plan-mermaid"')
-      && candidate.html.includes("<svg")
+      candidate.activeSessionId === sessionId &&
+      /hljs-[\w-]+/u.test(candidate.html) &&
+      candidate.html.includes('data-testid="plan-mermaid"') &&
+      candidate.html.includes("<svg")
         ? candidate
         : undefined,
     20_000,
@@ -4638,9 +5091,14 @@ export async function assertTranscriptRichRenderingFlow(
   });
   const fileCardEditor = await waitForActiveTextEditor(
     (editor) =>
-      editor?.document.uri.fsPath === richFilePath && editor.selection.start.line === 5,
+      editor?.document.uri.fsPath === richFilePath &&
+      editor.selection.start.line === 5,
   );
-  assert.equal(fileCardEditor.selection.start.line, 5, "expected code-card click to reveal line 6");
+  assert.equal(
+    fileCardEditor.selection.start.line,
+    5,
+    "expected code-card click to reveal line 6",
+  );
 
   api.__testing.clearObservedEvents();
   await api.__testing.focusWebview();
@@ -4676,9 +5134,9 @@ export async function assertTranscriptRichRenderingFlow(
   const expandedThinking = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === sessionId
-      && candidate.html.includes("## Inspect")
-      && candidate.html.includes("src/thinking/plain.ts:9")
+      candidate.activeSessionId === sessionId &&
+      candidate.html.includes("## Inspect") &&
+      candidate.html.includes("src/thinking/plain.ts:9")
         ? candidate
         : undefined,
     10_000,
@@ -4708,7 +5166,11 @@ export async function assertWebviewPlanToolUxFlow(
   const planId = "plan-tool-ux";
   const planPath = `/tmp/${planId}.plan.md`;
   const renderPlanMarkdown = (
-    todos: Array<{ content: string; id: string; status: "completed" | "pending" }>,
+    todos: Array<{
+      content: string;
+      id: string;
+      status: "completed" | "pending";
+    }>,
   ) =>
     [
       "---",
@@ -4730,19 +5192,47 @@ export async function assertWebviewPlanToolUxFlow(
       "",
     ].join("\n");
   const initialTodos = [
-    { content: "Draft the immutable create card", id: "todo-1", status: "pending" as const },
+    {
+      content: "Draft the immutable create card",
+      id: "todo-1",
+      status: "pending" as const,
+    },
     { content: "Render update rows", id: "todo-2", status: "pending" as const },
-    { content: "Guard against drift", id: "todo-3", status: "pending" as const },
+    {
+      content: "Guard against drift",
+      id: "todo-3",
+      status: "pending" as const,
+    },
   ];
   const afterFirstUpdateTodos = [
-    { content: "Draft the immutable create card", id: "todo-1", status: "completed" as const },
+    {
+      content: "Draft the immutable create card",
+      id: "todo-1",
+      status: "completed" as const,
+    },
     { content: "Render update rows", id: "todo-2", status: "pending" as const },
-    { content: "Guard against drift", id: "todo-3", status: "pending" as const },
+    {
+      content: "Guard against drift",
+      id: "todo-3",
+      status: "pending" as const,
+    },
   ];
   const afterSecondUpdateTodos = [
-    { content: "Draft the immutable create card", id: "todo-1", status: "completed" as const },
-    { content: "Render update rows", id: "todo-2", status: "completed" as const },
-    { content: "Guard against drift", id: "todo-3", status: "pending" as const },
+    {
+      content: "Draft the immutable create card",
+      id: "todo-1",
+      status: "completed" as const,
+    },
+    {
+      content: "Render update rows",
+      id: "todo-2",
+      status: "completed" as const,
+    },
+    {
+      content: "Guard against drift",
+      id: "todo-3",
+      status: "pending" as const,
+    },
   ];
   await fs.mkdir(path.dirname(planPath), { recursive: true });
   await fs.writeFile(planPath, renderPlanMarkdown(initialTodos), "utf8");
@@ -4835,7 +5325,11 @@ export async function assertWebviewPlanToolUxFlow(
     toolName: "update_plan",
     type: "tool_execution_end",
   });
-  await fs.writeFile(planPath, renderPlanMarkdown(afterFirstUpdateTodos), "utf8");
+  await fs.writeFile(
+    planPath,
+    renderPlanMarkdown(afterFirstUpdateTodos),
+    "utf8",
+  );
   await api.__testing.injectServeEvent({
     planId,
     sessionId,
@@ -4873,7 +5367,11 @@ export async function assertWebviewPlanToolUxFlow(
     toolName: "update_plan",
     type: "tool_execution_end",
   });
-  await fs.writeFile(planPath, renderPlanMarkdown(afterSecondUpdateTodos), "utf8");
+  await fs.writeFile(
+    planPath,
+    renderPlanMarkdown(afterSecondUpdateTodos),
+    "utf8",
+  );
   await api.__testing.injectServeEvent({
     planId,
     sessionId,
@@ -4893,7 +5391,11 @@ export async function assertWebviewPlanToolUxFlow(
         : undefined,
     20_000,
   );
-  assert.equal(settled.planCardCount, 1, `expected a single plan card, got ${settled.planCardCount}`);
+  assert.equal(
+    settled.planCardCount,
+    1,
+    `expected a single plan card, got ${settled.planCardCount}`,
+  );
   assert.ok(
     settled.html.includes("Plan tool ux"),
     "expected the completed create_plan card to keep the original title",
@@ -4915,9 +5417,9 @@ export async function assertWebviewPlanToolUxFlow(
   assert.ok(
     !settled.groupFoldTitles.some(
       (title) =>
-        title.includes("Creating plan")
-        || title.includes("Checked 1")
-        || title.includes("Updated plan"),
+        title.includes("Creating plan") ||
+        title.includes("Checked 1") ||
+        title.includes("Updated plan"),
     ),
     `expected no folded thinking header to echo plan tool labels, got ${JSON.stringify(settled.groupFoldTitles)}`,
   );
@@ -4978,9 +5480,7 @@ export async function assertWebviewStickyHistoryFlow(
     await waitForEvent(api, { type: "agent_end" });
   }
 
-  await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
+  await waitForWebviewDomSnapshot(api, (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.messageTexts.includes(prompts[0]) &&
       candidate.messageTexts.includes(prompts[1]) &&
@@ -4995,9 +5495,7 @@ export async function assertWebviewStickyHistoryFlow(
     scrollBlock: "start",
     testId: "message-block",
   });
-  await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
+  await waitForWebviewDomSnapshot(api, (candidate) =>
       candidate.activeSessionId === sessionId && !candidate.stickyPromptText
         ? candidate
         : undefined,
@@ -5009,9 +5507,7 @@ export async function assertWebviewStickyHistoryFlow(
     scrollBlock: "start",
     testId: "message-block",
   });
-  const historicalTurn = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
+  const historicalTurn = await waitForWebviewDomSnapshot(api, (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.stickyPromptText !== null &&
       candidate.stickyPromptText !== prompts[prompts.length - 1]
@@ -5085,14 +5581,20 @@ export async function assertPlanPreviewCustomEditorFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  assert.ok(workspaceRoot, "expected a real workspace folder for the plan preview E2E");
+  assert.ok(
+    workspaceRoot,
+    "expected a real workspace folder for the plan preview E2E",
+  );
 
   // A live chat session must exist so "add selection to chat" can insert a chip.
   // The chip lands in whichever session `focusWebviewSurface()` reveals (the
   // sidebar's active session), so we don't pin assertions to this id.
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
-  const sessionId = await createFreshWebviewSession(api, "plan-preview-selection-session");
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "plan-preview-selection-session",
+  );
 
   const scratchDir = path.join(
     workspaceRoot,
@@ -5153,7 +5655,9 @@ export async function assertPlanPreviewCustomEditorFlow(
   const captureStableChipCount = async (
     expectedChips: number,
     durationMs = 2_000,
-  ): Promise<Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>> => {
+  ): Promise<
+    Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>
+  > => {
     const deadline = Date.now() + durationMs;
     let snapshot = await api.__testing.captureWebviewDom();
     do {
@@ -5173,11 +5677,9 @@ export async function assertPlanPreviewCustomEditorFlow(
     await fs.mkdir(path.dirname(linkedFilePath), { recursive: true });
     await fs.writeFile(
       linkedFilePath,
-      [
-        "export function previewTarget() {",
-        "  return 'ready';",
-        "}",
-      ].join("\n"),
+      ["export function previewTarget() {", "  return 'ready';", "}"].join(
+        "\n",
+      ),
       "utf8",
     );
     await fs.writeFile(planPath, initialText, "utf8");
@@ -5234,43 +5736,56 @@ export async function assertPlanPreviewCustomEditorFlow(
       "3 To-dos",
       `expected a "3 To-dos" count header, got ${preview.todoCountText}`,
     );
-    assert.equal(preview.bodyHasContent, true, "expected the rendered body to have content");
+    assert.equal(
+      preview.bodyHasContent,
+      true,
+      "expected the rendered body to have content",
+    );
     assert.ok(
-      preview.baseFontSizePx !== null
-      && preview.bodyFontSizePx !== null
-      && Math.abs(preview.bodyFontSizePx - (preview.baseFontSizePx + 1)) <= 0.1,
+      preview.baseFontSizePx !== null &&
+        preview.bodyFontSizePx !== null &&
+        Math.abs(preview.bodyFontSizePx - (preview.baseFontSizePx + 1)) <= 0.1,
       `expected Plan body font to equal VS Code base + 1px, base=${String(preview.baseFontSizePx)} body=${String(preview.bodyFontSizePx)}`,
     );
     assert.ok(
-      preview.codeFontSizePx !== null
-      && preview.bodyFontSizePx !== null
-      && Math.abs(preview.codeFontSizePx - preview.bodyFontSizePx) <= 0.1,
+      preview.codeFontSizePx !== null &&
+        preview.bodyFontSizePx !== null &&
+        Math.abs(preview.codeFontSizePx - preview.bodyFontSizePx) <= 0.1,
       `expected inline code to keep the Plan reading size, body=${String(preview.bodyFontSizePx)} code=${String(preview.codeFontSizePx)}`,
     );
     assert.ok(
-      preview.todoFontSizePx !== null
-      && preview.bodyFontSizePx !== null
-      && Math.abs(preview.todoFontSizePx - preview.bodyFontSizePx) <= 0.1,
+      preview.todoFontSizePx !== null &&
+        preview.bodyFontSizePx !== null &&
+        Math.abs(preview.todoFontSizePx - preview.bodyFontSizePx) <= 0.1,
       `expected todo copy to keep the Plan reading size, body=${String(preview.bodyFontSizePx)} todo=${String(preview.todoFontSizePx)}`,
     );
 
-    // Drive the actual workbench, not the webview DOM: platform Cmd/Ctrl+F must
-    // open VS Code's built-in Find Widget and find both rendered body and todo copy.
+    // Drive the actual workbench, not the webview DOM. The custom editor's
+    // Cmd/Ctrl+F binding invokes this native VS Code webview-find command; CDP
+    // cannot reliably deliver macOS menu accelerators to Electron.
     const findDriver = await WorkbenchFindDriver.connectFromEnvironment();
     try {
       const instanceBeforeFind = preview.webviewInstanceId;
+      await api.__testing.executeCommand("editor.action.webvieweditor.showFind");
       await findDriver.findUniqueText(bodyFindToken);
-      await findDriver.closeFind();
-      let afterFind = await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+      let afterFind = await waitForPlanPreviewDom(
+        api,
+        planPath,
+        (snapshot) => snapshot.bodyHasContent,
+      );
       assert.equal(
         afterFind.webviewInstanceId,
         instanceBeforeFind,
-        "expected closing Find after a body match not to rebuild the Plan webview",
+        "expected a body match not to rebuild the Plan webview",
       );
 
       await findDriver.findUniqueText(todoFindToken);
-      await findDriver.closeFind();
-      afterFind = await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+      await api.__testing.executeCommand("editor.action.webvieweditor.hideFind");
+      afterFind = await waitForPlanPreviewDom(
+        api,
+        planPath,
+        (snapshot) => snapshot.bodyHasContent,
+      );
       assert.equal(
         afterFind.webviewInstanceId,
         instanceBeforeFind,
@@ -5292,16 +5807,17 @@ export async function assertPlanPreviewCustomEditorFlow(
       `expected at least one rendered mermaid SVG, got ${mermaid.mermaidSvgCount}`,
     );
     assert.ok(
-      mermaid.mermaidFontSizePx !== null
-      && mermaid.bodyFontSizePx !== null
-      && Math.abs(mermaid.mermaidFontSizePx - mermaid.bodyFontSizePx) <= 0.5,
+      mermaid.mermaidFontSizePx !== null &&
+        mermaid.bodyFontSizePx !== null &&
+        Math.abs(mermaid.mermaidFontSizePx - mermaid.bodyFontSizePx) <= 0.5,
       `expected Mermaid text to use the Plan reading size, body=${String(mermaid.bodyFontSizePx)} mermaid=${String(mermaid.mermaidFontSizePx)}`,
     );
 
     // The same +1px reading contract must survive VS Code's built-in light,
     // dark and high-contrast theme projections.
     const themeConfig = vscode.workspace.getConfiguration("workbench");
-    const originalTheme = themeConfig.inspect<string>("colorTheme")?.globalValue;
+    const originalTheme =
+      themeConfig.inspect<string>("colorTheme")?.globalValue;
     const themeCases = [
       { bodyClass: "vscode-light", name: "Default Light Modern" },
       { bodyClass: "vscode-dark", name: "Default Dark Modern" },
@@ -5320,13 +5836,17 @@ export async function assertPlanPreviewCustomEditorFlow(
         20_000,
       );
       assert.ok(
-        themed.baseFontSizePx !== null
-        && themed.bodyFontSizePx !== null
-        && Math.abs(themed.bodyFontSizePx - (themed.baseFontSizePx + 1)) <= 0.1,
+        themed.baseFontSizePx !== null &&
+          themed.bodyFontSizePx !== null &&
+          Math.abs(themed.bodyFontSizePx - (themed.baseFontSizePx + 1)) <= 0.1,
         `expected ${themeCase.name} to preserve Plan base + 1px, base=${String(themed.baseFontSizePx)} body=${String(themed.bodyFontSizePx)}`,
       );
     }
-    await themeConfig.update("colorTheme", originalTheme, vscode.ConfigurationTarget.Global);
+    await themeConfig.update(
+      "colorTheme",
+      originalTheme,
+      vscode.ConfigurationTarget.Global,
+    );
 
     const inlinePathSnapshot = await waitForPlanPreviewDom(
       api,
@@ -5360,7 +5880,11 @@ export async function assertPlanPreviewCustomEditorFlow(
       `expected the inline path click to open ${linkedDisplayPath}`,
     );
     await api.__testing.openPlanPreview(planPath);
-    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+    await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.bodyHasContent,
+    );
 
     // Native title-bar command → "Markdown" opens the plain native text editor
     // for the same file (no in-webview source view any more).
@@ -5377,7 +5901,11 @@ export async function assertPlanPreviewCustomEditorFlow(
     // document afterwards via disk write + serve event, and expect the checklist
     // to grow without kicking the user back to the top of the scroll column.
     await api.__testing.executeCommand("tomcat.plan.viewAsPreview");
-    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+    await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.bodyHasContent,
+    );
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
       kind: "setContentScrollTop",
       scrollTop: 280,
@@ -5390,9 +5918,14 @@ export async function assertPlanPreviewCustomEditorFlow(
 
     const updatedText = initialText.replace(
       "---\n\n# E2E heading",
-      ["- id: t4", "  content: Fourth task", "  status: pending", "---", "", "# E2E heading"].join(
-        "\n",
-      ),
+      [
+        "- id: t4",
+        "  content: Fourth task",
+        "  status: pending",
+        "---",
+        "",
+        "# E2E heading",
+      ].join("\n"),
     );
     await fs.writeFile(planPath, updatedText, "utf8");
     await api.__testing.injectServeEvent({
@@ -5407,22 +5940,22 @@ export async function assertPlanPreviewCustomEditorFlow(
       api,
       planPath,
       (snapshot) =>
-        snapshot.refreshCounters.hostRefreshCalls
-          > scrollBeforeHotUpdate.refreshCounters.hostRefreshCalls,
+        snapshot.refreshCounters.hostRefreshCalls >
+        scrollBeforeHotUpdate.refreshCounters.hostRefreshCalls,
     );
     assert.ok(
-      refreshed.refreshCounters.hostPostAttempts
-        > scrollBeforeHotUpdate.refreshCounters.hostPostAttempts,
+      refreshed.refreshCounters.hostPostAttempts >
+        scrollBeforeHotUpdate.refreshCounters.hostPostAttempts,
       `expected the host to attempt a state frame after refresh; before=${JSON.stringify(scrollBeforeHotUpdate.refreshCounters)} after=${JSON.stringify(refreshed.refreshCounters)}`,
     );
     assert.ok(
-      refreshed.refreshCounters.hostPostDeliveries
-        > scrollBeforeHotUpdate.refreshCounters.hostPostDeliveries,
+      refreshed.refreshCounters.hostPostDeliveries >
+        scrollBeforeHotUpdate.refreshCounters.hostPostDeliveries,
       `expected the host to deliver a state frame after refresh; before=${JSON.stringify(scrollBeforeHotUpdate.refreshCounters)} after=${JSON.stringify(refreshed.refreshCounters)}`,
     );
     assert.ok(
-      refreshed.refreshCounters.webviewStateFrames
-        > scrollBeforeHotUpdate.refreshCounters.webviewStateFrames,
+      refreshed.refreshCounters.webviewStateFrames >
+        scrollBeforeHotUpdate.refreshCounters.webviewStateFrames,
       `expected the visible webview to receive a state frame after refresh; before=${JSON.stringify(scrollBeforeHotUpdate.refreshCounters)} after=${JSON.stringify(refreshed.refreshCounters)}`,
     );
 
@@ -5430,11 +5963,14 @@ export async function assertPlanPreviewCustomEditorFlow(
     // (post hot-update) document so the assertions can't drift.
     const updatedLines = updatedText.split("\n");
     const headingLine = updatedLines.indexOf("# E2E heading") + 1;
-    const paragraphLine = updatedLines.indexOf(
+    const paragraphLine =
+      updatedLines.indexOf(
       `Body paragraph for the preview. ${bodyFindToken} with \`inline-code\`.`,
     ) + 1;
-    const firstListLine = updatedLines.indexOf("- First markdown selection") + 1;
-    const secondListLine = updatedLines.indexOf("- Second markdown selection") + 1;
+    const firstListLine =
+      updatedLines.indexOf("- First markdown selection") + 1;
+    const secondListLine =
+      updatedLines.indexOf("- Second markdown selection") + 1;
     const headingChip = `${planBasename}:${headingLine}`;
     const paragraphChip = `${planBasename}:${paragraphLine}`;
     const firstListChip = `${planBasename}:${firstListLine}`;
@@ -5451,9 +5987,11 @@ export async function assertPlanPreviewCustomEditorFlow(
       `expected the count header to hot-update to "4 To-dos", got ${hotUpdated.todoCountText}`,
     );
     assert.ok(
-      hotUpdated.contentScrollTop !== null
-      && scrollBeforeHotUpdate.contentScrollTop !== null
-      && Math.abs(hotUpdated.contentScrollTop - scrollBeforeHotUpdate.contentScrollTop) <= 32,
+      hotUpdated.contentScrollTop !== null &&
+        scrollBeforeHotUpdate.contentScrollTop !== null &&
+        Math.abs(
+          hotUpdated.contentScrollTop - scrollBeforeHotUpdate.contentScrollTop,
+        ) <= 32,
       `expected hot-update to preserve the reading position, before=${String(scrollBeforeHotUpdate.contentScrollTop)} after=${String(hotUpdated.contentScrollTop)}`,
     );
 
@@ -5499,16 +6037,23 @@ export async function assertPlanPreviewCustomEditorFlow(
     // selection (heading) inside the focused plan editor. The chip must carry
     // the exact source line derived from the block's data-source-line attribute.
     await api.__testing.openPlanPreview(planPath);
-    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+    await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.bodyHasContent,
+    );
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
       kind: "selectText",
       selector: ".tc-plan-preview__body h1",
     });
-    await api.__testing.executeCommand(TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND);
+    await api.__testing.executeCommand(
+      TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
+    );
     const afterCommand = await waitForWebviewDomSnapshot(
       api,
       (snapshot) =>
-        chipCount(snapshot.html) === baseChips + 1 && snapshot.html.includes(headingChip)
+        chipCount(snapshot.html) === baseChips + 1 &&
+        snapshot.html.includes(headingChip)
           ? snapshot
           : undefined,
       20_000,
@@ -5521,17 +6066,28 @@ export async function assertPlanPreviewCustomEditorFlow(
     // Selection → chat, path 2: the floating button on a different selection
     // (body paragraph) yields a second, distinct chip carrying its own line.
     await api.__testing.openPlanPreview(planPath);
-    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+    await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.bodyHasContent,
+    );
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
       kind: "selectText",
       selector: ".tc-plan-preview__body p",
     });
-    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.selectionButtonVisible);
-    await api.__testing.dispatchPlanPreviewDomAction(planPath, { kind: "clickSelectionAdd" });
+    await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.selectionButtonVisible,
+    );
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "clickSelectionAdd",
+    });
     const afterFloating = await waitForWebviewDomSnapshot(
       api,
       (snapshot) =>
-        chipCount(snapshot.html) === baseChips + 2 && snapshot.html.includes(paragraphChip)
+        chipCount(snapshot.html) === baseChips + 2 &&
+        snapshot.html.includes(paragraphChip)
           ? snapshot
           : undefined,
       20_000,
@@ -5550,18 +6106,25 @@ export async function assertPlanPreviewCustomEditorFlow(
       [1, baseChips + 4],
     ] as const) {
       await api.__testing.openPlanPreview(planPath);
-      await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+      await waitForPlanPreviewDom(
+        api,
+        planPath,
+        (snapshot) => snapshot.bodyHasContent,
+      );
       await api.__testing.dispatchPlanPreviewDomAction(planPath, {
         kind: "selectText",
         selector: `.tc-plan-preview__body ul > li:nth-child(${index})`,
       });
-      await api.__testing.executeCommand(TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND);
+      await api.__testing.executeCommand(
+        TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
+      );
       const isDuplicate = index === 1 && expectedChips === baseChips + 4;
       const selectionSnapshot = isDuplicate
         ? await captureStableChipCount(expectedChips)
         : await waitForWebviewDomSnapshot(
             api,
-            (snapshot) => (chipCount(snapshot.html) === expectedChips ? snapshot : undefined),
+            (snapshot) =>
+              chipCount(snapshot.html) === expectedChips ? snapshot : undefined,
             20_000,
           );
       assert.ok(
@@ -5583,7 +6146,8 @@ export async function assertPlanPreviewCustomEditorFlow(
     const native = await waitForPlanPreviewDom(
       api,
       planPath,
-      (snapshot) => snapshot.toolbarStyle === "native" && !snapshot.hasActionStrip,
+      (snapshot) =>
+        snapshot.toolbarStyle === "native" && !snapshot.hasActionStrip,
     );
     assert.equal(
       native.hasActionStrip,
@@ -5596,10 +6160,16 @@ export async function assertPlanPreviewCustomEditorFlow(
     await clearComposerDraft(api, sessionId).catch(() => undefined);
     await vscode.workspace
       .getConfiguration("tomcat")
-      .update("plan.toolbarStyle", undefined, vscode.ConfigurationTarget.Global);
+      .update(
+        "plan.toolbarStyle",
+        undefined,
+        vscode.ConfigurationTarget.Global,
+      );
     await vscode.workspace
       .getConfiguration("tomcat")
       .update("plan.buildModel", "", vscode.ConfigurationTarget.Global);
-    await fs.rm(scratchDir, { force: true, recursive: true }).catch(() => undefined);
+    await fs
+      .rm(scratchDir, { force: true, recursive: true })
+      .catch(() => undefined);
   }
 }

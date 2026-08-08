@@ -2,9 +2,11 @@
 //! delete / archive / search。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::{
-    resolve_sessions_dir, session_key_for_agent, AppConfig, AppError, SessionManager, SessionMode,
+    resolve_model_thinking_path, resolve_sessions_dir, session_key_for_agent, AppConfig, AppError,
+    ModelPrefsStore, SessionManager, SessionMode, ThinkingLevel,
 };
 
 use super::{resolve_default_cli_session_mode, SessionScopeArg, SessionSub};
@@ -167,7 +169,22 @@ fn cleanup_openai_files_for_session(
             return;
         }
     };
-    let resolver = crate::core::llm::DefaultLlmResolver::new(cfg.clone(), model_catalog);
+    let default_reasoning = ThinkingLevel::parse_or_medium(&cfg.llm.thinking.level).0;
+    let model_prefs = match resolve_model_thinking_path(cfg)
+        .and_then(|path| ModelPrefsStore::load(path, default_reasoning))
+    {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                session_id,
+                "skip openai files cleanup: cannot load model preferences"
+            );
+            return;
+        }
+    };
+    let resolver =
+        crate::core::llm::DefaultLlmResolver::new(cfg.clone(), model_catalog, model_prefs);
     let llm = match crate::core::llm::LlmResolver::resolve(
         &resolver,
         crate::core::llm::LlmScene::Main,

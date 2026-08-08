@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  assertPrebuiltArtifactsFresh,
   assertPublishableFiles,
   buildVscePackageArgs,
   buildVsixOutPath,
@@ -113,5 +114,38 @@ describe("VSIX packaging", () => {
       "--out",
       "/tmp/tomcat-vscode-ext.vsix",
     ]);
+  });
+
+  it("rejects skip-build packaging when source is newer than its artifact", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-vsix-freshness-"));
+    const sourcePath = path.join(root, "gui", "src", "App.tsx");
+    const artifactPath = path.join(root, "gui", "dist", "index.js");
+    const coreSourcePath = path.join(root, "src", "extension.ts");
+    const coreArtifactPath = path.join(root, "out", "extension.js");
+
+    try {
+      await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+      await fs.mkdir(path.dirname(artifactPath), { recursive: true });
+      await fs.mkdir(path.dirname(coreSourcePath), { recursive: true });
+      await fs.mkdir(path.dirname(coreArtifactPath), { recursive: true });
+      await Promise.all([
+        fs.writeFile(sourcePath, "export {};\n"),
+        fs.writeFile(artifactPath, "export {};\n"),
+        fs.writeFile(coreSourcePath, "export {};\n"),
+        fs.writeFile(coreArtifactPath, "export {};\n"),
+      ]);
+
+      const now = Date.now();
+      await fs.utimes(artifactPath, now / 1000 - 10, now / 1000 - 10);
+      await fs.utimes(coreArtifactPath, now / 1000, now / 1000);
+      await fs.utimes(coreSourcePath, now / 1000 - 10, now / 1000 - 10);
+      await fs.utimes(sourcePath, now / 1000, now / 1000);
+
+      expect(() => assertPrebuiltArtifactsFresh(root)).toThrow(
+        "source gui/src/App.tsx is newer than artifact gui/dist/index.js",
+      );
+    } finally {
+      await fs.rm(root, { force: true, recursive: true });
+    }
   });
 });

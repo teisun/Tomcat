@@ -34,7 +34,9 @@ fn deepseek_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: vec!["high".to_string(), "max".to_string()],
         thinking_format: Some("deepseek".to_string()),
     }
@@ -50,7 +52,9 @@ fn openai_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -71,7 +75,9 @@ fn openai_auto_entry(api_key_env: &str, provider: &str, model_name: &str) -> Mod
         base_url: Some("https://gateway.example.test/v1".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -98,7 +104,9 @@ fn openai_multimodal_entry(api_key_env: &str) -> ModelEntry {
             web_search: false,
         },
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: vec![],
         thinking_format: Some("openai".to_string()),
     }
@@ -120,7 +128,9 @@ fn moonshot_multimodal_entry(api_key_env: &str) -> ModelEntry {
             web_search: false,
         },
         context_window: Some(1_000_000),
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: vec!["low".to_string(), "high".to_string(), "max".to_string()],
         thinking_format: Some("openai".to_string()),
     }

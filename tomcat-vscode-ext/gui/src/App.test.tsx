@@ -5,7 +5,10 @@ import { App } from "./App";
 import type {
   HostToWebviewFrame,
   VsCodeApiLike,
+  WebviewCheckpoint,
+  WebviewSessionSnapshot,
   WebviewStateSnapshot,
+  WebviewTimelineItem,
 } from "./types";
 
 vi.mock("./attachments/imagePipeline", () => ({
@@ -39,9 +42,61 @@ function mount(initialState?: unknown) {
   };
 }
 
-async function emitState(frame: HostToWebviewFrame) {
+type StateTestSession = Partial<WebviewSessionSnapshot> &
+  Pick<WebviewSessionSnapshot, "sessionId" | "timeline">;
+
+function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapshot {
+  return {
+    activePlan: fixture.activePlan ?? null,
+    agentMode: fixture.agentMode ?? "chat",
+    busy: fixture.busy ?? false,
+    checkpoints: fixture.checkpoints,
+    composerDraft: fixture.composerDraft,
+    contextRatio: fixture.contextRatio,
+    hasMoreHistory: fixture.hasMoreHistory,
+    historyLoading: fixture.historyLoading,
+    model: fixture.model,
+    ownedByThisFrontend: fixture.ownedByThisFrontend ?? true,
+    pendingAttachments: fixture.pendingAttachments ?? [],
+    planTodos: fixture.planTodos ?? [],
+    sessionId: fixture.sessionId,
+    sessionTodos: fixture.sessionTodos ?? [],
+    thinkingLevel: fixture.thinkingLevel,
+    timeline: fixture.timeline,
+  };
+}
+
+type StateTestFrame = {
+  channel: "state";
+  content: Omit<WebviewStateSnapshot, "modelAdminSupported" | "sessionViews"> & {
+    modelAdminSupported?: boolean;
+    sessionViews: Record<string, StateTestSession>;
+  };
+  messageId: string;
+};
+
+type TestFrame = StateTestFrame | Exclude<HostToWebviewFrame, { channel: "state" }>;
+
+async function emitState(frame: TestFrame) {
+  let normalizedFrame: HostToWebviewFrame;
+  if (frame.channel === "state") {
+    const sessionViews: Record<string, WebviewSessionSnapshot> = {};
+    for (const [sessionId, session] of Object.entries(frame.content.sessionViews)) {
+      sessionViews[sessionId] = createSessionSnapshot(session);
+    }
+    normalizedFrame = {
+      ...frame,
+      content: {
+        modelAdminSupported: false,
+        ...frame.content,
+        sessionViews,
+      },
+    };
+  } else {
+    normalizedFrame = frame;
+  }
   await act(async () => {
-    window.dispatchEvent(new MessageEvent("message", { data: frame }));
+    window.dispatchEvent(new MessageEvent("message", { data: normalizedFrame }));
   });
 }
 
@@ -74,9 +129,8 @@ async function emitReadySessionState(
           model: "gpt-5.4",
           ownedByThisFrontend: true,
           pendingAttachments: [],
-          planFile: null,
-          planId: null,
-          planState: "chat",
+          activePlan: null,
+          agentMode: "chat",
           sessionId,
           thinkingLevel: "high",
           timeline: [],
@@ -98,9 +152,8 @@ function approvalDraftSnapshot(activeSessionId: "s1" | "s2"): WebviewStateSnapsh
     model: "gpt-5.4",
     ownedByThisFrontend: true,
     pendingAttachments: [],
-    planFile: null,
-    planId: null,
-    planState: "chat" as const,
+    activePlan: null,
+    agentMode: "chat" as const,
     planTodos: [],
     sessionId,
     sessionTodos: [],
@@ -148,8 +201,8 @@ function approvalDraftSnapshot(activeSessionId: "s1" | "s2"): WebviewStateSnapsh
 }
 
 async function emitCheckpointSessionState(
-  timeline: Array<Record<string, unknown>>,
-  checkpoints: Array<Record<string, unknown>> = [],
+  timeline: WebviewTimelineItem[],
+  checkpoints: WebviewCheckpoint[] = [],
   sessionId = "s1",
 ) {
   await emitState({
@@ -178,9 +231,8 @@ async function emitCheckpointSessionState(
           model: "gpt-5.4",
           ownedByThisFrontend: true,
           pendingAttachments: [],
-          planFile: null,
-          planId: null,
-          planState: "chat",
+          activePlan: null,
+          agentMode: "chat",
           sessionId,
           thinkingLevel: "high",
           timeline,
@@ -200,7 +252,7 @@ async function emitTranscriptSessionState({
   busy: boolean;
   messageId: string;
   sessionId?: string;
-  timeline: Array<Record<string, unknown>>;
+  timeline: WebviewTimelineItem[];
 }) {
   await emitState({
     channel: "state",
@@ -227,9 +279,8 @@ async function emitTranscriptSessionState({
           model: "gpt-5.4",
           ownedByThisFrontend: true,
           pendingAttachments: [],
-          planFile: null,
-          planId: null,
-          planState: "chat",
+          activePlan: null,
+          agentMode: "chat",
           sessionId,
           thinkingLevel: "high",
           timeline,
@@ -522,11 +573,9 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             pendingAttachments: [
               {
-                attachment: {
-                  dataBase64: "YWJj",
-                  kind: "file",
-                  mimeType: "text/markdown",
-                },
+                blobSha: "a".repeat(64),
+                bytes: 3,
+                filename: "README.md",
                 id: "att-1",
                 kind: "file",
                 label: "README.md",
@@ -546,14 +595,14 @@ describe("Tomcat webview App", () => {
                 status: "pending",
               },
             ],
-            planFile: {
+            activePlan: {
               path: "/workspace/login-refactor.plan.md",
               planId: "plan-1",
               state: "planning",
             },
-            planId: "plan-1",
-            planState: "planning",
+            agentMode: "plan",
             sessionId: "s1",
+            sessionTodos: [],
             timeline: [
               {
                 coveredCount: 12,
@@ -699,8 +748,12 @@ describe("Tomcat webview App", () => {
             pendingAttachments: [],
             planTodos: [],
             sessionTodos: [],
-            planId: "plan-1",
-            planState: "planning",
+            activePlan: {
+              path: "/workspace/login-refactor.plan.md",
+              planId: "plan-1",
+              state: "planning",
+            },
+            agentMode: "plan",
             sessionId: "s1",
             timeline: [
               {
@@ -740,9 +793,13 @@ describe("Tomcat webview App", () => {
       messageId: "state-build-model",
     });
 
-    fireEvent.change(screen.getByTestId("plan-card-build-model"), {
-      target: { value: "claude-4.6-sonnet" },
-    });
+    fireEvent.click(screen.getByTestId("plan-card-build-model"));
+    fireEvent.click(
+      screen
+        .getAllByTestId("model-option")
+        .find((node) => node.textContent?.includes("claude-4.6-sonnet")) ??
+        screen.getAllByTestId("model-option")[0],
+    );
 
     expect(postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -797,8 +854,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [
               { id: "m-user", kind: "user", text: "hello", type: "message" },
@@ -859,8 +916,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [
               { id: "m-user", kind: "user", text: "hello", type: "message" },
@@ -919,8 +976,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [],
           },
@@ -964,10 +1021,11 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "planning",
+            activePlan: null,
+            agentMode: "plan",
+            planTodos: [],
             sessionId: "s1",
+            sessionTodos: [],
             timeline: [
               {
                 args: {
@@ -1056,8 +1114,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [
               {
@@ -1104,8 +1162,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [
               {
@@ -1145,8 +1203,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [
               {
@@ -1214,8 +1272,8 @@ describe("Tomcat webview App", () => {
               model: "gpt-5.4",
               ownedByThisFrontend: true,
               pendingAttachments: [],
-              planId: null,
-              planState: "chat",
+              activePlan: null,
+              agentMode: "chat",
               sessionId: "s1",
               timeline: [
                 {
@@ -1255,8 +1313,8 @@ describe("Tomcat webview App", () => {
               model: "gpt-5.4",
               ownedByThisFrontend: true,
               pendingAttachments: [],
-              planId: null,
-              planState: "chat",
+              activePlan: null,
+              agentMode: "chat",
               sessionId: "s1",
               timeline: [
                 {
@@ -1306,8 +1364,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [],
           },
@@ -1342,8 +1400,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [
               { id: "m1", kind: "assistant", text: "done", type: "message" },
@@ -1394,11 +1452,9 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             pendingAttachments: [
               {
-                attachment: {
-                  dataBase64: "YWJj",
-                  kind: "file",
-                  mimeType: "text/markdown",
-                },
+                blobSha: "a".repeat(64),
+                bytes: 3,
+                filename: "README.md",
                 id: "att-1",
                 kind: "file",
                 label: "README.md",
@@ -1414,6 +1470,7 @@ describe("Tomcat webview App", () => {
               },
             ],
             sessionId: "s1",
+            sessionTodos: [],
             timeline: [
               {
                 args: {
@@ -1447,7 +1504,6 @@ describe("Tomcat webview App", () => {
               },
               {
                 assistantMessageId: "assistant-plan",
-                planId: "plan-1",
                 kind: "assistant",
                 id: "assistant-plan",
                 text: "Plan is ready to build.",
@@ -1486,20 +1542,13 @@ describe("Tomcat webview App", () => {
       },
     });
     fireEvent.click(screen.getByTestId("send-button"));
-    const modelSelect = screen.getByTestId("model-select");
-    if (modelSelect.tagName === "SELECT") {
-      fireEvent.change(modelSelect, {
-        target: { value: "claude-4.6-sonnet" },
-      });
-    } else {
-      fireEvent.click(modelSelect);
-      fireEvent.click(
-        screen
-          .getAllByTestId("model-option")
-          .find((node) => node.textContent?.includes("claude-4.6-sonnet")) ??
-          screen.getAllByTestId("model-option")[0],
-      );
-    }
+    fireEvent.click(screen.getByTestId("model-select"));
+    fireEvent.click(
+      screen
+        .getAllByTestId("model-option")
+        .find((node) => node.textContent?.includes("claude-4.6-sonnet")) ??
+        screen.getAllByTestId("model-option")[0],
+    );
     fireEvent.click(screen.getByTestId("thinking-level-select"));
     fireEvent.click(
       screen
@@ -1622,9 +1671,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+          activePlan: null,
+          agentMode: "chat",
             sessionId: "s1",
             timeline: [
               {
@@ -1798,9 +1846,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [],
           },
@@ -1967,9 +2014,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "medium",
             timeline: [],
@@ -2036,9 +2082,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [],
@@ -2079,9 +2124,8 @@ describe("Tomcat webview App", () => {
             model: "claude-4.6-sonnet",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "low",
             timeline: [],
@@ -2122,9 +2166,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
@@ -2211,9 +2254,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
@@ -2270,7 +2312,7 @@ describe("Tomcat webview App", () => {
   it("settles the previous turn and auto-switches from reveal-to-top into the current sticky prompt", async () => {
     mount();
 
-    const previousTurn = [
+    const previousTurn: WebviewTimelineItem[] = [
       { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
       {
         assistantMessageId: "assistant-1",
@@ -2466,9 +2508,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
@@ -2563,9 +2604,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
@@ -2642,7 +2682,7 @@ describe("Tomcat webview App", () => {
   it("drives send stop state from busy instead of inferring from transcript tail", async () => {
     mount();
 
-    const danglingTimeline = [
+    const danglingTimeline: WebviewTimelineItem[] = [
       {
         assistantMessageId: "assistant-1",
         id: "assistant-1-thinking",
@@ -2688,9 +2728,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: danglingTimeline,
@@ -2729,9 +2768,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: danglingTimeline,
@@ -2775,9 +2813,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "1781621492962_3ee132361e6832e6",
             thinkingLevel: "medium",
             timeline: [],
@@ -2835,9 +2872,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "empty-session",
             thinkingLevel: "medium",
             timeline: [],
@@ -2889,9 +2925,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s0",
             thinkingLevel: "medium",
             timeline: [],
@@ -2975,9 +3010,8 @@ describe("Tomcat webview App", () => {
               model: "gpt-5.4",
               ownedByThisFrontend: true,
               pendingAttachments: [],
-              planFile: null,
-              planId: null,
-              planState: "chat",
+              activePlan: null,
+              agentMode: "chat",
               sessionId: "today-s",
               thinkingLevel: "medium",
               timeline: [],
@@ -3171,9 +3205,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [],
@@ -3224,9 +3257,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
@@ -3274,9 +3306,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [],
@@ -3325,9 +3356,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
@@ -3368,7 +3398,7 @@ describe("Tomcat webview App", () => {
         },
         sessionId: null,
         type: "insertReference",
-      } as HostToWebviewFrame["content"],
+      },
       messageId: "event-invalid-insert-reference",
     });
 
@@ -3638,9 +3668,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [],

@@ -151,7 +151,10 @@ fn serve_set_thinking_level_roundtrip_over_real_stdio_writes_global_store() {
     let store = std::fs::read_to_string(&store_path).expect("read global model thinking store");
     let parsed: serde_json::Value =
         serde_json::from_str(&store).expect("parse model thinking store");
-    assert_eq!(parsed["models"]["gpt-5.4"].as_str(), Some("high"));
+    assert_eq!(
+        parsed["models"]["gpt-5.4"]["reasoning"].as_str(),
+        Some("high")
+    );
     assert!(
         !fx.home_path
             .join(".tomcat")

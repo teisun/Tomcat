@@ -50,6 +50,11 @@ const THUMBS_DIR = path.join(ATTACHMENT_ROOT, "thumbs");
 const timers = new Set();
 const sessions = new Map();
 const pendingApprovals = new Map();
+// The real attachment store retains hashes per session while a draft survives
+// a serve restart. This fixture does not garbage-collect blobs, but it still
+// tracks the lease contract so an invalid reference fails just as it would in
+// production instead of silently making a broken thumbnail look valid.
+const attachmentLeases = new Map();
 
 let activeSessionId = null;
 let askQuestionCounter = 1;
@@ -679,6 +684,72 @@ function handleCacheAttachmentThumbnail(frame) {
   });
 }
 
+function handleRetainAttachmentLeases(frame) {
+  const sessionId = frame.sessionId;
+  if (typeof sessionId !== "string" || !sessions.has(sessionId)) {
+    send({
+      error: "unknown_session",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const attachments = Array.isArray(frame?.params?.attachments)
+    ? frame.params.attachments
+    : [];
+  if (attachments.length > 512) {
+    send({
+      error: "too_many_attachment_leases",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const retainedShas = [...new Set(attachments.flatMap((attachment) => [
+    attachment?.blobSha,
+    attachment?.providerSha,
+  ]).filter((sha) => typeof sha === "string"))].sort();
+  if (retainedShas.length > 512) {
+    send({
+      error: "too_many_attachment_leases",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const missing = retainedShas.find((sha) => !fs.existsSync(path.join(BLOBS_DIR, sha)));
+  if (missing) {
+    send({
+      error: `missing_attachment_blob: ${missing}`,
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const sessionLeases = attachmentLeases.get(sessionId) ?? new Set();
+  retainedShas.forEach((sha) => sessionLeases.add(sha));
+  attachmentLeases.set(sessionId, sessionLeases);
+  send({
+    id: frame.id,
+    payload: { retainedShas },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
 /**
  * Turn the reference-only attachments on a prompt into transcript attachment parts.
  *
@@ -947,9 +1018,10 @@ function handleCommand(frame) {
               "set_model",
               "set_thinking_level",
               "ingest_attachment",
+              "retain_attachment_leases",
               "cache_attachment_thumbnail",
             ],
-            protocolVersion: 1,
+            protocolVersion: 2,
             sessionId,
           },
           requestId: frame.requestId,
@@ -1013,6 +1085,9 @@ function handleCommand(frame) {
     case "cache_attachment_thumbnail":
       handleCacheAttachmentThumbnail(frame);
       return;
+    case "retain_attachment_leases":
+      handleRetainAttachmentLeases(frame);
+      return;
     case "get_state": {
       const sessionId = frame.sessionId || activeSessionId || createSession();
       const session = ensureSession(sessionId);
@@ -1060,6 +1135,7 @@ function handleCommand(frame) {
     case "close_session":
       if (frame.sessionId) {
         sessions.delete(frame.sessionId);
+        attachmentLeases.delete(frame.sessionId);
         if (activeSessionId === frame.sessionId) {
           activeSessionId = [...sessions.keys()][0] ?? null;
         }

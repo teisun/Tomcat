@@ -826,7 +826,9 @@ fn stream_test_provider(
         base_url: Some(base_url),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),

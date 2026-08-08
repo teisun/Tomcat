@@ -13,7 +13,7 @@ use tomcat::{
 
 fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
     let catalog = Arc::new(ModelCatalog::load(cfg).expect("load model catalog"));
-    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog);
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, common::model_prefs_for(cfg));
     resolver
         .resolve(LlmScene::Main, None)
         .expect("resolve main model")

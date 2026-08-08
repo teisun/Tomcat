@@ -21,6 +21,7 @@ import {
   findMatchingProviderPreset,
   type ProviderPreset,
 } from "./providerPresets";
+import { findBuiltinModelByName } from "./modelBuiltinMatch";
 import { deriveRelayFields, RELAY_ID_SEPARATOR } from "./relayDerive";
 import { KeySlotCombobox, type KeySlotOption } from "./KeySlotCombobox";
 import { isValidKeySlotName } from "./keySlot";
@@ -119,16 +120,24 @@ function maskDraftApiKey(value: string): string {
   return `${chars.slice(0, 8).join("")}${"•".repeat(chars.length - 12)}${chars.slice(-4).join("")}`;
 }
 
-function normalizeOptionalText(value: string | null | undefined): string | null {
+function normalizeOptionalText(
+  value: string | null | undefined,
+): string | null {
   const trimmed = fieldText(value);
   return trimmed ? trimmed : null;
+}
+
+function finiteNumberOrNull(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function hasScheme(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
 }
 
-function normalizeBaseUrlInput(value: string | null | undefined): string | null {
+function normalizeBaseUrlInput(
+  value: string | null | undefined,
+): string | null {
   const trimmed = fieldText(value);
   if (!trimmed) {
     return null;
@@ -155,11 +164,13 @@ function normalizeModel(model: FormState): SettingsModelInput {
     apiKeyEnv: normalizeOptionalText(model.apiKeyEnv),
     baseUrl: normalizeBaseUrlInput(model.baseUrl),
     capabilities: cloneCapabilities(model.capabilities),
-    contextWindow:
-      typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow)
-        ? model.contextWindow
-        : null,
+    contextWindow: finiteNumberOrNull(model.contextWindow),
+    contextWindowOptions: Array.isArray(model.contextWindowOptions)
+      ? [...model.contextWindowOptions]
+      : null,
+    description: normalizeOptionalText(model.description),
     id: fieldText(model.id),
+    maxOutputTokens: finiteNumberOrNull(model.maxOutputTokens),
     modelName: normalizeOptionalText(model.modelName),
     provider: fieldText(model.provider),
     supportedReasoningLevels: Array.isArray(model.supportedReasoningLevels)
@@ -177,9 +188,7 @@ function frameIsState(message: unknown): message is SettingsHostFrame {
   );
 }
 
-function frameIsTestEvent(
-  message: unknown,
-): message is {
+function frameIsTestEvent(message: unknown): message is {
   channel: "event";
   content: {
     action?: SettingsDomAction;
@@ -191,7 +200,8 @@ function frameIsTestEvent(
     typeof message === "object" &&
     message !== null &&
     (message as { channel?: unknown }).channel === "event" &&
-    typeof (message as { content?: { type?: unknown } }).content?.type === "string"
+    typeof (message as { content?: { type?: unknown } }).content?.type ===
+      "string"
   );
 }
 
@@ -203,7 +213,12 @@ function readTestIdRect(
     return undefined;
   }
   const rect = el.getBoundingClientRect();
-  return { height: rect.height, left: rect.left, top: rect.top, width: rect.width };
+  return {
+    height: rect.height,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+  };
 }
 
 function buildSettingsDomSnapshot(): {
@@ -228,7 +243,9 @@ function runSettingsDomAction(action: SettingsDomAction | undefined): void {
   if (!action || !action.testId) {
     return;
   }
-  const target = document.querySelector<HTMLElement>(`[data-testid="${action.testId}"]`);
+  const target = document.querySelector<HTMLElement>(
+    `[data-testid="${action.testId}"]`,
+  );
   if (!(target instanceof HTMLElement)) {
     return;
   }
@@ -250,7 +267,10 @@ function modelToForm(model: SettingsModelView): FormState {
     baseUrl: model.baseUrl ?? "",
     capabilities: cloneCapabilities(model.capabilities),
     contextWindow: model.contextWindow ?? null,
+    contextWindowOptions: model.contextWindowOptions ?? null,
+    description: model.description ?? null,
     id: model.id,
+    maxOutputTokens: model.maxOutputTokens ?? null,
     modelName: model.modelName ?? "",
     provider: model.provider,
     supportedReasoningLevels: model.supportedReasoningLevels ?? null,
@@ -262,9 +282,13 @@ function formatApiLabel(api: string): string {
   return API_OPTIONS.find((entry) => entry.value === api)?.label ?? api;
 }
 
-function formatThinkingLabel(thinkingFormat: string | null | undefined): string {
+function formatThinkingLabel(
+  thinkingFormat: string | null | undefined,
+): string {
   return (
-    THINKING_FORMAT_OPTIONS.find((entry) => entry.value === (thinkingFormat ?? ""))?.label ??
+    THINKING_FORMAT_OPTIONS.find(
+      (entry) => entry.value === (thinkingFormat ?? ""),
+    )?.label ??
     thinkingFormat ??
     ""
   );
@@ -300,7 +324,9 @@ function fallbackModelName(model: SettingsModelView): string {
   return fromRelay?.trim() || model.id;
 }
 
-function buildModelDetails(model: SettingsModelView): Array<{ label: string; value: string }> {
+function buildModelDetails(
+  model: SettingsModelView,
+): Array<{ label: string; value: string }> {
   const detailRows = [
     {
       label: "Source",
@@ -352,7 +378,9 @@ function buildKeySlotOptions(
   const options: KeySlotOption[] = [];
   const seen = new Set<string>();
   if (suggestedEnvName) {
-    const existing = providerKeys.find((entry) => entry.envName === suggestedEnvName);
+    const existing = providerKeys.find(
+      (entry) => entry.envName === suggestedEnvName,
+    );
     options.push({
       envName: suggestedEnvName,
       group: "suggested",
@@ -462,9 +490,15 @@ function buildEditForm(
   return form;
 }
 
+type SettingsIntentPayload = SettingsIntent extends infer Intent
+  ? Intent extends SettingsIntent
+    ? Omit<Intent, "messageId">
+    : never
+  : never;
+
 function send(
   vscodeApi: VsCodeApiLike<SettingsIntent>,
-  message: Omit<SettingsIntent, "messageId">,
+  message: SettingsIntentPayload,
 ): void {
   vscodeApi.postMessage({
     ...message,
@@ -494,7 +528,9 @@ export function SettingsApp({
   const [form, setForm] = useState<FormState>(() => createEmptyForm());
   const [draftApiKey, setDraftApiKey] = useState("");
   const [isApiKeyFocused, setIsApiKeyFocused] = useState(false);
-  const [inlineApiKeys, setInlineApiKeys] = useState<Record<string, string>>({});
+  const [inlineApiKeys, setInlineApiKeys] = useState<Record<string, string>>(
+    {},
+  );
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState("");
   const [formMode, setFormMode] = useState<FormMode>("create");
@@ -502,7 +538,9 @@ export function SettingsApp({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isKeySlotRefreshing, setIsKeySlotRefreshing] = useState(false);
-  const [keySlotRefreshFeedback, setKeySlotRefreshFeedback] = useState<string | null>(null);
+  const [keySlotRefreshFeedback, setKeySlotRefreshFeedback] = useState<
+    string | null
+  >(null);
   const [replacementConfirmation, setReplacementConfirmation] = useState<{
     envName: string;
     modelIds: string[];
@@ -531,7 +569,9 @@ export function SettingsApp({
       if (keySlotRefreshPendingRef.current) {
         keySlotRefreshPendingRef.current = false;
         setIsKeySlotRefreshing(false);
-        setKeySlotRefreshFeedback(event.data.content.error ? null : "Key slots refreshed.");
+        setKeySlotRefreshFeedback(
+          event.data.content.error ? null : "Key slots refreshed.",
+        );
       }
       setState(event.data.content);
     };
@@ -573,7 +613,12 @@ export function SettingsApp({
   );
 
   useEffect(() => {
-    if (!isFormOpen || dialogKind !== "official" || selectedProvider || providerPresets.length === 0) {
+    if (
+      !isFormOpen ||
+      dialogKind !== "official" ||
+      selectedProvider ||
+      providerPresets.length === 0
+    ) {
       return;
     }
     const firstPreset = providerPresets[0];
@@ -615,52 +660,105 @@ export function SettingsApp({
 
   const selectedPreset =
     dialogKind === "official"
-      ? providerPresetByProvider.get(selectedProvider) ?? providerPresets[0] ?? null
+      ? (providerPresetByProvider.get(selectedProvider) ??
+        providerPresets[0] ??
+        null)
       : null;
+
+  const effectiveModelName = fieldText(form.modelName);
+  const builtinModelByName = useMemo(
+    () => findBuiltinModelByName(state.models, effectiveModelName),
+    [effectiveModelName, state.models],
+  );
+  // A relay id belongs to the gateway, while modelName identifies the upstream model.
+  // Only a fresh relay model inherits the upstream model's capability defaults.
+  const automaticBuiltinModel =
+    formMode === "create" && dialogKind === "relay" ? builtinModelByName : null;
+  const effectiveApi =
+    dialogKind === "official"
+      ? fieldText(form.api) || selectedPreset?.api || ""
+      : fieldText(form.api) || automaticBuiltinModel?.api || "openai";
+  const effectiveCapabilities = cloneCapabilities(
+    automaticBuiltinModel?.capabilities ?? form.capabilities,
+  );
+  // The current Anthropic Messages adapter has no files attachment transport.
+  // Keep inherited relay capabilities valid for the backend's mutable-model check.
+  if (effectiveApi === "anthropic-messages") {
+    effectiveCapabilities.files = false;
+  }
   const relayDerived = useMemo(
     () =>
       deriveRelayFields(
         form.baseUrl ?? "",
         form.modelName ?? "",
-        fieldText(form.api) || "openai",
+        effectiveApi,
         RELAY_ID_SEPARATOR,
       ),
-    [form.api, form.baseUrl, form.modelName],
+    [effectiveApi, form.baseUrl, form.modelName],
   );
-
-  const effectiveModelName = fieldText(form.modelName);
-  const effectiveApi =
-    dialogKind === "official"
-      ? fieldText(form.api) || selectedPreset?.api || ""
-      : fieldText(form.api) || "openai";
   const effectiveProvider =
     dialogKind === "official"
       ? fieldText(form.provider) || selectedPreset?.provider || ""
       : fieldText(form.provider) || relayDerived.provider;
   const effectiveBaseUrl =
     dialogKind === "official"
-      ? normalizeBaseUrlInput(form.baseUrl) ?? selectedPreset?.baseUrl ?? null
+      ? (normalizeBaseUrlInput(form.baseUrl) ?? selectedPreset?.baseUrl ?? null)
       : normalizeBaseUrlInput(form.baseUrl);
   const suggestedApiKeyEnv =
     dialogKind === "official"
-      ? selectedPreset?.apiKeyEnv ?? ""
+      ? (selectedPreset?.apiKeyEnv ?? "")
       : relayDerived.apiKeyEnv;
   const effectiveApiKeyEnv = fieldText(form.apiKeyEnv) || suggestedApiKeyEnv;
-  const derivedId = dialogKind === "official" ? effectiveModelName : relayDerived.id;
-  const effectiveId = selectedModel ? selectedModel.id : fieldText(form.id) || derivedId;
+  const derivedId =
+    dialogKind === "official" ? effectiveModelName : relayDerived.id;
+  const effectiveId = selectedModel
+    ? selectedModel.id
+    : fieldText(form.id) || derivedId;
+  const normalizedContextWindow = finiteNumberOrNull(form.contextWindow);
+  const automaticContextWindow = finiteNumberOrNull(
+    automaticBuiltinModel?.contextWindow,
+  );
+  const effectiveContextWindow =
+    formMode === "create"
+      ? (automaticContextWindow ?? normalizedContextWindow ?? 400_000)
+      : (normalizedContextWindow ?? automaticContextWindow ?? 400_000);
+  const normalizedMaxOutputTokens = finiteNumberOrNull(form.maxOutputTokens);
+  const automaticMaxOutputTokens = finiteNumberOrNull(
+    automaticBuiltinModel?.maxOutputTokens,
+  );
+  const effectiveMaxOutputTokens =
+    normalizedMaxOutputTokens ?? automaticMaxOutputTokens;
+  const effectiveContextWindowOptions =
+    formMode === "create"
+      ? (automaticBuiltinModel?.contextWindowOptions ??
+        form.contextWindowOptions ??
+        null)
+      : (form.contextWindowOptions ??
+        automaticBuiltinModel?.contextWindowOptions ??
+        null);
   const effectiveThinkingFormat =
     fieldText(form.thinkingFormat) ||
     (dialogKind === "official"
-      ? selectedPreset?.thinkingFormat ?? defaultThinkingFormatForApi(effectiveApi)
-      : defaultThinkingFormatForApi(effectiveApi));
+      ? (selectedPreset?.thinkingFormat ??
+        defaultThinkingFormatForApi(effectiveApi))
+      : (automaticBuiltinModel?.thinkingFormat ??
+        defaultThinkingFormatForApi(effectiveApi)));
   const effectiveModel: SettingsModelInput = normalizeModel({
     ...form,
     api: effectiveApi,
     apiKeyEnv: effectiveApiKeyEnv,
     baseUrl: effectiveBaseUrl ?? "",
+    capabilities: effectiveCapabilities,
+    contextWindow: effectiveContextWindow,
+    contextWindowOptions: effectiveContextWindowOptions,
     id: effectiveId,
+    maxOutputTokens: effectiveMaxOutputTokens,
     modelName: effectiveModelName,
     provider: effectiveProvider,
+    supportedReasoningLevels:
+      form.supportedReasoningLevels ??
+      automaticBuiltinModel?.supportedReasoningLevels ??
+      null,
     thinkingFormat: effectiveThinkingFormat,
   });
 
@@ -669,7 +767,7 @@ export function SettingsApp({
     [state.providerKeys, suggestedApiKeyEnv],
   );
   const selectedKeyStatus = effectiveApiKeyEnv
-    ? providerKeysByEnv.get(effectiveApiKeyEnv) ?? null
+    ? (providerKeysByEnv.get(effectiveApiKeyEnv) ?? null)
     : null;
   const effectiveKeyPresent = Boolean(selectedKeyStatus?.keyPresent);
   const builtinCollision = useMemo(
@@ -679,13 +777,10 @@ export function SettingsApp({
       ) ?? null,
     [effectiveId, state.models],
   );
-  const normalizedContextWindow =
-    typeof form.contextWindow === "number" && Number.isFinite(form.contextWindow)
-      ? form.contextWindow
-      : null;
   const officialPresetUnavailable =
     dialogKind === "official" && selectedPreset === null;
-  const showSharedFormFields = dialogKind === "relay" || selectedPreset !== null;
+  const showSharedFormFields =
+    dialogKind === "relay" || selectedPreset !== null;
 
   function resetForm() {
     const nextDialogKind = defaultDialogKindForPresets(providerPresets);
@@ -724,7 +819,7 @@ export function SettingsApp({
     const inferred = inferDialogKind(model, providerPresets);
     const preset =
       inferred.dialogKind === "official"
-        ? providerPresetByProvider.get(inferred.selectedProvider) ?? null
+        ? (providerPresetByProvider.get(inferred.selectedProvider) ?? null)
         : null;
     setSelectedModelId(model.id);
     setDraftApiKey("");
@@ -746,8 +841,12 @@ export function SettingsApp({
     setShowAdvanced(false);
     setValidationError(null);
     if (nextKind === "official") {
-      const nextProvider = selectedProvider || providerPresets[0]?.provider || "";
-      const preset = providerPresetByProvider.get(nextProvider) ?? providerPresets[0] ?? null;
+      const nextProvider =
+        selectedProvider || providerPresets[0]?.provider || "";
+      const preset =
+        providerPresetByProvider.get(nextProvider) ??
+        providerPresets[0] ??
+        null;
       setSelectedProvider(nextProvider);
       setForm((current) => ({
         ...createEmptyForm(),
@@ -763,7 +862,9 @@ export function SettingsApp({
 
     setForm((current) => ({
       ...createEmptyForm(),
-      api: fieldText(current.api) || "openai",
+      // Leave API unset for a fresh relay so a matching upstream model can
+      // supply its transport (for example Anthropic Messages for Claude).
+      api: fieldText(current.api),
       baseUrl: current.baseUrl ?? "",
       capabilities: cloneCapabilities(RELAY_DEFAULT_CAPABILITIES),
       contextWindow: current.contextWindow ?? null,
@@ -824,16 +925,20 @@ export function SettingsApp({
         dialogKind === "official"
           ? fieldText(current.api) || selectedPreset?.api || ""
           : fieldText(current.api) || "openai";
-      const currentDefaultThinkingFormat = defaultThinkingFormatForApi(currentApi);
+      const currentDefaultThinkingFormat =
+        defaultThinkingFormatForApi(currentApi);
       const currentThinkingFormat = fieldText(current.thinkingFormat);
       const nextThinkingFormat =
-        !currentThinkingFormat || currentThinkingFormat === currentDefaultThinkingFormat
+        !currentThinkingFormat ||
+        currentThinkingFormat === currentDefaultThinkingFormat
           ? defaultThinkingFormatForApi(nextApi)
           : current.thinkingFormat;
       return {
         ...current,
         api:
-          dialogKind === "official" && selectedPreset && nextApi === selectedPreset.api
+          dialogKind === "official" &&
+          selectedPreset &&
+          nextApi === selectedPreset.api
             ? ""
             : nextApi,
         thinkingFormat: nextThinkingFormat,
@@ -928,17 +1033,24 @@ export function SettingsApp({
       return;
     }
     if (draftApiKey.trim() && !state.capabilities.setProviderKey) {
-      setValidationError("当前后端不支持保存 API Key，请先升级 `tomcat serve`。");
+      setValidationError(
+        "当前后端不支持保存 API Key，请先升级 `tomcat serve`。",
+      );
       return;
     }
     setValidationError(null);
     const affectedModelIds = state.models
       .filter(
         (model) =>
-          model.apiKeyEnv === effectiveApiKeyEnv && model.id !== selectedModel?.id,
+          model.apiKeyEnv === effectiveApiKeyEnv &&
+          model.id !== selectedModel?.id,
       )
       .map((model) => model.id);
-    if (effectiveKeyPresent && draftApiKey.trim() && affectedModelIds.length > 0) {
+    if (
+      effectiveKeyPresent &&
+      draftApiKey.trim() &&
+      affectedModelIds.length > 0
+    ) {
       setReplacementConfirmation({
         envName: effectiveApiKeyEnv,
         modelIds: affectedModelIds,
@@ -980,24 +1092,25 @@ export function SettingsApp({
   }
 
   const formTitle =
-    formMode === "edit" && selectedModel ? `Edit ${selectedModel.id}` : "Add Model";
+    formMode === "edit" && selectedModel
+      ? `Edit ${selectedModel.id}`
+      : "Add Model";
   const formDescription =
     formMode === "edit"
       ? "Update this model, reuse a saved key slot, or rotate the key without echoing it back into the UI."
       : "Add an official model that Tomcat does not ship yet, or connect a relay or custom endpoint.";
 
-  const saveDisabledReason =
-    !state.capabilities.upsertModel
-      ? "The connected `tomcat serve` does not expose model writes yet."
-      : officialPresetUnavailable
-        ? "No official provider presets are available right now. Switch to Relay / custom endpoint."
-        : !effectiveModelName
-          ? "Enter a model name to continue."
-          : !effectiveApiKeyEnv
-            ? "Choose or derive an API key slot before saving."
-            : !isValidKeySlotName(effectiveApiKeyEnv)
-              ? "Key slot must match ^[A-Z_][A-Z0-9_]*$."
-              : dialogKind === "relay" && !fieldText(form.baseUrl)
+  const saveDisabledReason = !state.capabilities.upsertModel
+    ? "The connected `tomcat serve` does not expose model writes yet."
+    : officialPresetUnavailable
+      ? "No official provider presets are available right now. Switch to Relay / custom endpoint."
+      : !effectiveModelName
+        ? "Enter a model name to continue."
+        : !effectiveApiKeyEnv
+          ? "Choose or derive an API key slot before saving."
+          : !isValidKeySlotName(effectiveApiKeyEnv)
+            ? "Key slot must match ^[A-Z_][A-Z0-9_]*$."
+            : dialogKind === "relay" && !fieldText(form.baseUrl)
               ? "Enter a base URL to continue."
               : !effectiveKeyPresent && !draftApiKey.trim()
                 ? `Add an API key or choose a configured slot such as ${effectiveApiKeyEnv}.`
@@ -1021,7 +1134,10 @@ export function SettingsApp({
         <button className="tc-settings-nav__item" disabled type="button">
           Tools
         </button>
-        <div className="tc-settings-shell__version" data-testid="settings-version-footer">
+        <div
+          className="tc-settings-shell__version"
+          data-testid="settings-version-footer"
+        >
           <div>Extension {formatVersionLabel(state.extensionVersion)}</div>
           <div>Serve {formatVersionLabel(state.serverVersion)}</div>
         </div>
@@ -1047,9 +1163,13 @@ export function SettingsApp({
         </header>
 
         {serveVersionWarning ? (
-          <div className="tc-banner tc-banner--warning">{serveVersionWarning}</div>
+          <div className="tc-banner tc-banner--warning">
+            {serveVersionWarning}
+          </div>
         ) : null}
-        {state.error ? <div className="tc-banner tc-banner--warning">{state.error}</div> : null}
+        {state.error ? (
+          <div className="tc-banner tc-banner--warning">{state.error}</div>
+        ) : null}
         {state.warnings?.map((warning) => (
           <div key={warning} className="tc-banner tc-banner--warning">
             {warning}
@@ -1069,7 +1189,9 @@ export function SettingsApp({
             <section className="tc-settings-group">
               <h2 className="tc-settings-group__title">Ready</h2>
               {readyModels.length === 0 ? (
-                <div className="tc-session-dropdown__empty">No ready models yet.</div>
+                <div className="tc-session-dropdown__empty">
+                  No ready models yet.
+                </div>
               ) : (
                 readyModels.map((model) => {
                   const details = buildModelDetails(model);
@@ -1244,11 +1366,14 @@ export function SettingsApp({
               </div>
 
               {validationError ? (
-                <div className="tc-banner tc-banner--warning">{validationError}</div>
+                <div className="tc-banner tc-banner--warning">
+                  {validationError}
+                </div>
               ) : null}
               {builtinCollision ? (
                 <div className="tc-banner tc-banner--warning">
-                  Saving this model will override the built-in model `{builtinCollision.id}`.
+                  Saving this model will override the built-in model `
+                  {builtinCollision.id}`.
                 </div>
               ) : null}
 
@@ -1264,7 +1389,9 @@ export function SettingsApp({
                     className={`tc-settings-tabs__tab${dialogKind === "official" ? " tc-settings-tabs__tab--active" : ""}`}
                     id={tabIdForDialogKind("official")}
                     onClick={() => handleDialogKindChange("official")}
-                    onKeyDown={(event) => handleDialogTabKeyDown("official", event)}
+                    onKeyDown={(event) =>
+                      handleDialogTabKeyDown("official", event)
+                    }
                     role="tab"
                     tabIndex={dialogKind === "official" ? 0 : -1}
                     type="button"
@@ -1278,7 +1405,9 @@ export function SettingsApp({
                     data-testid="settings-mode-relay"
                     id={tabIdForDialogKind("relay")}
                     onClick={() => handleDialogKindChange("relay")}
-                    onKeyDown={(event) => handleDialogTabKeyDown("relay", event)}
+                    onKeyDown={(event) =>
+                      handleDialogTabKeyDown("relay", event)
+                    }
                     role="tab"
                     tabIndex={dialogKind === "relay" ? 0 : -1}
                     type="button"
@@ -1301,18 +1430,24 @@ export function SettingsApp({
                             <span>Provider</span>
                             <select
                               aria-label="Provider"
-                              onChange={(event) => handlePresetChange(event.target.value)}
+                              onChange={(event) =>
+                                handlePresetChange(event.target.value)
+                              }
                               value={selectedPreset?.provider ?? ""}
                             >
                               {providerPresets.map((preset) => (
-                                <option key={preset.provider} value={preset.provider}>
+                                <option
+                                  key={preset.provider}
+                                  value={preset.provider}
+                                >
                                   {preset.label}
                                 </option>
                               ))}
                             </select>
                             <small className="tc-field__hint">
-                              Choose the official vendor. Tomcat fills in the API,
-                              URL, key slot, thinking format, and capabilities.
+                              Choose the official vendor. Tomcat fills in the
+                              API, URL, key slot, thinking format, and
+                              capabilities.
                             </small>
                           </label>
                           <label className="tc-field">
@@ -1357,7 +1492,9 @@ export function SettingsApp({
                           </span>
                           <span className="tc-settings-preset-summary__line">
                             {selectedPreset.apiKeyEnv}
-                            {selectedPreset.keyPresent ? " already configured" : " not configured yet"}
+                            {selectedPreset.keyPresent
+                              ? " already configured"
+                              : " not configured yet"}
                           </span>
                         </div>
                       </>
@@ -1408,7 +1545,9 @@ export function SettingsApp({
                         <span>API</span>
                         <select
                           aria-label="API"
-                          onChange={(event) => handleApiChange(event.target.value)}
+                          onChange={(event) =>
+                            handleApiChange(event.target.value)
+                          }
                           value={fieldText(form.api) || "openai"}
                         >
                           {API_OPTIONS.map((entry) => (
@@ -1458,12 +1597,30 @@ export function SettingsApp({
                         <strong>{effectiveId || "—"}</strong>
                       </div>
                     </div>
+                    {automaticBuiltinModel ? (
+                      <div
+                        className="tc-settings-derived-model"
+                        data-testid="settings-builtin-capability-source"
+                      >
+                        <strong>
+                          Capabilities from built-in {automaticBuiltinModel.id}
+                        </strong>
+                        <span>
+                          Context tiers, maximum output, and reasoning levels
+                          are reused for this upstream model unless you override
+                          a value.
+                        </span>
+                      </div>
+                    ) : null}
                   </div>
                 )}
 
                 {showSharedFormFields ? (
                   <>
-                    <div className="tc-settings-form__row" data-testid="settings-key-fields-row">
+                    <div
+                      className="tc-settings-form__row"
+                      data-testid="settings-key-fields-row"
+                    >
                       <KeySlotCombobox
                         feedback={keySlotRefreshFeedback}
                         hint="Search a configured key slot or type a new environment variable name."
@@ -1471,14 +1628,21 @@ export function SettingsApp({
                         onRefresh={handleKeySlotRefresh}
                         options={keySlotOptions}
                         placeholder={suggestedApiKeyEnv || "EXAMPLE_API_KEY"}
-                        refreshDisabled={!state.capabilities.listProviderKeys || isKeySlotRefreshing}
+                        refreshDisabled={
+                          !state.capabilities.listProviderKeys ||
+                          isKeySlotRefreshing
+                        }
                         refreshLabel="Refresh key slots"
                         refreshing={isKeySlotRefreshing}
                         value={effectiveApiKeyEnv}
                       />
                       <label className="tc-field">
                         <div className="tc-field__label-row">
-                          <span>{effectiveKeyPresent ? "New API key (optional)" : "API key"}</span>
+                          <span>
+                            {effectiveKeyPresent
+                              ? "New API key (optional)"
+                              : "API key"}
+                          </span>
                         </div>
                         <input
                           aria-label="API key"
@@ -1497,7 +1661,11 @@ export function SettingsApp({
                               : `Save ${effectiveApiKeyEnv || "the selected key slot"}`
                           }
                           readOnly={!isApiKeyFocused && draftApiKey.length > 0}
-                          type={isApiKeyFocused || !draftApiKey ? "password" : "text"}
+                          type={
+                            isApiKeyFocused || !draftApiKey
+                              ? "password"
+                              : "text"
+                          }
                           value={
                             isApiKeyFocused || !draftApiKey
                               ? draftApiKey
@@ -1532,8 +1700,14 @@ export function SettingsApp({
                               <span>API override</span>
                               <select
                                 aria-label="API override"
-                                onChange={(event) => handleApiChange(event.target.value)}
-                                value={fieldText(form.api) || selectedPreset?.api || ""}
+                                onChange={(event) =>
+                                  handleApiChange(event.target.value)
+                                }
+                                value={
+                                  fieldText(form.api) ||
+                                  selectedPreset?.api ||
+                                  ""
+                                }
                               >
                                 {API_OPTIONS.map((entry) => (
                                   <option key={entry.value} value={entry.value}>
@@ -1552,7 +1726,10 @@ export function SettingsApp({
                                     baseUrl: event.target.value,
                                   }))
                                 }
-                                placeholder={selectedPreset?.baseUrl || "https://api.example.com/v1"}
+                                placeholder={
+                                  selectedPreset?.baseUrl ||
+                                  "https://api.example.com/v1"
+                                }
                                 value={form.baseUrl ?? ""}
                               />
                             </label>
@@ -1571,7 +1748,9 @@ export function SettingsApp({
                                   id: event.target.value,
                                 }))
                               }
-                              placeholder={derivedId || "Defaults to the model name"}
+                              placeholder={
+                                derivedId || "Defaults to the model name"
+                              }
                               value={selectedModel ? selectedModel.id : form.id}
                             />
                             <small className="tc-field__hint">
@@ -1588,34 +1767,56 @@ export function SettingsApp({
                                   provider: event.target.value,
                                 }))
                               }
-                              placeholder={effectiveProvider || "Derived from the current mode"}
+                              placeholder={
+                                effectiveProvider ||
+                                "Derived from the current mode"
+                              }
                               value={form.provider}
                             />
                             <small className="tc-field__hint">
-                              Usually you should keep the derived provider label.
+                              Usually you should keep the derived provider
+                              label.
                             </small>
                           </label>
                         </div>
 
                         <div className="tc-settings-form__row">
-                          <label className="tc-field">
+                          <div className="tc-settings-auto-field">
                             <span>Context window</span>
+                            <strong data-testid="settings-context-window-auto">
+                              {effectiveContextWindow}
+                            </strong>
+                            <small>
+                              Choose a different Context tier from ModelPicker;
+                              Settings always inherits the built-in default.
+                            </small>
+                          </div>
+                          <label className="tc-field">
+                            <span>Maximum output tokens</span>
                             <input
                               className="tc-input"
+                              data-testid="settings-max-output-tokens-input"
                               inputMode="numeric"
+                              min="1"
                               onChange={(event) =>
                                 setForm((current) => ({
                                   ...current,
-                                  contextWindow: event.target.value
+                                  maxOutputTokens: event.target.value
                                     ? Number(event.target.value)
                                     : null,
                                 }))
                               }
-                              placeholder="400000"
-                              value={normalizedContextWindow ?? ""}
+                              placeholder={String(
+                                automaticMaxOutputTokens ?? 16384,
+                              )}
+                              step="1"
+                              type="number"
+                              value={normalizedMaxOutputTokens ?? ""}
                             />
                             <small className="tc-field__hint">
-                              Leave this empty to use Tomcat’s default context window.
+                              {automaticMaxOutputTokens !== null
+                                ? `Leave empty to use the built-in value ${automaticMaxOutputTokens}.`
+                                : "Leave this empty to use Tomcat’s default output reserve."}
                             </small>
                           </label>
                         </div>
@@ -1630,7 +1831,8 @@ export function SettingsApp({
                                 thinkingFormat:
                                   dialogKind === "official" &&
                                   selectedPreset &&
-                                  event.target.value === selectedPreset.thinkingFormat
+                                  event.target.value ===
+                                    selectedPreset.thinkingFormat
                                     ? ""
                                     : event.target.value,
                               }))
@@ -1638,29 +1840,40 @@ export function SettingsApp({
                             value={
                               fieldText(form.thinkingFormat) ||
                               (dialogKind === "official"
-                                ? selectedPreset?.thinkingFormat ?? defaultThinkingFormatForApi(effectiveApi)
+                                ? (selectedPreset?.thinkingFormat ??
+                                  defaultThinkingFormatForApi(effectiveApi))
                                 : defaultThinkingFormatForApi(effectiveApi))
                             }
                           >
                             {THINKING_FORMAT_OPTIONS.map((entry) => (
-                              <option key={entry.value || "auto"} value={entry.value}>
+                              <option
+                                key={entry.value || "auto"}
+                                value={entry.value}
+                              >
                                 {entry.label}
                               </option>
                             ))}
                           </select>
                           <small className="tc-field__hint">
                             Defaults follow the selected API. Override only if
-                            your relay intentionally expects a different wire shape.
+                            your relay intentionally expects a different wire
+                            shape.
                           </small>
                         </label>
 
                         <div className="tc-settings-capabilities">
                           {CAPABILITY_OPTIONS.map(([key, label]) => (
-                            <label className="tc-settings-capabilities__item" key={key}>
+                            <label
+                              className="tc-settings-capabilities__item"
+                              key={key}
+                            >
                               <input
                                 checked={form.capabilities[key]}
                                 onChange={(event) =>
-                                  handleCapabilityChange(key, event.target.checked)
+                                  handleCapabilityChange(
+                                    key,
+                                    event.target.checked,
+                                  )
                                 }
                                 type="checkbox"
                               />
@@ -1721,7 +1934,8 @@ export function SettingsApp({
                 <div>
                   <h3 id="replace-shared-key-title">Replace shared API key?</h3>
                   <p>
-                    You are about to replace <strong>{replacementConfirmation.envName}</strong>.
+                    You are about to replace{" "}
+                    <strong>{replacementConfirmation.envName}</strong>.
                   </p>
                 </div>
               </div>

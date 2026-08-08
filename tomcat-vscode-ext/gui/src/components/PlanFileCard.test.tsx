@@ -207,14 +207,12 @@ describe("PlanFileCard", () => {
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("1 todo");
   });
 
-  it("renders the build-model dropdown between View Plan and Build when onSetBuildModel is provided", () => {
+  it("renders the build-model dropdown between View Plan and Build when configured", () => {
     const onSetBuildModel = vi.fn();
     const onBuild = vi.fn();
 
     render(
       <PlanFileCard
-        availableModels={["gpt-5.6", "claude-opus"]}
-        buildModel="gpt-5.6"
         canBuild
         item={{
           id: "plan-model",
@@ -223,16 +221,23 @@ describe("PlanFileCard", () => {
           state: "planning",
           type: "plan",
         }}
+        modelPicker={{
+          availableModels: ["gpt-5.6", "claude-opus"],
+          buildModel: "gpt-5.6",
+          onSelectContextWindow: vi.fn(),
+          onSelectThinkingLevel: vi.fn(),
+          onSetBuildModel,
+        }}
         onBuild={onBuild}
         onOpenPlanFile={() => undefined}
-        onSetBuildModel={onSetBuildModel}
         planTodos={[]}
       />,
     );
 
-    const select = screen.getByTestId("plan-card-build-model") as HTMLSelectElement;
-    expect(select.value).toBe("gpt-5.6");
-    fireEvent.change(select, { target: { value: "claude-opus" } });
+    const picker = screen.getByTestId("plan-card-build-model") as HTMLButtonElement;
+    expect(picker.textContent).toContain("gpt-5.6");
+    fireEvent.click(picker);
+    fireEvent.click(screen.getAllByTestId("model-option")[1]);
     expect(onSetBuildModel).toHaveBeenCalledWith("claude-opus");
 
     fireEvent.click(screen.getByTestId("build-plan"));
@@ -244,7 +249,7 @@ describe("PlanFileCard", () => {
     expect(screen.getByLabelText("Model")).toBeTruthy();
   });
 
-  it("omits the build-model dropdown when onSetBuildModel is not provided", () => {
+  it("omits the build-model dropdown when picker callbacks are unavailable", () => {
     render(
       <PlanFileCard
         canBuild

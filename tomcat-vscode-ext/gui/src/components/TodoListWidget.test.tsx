@@ -36,7 +36,7 @@ describe("TodoListWidget", () => {
     const { container } = render(
       <TodoListWidget
         busy
-        planState="chat"
+        planState={null}
         planTodos={[]}
         sessionTodos={[]}
       />,

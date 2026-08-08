@@ -23,9 +23,10 @@ function displayBasenameLabel(path: string, line?: number, column?: number): str
 }
 
 export function normalizeHighlightLanguage(value: string | undefined): string {
-  switch (value?.toLowerCase()) {
-    case undefined:
+  if (!value) {
       return "plaintext";
+  }
+  switch (value.toLowerCase()) {
     case "cjs":
     case "js":
     case "jsx":

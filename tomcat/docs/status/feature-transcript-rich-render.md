@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-06 11:30 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-08 09:45 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** ModelPicker + Context/Effort 整改收口：Composer / Plan 卡共用单一 `ModelPicker`（固定宽列表、token 搜索、行内 `model id + effort`、始终可见 Edit、配置浮层 `createPortal` 左右竖中对齐且独立于列表）；`builtin_models.toml` 收录官方 `context_window_options`（默认档规则：满档 1M 不涨价用 1M，涨价用 400K；1.05M 并入 1M；去掉 `none` effort）；`model-thinking` 偏好改为 `{reasoning, context_window}` 对象（开发期不做旧串格式兼容）；Settings 新建中转站按 model name 拷贝内置档位/能力且 Context 不可手填；Webview 根挂 `WebviewErrorBoundary`；`package-vsix --skip-build` 增加预构建产物新鲜度门禁；`accept:image` 修 fake-serve `retain_attachment_leases` 与 macOS 窗口定位（弃用找 Electron 的 osascript）。版本 CLI `0.1.30 → 0.1.31`、扩展 `0.1.41 → 0.1.42`（`bundledCli=0.1.31`）。验证：相关 Rust admin/catalog/model_thinking/serve commands 与 GUI ModelPicker/Composer/Settings/Transcript 单测；fake-serve lease 单测；host E2E ModelPicker 与 image acceptance 路径。@2026-08-08
 - [✓] **[P0]** Ctx% 稳定水位整改：冷启动 / 重启后在首个 provider usage 前仍留空；一旦显示过，本进程 slot 生命周期内绝不再因“本轮没有新 usage”而变空。`StreamEvent::Usage` 到达即广播实测水位（早于工具执行）；后续 prompt、系统提示刷新、L0/L2/L3、`/compact`、`/restore` 与模型输入预算变化都广播最佳估算来原位更新已有水位。`providerUsageMeasured=true` 现严格表示本条 event 直接来自 provider usage，`false` 表示估算：它只能让已定基水位更新，不能让冷启动 slot 伪显示，也不能清空已有数字。`get_state` 继续只读 `SessionSlot.last_context_ratio`，不回读 `sessions.json`。验证覆盖 provider usage→工具执行时序、估算保持/冷启动留空、两条 prompt 的 usage pending、compact/rehydrate、模型预算切换、webview state 与 host E2E，Composer 固定宽度不跳版。@2026-08-06
 - [✓] **[P0]** Chat Completions 的移动 `EphemeralTail` 缓存退化已根治：runtime state 不再作为每轮末尾 `user` 出站，而由三 adapter 共用的 text-tail 提取规则归一化到各自 instruction 通道（Anthropic system suffix、Responses `instructions`、Chat Completions leading system）。Chat Completions 的非流式/流式共用 `transport_messages`，所以只改一处；无 system 会安全新建 leading system，tool/reasoning 历史顺序与 transcript metadata 均有回归锁定。真实 DeepSeek `deepseek-v4-pro` 六轮 Agent-shaped 探针：旧 user tail `11,648 → 11,648 → 11,648 → 14,080 → 16,512 → 19,072`，稳定 system tail `13,184 → 13,184 → 15,616 → 18,176 → 20,608 → 23,168`（r6 命中率 `74.6% → 90.3%`）；r3 单次 grant 变化 `3,072`、r4 恢复 `18,176`、r6 `23,168`。版本 CLI `0.1.28 → 0.1.29`、扩展 `0.1.39 → 0.1.40`（`bundledCli=0.1.29`）；验证：`cargo fmt --check`、`cargo test --lib`（2572 passed, 1 ignored）、三 adapter 单测、DeepSeek 真机探针、`release-version check` 与纯插件 `tomcat-vscode-ext-0.1.40.vsix`（无 `bin/tomcat`）通过。@2026-08-06
 - [✓] **[P0]** OpenAI Responses 缓存不随 Agent 对话增长已根治：运行时 `EphemeralTail` 原先作为末尾 user input，下一回合新增的 assistant / reasoning / tool 项会插到它前面，令历史 input 前缀在约 8.7K 截断。现在 tail 仅合入顶层 `instructions`，`input` 只保留 append-only 持久历史；支持 `previous_response_id` 的路由也只发送锚点之后的新项。新增仅记录哈希的 wire fingerprint 和真实 main-agent / transcript replay 探针，fcodex HTTP 的 `previous_response_id` 400 已排除为默认路径。真实 transcript 大结果马拉松读缓存 `0 → 48,640 → 52,736 → 56,832 → 60,928 → 65,024`。版本 CLI `0.1.27 → 0.1.28`、扩展 `0.1.38 → 0.1.39`（`bundledCli=0.1.28`）；纯插件包 `tomcat-vscode-ext-0.1.39.vsix` 已生成。验证：Responses 定向单测、真实 fcodex 探针、`npm run package:vsix` 通过。@2026-08-05
@@ -58,6 +59,10 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- 模型 Context 档位：`ModelEntry` / `ModelView` / serve schema / `wire.d.ts` / webview `types` 新增 `context_window_options` 与 `selected_context_window`；serve 命令 `set_context_window`；聊天 `/context`（`cmd_context`）；`model-thinking.json` 偏好值由裸 reasoning 字符串改为 `{ reasoning, context_window }` 对象（开发期不做旧格式读兼容）。
+- GUI：删除 `PlanBuildModelSelect`；Composer / Plan 卡共用 `ModelPicker`（含 portal 配置浮层）；Settings 中转站按内置 model name 继承 API/thinking/档位，Context Window 字段改为只读展示。
+- Webview 根组件挂载 `WebviewErrorBoundary`；`package-vsix --skip-build` 对预构建 gui/extension 产物做 mtime 新鲜度门禁。
+- 发布版本：CLI `0.1.31`、扩展 `0.1.42`、`bundledCliVersion=0.1.31`。
 - `context_metrics_update.providerUsageMeasured: boolean`：`true` 只表示**本条事件**直接由 provider usage 产生；`false` 表示最佳估算。消费者在从未收到 `true` 的 cold slot 上必须继续留空；已有基线时必须以 `false` 的 ratio 原位更新而非清空。wire 字段和 schema 不变，仅收紧语义。
 - OpenAI Responses：`build_responses_input` 将 `MessageKind::EphemeralTail` 合入顶层 `instructions` 并排除出 `input`；兼容路由的 `previous_response_id` continuity 以锚点 assistant 的后继索引裁剪 input，避免重复发送服务端已恢复的历史。`TOMCAT_PROMPT_PREFIX_FINGERPRINT=1` 仅输出 prompt 结构哈希，用于安全定位前缀漂移。
 - Anthropic wire：`MessageKind::EphemeralTail` 在出站时转为 `system` 后缀文本块（无独立 `cache_control`）；断点 B 停在稳定 system，D 打最新持久 wire 消息末尾；OpenAI Completions 保持 messages 尾部，Responses 走上述 instructions 提升。
@@ -66,7 +71,6 @@
 - Token / 输出上限：`ChatRequest.resolved_output_limit`（调用方 `max_tokens` 与 wire 解析值分离）；`EffectiveModelLimits` 去掉实例级 `wire_output_limit`；`ContextConfig` 权威键 `context_window_fallback` / `output_reserve_tokens`（旧键别名可读、混用报错）；catalog 加载期校验模型 `max_output_tokens`。
 - 空回合守卫：hidden output 仅看截断类 `finish_reason` / `reasoning_continuation` / thinking 文本；`completion_tokens` 只进诊断与 empty_turn 落盘。
 - Webview 恢复 UX：错误卡 dismiss 后保留卡片、去掉 `recoveryAction`；Retry copy-forward 源 user 带 `abandoned`；`agent.interrupted` live+history 去重恰好一张。
-- 发布版本：CLI `0.1.28`、扩展 `0.1.39`、`bundledCliVersion=0.1.28`。
 - 会话/计划状态拆分：删除五态 `PlanState`；`AgentMode`=`chat|plan`；`ActivePlan`/`PlanFileState`；`get_state` 用 `agentMode`+`activePlan`，旧 `mode` 改名 `workspaceMode`；新增 `session.agent_mode.changed`；`RESUME_INDEX_SCHEMA_VERSION=3` 公开导出。
 - Build 用户消息：`MessageKind::PlanBuild`（`plan_build`）；扩展渲染为「开始执行计划」折叠摘要；pending 计划 Build 按钮文案 `Resume`。
 - Plan 预览：`refreshFromServeEvent` dirty 时用缓冲文本、非文本态可跟事件；设置 `tomcat.plan.autoSave`（默认 true，~1s 防抖）；`PlanPreviewDomSnapshot.refreshCounters` 保留热更新诊断四计数器。
@@ -119,6 +123,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-08 09:45）：ModelPicker / Context 档位 / Effort 显示与 portal 配置浮层、WebviewErrorBoundary、VSIX 新鲜度门禁、`accept:image` lease+窗口定位修复已合入工作区；版本 CLI `0.1.31` / 扩展 `0.1.42`。既有本地 `~/.tomcat/models.toml` 若在旧 builtin 物化后未含 `context_window_options`，会盖住嵌入 catalog 的新档位——升级后需重新生成或手工补档位。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-05 23:13）：OpenAI Responses cache 增长根因与修复已合入。真实 Agent 的 `EphemeralTail` 不能作为移动 input user 项；现请求专用 tail 合并进 `instructions`，持久 `input` 保持只追加。fcodex HTTP 明确拒绝 `previous_response_id`，故不作为默认方案；真实 transcript 大 tool-result probe 已越过多个量化块持续增长至 `65,024` read tokens。验证：Responses 定向单测、真实 fcodex probe、`npm run package:vsix`；CLI `0.1.28` / 扩展 `0.1.39`，本机纯插件包已生成。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-04 17:02）：失败回合与缓存整改 + 二次复查合入。`resolved_output_limit`、空回合守卫、thinking 下限 1024、配置别名与目录期校验、恢复卡保留/`abandoned`/中断去重、指纹门禁与成对哈希；版本 CLI `0.1.26` / 扩展 `0.1.37`。验证：`cargo fmt/clippy`、`cargo test --lib` 2537 passed、webview unit 475、E2E 33、`release-version check`；真实 DeepSeek multi-timeout CLI 偶发仍记在 BLOCKED。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-03 22:37）：Prompt 前缀缓存复核补全合入。稳定 ToolSurface/SystemPromptSnapshot + ephemeral 尾部；Anthropic 断点预算与 cache key 家族；OpenAI/Responses cached_tokens；文档与 20 轮命中率基线写入 `context-management.md`；版本 CLI `0.1.24` / 扩展 `0.1.35`。验证：`cargo fmt --check`、`clippy -D warnings`、`./scripts/run-integration-tests.sh gate-fast`、`npm run check:wire && npm run gate:fast`、`node scripts/release-version.mjs check`。Cov% 本轮未跑 tarpaulin，仍为 —。

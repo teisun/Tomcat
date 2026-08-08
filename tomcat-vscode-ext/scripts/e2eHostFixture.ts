@@ -118,9 +118,53 @@ const BUILTIN_MODELS = [
 ];
 const MODEL_OPTIONS = BUILTIN_MODELS.map((model) => model.id);
 const userModels = new Map();
+const modelPreferences = new Map();
 const providerKeys = new Map(
   BUILTIN_MODELS.map((model) => [model.apiKeyEnv, { keyPresent: true, provider: model.provider }]),
 );
+const USER_MODELS_PATH = path.join(path.dirname(setupMarkerPath), "fake-serve-models.json");
+const MODEL_PREFS_PATH = path.join(path.dirname(setupMarkerPath), "fake-serve-model-prefs.json");
+try {
+  const savedModels = JSON.parse(fs.readFileSync(USER_MODELS_PATH, "utf8"));
+  if (Array.isArray(savedModels)) {
+    for (const model of savedModels) {
+      if (model && typeof model.id === "string") {
+        userModels.set(model.id, model);
+        if (typeof model.selectedReasoningLevel === "string") {
+          modelPreferences.set(model.id, { reasoning: model.selectedReasoningLevel });
+        }
+        if (model.keyPresent === true && typeof model.apiKeyEnv === "string") {
+          providerKeys.set(model.apiKeyEnv, { keyPresent: true, provider: model.provider || "openai" });
+        }
+      }
+    }
+  }
+} catch (error) {
+  if (!error || error.code !== "ENOENT") throw error;
+}
+try {
+  const savedPreferences = JSON.parse(fs.readFileSync(MODEL_PREFS_PATH, "utf8"));
+  if (savedPreferences && typeof savedPreferences === "object") {
+    for (const [modelId, preference] of Object.entries(savedPreferences)) {
+      if (preference && typeof preference === "object") {
+        modelPreferences.set(modelId, {
+          ...modelPreferences.get(modelId),
+          ...preference,
+        });
+      }
+    }
+  }
+} catch (error) {
+  if (!error || error.code !== "ENOENT") throw error;
+}
+function persistUserModels() {
+  fs.mkdirSync(path.dirname(USER_MODELS_PATH), { recursive: true });
+  fs.writeFileSync(USER_MODELS_PATH, JSON.stringify([...userModels.values()]));
+}
+function persistModelPreferences() {
+  fs.mkdirSync(path.dirname(MODEL_PREFS_PATH), { recursive: true });
+  fs.writeFileSync(MODEL_PREFS_PATH, JSON.stringify(Object.fromEntries(modelPreferences)));
+}
 const sessions = new Map();
 const attachmentLeases = new Map();
 let sessionCounter = 1;
@@ -140,8 +184,7 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.25";
-
+const serverVersion = "0.1.30";
 function persistPendingApproval() {
   if (!pendingApproval || pendingApproval.kind !== "answer-card") {
     try {
@@ -323,6 +366,12 @@ function normalizeModelEntry(entry, source) {
     api,
     thinkingFormat,
   );
+  const id = typeof entry?.id === "string" ? entry.id : "fake-model";
+  const preference = modelPreferences.get(id) || {};
+  const contextWindow = typeof entry?.contextWindow === "number" ? entry.contextWindow : null;
+  const contextWindowOptions = Array.isArray(entry?.contextWindowOptions)
+    ? entry.contextWindowOptions.filter((value) => Number.isInteger(value) && value > 0)
+    : [];
   return {
     api,
     apiKeyEnv,
@@ -335,7 +384,9 @@ function normalizeModelEntry(entry, source) {
       webSearch:
         entry?.capabilities?.webSearch === true || entry?.capabilities?.web_search === true,
     },
-    contextWindow: typeof entry?.contextWindow === "number" ? entry.contextWindow : null,
+    contextWindow,
+    contextWindowOptions,
+    description: typeof entry?.description === "string" ? entry.description : null,
     cost:
       entry?.cost && typeof entry.cost === "object"
         ? {
@@ -353,7 +404,11 @@ function normalizeModelEntry(entry, source) {
                   : null,
           }
         : null,
-    id: typeof entry?.id === "string" ? entry.id : "fake-model",
+    id,
+    selectedContextWindow:
+      typeof preference.contextWindow === "number" ? preference.contextWindow : contextWindow,
+    selectedReasoningLevel:
+      typeof preference.reasoning === "string" ? preference.reasoning : null,
     keyPresent: providerKey?.keyPresent === true,
     modelName: typeof entry?.modelName === "string" ? entry.modelName : null,
     provider,
@@ -2150,6 +2205,7 @@ function handleCommand(frame) {
               "list_provider_keys",
               "set_model",
             "set_thinking_level",
+              "set_context_window",
               "set_plan_mode",
             ],
             protocolVersion: 2,
@@ -2201,7 +2257,7 @@ function handleCommand(frame) {
     case "switch_session": {
       activeSessionId = frame.sessionId;
       touchSession(ensureSession(activeSessionId));
-      send({
+          send({
         id: frame.id,
         payload: { activeSessionId },
         sessionId: activeSessionId,
@@ -2352,6 +2408,7 @@ function handleCommand(frame) {
     case "upsert_model": {
       const normalized = normalizeModelEntry(frame.model, "user");
       userModels.set(normalized.id, normalized);
+      persistUserModels();
       const warnings = collectModelWarnings(normalized.api, normalized.thinkingFormat);
       send({
         id: frame.id,
@@ -2383,6 +2440,10 @@ function handleCommand(frame) {
           listModelViews().find((model) => model.apiKeyEnv === frame.envName)?.provider || "openai",
       };
       providerKeys.set(frame.envName, entry);
+      for (const model of userModels.values()) {
+        if (model.apiKeyEnv === frame.envName) model.keyPresent = entry.keyPresent;
+      }
+      persistUserModels();
       send({
         id: frame.id,
         payload: {
@@ -2408,7 +2469,7 @@ function handleCommand(frame) {
       const sessionId = frame.sessionId || activeSessionId || createSession();
       const session = touchSession(ensureSession(sessionId));
       session.model = frame.model;
-      send({
+          send({
         id: frame.id,
         payload: { model: session.model, sessionId },
         sessionId,
@@ -2425,10 +2486,47 @@ function handleCommand(frame) {
       const level = normalizeReasoningLevel(frame.level);
       session.thinkingByModel = session.thinkingByModel || {};
       session.thinkingByModel[modelId] = level || "off";
-      send({
+      modelPreferences.set(modelId, {
+        ...modelPreferences.get(modelId),
+        reasoning: session.thinkingByModel[modelId],
+      });
+      persistModelPreferences();
+      const userModel = userModels.get(modelId);
+      if (userModel) {
+        userModel.selectedReasoningLevel = session.thinkingByModel[modelId];
+        persistUserModels();
+      } else if (level) {
+        for (const model of userModels.values()) {
+          model.selectedReasoningLevel = level;
+        }
+        persistUserModels();
+      }
+          send({
         id: frame.id,
         payload: { model: modelId, sessionId, thinkingLevel: session.thinkingByModel[modelId] },
         sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "set_context_window": {
+      const modelId = typeof frame.model === "string" ? frame.model : "";
+      const contextWindow = frame.contextWindow;
+      const model = listModelViews().find((candidate) => candidate.id === modelId);
+      if (!model || !model.contextWindowOptions.includes(contextWindow)) {
+        send({ id: frame.id, error: "invalid_context_window", success: false, type: "response" });
+        break;
+      }
+      modelPreferences.set(modelId, {
+        ...modelPreferences.get(modelId),
+        contextWindow,
+      });
+      persistModelPreferences();
+      send({
+        id: frame.id,
+        payload: { contextWindow, model: modelId, sessionId: frame.sessionId || activeSessionId },
+        sessionId: frame.sessionId || activeSessionId,
         success: true,
         type: "response",
       });
@@ -2611,7 +2709,9 @@ rl.on("line", (line) => {
 export async function createHostE2eFixture(
   options: HostE2eFixtureOptions = {},
 ): Promise<HostE2eFixture> {
-  const rootDir = await mkdtemp(path.join(os.tmpdir(), "tomcat-vscode-ext-host-"));
+  const rootDir = await mkdtemp(
+    path.join(os.tmpdir(), "tomcat-vscode-ext-host-"),
+  );
   const workspaceDir = path.join(rootDir, "workspace");
   const fakeServePath = path.join(rootDir, "fake-tomcat.js");
   const editFilePath = path.join(rootDir, "edit-target.txt");

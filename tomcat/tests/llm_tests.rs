@@ -203,7 +203,7 @@ fn test_llm_resolver_session_override_uses_provider_specific_key() {
     let models_path = dir.path().join("models.toml");
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, models_path).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, common::model_prefs_for(&cfg));
 
     unsafe {
         std::env::set_var("DEEPSEEK_API_KEY", "deepseek-stub");
@@ -228,7 +228,7 @@ fn test_llm_resolver_missing_explicit_model_reports_models_toml_hint() {
     let models_path = dir.path().join("models.toml");
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, models_path.clone()).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog);
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, common::model_prefs_for(&cfg));
 
     let err = resolver
         .resolve(LlmScene::Main, Some("missing-explicit-model"))

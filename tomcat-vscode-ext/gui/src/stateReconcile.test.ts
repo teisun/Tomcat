@@ -28,6 +28,8 @@ function session(
   overrides: Partial<WebviewSessionSnapshot> = {},
 ): WebviewSessionSnapshot {
   return {
+    activePlan: null,
+    agentMode: "chat",
     busy: false,
     checkpoints: [],
     contextRatio: null,
@@ -36,9 +38,6 @@ function session(
     model: "gpt-5.4",
     ownedByThisFrontend: true,
     pendingAttachments: [],
-    planFile: null,
-    planId: null,
-    planState: "chat",
     planTodos: [],
     sessionId,
     sessionTodos: [],
@@ -93,8 +92,12 @@ describe("stateReconcile", () => {
   it("reuses unchanged timeline entries and untouched sessions", () => {
     const previous = snapshot();
     const next = snapshot();
+    const previousMessage = next.sessionViews.s1.timeline[1];
+    if (previousMessage?.type !== "message") {
+      throw new Error("Expected a message timeline item");
+    }
     next.sessionViews.s1.timeline[1] = {
-      ...next.sessionViews.s1.timeline[1],
+      ...previousMessage,
       text: "updated",
     };
 

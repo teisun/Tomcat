@@ -389,9 +389,22 @@ export interface WebviewMediaRoot {
   webviewBase: string;
 }
 
+export interface WebviewModelInfo {
+  capabilities: string[];
+  contextWindow?: number | null;
+  contextWindowOptions: number[];
+  description?: string | null;
+  id: string;
+  modelName?: string | null;
+  selectedContextWindow?: number | null;
+  selectedReasoningLevel?: string | null;
+  supportedReasoningLevels: string[];
+}
+
 export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
+  availableModelDetails?: Record<string, WebviewModelInfo>;
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   buildModel?: string;
@@ -540,6 +553,14 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "webviewError";
+      data: {
+        message: string;
+        stack?: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "loadOlderHistory";
       data: {
         sessionId: string;
@@ -668,6 +689,15 @@ export type WebviewIntent =
       type: "setThinkingLevel";
       data: {
         level: string;
+        modelId: string;
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setContextWindow";
+      data: {
+        contextWindow: number;
         modelId: string;
         sessionId?: string | null;
       };

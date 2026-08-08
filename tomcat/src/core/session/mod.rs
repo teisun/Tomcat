@@ -26,7 +26,7 @@ pub use manager::{
     MessageAppendSink, PlanEventKind, PlanEventRef, ResumeControlState, SessionManager,
     INTERRUPTED_TOOL_RESULT_TEXT, PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
 };
-pub use model_thinking::ModelThinkingStore;
+pub use model_thinking::{ModelPrefs, ModelPrefsStore};
 pub use resume_index::RESUME_INDEX_SCHEMA_VERSION;
 pub use scope::{
     fnv1a_hex, project_root, resolve_session_mode, session_key_for, session_key_for_agent,

@@ -186,6 +186,10 @@ export function reconcileStateSnapshot(
     previous.availableModelCapabilities,
     next.availableModelCapabilities,
   );
+  const availableModelDetails = reconcileValue(
+    previous.availableModelDetails,
+    next.availableModelDetails,
+  );
   const availableModelReasoningLevels = reconcileValue(
     previous.availableModelReasoningLevels,
     next.availableModelReasoningLevels,
@@ -195,6 +199,7 @@ export function reconcileStateSnapshot(
     previous.activeSessionId === next.activeSessionId &&
     previous.availableModels === availableModels &&
     previous.availableModelCapabilities === availableModelCapabilities &&
+    previous.availableModelDetails === availableModelDetails &&
     previous.availableModelReasoningLevels === availableModelReasoningLevels &&
     previous.buildModel === next.buildModel &&
     previous.mediaRoots === mediaRoots &&
@@ -208,6 +213,7 @@ export function reconcileStateSnapshot(
   return {
     ...next,
     availableModelCapabilities,
+    availableModelDetails,
     availableModelReasoningLevels,
     availableModels,
     mediaRoots,
@@ -228,6 +234,7 @@ export function mergeSessionViewSnapshot(
     return {
       activeSessionId: null,
       availableModelCapabilities: {},
+      availableModelDetails: {},
       availableModelReasoningLevels: {},
       availableModels: [],
       modelAdminSupported: false,

@@ -27,8 +27,21 @@ export type PlanToolbarStyle = "hybrid" | "native";
  * editor always renders the preview; "Markdown" opens the native text editor
  * instead (a separate editor), so there is no in-webview mode any more.
  */
+export interface PlanPreviewModelInfo {
+  capabilities: string[];
+  contextWindow?: number | null;
+  contextWindowOptions: number[];
+  description?: string | null;
+  id: string;
+  modelName?: string | null;
+  selectedContextWindow?: number | null;
+  selectedReasoningLevel?: string | null;
+  supportedReasoningLevels: string[];
+}
+
 export interface PlanPreviewStateSnapshot {
   availableModels: string[];
+  availableModelDetails: Record<string, PlanPreviewModelInfo>;
   /** 1-based source file line for each line of `bodyMarkdown` (see planDocument). */
   bodyLineMap: number[];
   bodyMarkdown: string;
@@ -60,6 +73,8 @@ export interface PlanPreviewDomSnapshot {
   bodyInsetLeft: number | null;
   buildModelOptions: string[];
   buildModelValue: string;
+  /** Rendered combined model + reasoning label in the shared picker trigger. */
+  buildModelLabel: string;
   /** Current scrollTop of the content scroller. */
   contentScrollTop: number | null;
   hasActionStrip: boolean;
@@ -106,6 +121,8 @@ export type PlanPreviewDomAction =
   | { kind: "clickSelectionAdd" }
   | { kind: "setContentScrollTop"; scrollTop: number }
   | { kind: "selectBuildModel"; modelId: string }
+  | { contextWindow: number; kind: "selectContextWindow"; modelId: string }
+  | { kind: "selectThinkingLevel"; level: string; modelId: string }
   | { kind: "selectText"; selector: string };
 
 export type PlanPreviewTestEvent =
@@ -182,6 +199,22 @@ export type PlanPreviewIntent =
     }
   | {
       messageId: string;
+      type: "setContextWindow";
+      data: {
+        contextWindow: number;
+        modelId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setThinkingLevel";
+      data: {
+        level: string;
+        modelId: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "build";
     }
   | {
@@ -223,6 +256,18 @@ export function isPlanPreviewIntent(value: unknown): value is PlanPreviewIntent 
       );
     case "setBuildModel":
       return isRecord(value.data) && typeof value.data.modelId === "string";
+    case "setContextWindow":
+      return (
+        isRecord(value.data) &&
+        typeof value.data.modelId === "string" &&
+        typeof value.data.contextWindow === "number" &&
+        Number.isInteger(value.data.contextWindow) &&
+        value.data.contextWindow > 0
+      );
+    case "setThinkingLevel":
+      return isRecord(value.data) &&
+        typeof value.data.modelId === "string" &&
+        typeof value.data.level === "string";
     case "addSelectionToChat":
       return isRecord(value.data) && typeof value.data.text === "string";
     default:

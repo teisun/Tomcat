@@ -30,9 +30,9 @@ mod token_usage;
 mod types;
 
 pub use admin::{
-    list_model_views, list_provider_keys, remove_user_model, resolve_provider_key_env_name,
-    set_default_model, set_provider_key, upsert_user_model, ModelEntryInput, ModelKeyStatus,
-    ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
+    list_model_views, list_model_views_with_prefs, list_provider_keys, remove_user_model,
+    resolve_provider_key_env_name, set_default_model, set_provider_key, upsert_user_model,
+    ModelEntryInput, ModelKeyStatus, ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
 };
 pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use catalog::{Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog};

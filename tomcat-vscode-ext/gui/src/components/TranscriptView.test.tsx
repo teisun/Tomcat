@@ -1,8 +1,66 @@
+import type { ComponentProps } from "react";
+
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { WebviewCheckpoint, WebviewTimelineItem } from "../types";
-import { TranscriptView } from "./TranscriptView";
+import type {
+  PathResolution,
+  WebviewCheckpoint,
+  WebviewTimelineItem,
+} from "../types";
+import { TranscriptView as TranscriptViewComponent } from "./TranscriptView";
+
+type TranscriptViewTestProps = Omit<
+  ComponentProps<typeof TranscriptViewComponent>,
+  | "onApprovalDraftChange"
+  | "onSelectContextWindow"
+  | "onSelectThinkingLevel"
+  | "onSetBuildModel"
+> & {
+  onApprovalDraftChange?: ComponentProps<
+    typeof TranscriptViewComponent
+  >["onApprovalDraftChange"];
+  onSelectContextWindow?: ComponentProps<
+    typeof TranscriptViewComponent
+  >["onSelectContextWindow"];
+  onSelectThinkingLevel?: ComponentProps<
+    typeof TranscriptViewComponent
+  >["onSelectThinkingLevel"];
+  onSetBuildModel?: ComponentProps<
+    typeof TranscriptViewComponent
+  >["onSetBuildModel"];
+};
+
+const noopApprovalDraftChange: ComponentProps<
+  typeof TranscriptViewComponent
+>["onApprovalDraftChange"] = () => {};
+const noopSelectContextWindow: ComponentProps<
+  typeof TranscriptViewComponent
+>["onSelectContextWindow"] = () => {};
+const noopSelectThinkingLevel: ComponentProps<
+  typeof TranscriptViewComponent
+>["onSelectThinkingLevel"] = () => {};
+const noopSetBuildModel: ComponentProps<
+  typeof TranscriptViewComponent
+>["onSetBuildModel"] = () => {};
+
+function TranscriptView({
+  onApprovalDraftChange = noopApprovalDraftChange,
+  onSelectContextWindow = noopSelectContextWindow,
+  onSelectThinkingLevel = noopSelectThinkingLevel,
+  onSetBuildModel = noopSetBuildModel,
+  ...props
+}: TranscriptViewTestProps) {
+  return (
+    <TranscriptViewComponent
+      {...props}
+      onApprovalDraftChange={onApprovalDraftChange}
+      onSelectContextWindow={onSelectContextWindow}
+      onSelectThinkingLevel={onSelectThinkingLevel}
+      onSetBuildModel={onSetBuildModel}
+    />
+  );
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -55,6 +113,7 @@ describe("TranscriptView", () => {
         findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
         id: "review:plan-1",
         planId: "plan-1",
+        reviewAttemptId: "review-attempt-1",
         rounds: 1,
         status: "done",
         summary: "Fix the missing null guard before completing the plan.",
@@ -325,7 +384,13 @@ describe("TranscriptView", () => {
         onBuildPlan={vi.fn()}
         onOpenFile={vi.fn()}
         onOpenPlanFile={vi.fn()}
-        resolvePaths={async (paths) => paths.map((path) => ({ kind: "file", path }))}
+        resolvePaths={async (paths): Promise<PathResolution[]> =>
+          paths.map((path) => ({
+            kind: "file",
+            path,
+            resolvedPath: path,
+          }))
+        }
         timeline={timeline}
       />,
     );
@@ -456,6 +521,8 @@ describe("TranscriptView", () => {
   });
 
   it("renders a completed create_plan as the single visible plan card for the turn", () => {
+    const onSelectContextWindow = vi.fn();
+    const onSelectThinkingLevel = vi.fn();
     const timeline: WebviewTimelineItem[] = [
       {
         assistantMessageId: "assistant-plan",
@@ -496,12 +563,26 @@ describe("TranscriptView", () => {
 
     render(
       <TranscriptView
+        availableModelDetails={{
+          "gpt-5.6": {
+            contextWindowOptions: [400_000, 1_000_000],
+            id: "gpt-5.6",
+            selectedContextWindow: 400_000,
+            selectedReasoningLevel: "high",
+            supportedReasoningLevels: ["high", "xhigh"],
+          },
+        }}
+        availableModels={["gpt-5.6"]}
+        buildModel="gpt-5.6"
         busy={false}
         canBuildPlan
         onAnswer={vi.fn()}
         onBuildPlan={vi.fn()}
         onOpenFile={vi.fn()}
         onOpenPlanFile={vi.fn()}
+        onSelectContextWindow={onSelectContextWindow}
+        onSelectThinkingLevel={onSelectThinkingLevel}
+        onSetBuildModel={vi.fn()}
         planId="mini-plan"
         planState="planning"
         planTodos={[
@@ -516,9 +597,51 @@ describe("TranscriptView", () => {
     expect(screen.getByTestId("plan-card-title").textContent).toBe("Transcript cleanup");
     expect(screen.getByTestId("plan-card-file-name").textContent).toBe("mini.plan.md");
     expect(screen.queryByTestId("tool-row")).toBeNull();
+    expect(
+      screen.getByTestId("thinking-group").contains(screen.getByTestId("plan-card")),
+    ).toBe(false);
+
+    fireEvent.click(screen.getByTestId("plan-card-build-model"));
+    const modelOption = screen.getByTestId("model-option");
+    const modelRow = modelOption.closest(".tc-model-picker-option");
+    if (!(modelRow instanceof HTMLElement)) {
+      throw new Error("model picker row not found");
+    }
+    fireEvent.mouseEnter(modelRow);
+    fireEvent.click(
+      within(modelRow).getByRole("button", { name: "Edit gpt-5.6" }),
+    );
+    fireEvent.click(screen.getAllByTestId("context-window-option")[1]);
+    fireEvent.click(
+      screen
+        .getAllByTestId("thinking-level-option")
+        .find((option) => option.textContent === "Xhigh") ??
+        screen.getAllByTestId("thinking-level-option")[0],
+    );
+    expect(onSelectContextWindow).toHaveBeenCalledWith("gpt-5.6", 1_000_000);
+    expect(onSelectThinkingLevel).toHaveBeenCalledWith("gpt-5.6", "xhigh");
   });
 
   it("keeps exactly one visible plan card while create_plan flips from running to complete", () => {
+    const runningPlanTool = {
+      args: {
+        draft: "Keep one create card and many update rows.",
+        goal: "Transcript cleanup",
+        todos: [
+          { content: "Audit the transcript path", id: "todo-1", status: "pending" },
+          { content: "Render update_plan events", id: "todo-2", status: "pending" },
+        ],
+      },
+      assistantMessageId: "assistant-plan",
+      id: "tool-plan-only",
+      isError: false,
+      planId: "mini-plan",
+      planPath: "/tmp/mini.plan.md",
+      status: "running",
+      toolCallId: "tc-plan-only",
+      toolName: "create_plan",
+      type: "tool",
+    } satisfies Extract<WebviewTimelineItem, { type: "tool" }>;
     const runningTimeline: WebviewTimelineItem[] = [
       {
         assistantMessageId: "assistant-plan",
@@ -527,30 +650,12 @@ describe("TranscriptView", () => {
         text: "Let me break the work down first.",
         type: "thinking",
       },
-      {
-        args: {
-          draft: "Keep one create card and many update rows.",
-          goal: "Transcript cleanup",
-          todos: [
-            { content: "Audit the transcript path", id: "todo-1", status: "pending" },
-            { content: "Render update_plan events", id: "todo-2", status: "pending" },
-          ],
-        },
-        assistantMessageId: "assistant-plan",
-        id: "tool-plan-only",
-        isError: false,
-        planId: "mini-plan",
-        planPath: "/tmp/mini.plan.md",
-        status: "running",
-        toolCallId: "tc-plan-only",
-        toolName: "create_plan",
-        type: "tool",
-      },
+      runningPlanTool,
     ];
     const completedTimeline: WebviewTimelineItem[] = [
       runningTimeline[0],
       {
-        ...runningTimeline[1],
+        ...runningPlanTool,
         planActivity: {
           completed: 0,
           kind: "create",

@@ -17,9 +17,9 @@ use crate::api::chat::commands::{
     checkpoint_kind_label, compact_session, restore_core, RestoreCoreReport,
 };
 use crate::core::llm::{
-    list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind, ContextReference,
-    LlmScene, ProviderKeyInput, ThinkingLevel,
+    list_model_views_with_prefs, list_provider_keys, remove_user_model, set_provider_key,
+    upsert_user_model, ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind,
+    ContextReference, LlmScene, ProviderKeyInput, ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::attachments::{
@@ -1084,8 +1084,8 @@ pub(crate) async fn handle_command(
             };
             slot.ctx
                 .global_services
-                .model_thinking
-                .set(&model, parsed_level)?;
+                .model_prefs
+                .set_reasoning(&model, parsed_level)?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
@@ -1096,9 +1096,84 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
+        ServeCommand::SetContextWindow {
+            id,
+            session_id,
+            model,
+            context_window,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            let entry = match slot
+                .ctx
+                .global_services
+                .model_catalog
+                .lookup_explicit(&model)
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        Some(slot.session_id.clone()),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            if entry.context_window_options.is_empty()
+                || !entry.context_window_options.contains(&context_window)
+            {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    format!(
+                        "invalid_context_window: 模型 `{model}` 可选档位为 {:?}。",
+                        entry.context_window_options
+                    ),
+                )?;
+                return Ok(());
+            }
+            slot.ctx
+                .global_services
+                .model_prefs
+                .set_context_window(&model, Some(context_window))?;
+            let current_entry = slot.ctx.session_runtime.session.current_session_entry()?;
+            let context_choice_applies = slot.ctx.effective_model(current_entry.as_ref()) == model;
+            if context_choice_applies {
+                let main_call = slot
+                    .ctx
+                    .resolve_call(LlmScene::Main, current_entry.as_ref())?;
+                let updated_runtime_context = {
+                    let mut turn_state = slot.turn_state.lock();
+                    if let Some(state) = turn_state.as_mut() {
+                        state.context_state.apply_limits(&main_call.limits);
+                        state.context_budget_chars = state.context_state.context_budget_chars;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if updated_runtime_context {
+                    emit_estimated_context_metrics_snapshot(&slot);
+                }
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                Some(serde_json::json!({
+                    "sessionId": slot.session_id,
+                    "model": model,
+                    "contextWindow": context_window,
+                })),
+            )))?;
+        }
         ServeCommand::ListModels { id } => {
             let catalog = resolve_model_catalog_snapshot(&state)?;
-            let models = list_model_views(catalog.as_ref());
+            let models = list_model_views_with_prefs(catalog.as_ref(), &state.shared_model_prefs);
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),

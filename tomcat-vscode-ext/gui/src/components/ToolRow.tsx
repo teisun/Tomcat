@@ -1,11 +1,10 @@
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type {
+  AskQuestionAnswer,
   AskQuestionResult,
+  WebviewApprovalOption,
   WebviewApprovalQuestion,
-  WebviewPlanFileCard,
-  WebviewPlanFileState,
-  WebviewTodo,
   WebviewToolCard,
   WebviewToolDisplayFileEntry,
 } from "../types";
@@ -13,7 +12,6 @@ import { AnswerCard } from "./AnswerCard";
 import { DiffView } from "./DiffView";
 import { DisclosureCard, type DisclosureStatusVariant } from "./DisclosureCard";
 import { FileChip } from "./FileChip";
-import { PlanFileCard } from "./PlanFileCard";
 import {
   limitTerminalOutput,
   tailTerminalOutput,
@@ -38,6 +36,36 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
     : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((entry: unknown): entry is string => typeof entry === "string")
+  );
+}
+
+function isApprovalOption(value: unknown): value is WebviewApprovalOption {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.label === "string" &&
+    (value.recommended === undefined || typeof value.recommended === "boolean")
+  );
+}
+
+function isApprovalQuestion(value: unknown): value is WebviewApprovalQuestion {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.prompt === "string" &&
+    Array.isArray(value.options) &&
+    value.options.every(isApprovalOption)
+  );
 }
 
 function humanizeToolName(toolName: string): string {
@@ -92,71 +120,6 @@ function isPlanTool(item: WebviewToolCard): boolean {
 
 function planPathForTool(item: WebviewToolCard): string | undefined {
   return item.planPath ?? asString(item.args?.path);
-}
-
-function createPlanTodosFromArgs(
-  args: Record<string, unknown> | undefined,
-): WebviewTodo[] | undefined {
-  const todos = args?.todos;
-  if (!Array.isArray(todos)) {
-    return undefined;
-  }
-  const parsed = todos.flatMap((todo, index) => {
-    if (typeof todo !== "object" || todo === null) {
-      return [];
-    }
-    const entry = todo as Record<string, unknown>;
-    const content = asString(entry.content) ?? `Todo ${index + 1}`;
-    const id = asString(entry.id) ?? `todo-${index + 1}`;
-    const status =
-      entry.status === "cancelled" ||
-      entry.status === "completed" ||
-      entry.status === "in_progress" ||
-      entry.status === "pending"
-        ? entry.status
-        : "pending";
-    return [{ content, id, status } satisfies WebviewTodo];
-  });
-  return parsed.length > 0 ? parsed : undefined;
-}
-
-function createPlanCardFromTool(
-  item: WebviewToolCard,
-  options: {
-    currentPlanId?: string | null;
-    currentPlanState?: WebviewPlanFileState | null;
-    planTodos?: WebviewTodo[];
-  },
-): WebviewPlanFileCard | null {
-  if (item.toolName !== "create_plan" || item.isError) {
-    return null;
-  }
-  const creating = isRunning(item);
-  if (!creating && item.status !== "complete") {
-    return null;
-  }
-  const path = planPathForTool(item);
-  if (!path) {
-    return null;
-  }
-  const isActivePlan = !!item.planId && item.planId === options.currentPlanId;
-  const argTodos = createPlanTodosFromArgs(item.args);
-  const ambientTodos =
-    options.planTodos && options.planTodos.length > 0
-      ? options.planTodos
-      : undefined;
-  return {
-    id: item.id,
-    overview: item.planActivity?.overview ?? undefined,
-    path,
-    planId: item.planId ?? null,
-    state: isActivePlan
-      ? (options.currentPlanState ?? item.planActivity?.stateAfter ?? null)
-      : (item.planActivity?.stateAfter ?? null),
-    title: item.planActivity?.title ?? asString(item.args?.goal) ?? undefined,
-    todos: isActivePlan ? (ambientTodos ?? argTodos) : argTodos,
-    type: "plan",
-  };
 }
 
 export function isRunning(item: WebviewToolCard): boolean {
@@ -715,21 +678,7 @@ function parseApprovalQuestions(
   if (!Array.isArray(questions)) {
     return null;
   }
-  const parsed = questions.filter(
-    (question): question is WebviewApprovalQuestion =>
-      typeof question === "object" &&
-      question !== null &&
-      typeof question.id === "string" &&
-      typeof question.prompt === "string" &&
-      Array.isArray(question.options) &&
-      question.options.every(
-        (option) =>
-          typeof option === "object" &&
-          option !== null &&
-          typeof option.id === "string" &&
-          typeof option.label === "string",
-      ),
-  );
+  const parsed = questions.filter(isApprovalQuestion);
   return parsed.length === questions.length ? parsed : null;
 }
 
@@ -754,41 +703,40 @@ function parseAskQuestionResult(
     if (typeof parsed.cancelled !== "boolean") {
       return null;
     }
-    const answers = parsed.answers.map((entry) => {
-      if (!entry || typeof entry !== "object") {
+    const answers: Array<AskQuestionAnswer | null> = parsed.answers.map(
+      (entry): AskQuestionAnswer | null => {
+      if (!isRecord(entry)) {
         return null;
       }
-      const answer = entry as Record<string, unknown>;
       const questionId =
-        typeof answer.questionId === "string"
-          ? answer.questionId
-          : typeof answer.question_id === "string"
-            ? answer.question_id
+        typeof entry.questionId === "string"
+          ? entry.questionId
+          : typeof entry.question_id === "string"
+            ? entry.question_id
             : null;
-      const optionIds = Array.isArray(answer.optionIds)
-        ? answer.optionIds
-        : Array.isArray(answer.option_ids)
-          ? answer.option_ids
+      const optionIds = isStringArray(entry.optionIds)
+        ? entry.optionIds
+        : isStringArray(entry.option_ids)
+          ? entry.option_ids
           : null;
       const pickedRecommended =
-        typeof answer.pickedRecommended === "boolean"
-          ? answer.pickedRecommended
-          : typeof answer.picked_recommended === "boolean"
-            ? answer.picked_recommended
+        typeof entry.pickedRecommended === "boolean"
+          ? entry.pickedRecommended
+          : typeof entry.picked_recommended === "boolean"
+            ? entry.picked_recommended
             : null;
       const customText =
-        typeof answer.customText === "string" || answer.customText === null
-          ? answer.customText
-          : typeof answer.custom_text === "string" ||
-              answer.custom_text === null
-            ? answer.custom_text
+        typeof entry.customText === "string" || entry.customText === null
+          ? entry.customText
+          : typeof entry.custom_text === "string" ||
+              entry.custom_text === null
+            ? entry.custom_text
             : undefined;
       const skipped =
-        typeof answer.skipped === "boolean" ? answer.skipped : undefined;
+        typeof entry.skipped === "boolean" ? entry.skipped : undefined;
       if (
         !questionId ||
         !optionIds ||
-        !optionIds.every((optionId) => typeof optionId === "string") ||
         typeof pickedRecommended !== "boolean"
       ) {
         return null;
@@ -800,14 +748,14 @@ function parseAskQuestionResult(
         questionId,
         skipped,
       };
-    });
+      },
+    );
     if (answers.some((entry) => entry === null)) {
       return null;
     }
     return {
       answers: answers.filter(
-        (entry): entry is AskQuestionResult["answers"][number] =>
-          entry !== null,
+        (entry): entry is AskQuestionAnswer => entry !== null,
       ),
       cancelled: parsed.cancelled,
     };
@@ -1228,36 +1176,18 @@ function shouldShowBodyByDefault(
 }
 
 type ToolRowProps = {
-  availableModels?: string[];
-  buildModel?: string;
-  canBuildPlan?: boolean;
-  currentPlanId?: string | null;
-  currentPlanState?: WebviewPlanFileState | null;
   item: WebviewToolCard;
-  onBuildPlan?(planId: string | null, path: string): void;
   onOpenFile(path: string): void;
   onOpenDiff?(toolCallId: string): void;
   onOpenPlanFile?(path: string): void;
-  onSetBuildModel?(modelId: string): void;
-  planTodos?: WebviewTodo[];
-  sessionModel?: string;
   variant?: "grouped" | "standalone";
 };
 
 function ToolRowComponent({
-  availableModels = [],
-  buildModel = "",
-  canBuildPlan = false,
-  currentPlanId = null,
-  currentPlanState = null,
   item,
-  onBuildPlan,
   onOpenFile,
   onOpenDiff,
   onOpenPlanFile,
-  onSetBuildModel,
-  planTodos = [],
-  sessionModel = "",
   variant = "standalone",
 }: ToolRowProps) {
   const category = toolCategory(item.toolName);
@@ -1303,35 +1233,10 @@ function ToolRowComponent({
     };
   }, [countdownActive, item.id, item.startedAt]);
 
-  const createPlanCard = useMemo(
-    () =>
-      createPlanCardFromTool(item, {
-        currentPlanId,
-        currentPlanState,
-        planTodos,
-      }),
-    [currentPlanId, currentPlanState, item, planTodos],
-  );
   const iconClass = useMemo(
     () => toolIconClass(item.toolName),
     [item.toolName],
   );
-  if (createPlanCard) {
-    return (
-      <PlanFileCard
-        availableModels={availableModels}
-        buildModel={buildModel}
-        canBuild={canBuildPlan}
-        creating={isRunning(item)}
-        item={createPlanCard}
-        onBuild={(planId, path) => onBuildPlan?.(planId, path)}
-        onOpenPlanFile={(path) => onOpenPlanFile?.(path)}
-        onSetBuildModel={onSetBuildModel}
-        planTodos={planTodos}
-        sessionModel={sessionModel}
-      />
-    );
-  }
   const shellClassName =
     variant === "grouped"
       ? "tc-tool-row-shell tc-tool-row-shell--grouped tc-thinking-tool-wrapper"
@@ -1574,19 +1479,10 @@ function ToolRowComponent({
 
 function areToolRowPropsEqual(prev: ToolRowProps, next: ToolRowProps): boolean {
   return (
-    prev.availableModels === next.availableModels &&
-    prev.buildModel === next.buildModel &&
-    prev.canBuildPlan === next.canBuildPlan &&
-    prev.currentPlanId === next.currentPlanId &&
-    prev.currentPlanState === next.currentPlanState &&
     prev.item === next.item &&
-    prev.onBuildPlan === next.onBuildPlan &&
     prev.onOpenDiff === next.onOpenDiff &&
     prev.onOpenFile === next.onOpenFile &&
     prev.onOpenPlanFile === next.onOpenPlanFile &&
-    prev.onSetBuildModel === next.onSetBuildModel &&
-    prev.planTodos === next.planTodos &&
-    prev.sessionModel === next.sessionModel &&
     prev.variant === next.variant
   );
 }

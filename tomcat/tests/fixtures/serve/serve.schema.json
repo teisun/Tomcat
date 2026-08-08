@@ -383,6 +383,42 @@
       {
         "type": "object",
         "required": [
+          "contextWindow",
+          "model",
+          "type"
+        ],
+        "properties": {
+          "contextWindow": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_context_window"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "type"
         ],
         "properties": {
@@ -1059,6 +1095,23 @@
             ],
             "format": "uint32",
             "minimum": 0.0
+          },
+          "contextWindowOptions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "type": "string"
@@ -5020,6 +5073,21 @@
         "format": "uint32",
         "minimum": 0.0
       },
+      "contextWindowOptions": {
+        "default": [],
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "id": {
         "type": "string"
       },
@@ -5042,6 +5110,20 @@
       },
       "provider": {
         "type": "string"
+      },
+      "selectedContextWindow": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0.0
+      },
+      "selectedReasoningLevel": {
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "source": {
         "$ref": "#/definitions/ModelSource"
@@ -5223,6 +5305,21 @@
             "format": "uint32",
             "minimum": 0.0
           },
+          "contextWindowOptions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -5245,6 +5342,20 @@
           },
           "provider": {
             "type": "string"
+          },
+          "selectedContextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "selectedReasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "source": {
             "$ref": "#/definitions/ModelSource"
@@ -5352,6 +5463,21 @@
             "format": "uint32",
             "minimum": 0.0
           },
+          "contextWindowOptions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -5374,6 +5500,20 @@
           },
           "provider": {
             "type": "string"
+          },
+          "selectedContextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "selectedReasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "source": {
             "$ref": "#/definitions/ModelSource"

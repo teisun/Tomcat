@@ -1,6 +1,6 @@
 use crate::api::chat::ChatContext;
 use crate::core::llm::ThinkingLevel;
-use crate::{AppError, ModelThinkingStore};
+use crate::{AppError, ModelPrefsStore};
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -25,11 +25,11 @@ pub fn parse_effort_level(level: &str) -> Option<ThinkingLevel> {
 }
 
 pub fn apply_level(
-    store: &ModelThinkingStore,
+    store: &ModelPrefsStore,
     model: &str,
     level: ThinkingLevel,
 ) -> Result<(), AppError> {
-    store.set(model, level)
+    store.set_reasoning(model, level)
 }
 
 pub(crate) fn run(ctx: &ChatContext, level: ThinkingLevel) -> ChatCommandOutcome {
@@ -45,7 +45,7 @@ pub(crate) fn run(ctx: &ChatContext, level: ThinkingLevel) -> ChatCommandOutcome
         }
     };
     let model = ctx.effective_model(entry.as_ref());
-    match apply_level(&ctx.global_services.model_thinking, &model, level) {
+    match apply_level(&ctx.global_services.model_prefs, &model, level) {
         Ok(()) => {
             println!(
                 "[effort] 模型 {} 的思考深度已设为 {}",

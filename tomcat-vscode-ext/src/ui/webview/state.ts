@@ -2439,6 +2439,7 @@ export class WebviewStateStore {
     this.state = {
       activeSessionId: null,
       availableModelCapabilities: {},
+      availableModelDetails: {},
       availableModelReasoningLevels: {},
       availableModels: [],
       buildModel: "",
@@ -2495,8 +2496,10 @@ export class WebviewStateStore {
     models: string[],
     capabilities: Record<string, string[]> = {},
     reasoningLevels: Record<string, string[]> = {},
+    modelDetails: WebviewStateSnapshot["availableModelDetails"] = {},
   ): void {
     this.state.availableModelCapabilities = { ...capabilities };
+    this.state.availableModelDetails = { ...modelDetails };
     this.state.availableModelReasoningLevels = { ...reasoningLevels };
     this.state.availableModels = [...models];
   }
@@ -2514,6 +2517,7 @@ export class WebviewStateStore {
     this.state = {
       activeSessionId: null,
       availableModelCapabilities: {},
+      availableModelDetails: {},
       availableModelReasoningLevels: {},
       availableModels: [],
       buildModel: "",

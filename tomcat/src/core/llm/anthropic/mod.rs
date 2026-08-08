@@ -549,7 +549,9 @@ mod tests {
                 ..Capabilities::default()
             },
             context_window: Some(200_000),
+            context_window_options: Vec::new(),
             max_output_tokens: Some(32_000),
+            description: None,
             thinking_format: Some("anthropic-adaptive".to_string()),
             supported_reasoning_levels: vec!["high".to_string()],
         };
@@ -625,7 +627,9 @@ mod tests {
             base_url: Some(server.base_url.clone()),
             capabilities: Capabilities::default(),
             context_window: Some(200_000),
+            context_window_options: Vec::new(),
             max_output_tokens: Some(8_192),
+            description: None,
             thinking_format: Some("anthropic-adaptive".to_string()),
             supported_reasoning_levels: vec!["high".to_string()],
         };

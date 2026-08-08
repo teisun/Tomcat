@@ -412,9 +412,15 @@ pub enum ModelSub {
         /// context window
         #[arg(long)]
         context_window: Option<u32>,
+        /// 可选 context window 档位（可重复传入）；传入后必须包含 --context-window
+        #[arg(long = "context-window-option")]
+        context_window_options: Vec<u32>,
         /// maximum output tokens for one request
         #[arg(long)]
         max_output_tokens: Option<u32>,
+        /// 模型描述
+        #[arg(long)]
+        description: Option<String>,
         /// thinking format（如 deepseek / doubao / anthropic）
         #[arg(long)]
         thinking_format: Option<String>,

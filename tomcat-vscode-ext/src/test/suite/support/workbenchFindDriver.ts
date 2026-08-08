@@ -233,8 +233,11 @@ export class WorkbenchFindDriver {
 
   async findUniqueText(query: string): Promise<FindWidgetState> {
     const accelerator = process.platform === "darwin" ? 4 : 2;
-    await this.dispatchKey("rawKeyDown", "f", "KeyF", accelerator);
-    await this.dispatchKey("keyUp", "f", "KeyF", accelerator);
+    const current = await this.readFindWidget();
+    if (!current.open) {
+      await this.dispatchKey("rawKeyDown", "f", "KeyF", accelerator);
+      await this.dispatchKey("keyUp", "f", "KeyF", accelerator);
+    }
     await waitFor(
       () => this.readFindWidget(),
       (state) => state.open,

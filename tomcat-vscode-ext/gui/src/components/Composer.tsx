@@ -33,8 +33,10 @@ import {
   ContextSearchDropdown,
   type ContextSearchDropdownHandle,
 } from "./ContextSearchDropdown";
+import { buildPickerModels } from "./buildPickerModels";
 import { createMentionSuggestion } from "./mentionSuggestion";
 import { ReferenceChip } from "./ReferenceChip";
+import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
 
 function formatPlanStatus(planState?: WebviewPlanFileState | null): string | null {
   if (!planState) {
@@ -155,56 +157,6 @@ function extractFileSourcePath(file: File): string | null {
 
 function modeLabel(value: "chat" | "plan"): string {
   return MODE_OPTIONS.find((option) => option.value === value)?.label ?? "Chat";
-}
-
-function titleCaseToken(value: string): string {
-  if (!value) {
-    return "";
-  }
-  return value[0].toUpperCase() + value.slice(1);
-}
-
-function thinkingLevelLabel(value: string): string {
-  switch (value.trim().toLowerCase()) {
-    case "":
-      return "Effort";
-    case "off":
-      return "Off";
-    case "xhigh":
-      return "Xhigh";
-    default:
-      return titleCaseToken(value.trim().toLowerCase());
-  }
-}
-
-function buildThinkingMenu(
-  supportedReasoningLevels: string[] | undefined,
-  currentValue: string,
-): {
-  buttonLabel: string;
-  fieldLabel: "Effort" | "Thinking";
-  options: Array<{ label: string; value: string }>;
-} {
-  const supported = Array.isArray(supportedReasoningLevels) ? supportedReasoningLevels : [];
-  if (supported.length === 0) {
-    const isOff = currentValue.trim().toLowerCase() === "off";
-    return {
-      buttonLabel: isOff ? "Off" : "On",
-      fieldLabel: "Thinking",
-      options: [
-        { label: "On", value: "high" },
-        { label: "Off", value: "off" },
-      ],
-    };
-  }
-  return {
-    buttonLabel: currentValue ? thinkingLevelLabel(currentValue) : thinkingLevelLabel(supported[0] ?? ""),
-    fieldLabel: "Effort",
-    options: supported.map((value) => ({
-      label: thinkingLevelLabel(value),
-      value,
-    })),
-  };
 }
 
 export interface ComposerDraft {
@@ -490,6 +442,8 @@ function sameDraft(left: ComposerDraft, right: ComposerDraft): boolean {
 }
 
 interface ComposerProps {
+  availableModelDetails?: Record<string, ModelPickerModel>;
+  availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   busy?: boolean;
   canInterrupt: boolean;
@@ -511,18 +465,21 @@ interface ComposerProps {
   /** Called synchronously when paste preparation starts so App can bind it to the source session. */
   onPrepareAttachments?(work: Promise<PreparedAttachment[]>): void;
   onPickContext(): void;
+  onContextWindowChange(modelId: string, contextWindow: number): void;
   onDraftChange(draft: ComposerDraft): void;
   onModeChange(value: "chat" | "plan"): void;
   onModelChange(value: string): void;
   onOpenModelSettings?(): void;
   onResolveDrop(uris: string[]): void;
-  onThinkingLevelChange(value: string): void;
+  onThinkingLevelChange(modelId: string, value: string): void;
   onInterrupt?(): void;
   onSubmit(): void;
   planState?: WebviewPlanFileState | null;
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({
+  availableModelDetails,
+  availableModelReasoningLevels,
   availableModels,
   busy = false,
   canInterrupt,
@@ -541,6 +498,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onContextSearchOpen,
   onContextSearchQueryChange,
   supportedReasoningLevels,
+  onContextWindowChange,
   thinkingLevelValue,
   onPickContext,
   onDraftChange,
@@ -557,17 +515,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [capabilityHint, setCapabilityHint] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [draft, setDraft] = useState<ComposerDraft>(EMPTY_DRAFT);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
-  const [effortMenuOpen, setEffortMenuOpen] = useState(false);
   const [mentionOpen, setMentionOpen] = useState(false);
   const isComposingRef = useRef(false);
   const isMentionOpenRef = useRef(false);
   const contextSearchDropdownRef = useRef<ContextSearchDropdownHandle | null>(null);
   const draftRef = useRef<ComposerDraft>(EMPTY_DRAFT);
-  const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modeMenuRef = useRef<HTMLDivElement | null>(null);
-  const effortMenuRef = useRef<HTMLDivElement | null>(null);
   const latestAttachmentHandlersRef = useRef({
     modelCapabilities,
     onAttachFiles,
@@ -816,26 +770,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [capabilityHint]);
 
   useEffect(() => {
-    if (!modelMenuOpen && !modeMenuOpen && !effortMenuOpen) {
+    if (!modeMenuOpen) {
       return;
     }
-    const refs = [modelMenuRef, modeMenuRef, effortMenuRef];
     const handleClickOutside = (event: MouseEvent) => {
-      if (!(event.target instanceof Node)) {
+      if (!(event.target instanceof Node) || modeMenuRef.current?.contains(event.target)) {
         return;
       }
-      if (refs.some((ref) => ref.current?.contains(event.target))) {
-        return;
-      }
-      setModelMenuOpen(false);
       setModeMenuOpen(false);
-      setEffortMenuOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setModelMenuOpen(false);
         setModeMenuOpen(false);
-        setEffortMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -844,36 +790,37 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [effortMenuOpen, modeMenuOpen, modelMenuOpen]);
+  }, [modeMenuOpen]);
 
-  const useNativeModelSelect = !onOpenModelSettings;
-  const canOpenModelMenu = canPrompt && (availableModels.length > 0 || Boolean(onOpenModelSettings));
   const canOpenModeMenu = canPrompt;
-  const canOpenEffortMenu = canPrompt && Boolean(modelValue);
-  const thinkingMenu = useMemo(
-    () => buildThinkingMenu(supportedReasoningLevels, thinkingLevelValue),
-    [supportedReasoningLevels, thinkingLevelValue],
+  const pickerModels = useMemo(
+    () =>
+      buildPickerModels({
+        activeModelId: modelValue,
+        availableModelDetails,
+        availableModelReasoningLevels: {
+          ...availableModelReasoningLevels,
+          ...(supportedReasoningLevels
+            ? { [modelValue]: supportedReasoningLevels }
+            : {}),
+        },
+        availableModels,
+        selectedModelId: modelValue,
+        sessionThinkingLevel: thinkingLevelValue,
+      }),
+    [
+      availableModelDetails,
+      availableModelReasoningLevels,
+      availableModels,
+      modelValue,
+      supportedReasoningLevels,
+      thinkingLevelValue,
+    ],
   );
-
-  const handleModelPick = (nextModel: string) => {
-    onModelChange(nextModel);
-    setModelMenuOpen(false);
-    setModeMenuOpen(false);
-    setEffortMenuOpen(false);
-  };
 
   const handleModePick = (nextMode: "chat" | "plan") => {
     onModeChange(nextMode);
-    setModelMenuOpen(false);
     setModeMenuOpen(false);
-    setEffortMenuOpen(false);
-  };
-
-  const handleThinkingLevelPick = (nextLevel: string) => {
-    onThinkingLevelChange(nextLevel);
-    setModelMenuOpen(false);
-    setModeMenuOpen(false);
-    setEffortMenuOpen(false);
   };
 
   const insertReferences = useCallback((references: readonly WebviewReference[]) => {
@@ -946,7 +893,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         : nextDraft.text
           ? [{ text: nextDraft.text, type: "text" } satisfies WebviewMessageSegment]
           : [];
-      editor.commands.setContent(createComposerDocument(segments), false);
+      editor.commands.setContent(createComposerDocument(segments), { emitUpdate: false });
       editor.commands.focus("end");
       updateDraft(serializeComposerDocument(editor.getJSON()));
     },
@@ -1114,8 +1061,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               data-testid="mode-select"
               disabled={!canOpenModeMenu}
               onClick={() => {
-                setModelMenuOpen(false);
-                setEffortMenuOpen(false);
                 setModeMenuOpen((value) => !value);
               }}
               type="button"
@@ -1149,147 +1094,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             |
           </span>
 
-          <div
-            className="tc-field tc-field--compact tc-field--dropdown tc-field--model"
-            ref={useNativeModelSelect ? null : modelMenuRef}
-          >
+          <div className="tc-field tc-field--compact tc-field--dropdown tc-field--model">
             <span>Model</span>
-            {useNativeModelSelect ? (
-              <select
-                aria-label="Tomcat model"
-                data-testid="model-select"
-                disabled={!canPrompt || availableModels.length === 0}
-                onChange={(event) => onModelChange(event.target.value)}
-                value={modelValue}
-              >
-                {availableModels.length === 0 ? (
-                  <option value="">No ready models</option>
-                ) : null}
-                {availableModels.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <>
-                <button
-                  aria-expanded={modelMenuOpen}
-                  aria-label="Tomcat model"
-                  className="tc-topbar__trigger tc-topbar__trigger--compact"
-                  data-testid="model-select"
-                  disabled={!canOpenModelMenu}
-                  onClick={() => {
-                    setModeMenuOpen(false);
-                    setEffortMenuOpen(false);
-                    setModelMenuOpen((value) => !value);
-                  }}
-                  type="button"
-                >
-                  <span className="tc-topbar__trigger-label">
-                    {modelValue || (availableModels.length ? "Select model" : "Add models")}
-                  </span>
-                  <span className="tc-topbar__caret" aria-hidden="true">
-                    {modelMenuOpen ? "▴" : "▾"}
-                  </span>
-                </button>
-                {modelMenuOpen ? (
-                  <div className="tc-session-dropdown tc-model-dropdown" data-testid="model-dropdown">
-                    {availableModels.length > 0 ? (
-                      availableModels.map((model) => {
-                        const isActive = model === modelValue;
-                        return (
-                          <button
-                            aria-current={isActive ? "true" : undefined}
-                            className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
-                            data-testid="model-option"
-                            key={model}
-                            onClick={() => handleModelPick(model)}
-                            type="button"
-                          >
-                            <span className="tc-session-item__title">{model}</span>
-                          </button>
-                        );
-                      })
-                    ) : (
-                      <div className="tc-session-dropdown__empty">No ready models</div>
-                    )}
-                    <div className="tc-model-dropdown__divider" />
-                    <button
-                      className="tc-session-item tc-model-dropdown__footer"
-                      data-testid="model-open-settings"
-                      onClick={() => {
-                        setModelMenuOpen(false);
-                        setModeMenuOpen(false);
-                        setEffortMenuOpen(false);
-                        onOpenModelSettings();
-                      }}
-                      type="button"
-                    >
-                      <span className="tc-session-item__title">Add Models...</span>
-                    </button>
-                  </div>
-                ) : null}
-              </>
-            )}
-          </div>
-          <span aria-hidden="true" className="tc-composer__bar-sep">
-            |
-          </span>
-
-          <div
-            className="tc-field tc-field--compact tc-field--dropdown tc-field--effort"
-            ref={effortMenuRef}
-          >
-            <span>{thinkingMenu.fieldLabel}</span>
-            <button
-              aria-expanded={effortMenuOpen}
-              aria-label="Tomcat reasoning effort"
-              className="tc-topbar__trigger tc-topbar__trigger--compact"
-              data-testid="thinking-level-select"
-              disabled={!canOpenEffortMenu}
-              onClick={() => {
-                setModelMenuOpen(false);
+            <ModelPicker
+              className="tc-composer-model-picker"
+              disabled={!canPrompt}
+              // The VS Code host E2E harness still drives this compatibility trigger.
+              legacyThinkingTriggerTestId="thinking-level-select"
+              models={pickerModels}
+              onOpenModelSettings={onOpenModelSettings}
+              onSelectContextWindow={(selectedModelId, contextWindow) => {
                 setModeMenuOpen(false);
-                setEffortMenuOpen((value) => !value);
+                onContextWindowChange(selectedModelId, contextWindow);
               }}
-              type="button"
-            >
-              <span className="tc-topbar__trigger-label">
-                {thinkingMenu.buttonLabel}
-              </span>
-              <span className="tc-topbar__caret" aria-hidden="true">
-                {effortMenuOpen ? "▴" : "▾"}
-              </span>
-            </button>
-            {effortMenuOpen ? (
-              <div
-                className="tc-session-dropdown tc-composer-dropdown"
-                data-testid="thinking-level-dropdown"
-              >
-                {thinkingMenu.options.map((option) => {
-                  const isToggleMenu = thinkingMenu.fieldLabel === "Thinking";
-                  const isOff = thinkingLevelValue.trim().toLowerCase() === "off";
-                  const isActive = isToggleMenu
-                    ? option.value === "off"
-                      ? isOff
-                      : !isOff
-                    : option.value === thinkingLevelValue;
-                  return (
-                    <button
-                      aria-current={isActive ? "true" : undefined}
-                      className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
-                      data-testid="thinking-level-option"
-                      key={option.value}
-                      onClick={() => handleThinkingLevelPick(option.value)}
-                      type="button"
-                    >
-                      <span className="tc-session-item__title">{option.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
+              onSelectModel={(selectedModelId) => {
+                setModeMenuOpen(false);
+                onModelChange(selectedModelId);
+              }}
+              onSelectThinkingLevel={(selectedModelId, level) => {
+                setModeMenuOpen(false);
+                onThinkingLevelChange(selectedModelId, level);
+              }}
+              selectedModelId={modelValue}
+            />
           </div>
 
           <span className="tc-composer__context" data-testid="context-ratio">

@@ -387,8 +387,13 @@ describe("model catalog parsing", () => {
             capabilities: {
               reasoning: true,
             },
+            contextWindow: 400000,
+            contextWindowOptions: [400000, 1000000],
+            description: "Fast reasoning model",
             id: "deepseek-v4-flash",
             keyPresent: true,
+            selectedContextWindow: 1000000,
+            selectedReasoningLevel: "max",
             supportedReasoningLevels: ["high", "max"],
           },
           {
@@ -418,6 +423,37 @@ describe("model catalog parsing", () => {
         "text-only": [],
       },
       ids: ["deepseek-v4-flash", "gpt-5.4", "text-only"],
+      modelDetails: {
+        "deepseek-v4-flash": {
+          capabilities: ["reasoning"],
+          contextWindow: 400000,
+          contextWindowOptions: [400000, 1000000],
+          description: "Fast reasoning model",
+          id: "deepseek-v4-flash",
+          modelName: null,
+          selectedContextWindow: 1000000,
+          selectedReasoningLevel: "max",
+          supportedReasoningLevels: ["high", "max"],
+        },
+        "gpt-5.4": {
+          capabilities: ["vision", "files"],
+          contextWindowOptions: [],
+          description: null,
+          id: "gpt-5.4",
+          modelName: null,
+          selectedReasoningLevel: null,
+          supportedReasoningLevels: ["low", "medium", "high", "xhigh"],
+        },
+        "text-only": {
+          capabilities: [],
+          contextWindowOptions: [],
+          description: null,
+          id: "text-only",
+          modelName: null,
+          selectedReasoningLevel: null,
+          supportedReasoningLevels: [],
+        },
+      },
       reasoningLevels: {
         "deepseek-v4-flash": ["high", "max"],
         "gpt-5.4": ["low", "medium", "high", "xhigh"],
@@ -652,6 +688,7 @@ describe("error-turn recovery", () => {
 describe("thinking level intent handling", () => {
   it("routes max through handleWebviewMessage and refreshes session state", async () => {
     const sendSetThinkingLevel = vi.fn().mockResolvedValue({ success: true });
+    const refreshModels = vi.fn().mockResolvedValue(undefined);
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
@@ -672,6 +709,7 @@ describe("thinking level intent handling", () => {
     });
     vi.spyOn(provider as any, "ensureInitialized").mockResolvedValue(undefined);
     vi.spyOn(provider as any, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(provider as any, "refreshModels").mockImplementation(refreshModels);
     vi.spyOn(provider as any, "postState").mockResolvedValue(undefined);
 
     await (
@@ -689,6 +727,7 @@ describe("thinking level intent handling", () => {
     });
 
     expect(sendSetThinkingLevel).toHaveBeenCalledWith("s1", "claude-4.6-sonnet", "max");
+    expect(refreshModels).toHaveBeenCalledTimes(1);
     expect(provider.currentState().sessionViews.s1).toMatchObject({
       model: "claude-4.6-sonnet",
       thinkingLevel: "max",

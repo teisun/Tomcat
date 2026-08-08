@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::core::llm::auth::{
     env_name_for_provider, key_present_for_env, refresh_managed_credentials,
 };
+use crate::core::session::ModelPrefsStore;
 use crate::infra::config::{
     get_work_dir, read_env_entries, write_default_model, write_env_entries, ThinkingConfig,
 };
@@ -16,12 +17,12 @@ use crate::infra::platform::write_file_atomic;
 use crate::{AppConfig, AppError};
 
 use super::catalog::{
-    load_user_models_file, render_user_models_file, Capabilities, ModelCatalog, ModelEntry,
-    PartialCapabilities, UserModelEntry, UserModelsFile,
+    load_user_models_file, render_user_models_file, validate_context_window_options, Capabilities,
+    ModelCatalog, ModelEntry, PartialCapabilities, UserModelEntry, UserModelsFile,
 };
 use super::thinking_policy::{
-    default_thinking_format_for_api, normalize_supported_reasoning_levels, resolve_request_fields,
-    safe_supported_reasoning_levels_for, ThinkingFormat,
+    clamp_reasoning_level, default_thinking_format_for_api, normalize_supported_reasoning_levels,
+    resolve_request_fields, safe_supported_reasoning_levels_for, ThinkingFormat,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -46,6 +47,14 @@ pub struct ModelView {
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub context_window_options: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(default)]
@@ -72,7 +81,11 @@ pub struct ModelEntryInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_options: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +133,10 @@ impl ModelView {
             capabilities: entry.capabilities.clone(),
             thinking_format: entry.thinking_format.clone(),
             context_window: entry.context_window,
+            context_window_options: entry.context_window_options.clone(),
+            selected_context_window: None,
+            selected_reasoning_level: None,
+            description: entry.description.clone(),
             max_output_tokens: entry.max_output_tokens,
             supported_reasoning_levels: entry.supported_reasoning_levels.clone(),
             source: if catalog.is_builtin_seed(&entry.id) {
@@ -157,6 +174,13 @@ impl ModelEntryInput {
         let base_url = normalize_optional(self.base_url);
         let thinking_format = normalize_optional(self.thinking_format)
             .or_else(|| Some(default_thinking_format_for_api(api.as_str()).to_string()));
+        let context_window_options = validate_context_window_options(
+            &id,
+            self.context_window,
+            self.context_window_options.as_deref().unwrap_or_default(),
+            self.max_output_tokens,
+        )?;
+        let description = normalize_optional(self.description);
         let supported_reasoning_levels = match self.supported_reasoning_levels {
             Some(levels) => {
                 let normalized = normalize_supported_reasoning_levels(&levels);
@@ -177,7 +201,9 @@ impl ModelEntryInput {
             base_url,
             capabilities: self.capabilities,
             context_window: self.context_window,
+            context_window_options,
             max_output_tokens: self.max_output_tokens,
+            description,
             thinking_format,
             supported_reasoning_levels,
         })
@@ -189,6 +215,40 @@ pub fn list_model_views(catalog: &ModelCatalog) -> Vec<ModelView> {
         .entries_in_merge_order()
         .into_iter()
         .map(|entry| ModelView::from_entry(catalog, entry))
+        .collect()
+}
+
+pub fn list_model_views_with_prefs(
+    catalog: &ModelCatalog,
+    prefs: &ModelPrefsStore,
+) -> Vec<ModelView> {
+    catalog
+        .entries_in_merge_order()
+        .into_iter()
+        .map(|entry| {
+            let mut view = ModelView::from_entry(catalog, entry.clone());
+            let explicit_prefs = prefs.explicit_prefs_for(&entry.id);
+            view.selected_reasoning_level =
+                (!entry.supported_reasoning_levels.is_empty()).then(|| {
+                    let requested = explicit_prefs
+                        .as_ref()
+                        .map(|prefs| prefs.reasoning)
+                        .unwrap_or_else(|| prefs.default_reasoning());
+                    clamp_reasoning_level(requested, &entry.supported_reasoning_levels)
+                        .as_str()
+                        .to_string()
+                });
+            view.selected_context_window = explicit_prefs
+                .and_then(|prefs| prefs.context_window)
+                .filter(|value| entry.context_window_options.contains(value))
+                .or_else(|| {
+                    entry.context_window.filter(|value| {
+                        entry.context_window_options.is_empty()
+                            || entry.context_window_options.contains(value)
+                    })
+                });
+            view
+        })
         .collect()
 }
 
@@ -419,7 +479,10 @@ fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {
             web_search: Some(entry.capabilities.web_search),
         }),
         context_window: entry.context_window,
+        context_window_options: (!entry.context_window_options.is_empty())
+            .then(|| entry.context_window_options.clone()),
         max_output_tokens: entry.max_output_tokens,
+        description: entry.description.clone(),
         thinking_format: entry.thinking_format.clone(),
         supported_reasoning_levels: Some(entry.supported_reasoning_levels.clone()),
     }

@@ -60,11 +60,18 @@ fn seed_block_text(model_id: &str) -> String {
 }
 
 fn expected_seed_file_text() -> String {
-    format!("{MODELS_TOML_HEADER}\n{}", expected_seed_blocks_text())
+    format!("{MODELS_TOML_HEADER}\n{}", builtin_seed_toml_text())
 }
 
 fn expected_seed_blocks_text() -> String {
-    builtin_seed_toml_text().to_string()
+    format!(
+        "{}\n",
+        seed_blocks()
+            .into_iter()
+            .map(|(_, block)| block)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    )
 }
 
 fn seed_ids_except(excluded: &[&str]) -> Vec<String> {

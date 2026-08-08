@@ -29,6 +29,24 @@
 | `model_name` | `gpt-5.6-sol` | 发给 API 的 wire 名 |
 | `provider` + `base_url` + `api_key_env` + `api` | fcodex / fcodex.top / openai-responses | 真正的出口 |
 
+### 2.1 能力与选择也必须分开
+
+`models.toml` 还包含两类**能力/默认值**：`supported_reasoning_levels`，以及 `context_window`（默认）和 `context_window_options`（可选档位）。这些字段与 endpoint 一样，必须随 catalog 条目流动，不能由 UI 猜测。
+
+```text
+ModelEntry (能力、默认值)              ModelPrefsStore (个人选择)
+├─ supported_reasoning_levels          ├─ reasoning
+├─ context_window                      └─ contextWindow
+└─ context_window_options                       │
+              │                                 │
+              └──── resolver / list_models ────┘
+                              │
+                              v
+                 EffectiveModelLimits + wire request
+```
+
+选择不是能力：`contextWindow` 只允许取该模型声明的 options；没有 options 时回落到 `context_window`。选择 Reasoning 不会改变 Context。偏好按 catalog `id` 持久化在兼容旧值的 `model-thinking.json`，因此 `model_name`（wire 名）变化不会把用户偏好误绑给另一条目录记录。为兼容旧二进制，真实模型键仍保存 Reasoning 字符串；Context 被编码为同一映射中值为 `"off"` 的保留键 `__tomcat_context_window__:<model>:<tokens>`，旧客户端可安全忽略它。Chat 的 `/context` 和 `/effort`、serve 的 `set_context_window` 和 `set_thinking_level` 是同一规则的两个入口。
+
 把「名字」和「出口」拆开传递，就会出现：deepseek endpoint 收到 `fcodex/gpt-5.6-sol` → HTTP 400。
 
 ## 3. 事故复盘（2026-07）

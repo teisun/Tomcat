@@ -68,7 +68,7 @@ function MessageBubbleComponent({
     (attachment) => ({
       ...attachment,
       label: attachment.filename,
-      path: attachment.path ?? null,
+      path: null,
     }),
   );
 

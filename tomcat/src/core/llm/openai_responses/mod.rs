@@ -241,6 +241,17 @@ struct PreviousResponseHint {
     assistant_index: usize,
 }
 
+struct ResponsesWireFingerprint<'a> {
+    model: &'a str,
+    request: &'a ChatRequest,
+    instructions: Option<&'a str>,
+    input: &'a [Value],
+    tools: Option<&'a [Value]>,
+    explicit_replay: bool,
+    input_start: usize,
+    has_previous_response_id: bool,
+}
+
 fn latest_openai_response_hint_for_profile(
     messages: &[ChatMessage],
     target_profile: &ProviderCompatProfile,
@@ -281,16 +292,17 @@ fn is_previous_response_id_error(err: &AppError) -> bool {
 /// Emit only hashes and structural facts, never prompt text. The cache key is
 /// an input prefix, so adjacent requests can be compared at the first input
 /// item whose hash differs without exposing user content in diagnostics.
-fn log_responses_wire_fingerprint(
-    model: &str,
-    request: &ChatRequest,
-    instructions: Option<&str>,
-    input: &[Value],
-    tools: Option<&[Value]>,
-    explicit_replay: bool,
-    input_start: usize,
-    has_previous_response_id: bool,
-) {
+fn log_responses_wire_fingerprint(wire: ResponsesWireFingerprint<'_>) {
+    let ResponsesWireFingerprint {
+        model,
+        request,
+        instructions,
+        input,
+        tools,
+        explicit_replay,
+        input_start,
+        has_previous_response_id,
+    } = wire;
     if !prompt_prefix_fingerprint_enabled()
         || !tracing::enabled!(target: "tomcat_chat_diag", Level::INFO)
     {
@@ -554,16 +566,16 @@ impl OpenAiResponsesProvider {
             .as_deref()
             .map(payload::convert_tools_to_responses)
             .filter(|v| !v.is_empty());
-        log_responses_wire_fingerprint(
-            &model,
+        log_responses_wire_fingerprint(ResponsesWireFingerprint {
+            model: &model,
             request,
-            instructions.as_deref(),
-            &input,
-            tools_payload.as_deref(),
+            instructions: instructions.as_deref(),
+            input: &input,
+            tools: tools_payload.as_deref(),
             explicit_replay,
             input_start,
-            previous_response_hint.is_some(),
-        );
+            has_previous_response_id: previous_response_hint.is_some(),
+        });
 
         let mut body = json!({
             "model": model,

@@ -45,6 +45,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "set_plan_mode",
                             "set_model",
                             "set_thinking_level",
+                            "set_context_window",
                             "list_models",
                             "upsert_model",
                             "remove_model",

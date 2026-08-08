@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   isPlanPreviewHostFrame,
@@ -16,10 +22,15 @@ import { PlanActionStrip } from "../components/PlanActionStrip";
 import { TodoList } from "../components/TodoList";
 import { PlanSelectionActionButton } from "./PlanSelectionActionButton";
 
-type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
+type DistributiveOmit<T, K extends keyof T> = T extends unknown
+  ? Omit<T, K>
+  : never;
 type PlanIntentWithoutId = DistributiveOmit<PlanPreviewIntent, "messageId">;
 
-function send(vscodeApi: VsCodeApiLike<PlanPreviewIntent>, message: PlanIntentWithoutId): void {
+function send(
+  vscodeApi: VsCodeApiLike<PlanPreviewIntent>,
+  message: PlanIntentWithoutId,
+): void {
   vscodeApi.postMessage({
     ...message,
     messageId: `${message.type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -50,7 +61,10 @@ function sourceLineOf(node: Node | null): number | null {
  * unaffected by inline markdown. Returns null when the selection is not inside a
  * source-mapped block (e.g. the todo checklist), so the caller omits line info.
  */
-function readSelectionSourceLines(): { lineEnd: number; lineStart: number } | null {
+function readSelectionSourceLines(): {
+  lineEnd: number;
+  lineStart: number;
+} | null {
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) {
     return null;
@@ -78,18 +92,26 @@ function normalizeAnchorText(text: string): string {
   return text.replace(/\s+/gu, " ").trim().slice(0, 160);
 }
 
-function findFirstVisibleSourceBlock(container: HTMLElement): HTMLElement | null {
+function findFirstVisibleSourceBlock(
+  container: HTMLElement,
+): HTMLElement | null {
   const containerRect = container.getBoundingClientRect();
-  const blocks = Array.from(container.querySelectorAll<HTMLElement>("[data-source-line]"));
+  const blocks = Array.from(
+    container.querySelectorAll<HTMLElement>("[data-source-line]"),
+  );
   return (
     blocks.find((block) => {
       const rect = block.getBoundingClientRect();
       return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
-    }) ?? blocks[0] ?? null
+    }) ??
+    blocks[0] ??
+    null
   );
 }
 
-function captureScrollRestore(container: HTMLElement | null): ScrollRestoreState | null {
+function captureScrollRestore(
+  container: HTMLElement | null,
+): ScrollRestoreState | null {
   if (!container) {
     return null;
   }
@@ -122,28 +144,42 @@ function findAnchorByText(
     return null;
   }
   return (
-    Array.from(container.querySelectorAll<HTMLElement>("[data-source-line]")).find(
+    Array.from(
+      container.querySelectorAll<HTMLElement>("[data-source-line]"),
+    ).find(
       (candidate) =>
-        candidate.tagName === tagName
-        && normalizeAnchorText(candidate.textContent ?? "").startsWith(anchorText),
+        candidate.tagName === tagName &&
+        normalizeAnchorText(candidate.textContent ?? "").startsWith(anchorText),
     ) ?? null
   );
 }
 
-function restoreScrollPosition(container: HTMLElement, restore: ScrollRestoreState): void {
+function restoreScrollPosition(
+  container: HTMLElement,
+  restore: ScrollRestoreState,
+): void {
   let anchor: HTMLElement | null = null;
   if (restore.anchorLine !== null) {
-    anchor = container.querySelector<HTMLElement>(`[data-source-line="${restore.anchorLine}"]`);
+    anchor = container.querySelector<HTMLElement>(
+      `[data-source-line="${restore.anchorLine}"]`,
+    );
   }
   if (!anchor) {
-    anchor = findAnchorByText(container, restore.anchorTagName, restore.anchorText);
+    anchor = findAnchorByText(
+      container,
+      restore.anchorTagName,
+      restore.anchorText,
+    );
   }
   if (!anchor) {
     container.scrollTop = restore.scrollTop;
     return;
   }
   const containerRect = container.getBoundingClientRect();
-  const absoluteTop = anchor.getBoundingClientRect().top - containerRect.top + container.scrollTop;
+  const absoluteTop =
+    anchor.getBoundingClientRect().top -
+    containerRect.top +
+    container.scrollTop;
   container.scrollTop = Math.max(0, absoluteTop - restore.anchorOffset);
 }
 
@@ -153,7 +189,9 @@ function computedFontSize(element: Element | null): number | null {
   if (!element) {
     return null;
   }
-  const value = Number.parseFloat(element.ownerDocument.defaultView?.getComputedStyle(element).fontSize ?? "");
+  const value = Number.parseFloat(
+    element.ownerDocument.defaultView?.getComputedStyle(element).fontSize ?? "",
+  );
   return Number.isFinite(value) ? value : null;
 }
 
@@ -163,7 +201,7 @@ function readDomSnapshot(
   webviewStateFrames: number,
 ): PlanPreviewDomSnapshot {
   const strip = document.querySelector('[data-testid="plan-action-strip"]');
-  const select = document.querySelector<HTMLSelectElement>(
+  const modelTrigger = document.querySelector<HTMLElement>(
     '[data-testid="plan-build-model-select"]',
   );
   const countEl = document.querySelector('[data-testid="plan-todos-count"]');
@@ -171,26 +209,28 @@ function readDomSnapshot(
   const icons = document.querySelectorAll(".tc-plan-todo__icon");
   const body = document.querySelector('[data-testid="plan-markdown-body"]');
   const code = body?.querySelector("code") ?? null;
-  const content = document.querySelector<HTMLElement>('[data-testid="plan-content"]');
+  const content = document.querySelector<HTMLElement>(
+    '[data-testid="plan-content"]',
+  );
   const mermaidText = document.querySelector(
     '[data-testid="plan-mermaid"] svg text, [data-testid="plan-mermaid"] svg foreignObject span, [data-testid="plan-mermaid"] .nodeLabel',
   );
   const todoContent = document.querySelector(".tc-plan-todo__content");
   const inlinePathCount = document.querySelectorAll(".tc-inline-path").length;
-  const options = select
-    ? Array.from(select.options)
-        .map((option) => option.value)
-        .filter((value) => value !== "")
-    : [];
+  const options = state?.availableModels ?? [];
+  const buildModelValue = state?.buildModel || state?.sessionModel || "";
+  const buildModelLabel = modelTrigger?.textContent?.trim() ?? buildModelValue;
   const todoIconSizes = Array.from(icons).map((icon) =>
     Math.round(icon.getBoundingClientRect().width),
   );
-  const todoStatuses: PlanTodoStatus[] = Array.from(items).flatMap<PlanTodoStatus>((item) => {
+  const todoStatuses: PlanTodoStatus[] = Array.from(
+    items,
+  ).flatMap<PlanTodoStatus>((item) => {
     const status = item.getAttribute("data-status");
     return status === "cancelled" ||
-        status === "completed" ||
-        status === "in_progress" ||
-        status === "pending"
+      status === "completed" ||
+      status === "in_progress" ||
+      status === "pending"
       ? [status]
       : [];
   });
@@ -200,18 +240,25 @@ function readDomSnapshot(
   ).length;
   // The fixed action strip must sit outside the scrolling content column so it
   // never scrolls away; assert the structural invariant here for E2E.
-  const stripOutsideContent = Boolean(strip && content && !content.contains(strip));
+  const stripOutsideContent = Boolean(
+    strip && content && !content.contains(strip),
+  );
   // Left inset of the strip: ~0 confirms the full-bleed header (no leftover VS
   // Code body padding). null when the strip isn't rendered (native toolbar mode).
-  const stripInsetLeft = strip ? Math.round(strip.getBoundingClientRect().left) : null;
-  const topVisibleSourceLine = sourceLineOf(content ? findFirstVisibleSourceBlock(content) : null);
+  const stripInsetLeft = strip
+    ? Math.round(strip.getBoundingClientRect().left)
+    : null;
+  const topVisibleSourceLine = sourceLineOf(
+    content ? findFirstVisibleSourceBlock(content) : null,
+  );
   return {
     baseFontSizePx: computedFontSize(document.body),
     bodyFontSizePx: computedFontSize(body),
     bodyHasContent: Boolean(body && (body.textContent ?? "").trim().length > 0),
     bodyInsetLeft: body ? Math.round(body.getBoundingClientRect().left) : null,
+    buildModelLabel,
     buildModelOptions: options,
-    buildModelValue: select ? select.value : "",
+    buildModelValue,
     codeFontSizePx: computedFontSize(code),
     contentScrollTop: content ? Math.round(content.scrollTop) : null,
     hasActionStrip: Boolean(strip),
@@ -244,16 +291,22 @@ function readDomSnapshot(
 function runDomAction(action: PlanPreviewDomAction): void {
   switch (action.kind) {
     case "clickBuild":
-      document.querySelector<HTMLButtonElement>('[data-testid="plan-build"]')?.click();
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="plan-build"]')
+        ?.click();
       return;
     case "clickSelectionAdd":
-      document.querySelector<HTMLButtonElement>('[data-testid="plan-selection-add"]')?.click();
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="plan-selection-add"]')
+        ?.click();
       return;
     case "clickSelector":
       document.querySelector<HTMLElement>(action.selector)?.click();
       return;
     case "setContentScrollTop": {
-      const content = document.querySelector<HTMLElement>('[data-testid="plan-content"]');
+      const content = document.querySelector<HTMLElement>(
+        '[data-testid="plan-content"]',
+      );
       if (content) {
         content.scrollTop = action.scrollTop;
         content.dispatchEvent(new Event("scroll", { bubbles: true }));
@@ -272,20 +325,73 @@ function runDomAction(action: PlanPreviewDomAction): void {
       return;
     }
     case "selectBuildModel": {
-      const select = document.querySelector<HTMLSelectElement>(
-        '[data-testid="plan-build-model-select"]',
-      );
-      if (select) {
-        const setter = Object.getOwnPropertyDescriptor(
-          window.HTMLSelectElement.prototype,
-          "value",
-        )?.set;
-        setter?.call(select, action.modelId);
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      }
+      openModelPicker(() => {
+        findModelOption(action.modelId)
+          ?.querySelector<HTMLButtonElement>("button")
+          ?.click();
+      });
+      return;
+    }
+    case "selectContextWindow": {
+      openModelConfig(action.modelId, () => {
+        Array.from(
+          document.querySelectorAll<HTMLButtonElement>(
+            '[data-testid="context-window-option"]',
+          ),
+        )
+          .find((option) =>
+            option.textContent
+              ?.replaceAll(",", "")
+              .includes(String(action.contextWindow)),
+          )
+          ?.click();
+      });
+      return;
+    }
+    case "selectThinkingLevel": {
+      openModelConfig(action.modelId, () => {
+        Array.from(
+          document.querySelectorAll<HTMLButtonElement>(
+            '[data-testid="thinking-level-option"]',
+          ),
+        )
+          .find(
+            (option) =>
+              option.textContent?.trim().toLowerCase() ===
+              action.level.toLowerCase(),
+          )
+          ?.click();
+      });
       return;
     }
   }
+}
+
+function findModelOption(modelId: string): HTMLElement | null {
+  return (
+    Array.from(
+      document.querySelectorAll<HTMLElement>(".tc-model-picker-option"),
+    ).find((option) => option.dataset.modelId === modelId) ?? null
+  );
+}
+
+function openModelPicker(afterOpen?: () => void): void {
+  document
+    .querySelector<HTMLElement>('[data-testid="plan-build-model-select"]')
+    ?.click();
+  if (afterOpen) {
+    window.setTimeout(afterOpen, 0);
+  }
+}
+
+function openModelConfig(modelId: string, afterOpen?: () => void): void {
+  openModelPicker(() => {
+    const option = findModelOption(modelId);
+    option?.querySelector<HTMLButtonElement>(".tc-model-picker-edit")?.click();
+    if (afterOpen) {
+      window.setTimeout(afterOpen, 0);
+    }
+  });
 }
 
 export function PlanPreviewApp({
@@ -312,7 +418,11 @@ export function PlanPreviewApp({
       const lines = readSelectionSourceLines();
       send(vscodeApi, {
         data: lines
-          ? { lineEnd: lines.lineEnd, lineStart: lines.lineStart, text: trimmed }
+          ? {
+              lineEnd: lines.lineEnd,
+              lineStart: lines.lineStart,
+              text: trimmed,
+            }
           : { text: trimmed },
         type: "addSelectionToChat",
       });
@@ -322,14 +432,19 @@ export function PlanPreviewApp({
 
   const resolvePaths = useCallback(
     (paths: string[]): Promise<PathResolution[]> => {
-      const uniquePaths = [...new Set(paths.map((path) => path.trim()).filter(Boolean))];
+      const uniquePaths = [
+        ...new Set(paths.map((path) => path.trim()).filter(Boolean)),
+      ];
       if (uniquePaths.length === 0) {
         return Promise.resolve([]);
       }
       const requestId = `resolve-paths-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       return new Promise<PathResolution[]>((resolve) => {
         pendingPathResolutionsRef.current.set(requestId, { resolve });
-        send(vscodeApi, { data: { paths: uniquePaths, requestId }, type: "resolvePaths" });
+        send(vscodeApi, {
+          data: { paths: uniquePaths, requestId },
+          type: "resolvePaths",
+        });
       });
     },
     [vscodeApi],
@@ -350,7 +465,9 @@ export function PlanPreviewApp({
         return;
       }
       if (frame.content.type === "pathsResolved") {
-        const pending = pendingPathResolutionsRef.current.get(frame.content.requestId);
+        const pending = pendingPathResolutionsRef.current.get(
+          frame.content.requestId,
+        );
         if (pending) {
           pendingPathResolutionsRef.current.delete(frame.content.requestId);
           pending.resolve(frame.content.results);
@@ -393,7 +510,10 @@ export function PlanPreviewApp({
 
   if (!state) {
     return (
-      <div className="tc-plan-preview tc-plan-preview--loading" data-testid="plan-loading">
+      <div
+        className="tc-plan-preview tc-plan-preview--loading"
+        data-testid="plan-loading"
+      >
         Loading plan…
       </div>
     );
@@ -405,6 +525,7 @@ export function PlanPreviewApp({
     <div className="tc-plan-preview">
       {isHybrid ? (
         <PlanActionStrip
+          availableModelDetails={state.availableModelDetails}
           availableModels={state.availableModels}
           buildModel={state.buildModel}
           canBuild={state.canBuild}
@@ -412,6 +533,18 @@ export function PlanPreviewApp({
           onBuild={() => send(vscodeApi, { type: "build" })}
           onSetBuildModel={(modelId) =>
             send(vscodeApi, { data: { modelId }, type: "setBuildModel" })
+          }
+          onSelectContextWindow={(modelId, contextWindow) =>
+            send(vscodeApi, {
+              data: { contextWindow, modelId },
+              type: "setContextWindow",
+            })
+          }
+          onSelectThinkingLevel={(modelId, level) =>
+            send(vscodeApi, {
+              data: { level, modelId },
+              type: "setThinkingLevel",
+            })
           }
           sessionModel={state.sessionModel}
         />
@@ -424,8 +557,12 @@ export function PlanPreviewApp({
       >
         <MarkdownBody
           markdown={state.bodyMarkdown}
-          onOpenFile={(path, line) => send(vscodeApi, { data: { line, path }, type: "openFile" })}
-          onOpenLink={(href) => send(vscodeApi, { data: { href }, type: "openLink" })}
+          onOpenFile={(path, line) =>
+            send(vscodeApi, { data: { line, path }, type: "openFile" })
+          }
+          onOpenLink={(href) =>
+            send(vscodeApi, { data: { href }, type: "openLink" })
+          }
           resolvePaths={resolvePaths}
           sourceLineMap={state.bodyLineMap}
         />

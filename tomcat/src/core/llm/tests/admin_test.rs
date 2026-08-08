@@ -11,19 +11,28 @@ use serial_test::serial;
 
 use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::llm::{
-    auth::clear_managed_credentials_for_test, list_model_views, list_provider_keys,
-    remove_user_model, set_provider_key, upsert_user_model, Capabilities, DefaultLlmResolver,
-    LlmResolver, LlmScene, ModelCatalog, ModelEntryInput, ModelSource, ProviderKeyInput,
-    SharedModelCatalog,
+    auth::clear_managed_credentials_for_test, list_model_views, list_model_views_with_prefs,
+    list_provider_keys, remove_user_model, set_provider_key, upsert_user_model, Capabilities,
+    DefaultLlmResolver, LlmResolver, LlmScene, ModelCatalog, ModelEntryInput, ModelSource,
+    ProviderKeyInput, SharedModelCatalog,
 };
 use crate::infra::config::AppConfig;
-use crate::{resolve_sessions_dir, save_store, SessionEntry, SessionStore};
+use crate::{
+    resolve_sessions_dir, save_store, ModelPrefsStore, SessionEntry, SessionStore, ThinkingLevel,
+};
 
 fn temp_cfg() -> (tempfile::TempDir, AppConfig) {
     let work_dir = tempfile::tempdir().expect("tempdir");
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
     (work_dir, cfg)
+}
+
+fn model_prefs(path: &std::path::Path) -> Arc<ModelPrefsStore> {
+    Arc::new(
+        ModelPrefsStore::load(path.join("model-thinking.json"), ThinkingLevel::Medium)
+            .expect("model preferences"),
+    )
 }
 
 fn custom_claude_input() -> ModelEntryInput {
@@ -36,7 +45,9 @@ fn custom_claude_input() -> ModelEntryInput {
         base_url: Some("https://api.anthropic.com/v1".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: None,
         max_output_tokens: Some(128_000),
+        description: None,
         supported_reasoning_levels: None,
         thinking_format: Some("anthropic".to_string()),
     }
@@ -61,7 +72,9 @@ fn upsert_list_and_remove_user_model_roundtrip() {
         base_url: Some("https://gateway.example.test/v1".to_string()),
         capabilities,
         context_window: Some(256_000),
+        context_window_options: None,
         max_output_tokens: Some(128_000),
+        description: None,
         supported_reasoning_levels: None,
         thinking_format: Some("openai".to_string()),
     };
@@ -88,6 +101,50 @@ fn upsert_list_and_remove_user_model_roundtrip() {
     remove_user_model(&cfg, "custom-openai").expect("remove custom model");
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog after remove");
     assert!(catalog.lookup("custom-openai").is_none());
+}
+
+#[test]
+fn model_views_resolve_defaults_for_unselected_preferences() {
+    let (work_dir, cfg) = temp_cfg();
+    let catalog = ModelCatalog::load(&cfg).expect("load catalog");
+    let prefs = ModelPrefsStore::load(
+        work_dir.path().join("model-thinking.json"),
+        ThinkingLevel::Medium,
+    )
+    .expect("model preferences");
+
+    let model = list_model_views_with_prefs(&catalog, &prefs)
+        .into_iter()
+        .find(|model| model.id == "gpt-5.4")
+        .expect("builtin model");
+
+    assert_eq!(model.selected_reasoning_level.as_deref(), Some("medium"));
+    assert_eq!(model.selected_context_window, Some(400_000));
+}
+
+#[test]
+fn model_views_clamp_invalid_persisted_preferences_to_supported_defaults() {
+    let (work_dir, cfg) = temp_cfg();
+    let catalog = ModelCatalog::load(&cfg).expect("load catalog");
+    let prefs = ModelPrefsStore::load(
+        work_dir.path().join("model-thinking.json"),
+        ThinkingLevel::Max,
+    )
+    .expect("model preferences");
+    prefs
+        .set_reasoning("gpt-5.4", ThinkingLevel::Max)
+        .expect("persist reasoning");
+    prefs
+        .set_context_window("gpt-5.4", Some(123_456))
+        .expect("persist context window");
+
+    let model = list_model_views_with_prefs(&catalog, &prefs)
+        .into_iter()
+        .find(|model| model.id == "gpt-5.4")
+        .expect("builtin model");
+
+    assert_eq!(model.selected_reasoning_level.as_deref(), Some("xhigh"));
+    assert_eq!(model.selected_context_window, Some(400_000));
 }
 
 #[test]
@@ -179,7 +236,9 @@ fn upsert_user_model_accepts_id_with_slash() {
             ..Default::default()
         },
         context_window: None,
+        context_window_options: None,
         max_output_tokens: None,
+        description: None,
         supported_reasoning_levels: None,
         thinking_format: None,
     };
@@ -214,7 +273,9 @@ fn upsert_user_model_collects_warning_for_openai_api_with_non_effort_format() {
                 ..Default::default()
             },
             context_window: None,
+            context_window_options: None,
             max_output_tokens: None,
+            description: None,
             supported_reasoning_levels: None,
             thinking_format: Some("anthropic".to_string()),
         },
@@ -509,7 +570,9 @@ fn upsert_user_model_rejects_unknown_api() {
             base_url: Some("https://example.test/v1".to_string()),
             capabilities: Capabilities::default(),
             context_window: None,
+            context_window_options: None,
             max_output_tokens: None,
+            description: None,
             supported_reasoning_levels: None,
             thinking_format: None,
         },
@@ -577,7 +640,7 @@ fn set_provider_key_rejects_invalid_env_file() {
 #[serial(env_lock)]
 fn key_rotation_rebuilds_provider_for_same_resolver() {
     clear_managed_credentials_for_test();
-    let (_work_dir, cfg) = temp_cfg();
+    let (work_dir, cfg) = temp_cfg();
     upsert_user_model(&cfg, custom_claude_input()).expect("seed custom model");
 
     set_provider_key(
@@ -590,7 +653,11 @@ fn key_rotation_rebuilds_provider_for_same_resolver() {
     .expect("seed first provider key");
 
     let shared_catalog = SharedModelCatalog::load(&cfg).expect("shared catalog");
-    let resolver = DefaultLlmResolver::new(cfg.clone(), shared_catalog.clone());
+    let resolver = DefaultLlmResolver::new(
+        cfg.clone(),
+        shared_catalog.clone(),
+        model_prefs(work_dir.path()),
+    );
     let first = resolver
         .resolve(LlmScene::Main, Some("custom-claude"))
         .expect("resolve first provider");
@@ -618,7 +685,7 @@ fn key_rotation_rebuilds_provider_for_same_resolver() {
 #[serial(env_lock)]
 fn model_config_reload_rebuilds_provider_without_restart() {
     clear_managed_credentials_for_test();
-    let (_work_dir, cfg) = temp_cfg();
+    let (work_dir, cfg) = temp_cfg();
     let model_id = "relay-openai";
     let api_key_env = "ADMIN_TEST_RELAY_API_KEY";
     let base_url = "https://gateway.example.test/v1";
@@ -639,7 +706,9 @@ fn model_config_reload_rebuilds_provider_without_restart() {
             base_url: Some(base_url.to_string()),
             capabilities: capabilities.clone(),
             context_window: None,
+            context_window_options: None,
             max_output_tokens: None,
+            description: None,
             supported_reasoning_levels: None,
             thinking_format: Some("openai".to_string()),
         },
@@ -655,7 +724,11 @@ fn model_config_reload_rebuilds_provider_without_restart() {
     .expect("seed relay key");
 
     let shared_catalog = SharedModelCatalog::load(&cfg).expect("shared catalog");
-    let resolver = DefaultLlmResolver::new(cfg.clone(), shared_catalog.clone());
+    let resolver = DefaultLlmResolver::new(
+        cfg.clone(),
+        shared_catalog.clone(),
+        model_prefs(work_dir.path()),
+    );
     let first = resolver
         .resolve(LlmScene::Main, Some(model_id))
         .expect("resolve openai wire");
@@ -672,7 +745,9 @@ fn model_config_reload_rebuilds_provider_without_restart() {
             base_url: Some(base_url.to_string()),
             capabilities,
             context_window: None,
+            context_window_options: None,
             max_output_tokens: None,
+            description: None,
             supported_reasoning_levels: None,
             thinking_format: Some("anthropic".to_string()),
         },

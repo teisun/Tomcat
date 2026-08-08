@@ -39,6 +39,7 @@ import type {
   WebviewReference,
   WebviewCheckpoint,
   WebviewComposerDraft,
+  WebviewApprovalCard,
   WebviewTimelineItem,
   WebviewStateSnapshot,
 } from "./types";
@@ -49,6 +50,7 @@ import { useAutoScroll } from "./useAutoScroll";
 const EMPTY_STATE: WebviewStateSnapshot = {
   activeSessionId: null,
   availableModelCapabilities: {},
+  availableModelDetails: {},
   availableModelReasoningLevels: {},
   availableModels: [],
   mediaRoots: [],
@@ -697,7 +699,10 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     fileChipTopWithinStream,
     fileChipVisible,
     historyLoaderVisible: !!document.querySelector('[data-testid="history-loader"]'),
-    html: root?.innerHTML ?? "",
+    // Configuration menus are deliberately portaled to document.body so they
+    // can escape the dropdown's scroll clipping. The test snapshot must see
+    // those sibling layers as well as the React root.
+    html: document.body.innerHTML,
     jumpToLatestVisible: !!document.querySelector('[data-testid="scroll-to-bottom"]'),
     planCardTopWithinStream:
       streamRect && latestPlanCardRect ? latestPlanCardRect.top - streamRect.top : null,
@@ -1001,9 +1006,9 @@ async function probeFullResolutionMemory(rawSources: string | null): Promise<voi
 }
 
 function runDomAction(action: WebviewDomAction): void {
-  const decodeBase64Bytes = (input: string): Uint8Array => {
+  const decodeBase64Bytes = (input: string): Uint8Array<ArrayBuffer> => {
     const decoded = atob(input);
-    const bytes = new Uint8Array(decoded.length);
+    const bytes = new Uint8Array(new ArrayBuffer(decoded.length));
     for (let index = 0; index < decoded.length; index += 1) {
       bytes[index] = decoded.charCodeAt(index);
     }
@@ -1055,10 +1060,9 @@ function runDomAction(action: WebviewDomAction): void {
       }),
     );
   };
-  const isEditableElement = (target: HTMLElement | null): boolean =>
-    Boolean(
-      target && (target.isContentEditable || target.getAttribute("contenteditable") === "true"),
-    );
+  const isEditableElement = (target: HTMLElement | null): target is HTMLElement =>
+    target !== null &&
+    (target.isContentEditable || target.getAttribute("contenteditable") === "true");
   const createPasteEvent = (clipboardData: Record<string, unknown>): ClipboardEvent => {
     const event = (
       typeof ClipboardEvent === "function"
@@ -1459,9 +1463,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
     : undefined;
-  const activeModelReasoningLevels = activeSession?.model
-    ? state.availableModelReasoningLevels?.[activeSession.model] ?? []
-    : [];
   const {
     activeStickyMessageId,
     bottomSpacerHeight,
@@ -2140,6 +2141,27 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     },
     [vscodeApi],
   );
+  const handleSetContextWindow = useCallback(
+    (modelId: string, contextWindow: number) => {
+      const sessionId = stateRef.current.activeSessionId;
+      if (!sessionId || !modelId) {
+        return;
+      }
+      postIntent(vscodeApi, "setContextWindow", { contextWindow, modelId, sessionId });
+    },
+    [vscodeApi],
+  );
+  const handleSetThinkingLevel = useCallback(
+    (modelId: string, level: string) => {
+      const sessionId = stateRef.current.activeSessionId;
+      if (!sessionId || !modelId) {
+        return;
+      }
+      postIntent(vscodeApi, "setThinkingLevel", { level, modelId, sessionId });
+    },
+    [vscodeApi],
+  );
+
   const handleOpenDiff = useCallback(
     (toolCallId: string) => {
       postIntent(vscodeApi, "openDiff", {
@@ -2477,6 +2499,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             activeSession.hasMoreHistory ? (
               <TranscriptView
                 approvalAnswers={approvalAnswers}
+                availableModelDetails={state.availableModelDetails}
                 availableModels={state.availableModels}
                 buildModel={state.buildModel ?? ""}
                 busy={!!activeSession.busy}
@@ -2485,6 +2508,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onAnswer={handleAnswerQuestion}
                 onApprovalDraftChange={handleApprovalDraftChange}
                 onSetBuildModel={handleSetBuildModel}
+                onSelectContextWindow={handleSetContextWindow}
+                onSelectThinkingLevel={handleSetThinkingLevel}
                 checkpoints={activeSession.checkpoints ?? []}
                 onOpenDiff={handleOpenDiff}
                 onOpenFile={handleOpenFile}
@@ -2539,7 +2564,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       {activeSession
         ? activeSession.timeline
-            .filter((item) => item.type === "approval" && !item.resolved)
+            .filter(
+              (item): item is WebviewApprovalCard =>
+                item.type === "approval" && !item.resolved,
+            )
             .map((item) => {
               const answerState = approvalAnswers[
                 approvalAnswerKey(item.sessionId ?? activeSession.sessionId, item.request.requestId)
@@ -2625,6 +2653,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
 
       <Composer
+        availableModelDetails={state.availableModelDetails}
+        availableModelReasoningLevels={state.availableModelReasoningLevels}
         availableModels={state.availableModels}
         busy={!!activeSession?.busy}
         canInterrupt={canInterrupt}
@@ -2637,7 +2667,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         modelCapabilities={activeModelCapabilities}
         modeValue={currentModeValue(activeSession?.agentMode)}
         modelValue={activeSession?.model ?? ""}
-        supportedReasoningLevels={activeModelReasoningLevels}
         thinkingLevelValue={activeSession?.thinkingLevel ?? ""}
         ref={composerRef}
         onContextSearchClose={handleContextSearchClose}
@@ -2652,6 +2681,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId,
           });
         }}
+        onContextWindowChange={handleSetContextWindow}
         onDraftChange={(draft) => {
           if (activeSession?.sessionId) {
             locallyEditedDraftsRef.current.add(activeSession.sessionId);
@@ -2675,16 +2705,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
               });
             }
           : undefined}
-        onThinkingLevelChange={(level) => {
-          if (!activeSession || !activeSession.model) {
-            return;
-          }
-          postIntent(vscodeApi, "setThinkingLevel", {
-            level,
-            modelId: activeSession.model,
-            sessionId: activeSession.sessionId,
-          });
-        }}
+        onThinkingLevelChange={handleSetThinkingLevel}
         onPrepareAttachments={(work) => {
           const sessionId = stateRef.current.activeSessionId;
           if (!sessionId) return;

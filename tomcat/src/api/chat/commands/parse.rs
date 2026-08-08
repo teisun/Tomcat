@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use crate::api::chat::ChatContext;
 
 use super::{
-    cmd_ckpt, cmd_compact, cmd_effort, cmd_help, cmd_install, cmd_model, cmd_path, cmd_plan,
-    cmd_restore, cmd_skill, cmd_thinking,
+    cmd_ckpt, cmd_compact, cmd_context, cmd_effort, cmd_help, cmd_install, cmd_model, cmd_path,
+    cmd_plan, cmd_restore, cmd_skill, cmd_thinking,
 };
 
 pub use cmd_install::InstallCommand;
@@ -47,6 +47,10 @@ pub enum ChatCommand {
     /// `/effort low|medium|high|xhigh`：设置当前模型的 reasoning effort。
     Effort {
         level: crate::core::llm::ThinkingLevel,
+    },
+    /// `/context 400000`：为当前模型选择一个受支持的 Context 档位。
+    Context {
+        context_window: u32,
     },
     /// `/model current|list|use <id>`：查看/切换当前会话模型。
     Model(ModelCommand),
@@ -103,6 +107,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
             | "/compact"
             | "/thinking"
             | "/effort"
+            | "/context"
             | "/model"
             | "/ckpt"
             | "/restore"
@@ -128,6 +133,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/compact" => cmd_compact::parse_args(tokens),
         "/thinking" => cmd_thinking::parse_args(tokens),
         "/effort" => cmd_effort::parse_args(tokens),
+        "/context" => cmd_context::parse_args(tokens),
         "/model" => cmd_model::parse_args(tokens),
         "/ckpt" => parse_ckpt_args(tokens),
         "/restore" => parse_restore_args(tokens),
@@ -163,6 +169,7 @@ pub(crate) async fn dispatch_chat_command(
         } => cmd_path::run(ctx, path, original_line, rl),
         ChatCommand::Thinking { action } => cmd_thinking::run(ctx, action),
         ChatCommand::Effort { level } => cmd_effort::run(ctx, level),
+        ChatCommand::Context { context_window } => cmd_context::run(ctx, context_window),
         ChatCommand::Model(model_cmd) => cmd_model::run(ctx, model_cmd),
         ChatCommand::CkptList { limit } => cmd_ckpt::run_list(ctx, limit),
         ChatCommand::CkptShow { checkpoint_id } => cmd_ckpt::run_show(ctx, checkpoint_id),

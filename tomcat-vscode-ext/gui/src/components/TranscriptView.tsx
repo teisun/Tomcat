@@ -19,6 +19,8 @@ import { BoundaryBlock } from "./BoundaryBlock";
 import { CheckpointMarker } from "./CheckpointMarker";
 import { injectCheckpointMarkers } from "./checkpointMarkers";
 import { MessageBubble } from "./MessageBubble";
+import type { ModelPickerModel } from "./ModelPicker";
+import { createPlanFileCardFromTool, PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
 import { ReviewRow } from "./ReviewRow";
 import { ThinkingBlock } from "./ThinkingBlock";
@@ -113,6 +115,7 @@ export function partitionAssistantResponseGroup(
 
 export function TranscriptView({
   approvalAnswers = {},
+  availableModelDetails,
   availableModels = [],
   buildModel = "",
   busy,
@@ -130,6 +133,8 @@ export function TranscriptView({
   onRecoverErrorTurn,
   onRestoreCheckpoint,
   onRetryUserMessage,
+  onSelectContextWindow,
+  onSelectThinkingLevel,
   onSetBuildModel,
   onZoomImage,
   resolvePaths,
@@ -143,6 +148,7 @@ export function TranscriptView({
   transcriptRef,
 }: {
   approvalAnswers?: Record<string, ApprovalAnswerState>;
+  availableModelDetails?: Record<string, ModelPickerModel>;
   availableModels?: string[];
   buildModel?: string;
   busy: boolean;
@@ -164,7 +170,9 @@ export function TranscriptView({
   onRecoverErrorTurn?(errorId: string, action: "resume" | "retry"): void;
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
-  onSetBuildModel?(modelId: string): void;
+  onSelectContextWindow(modelId: string, contextWindow: number): void;
+  onSelectThinkingLevel(modelId: string, level: string): void;
+  onSetBuildModel(modelId: string): void;
   onZoomImage?(image: { alt: string; src: string }): void;
   resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   planId?: string | null;
@@ -194,6 +202,49 @@ export function TranscriptView({
     const activeAssistantMessageId = showProgress
       ? lastLiveAssistantMessageId(clusterTimeline)
       : null;
+    const planModelPicker = {
+      availableModelDetails,
+      availableModels,
+      buildModel,
+      onSelectContextWindow,
+      onSelectThinkingLevel,
+      onSetBuildModel,
+      sessionModel,
+    };
+
+    const renderTool = (
+      item: Extract<WebviewTimelineItem, { type: "tool" }>,
+      key: string,
+    ) => {
+      const planCard = createPlanFileCardFromTool(item, {
+        currentPlanId: planId,
+        currentPlanState: planState,
+        planTodos,
+      });
+      if (planCard) {
+        return (
+          <PlanFileCard
+            canBuild={canBuildPlan}
+            creating={item.status === "running" || item.status === "streaming"}
+            item={planCard}
+            key={key}
+            modelPicker={planModelPicker}
+            onBuild={onBuildPlan}
+            onOpenPlanFile={onOpenPlanFile}
+            planTodos={planTodos}
+          />
+        );
+      }
+      return (
+        <ToolRow
+          item={item}
+          key={key}
+          onOpenDiff={onOpenDiff}
+          onOpenFile={onOpenFile}
+          onOpenPlanFile={onOpenPlanFile}
+        />
+      );
+    };
 
     const renderTimelineItem = (item: WebviewTimelineItem) => {
       switch (item.type) {
@@ -233,24 +284,7 @@ export function TranscriptView({
             />
           );
         case "tool":
-          return (
-            <ToolRow
-              availableModels={availableModels}
-              buildModel={buildModel}
-              canBuildPlan={canBuildPlan}
-              currentPlanId={planId}
-              currentPlanState={planState}
-              item={item}
-              key={item.id}
-              onBuildPlan={onBuildPlan}
-              onOpenDiff={onOpenDiff}
-              onOpenFile={onOpenFile}
-              onOpenPlanFile={onOpenPlanFile}
-              onSetBuildModel={onSetBuildModel}
-              planTodos={planTodos}
-              sessionModel={sessionModel}
-            />
-          );
+          return renderTool(item, item.id);
         case "plan":
           return null;
         case "review":
@@ -305,24 +339,7 @@ export function TranscriptView({
             {segments.map((segment, index) => {
               const isActiveTailContextGroup = isActiveGroup && index === lastContextGroupIndex;
               if (segment.type === "action-tool") {
-                return (
-                  <ToolRow
-                    availableModels={availableModels}
-                    buildModel={buildModel}
-                    canBuildPlan={canBuildPlan}
-                    currentPlanId={planId}
-                    currentPlanState={planState}
-                    item={segment.tool}
-                    key={`group-action-${segment.tool.id}`}
-                    onBuildPlan={onBuildPlan}
-                    onOpenDiff={onOpenDiff}
-                    onOpenFile={onOpenFile}
-                    onOpenPlanFile={onOpenPlanFile}
-                    onSetBuildModel={onSetBuildModel}
-                    planTodos={planTodos}
-                    sessionModel={sessionModel}
-                  />
-                );
+                return renderTool(segment.tool, `group-action-${segment.tool.id}`);
               }
               const hasThinkingText = Boolean(segment.group.thinking?.text.trim());
               if (segment.group.tools.length === 0 && !hasThinkingText) {

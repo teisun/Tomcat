@@ -36,7 +36,9 @@ import { isSettingsIntent as isSettingsIntentMessage } from "../../shared/settin
 import { resolveWebviewEntryAssets } from "../guiAssets";
 
 function getNonce(): string {
-  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  return (
+    Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,15 +70,29 @@ function parseStringArray(value: unknown): string[] {
     : [];
 }
 
+function parseNumberArray(value: unknown): number[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (entry): entry is number =>
+          typeof entry === "number" && Number.isInteger(entry) && entry > 0,
+      )
+    : [];
+}
+
 function parseModelView(value: WireModelView): SettingsModelView {
   return {
     api: value.api,
     apiKeyEnv: value.apiKeyEnv,
     baseUrl: value.baseUrl ?? null,
     capabilities: parseCapabilities(value.capabilities),
-    contextWindow: typeof value.contextWindow === "number" ? value.contextWindow : null,
+    contextWindow:
+      typeof value.contextWindow === "number" ? value.contextWindow : null,
+    contextWindowOptions: parseNumberArray(value.contextWindowOptions),
+    description: value.description ?? null,
     id: value.id,
     keyPresent: value.keyPresent === true,
+    maxOutputTokens:
+      typeof value.maxOutputTokens === "number" ? value.maxOutputTokens : null,
     modelName: value.modelName ?? null,
     provider: value.provider,
     source: value.source === "user" ? "user" : "builtin",
@@ -85,7 +101,9 @@ function parseModelView(value: WireModelView): SettingsModelView {
   };
 }
 
-function parseProviderKeyView(value: WireProviderKeyView): SettingsProviderKeyView {
+function parseProviderKeyView(
+  value: WireProviderKeyView,
+): SettingsProviderKeyView {
   return {
     envName: value.envName,
     keyPresent: value.keyPresent === true,
@@ -94,11 +112,15 @@ function parseProviderKeyView(value: WireProviderKeyView): SettingsProviderKeyVi
   };
 }
 
-function parseModelsPayload(payload: ListModelsPayload | undefined): SettingsModelView[] {
+function parseModelsPayload(
+  payload: ListModelsPayload | undefined,
+): SettingsModelView[] {
   return payload?.models?.map(parseModelView) ?? [];
 }
 
-function parseProviderKeysPayload(payload: ListProviderKeysPayload | undefined): SettingsProviderKeyView[] {
+function parseProviderKeysPayload(
+  payload: ListProviderKeysPayload | undefined,
+): SettingsProviderKeyView[] {
   return payload?.keys?.map(parseProviderKeyView) ?? [];
 }
 
@@ -115,7 +137,10 @@ function toWireModelEntryInput(model: SettingsModelInput): ModelEntryInput {
       web_search: model.capabilities.webSearch,
     },
     contextWindow: model.contextWindow ?? null,
+    contextWindowOptions: model.contextWindowOptions ?? null,
+    description: model.description ?? null,
     id: model.id,
+    maxOutputTokens: model.maxOutputTokens ?? null,
     modelName: model.modelName ?? null,
     provider: model.provider,
     supportedReasoningLevels: model.supportedReasoningLevels ?? null,
@@ -160,10 +185,10 @@ function parseSettingsDomRect(value: unknown): SettingsDomRect | undefined {
   }
   const { height, left, top, width } = value;
   if (
-    typeof height === "number"
-    && typeof left === "number"
-    && typeof top === "number"
-    && typeof width === "number"
+    typeof height === "number" &&
+    typeof left === "number" &&
+    typeof top === "number" &&
+    typeof width === "number"
   ) {
     return { height, left, top, width };
   }
@@ -222,7 +247,9 @@ export class SettingsPanel implements vscode.Disposable {
   dispose(): void {
     for (const pending of this.pendingDomSnapshots.values()) {
       clearTimeout(pending.timeout);
-      pending.reject(new Error("Settings panel disposed before DOM snapshot completed."));
+      pending.reject(
+        new Error("Settings panel disposed before DOM snapshot completed."),
+      );
     }
     this.pendingDomSnapshots.clear();
     this.panel?.dispose();
@@ -246,14 +273,18 @@ export class SettingsPanel implements vscode.Disposable {
       },
       {
         enableScripts: true,
-        localResourceRoots: [vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist")],
+        localResourceRoots: [
+          vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist"),
+        ],
         retainContextWhenHidden: true,
       },
     );
     this.panel.onDidDispose(() => {
       for (const pending of this.pendingDomSnapshots.values()) {
         clearTimeout(pending.timeout);
-        pending.reject(new Error("Settings panel closed before DOM snapshot completed."));
+        pending.reject(
+          new Error("Settings panel closed before DOM snapshot completed."),
+        );
       }
       this.pendingDomSnapshots.clear();
       this.webviewReady = false;
@@ -261,9 +292,9 @@ export class SettingsPanel implements vscode.Disposable {
     });
     this.panel.webview.onDidReceiveMessage((message: unknown) => {
       if (
-        isRecord(message)
-        && message.type === "__test.dom_snapshot"
-        && typeof message.messageId === "string"
+        isRecord(message) &&
+        message.type === "__test.dom_snapshot" &&
+        typeof message.messageId === "string"
       ) {
         const pending = this.pendingDomSnapshots.get(message.messageId);
         if (!pending) {
@@ -353,7 +384,10 @@ export class SettingsPanel implements vscode.Disposable {
         await this.refreshProviderKeys();
         return;
       case "upsertModel":
-        await this.handleUpsertModel(intent.data.model, intent.data.providerKey);
+        await this.handleUpsertModel(
+          intent.data.model,
+          intent.data.providerKey,
+        );
         return;
       case "removeModel":
         await this.handleRemoveModel(intent.data.modelId);
@@ -369,12 +403,18 @@ export class SettingsPanel implements vscode.Disposable {
     providerKey?: SettingsProviderKeyInput,
   ): Promise<void> {
     try {
-      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      const capabilities = this.buildCapabilities(
+        await this.deps.ensureInitialized(),
+      );
       if (!capabilities.upsertModel) {
-        await this.refreshState("Model management is unavailable for this serve instance.");
+        await this.refreshState(
+          "Model management is unavailable for this serve instance.",
+        );
         return;
       }
-      const response = await this.deps.messenger.sendUpsertModel(toWireModelEntryInput(model));
+      const response = await this.deps.messenger.sendUpsertModel(
+        toWireModelEntryInput(model),
+      );
       if (!response.success) {
         await this.refreshState(response.error ?? "Unable to save model.");
         return;
@@ -403,7 +443,11 @@ export class SettingsPanel implements vscode.Disposable {
           await this.deps.onModelCatalogChanged?.();
           return;
         }
-        await this.refreshState(null, `Saved ${providerKey.envName}.`, warnings);
+        await this.refreshState(
+          null,
+          `Saved ${providerKey.envName}.`,
+          warnings,
+        );
         await this.deps.onModelCatalogChanged?.();
         return;
       }
@@ -416,9 +460,13 @@ export class SettingsPanel implements vscode.Disposable {
 
   private async handleRemoveModel(modelId: string): Promise<void> {
     try {
-      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      const capabilities = this.buildCapabilities(
+        await this.deps.ensureInitialized(),
+      );
       if (!capabilities.removeModel) {
-        await this.refreshState("Model removal is unavailable for this serve instance.");
+        await this.refreshState(
+          "Model removal is unavailable for this serve instance.",
+        );
         return;
       }
       const response = await this.deps.messenger.sendRemoveModel(modelId);
@@ -433,14 +481,24 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async handleSetProviderKey(envName: string, value: string): Promise<void> {
+  private async handleSetProviderKey(
+    envName: string,
+    value: string,
+  ): Promise<void> {
     try {
-      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      const capabilities = this.buildCapabilities(
+        await this.deps.ensureInitialized(),
+      );
       if (!capabilities.setProviderKey) {
-        await this.refreshState("API key storage is unavailable for this serve instance.");
+        await this.refreshState(
+          "API key storage is unavailable for this serve instance.",
+        );
         return;
       }
-      const response = await this.deps.messenger.sendSetProviderKey(envName, value);
+      const response = await this.deps.messenger.sendSetProviderKey(
+        envName,
+        value,
+      );
       if (!response.success) {
         await this.refreshState(response.error ?? "Unable to store API key.");
         return;
@@ -531,7 +589,10 @@ export class SettingsPanel implements vscode.Disposable {
 
   private async fetchProviderKeys(
     fallback: SettingsProviderKeyView[],
-  ): Promise<{ error: string | null; providerKeys: SettingsProviderKeyView[] }> {
+  ): Promise<{
+    error: string | null;
+    providerKeys: SettingsProviderKeyView[];
+  }> {
     try {
       const response = await this.deps.messenger.sendListProviderKeys();
       if (!response.success) {
@@ -552,19 +613,30 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private buildCapabilities(initializeResult: InitializeResult): SettingsCapabilities {
+  private buildCapabilities(
+    initializeResult: InitializeResult,
+  ): SettingsCapabilities {
     return {
-      listModels: hasServeCapability(initializeResult, SERVE_CAPABILITY_LIST_MODELS),
+      listModels: hasServeCapability(
+        initializeResult,
+        SERVE_CAPABILITY_LIST_MODELS,
+      ),
       listProviderKeys: hasServeCapability(
         initializeResult,
         SERVE_CAPABILITY_LIST_PROVIDER_KEYS,
       ),
-      removeModel: hasServeCapability(initializeResult, SERVE_CAPABILITY_REMOVE_MODEL),
+      removeModel: hasServeCapability(
+        initializeResult,
+        SERVE_CAPABILITY_REMOVE_MODEL,
+      ),
       setProviderKey: hasServeCapability(
         initializeResult,
         SERVE_CAPABILITY_SET_PROVIDER_KEY,
       ),
-      upsertModel: hasServeCapability(initializeResult, SERVE_CAPABILITY_UPSERT_MODEL),
+      upsertModel: hasServeCapability(
+        initializeResult,
+        SERVE_CAPABILITY_UPSERT_MODEL,
+      ),
     };
   }
 
@@ -582,7 +654,11 @@ export class SettingsPanel implements vscode.Disposable {
 
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
-    const assets = resolveWebviewEntryAssets(distRoot, "settings.html", "settings.js");
+    const assets = resolveWebviewEntryAssets(
+      distRoot,
+      "settings.html",
+      "settings.js",
+    );
     if (assets.scripts.length === 0) {
       return this.renderFallbackHtml(
         "Tomcat settings assets are missing. Run `npm run build` in `tomcat-vscode-ext` first.",

@@ -57,12 +57,18 @@ import {
   buildSelectionReferenceFromParts,
   resolveUriToFileReference,
 } from "./ui/webview/contextReferences";
-import { SettingsPanel, type SettingsDomSnapshot } from "./ui/settings/SettingsPanel";
+import {
+  SettingsPanel,
+  type SettingsDomSnapshot,
+} from "./ui/settings/SettingsPanel";
 import type {
   ImagePreviewDomAction,
   ImagePreviewDomSnapshot,
 } from "./shared/imagePreviewProtocol";
-import type { SettingsIntent, SettingsStateSnapshot } from "./shared/settingsProtocol";
+import type {
+  SettingsIntent,
+  SettingsStateSnapshot,
+} from "./shared/settingsProtocol";
 import type {
   PlanPreviewDomAction,
   PlanPreviewDomSnapshot,
@@ -203,15 +209,22 @@ export interface TomcatExtensionApi {
     getObservedEvents(): ServeEvent[];
     getObservedFileOpens(): Array<{ line?: number; path: string }>;
     getPromptHistory(): PromptRecord[];
-    getPreparedChange(toolCallId: string): {
+    getPreparedChange(toolCallId: string):
+      | {
       displayPath: string;
       originalContent: string;
       proposedContent: string;
       toolCallId: string;
-    } | undefined;
+        }
+      | undefined;
     getResolvedExecutable(): ResolvedTomcatExecutable;
-    getLastContextSearchIntent(): Extract<WebviewIntent, { type: "searchContext" }> | null;
-    getSessionState(sessionId?: string): Promise<Awaited<ReturnType<SessionRouter["getState"]>>>;
+    getLastContextSearchIntent(): Extract<
+      WebviewIntent,
+      { type: "searchContext" }
+    > | null;
+    getSessionState(
+      sessionId?: string,
+    ): Promise<Awaited<ReturnType<SessionRouter["getState"]>>>;
     getSettingsPanelState(): {
       route: "models";
       state: SettingsStateSnapshot;
@@ -246,7 +259,10 @@ export interface TomcatExtensionApi {
       handler:
         | ((
             options: vscode.OpenDialogOptions,
-          ) => Thenable<readonly vscode.Uri[] | undefined> | readonly vscode.Uri[] | undefined)
+          ) =>
+            | Thenable<readonly vscode.Uri[] | undefined>
+            | readonly vscode.Uri[]
+            | undefined)
         | undefined,
     ): void;
     waitForEvent(filter: ObservedEventFilter): Promise<ServeEvent>;
@@ -275,7 +291,10 @@ function matchesObservedEvent(
   if (filter.sessionId && event.sessionId !== filter.sessionId) {
     return false;
   }
-  if (filter.textIncludes && !JSON.stringify(event).includes(filter.textIncludes)) {
+  if (
+    filter.textIncludes &&
+    !JSON.stringify(event).includes(filter.textIncludes)
+  ) {
     return false;
   }
   return true;
@@ -283,7 +302,9 @@ function matchesObservedEvent(
 
 const CODELENS_REFRESH_DEBOUNCE_MS = 150;
 
-export class TomcatSelectionCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
+export class TomcatSelectionCodeLensProvider
+  implements vscode.CodeLensProvider, vscode.Disposable
+{
   private readonly changeEmitter = new vscode.EventEmitter<void>();
 
   readonly onDidChangeCodeLenses = this.changeEmitter.event;
@@ -306,10 +327,18 @@ export class TomcatSelectionCodeLensProvider implements vscode.CodeLensProvider,
       return [];
     }
     return [
-      new vscode.CodeLens(new vscode.Range(editor.selection.start.line, 0, editor.selection.start.line, 0), {
+      new vscode.CodeLens(
+        new vscode.Range(
+          editor.selection.start.line,
+          0,
+          editor.selection.start.line,
+          0,
+        ),
+        {
         command: TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
         title: "Add to Tomcat Chat",
-      }),
+        },
+      ),
     ];
   }
 }
@@ -337,12 +366,13 @@ function getTomcatExtraArgs(): string[] {
   try {
     parsed = JSON.parse(envValue);
   } catch (error) {
-    throw new Error(
-      `Invalid ${TEST_EXTRA_ARGS_ENV}: ${String(error)}`,
-    );
+    throw new Error(`Invalid ${TEST_EXTRA_ARGS_ENV}: ${String(error)}`);
   }
 
-  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
+  if (
+    !Array.isArray(parsed) ||
+    !parsed.every((entry) => typeof entry === "string")
+  ) {
     throw new Error(`${TEST_EXTRA_ARGS_ENV} must be a JSON string array`);
   }
 
@@ -357,7 +387,8 @@ function autoSelectedPromptAction(
   severity: PromptRecord["severity"],
   actions: readonly string[],
 ): string | undefined {
-  const envName = severity === "info" ? TEST_INFO_ACTION_ENV : TEST_WARNING_ACTION_ENV;
+  const envName =
+    severity === "info" ? TEST_INFO_ACTION_ENV : TEST_WARNING_ACTION_ENV;
   const configured = process.env[envName]?.trim();
   return configured && actions.includes(configured) ? configured : undefined;
 }
@@ -416,7 +447,9 @@ function getDefaultCwd(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-function bundledExecutableName(platform: NodeJS.Platform = process.platform): string {
+function bundledExecutableName(
+  platform: NodeJS.Platform = process.platform,
+): string {
   return platform === "win32" ? "tomcat.exe" : "tomcat";
 }
 
@@ -453,7 +486,8 @@ function isReadonlyExecutableError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
-  const code = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  const code =
+    "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
   return code === "EPERM" || code === "EROFS";
 }
 
@@ -490,7 +524,9 @@ async function ensureBundledExecutable(
   return fallbackPath;
 }
 
-async function openExtensionGuide(context: vscode.ExtensionContext): Promise<void> {
+async function openExtensionGuide(
+  context: vscode.ExtensionContext,
+): Promise<void> {
   const guidePath = path.join(context.extensionPath, "README.md");
   const document = await vscode.workspace.openTextDocument(guidePath);
   await vscode.window.showTextDocument(document, { preview: true });
@@ -505,7 +541,10 @@ async function resolveExecutable(
   );
   return resolveTomcatExecutable({
     bundledPath,
-    configuredPath: getTomcatConfiguration().get<string>("path", TOMCAT_EXECUTABLE_NAME),
+    configuredPath: getTomcatConfiguration().get<string>(
+      "path",
+      TOMCAT_EXECUTABLE_NAME,
+    ),
     pathWasConfigured: isTomcatPathConfigured(),
   });
 }
@@ -603,19 +642,18 @@ export async function activate(
     message: string,
     severity: "info" | "warning" = "info",
   ): Promise<void> => {
-    const selection = severity === "warning"
-      ? await showPromptMessage(
-          promptHistory,
-          "warning",
-          message,
-          [RETRY_SETUP_ACTION, OPEN_TERMINAL_ACTION, OPEN_GUIDE_ACTION],
-        )
-      : await showPromptMessage(
-          promptHistory,
-          "info",
-          message,
-          [RETRY_SETUP_ACTION, OPEN_TERMINAL_ACTION, OPEN_GUIDE_ACTION],
-        );
+    const selection =
+      severity === "warning"
+        ? await showPromptMessage(promptHistory, "warning", message, [
+            RETRY_SETUP_ACTION,
+            OPEN_TERMINAL_ACTION,
+            OPEN_GUIDE_ACTION,
+          ])
+        : await showPromptMessage(promptHistory, "info", message, [
+            RETRY_SETUP_ACTION,
+            OPEN_TERMINAL_ACTION,
+            OPEN_GUIDE_ACTION,
+          ]);
 
     if (selection === RETRY_SETUP_ACTION) {
       const recovered = await retryInitializationAfterSetup(true);
@@ -662,7 +700,9 @@ export async function activate(
     }
   };
 
-  const retryInitializationAfterSetup = async (showSuccessMessage: boolean): Promise<boolean> => {
+  const retryInitializationAfterSetup = async (
+    showSuccessMessage: boolean,
+  ): Promise<boolean> => {
     try {
       await applyRuntimeConfiguration();
       messenger.restart();
@@ -678,7 +718,11 @@ export async function activate(
       }
       return true;
     } catch (error) {
-      appendOutput(output, "debug", `setup retry still waiting: ${String(error)}`);
+      appendOutput(
+        output,
+        "debug",
+        `setup retry still waiting: ${String(error)}`,
+      );
       return false;
     }
   };
@@ -805,7 +849,10 @@ export async function activate(
   let testOpenDialogHandler:
     | ((
         options: vscode.OpenDialogOptions,
-      ) => Thenable<readonly vscode.Uri[] | undefined> | readonly vscode.Uri[] | undefined)
+      ) =>
+        | Thenable<readonly vscode.Uri[] | undefined>
+        | readonly vscode.Uri[]
+        | undefined)
     | undefined;
   let settingsPanel: SettingsPanel;
   let planPreviewProvider!: PlanPreviewEditorProvider;
@@ -816,7 +863,9 @@ export async function activate(
     version?: unknown;
   };
   const extensionVersion =
-    typeof extensionPackage.version === "string" ? extensionPackage.version : null;
+    typeof extensionPackage.version === "string"
+      ? extensionPackage.version
+      : null;
   const expectedCliVersion =
     typeof extensionPackage.tomcat?.bundledCliVersion === "string"
       ? extensionPackage.tomcat.bundledCliVersion
@@ -906,6 +955,7 @@ export async function activate(
       await webviewProvider.buildPlan(planId);
     },
     ensureInitialized,
+    ensureSession: focusWebviewSurface,
     extensionUri: context.extensionUri,
     getBuildModel: () =>
       vscode.workspace
@@ -933,9 +983,8 @@ export async function activate(
       info?.canBuild ?? false,
     );
   };
-  const planContextSubscription = planPreviewProvider.onDidChangeActivePlan(
-    applyPlanContextKeys,
-  );
+  const planContextSubscription =
+    planPreviewProvider.onDidChangeActivePlan(applyPlanContextKeys);
   applyPlanContextKeys(planPreviewProvider.getActivePlanInfo());
 
   const planBuildCommand = vscode.commands.registerCommand(
@@ -948,14 +997,17 @@ export async function activate(
     TOMCAT_PLAN_SELECT_BUILD_MODEL_COMMAND,
     async () => {
       const current =
-        planPreviewProvider.getBuildModel() || webviewProvider.activeSessionModel();
+        planPreviewProvider.getBuildModel() ||
+        webviewProvider.activeSessionModel();
       const available = await planPreviewProvider.getAvailableModels();
       type ModelQuickPickItem = vscode.QuickPickItem & { modelId: string };
-      const items: ModelQuickPickItem[] = available.map<ModelQuickPickItem>((model) => ({
+      const items: ModelQuickPickItem[] = available.map<ModelQuickPickItem>(
+        (model) => ({
         description: model === current ? "$(check)" : undefined,
         label: model,
         modelId: model,
-      }));
+        }),
+      );
       const picked = await vscode.window.showQuickPick(items, {
         placeHolder: "Select the model used when building plans",
         title: "Tomcat: Build Model",
@@ -973,7 +1025,11 @@ export async function activate(
     if (!uri || !uri.fsPath.endsWith(PLAN_FILE_SUFFIX)) {
       return;
     }
-    await vscode.commands.executeCommand("vscode.openWith", uri, PLAN_PREVIEW_VIEW_TYPE);
+    await vscode.commands.executeCommand(
+      "vscode.openWith",
+      uri,
+      PLAN_PREVIEW_VIEW_TYPE,
+    );
   };
   // "Markdown" runs from the custom preview editor: reopen the focused plan in
   // the plain native text editor (VS Code's `default` editor).
@@ -1040,8 +1096,7 @@ export async function activate(
       "warning",
       "Tomcat serve exited. Restart the bridge to continue chatting.",
       ["Restart Tomcat"],
-    )
-      .then((selection) => {
+    ).then((selection) => {
         if (selection === "Restart Tomcat") {
           void vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND);
         }
@@ -1056,6 +1111,7 @@ export async function activate(
       initializePromise = undefined;
       sessionRouter.clearBootstrapSessionId();
       const result = await ensureInitialized();
+      await webviewProvider.refreshAfterServeRestart();
       await showInformationMessage(
         promptHistory,
         `Tomcat serve restarted. Active session: ${result.sessionId ?? "n/a"}`,
@@ -1068,7 +1124,10 @@ export async function activate(
     async () => {
       await ensureInitialized();
       const sessionId = await webviewProvider.beginNewSession();
-      await showInformationMessage(promptHistory, `Created Tomcat session: ${sessionId ?? "unknown"}`);
+      await showInformationMessage(
+        promptHistory,
+        `Created Tomcat session: ${sessionId ?? "unknown"}`,
+      );
     },
   );
 
@@ -1116,17 +1175,26 @@ export async function activate(
     async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
-        await showWarningMessage(promptHistory, "Open an editor and select some text first.");
+        await showWarningMessage(
+          promptHistory,
+          "Open an editor and select some text first.",
+        );
         return;
       }
       const reference = buildSelectionReference(editor);
       if (!reference) {
-        await showWarningMessage(promptHistory, "Select some text before adding it to Tomcat Chat.");
+        await showWarningMessage(
+          promptHistory,
+          "Select some text before adding it to Tomcat Chat.",
+        );
         return;
       }
       const sessionId = await focusWebviewSurface();
       if (!sessionId) {
-        await showWarningMessage(promptHistory, "Tomcat sidebar is not ready yet. Please try again.");
+        await showWarningMessage(
+          promptHistory,
+          "Tomcat sidebar is not ready yet. Please try again.",
+        );
         return;
       }
       await webviewProvider.postInsertReference(sessionId, reference);
@@ -1135,18 +1203,25 @@ export async function activate(
   const addFileToChatCommand = vscode.commands.registerCommand(
     TOMCAT_ADD_FILE_TO_CHAT_COMMAND,
     async (uri?: vscode.Uri, selectedUris?: vscode.Uri[]) => {
-      const targets = Array.isArray(selectedUris) && selectedUris.length > 0
+      const targets =
+        Array.isArray(selectedUris) && selectedUris.length > 0
         ? selectedUris
         : uri
           ? [uri]
           : [];
       if (!targets.length) {
-        await showWarningMessage(promptHistory, "Choose a file or folder in the explorer first.");
+        await showWarningMessage(
+          promptHistory,
+          "Choose a file or folder in the explorer first.",
+        );
         return;
       }
       const sessionId = await focusWebviewSurface();
       if (!sessionId) {
-        await showWarningMessage(promptHistory, "Tomcat sidebar is not ready yet. Please try again.");
+        await showWarningMessage(
+          promptHistory,
+          "Tomcat sidebar is not ready yet. Please try again.",
+        );
         return;
       }
       for (const target of targets) {
@@ -1171,13 +1246,19 @@ export async function activate(
   );
   const configurationSubscription = vscode.workspace.onDidChangeConfiguration(
     (event) => {
-      if (event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.plan.buildModel`)) {
+      if (
+        event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.plan.buildModel`)
+      ) {
         void webviewProvider.syncBuildModel().catch(() => undefined);
       }
       if (
         !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.path`) &&
-        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.serve.extraArgs`) &&
-        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.session.defaultCwd`)
+        !event.affectsConfiguration(
+          `${TOMCAT_CONFIG_SECTION}.serve.extraArgs`,
+        ) &&
+        !event.affectsConfiguration(
+          `${TOMCAT_CONFIG_SECTION}.session.defaultCwd`,
+        )
       ) {
         return;
       }
@@ -1189,7 +1270,10 @@ export async function activate(
         if (messenger.isRunning) {
           messenger.restart();
           await ensureInitialized();
-          await showInformationMessage(promptHistory, "Tomcat settings changed. Restarted Tomcat serve.");
+          await showInformationMessage(
+            promptHistory,
+            "Tomcat settings changed. Restarted Tomcat serve.",
+          );
         }
       })().catch((error: unknown) => {
         appendOutput(output, "error", `config update failed: ${String(error)}`);
@@ -1200,12 +1284,15 @@ export async function activate(
     [{ scheme: "file" }, { scheme: "vscode-remote" }, { scheme: "untitled" }],
     selectionCodeLensProvider,
   );
-  const selectionChangeSubscription = vscode.window.onDidChangeTextEditorSelection(() => {
+  const selectionChangeSubscription =
+    vscode.window.onDidChangeTextEditorSelection(() => {
     scheduleSelectionCodeLensRefresh();
   });
-  const activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor(() => {
+  const activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor(
+    () => {
     scheduleSelectionCodeLensRefresh();
-  });
+    },
+  );
 
   context.subscriptions.push(
     output,
@@ -1282,7 +1369,8 @@ export async function activate(
           ...dom,
           fileChipOpen: webviewProvider.getOpenFileObserved(),
           sessionTitleUpdated: observedEvents.some(
-            (event) => (event as { type: string }).type === "session.title_updated",
+            (event) =>
+              (event as { type: string }).type === "session.title_updated",
           ),
         };
       },
@@ -1293,7 +1381,8 @@ export async function activate(
       clearObservedFileOpens: () => {
         observedFileOpens.length = 0;
       },
-      createFreshWebviewSession: (cwd) => webviewProvider.createFreshSessionForTest(cwd),
+      createFreshWebviewSession: (cwd) =>
+        webviewProvider.createFreshSessionForTest(cwd),
       dispatchImagePreviewDomAction: async (action) => {
         const panel = ImagePreviewPanel.getCurrent();
         if (!panel?.isVisible) {
@@ -1322,16 +1411,21 @@ export async function activate(
         };
       },
       getResolvedExecutable: () => resolvedExecutable,
-      getLastContextSearchIntent: () => webviewProvider.getLastContextSearchIntent(),
+      getLastContextSearchIntent: () =>
+        webviewProvider.getLastContextSearchIntent(),
       getSettingsPanelState: () => settingsPanel.__testingSnapshot(),
-      getAttachmentDiagnostics: () => webviewProvider.getAttachmentDiagnostics(),
+      getAttachmentDiagnostics: () =>
+        webviewProvider.getAttachmentDiagnostics(),
       getWebviewState: () => webviewProvider.currentState(),
       hydrateWebviewHistory: async (payload) => {
         await webviewProvider.waitUntilReady();
         (
           webviewProvider as unknown as {
             stateStore: {
-              hydrateHistory(sessionId: string, history: SessionHistoryPayload): void;
+              hydrateHistory(
+                sessionId: string,
+                history: SessionHistoryPayload,
+              ): void;
             };
             postState(): Promise<void>;
           }
@@ -1414,8 +1508,12 @@ export async function activate(
       setOpenDialogHandler: (handler) => {
         testOpenDialogHandler = handler;
       },
-      waitForEvent: async (filter: ObservedEventFilter): Promise<ServeEvent> => {
-        const existing = observedEvents.find((event) => matchesObservedEvent(event, filter));
+      waitForEvent: async (
+        filter: ObservedEventFilter,
+      ): Promise<ServeEvent> => {
+        const existing = observedEvents.find((event) =>
+          matchesObservedEvent(event, filter),
+        );
         if (existing) {
           return existing;
         }

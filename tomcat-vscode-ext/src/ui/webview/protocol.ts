@@ -380,9 +380,22 @@ export interface WebviewMediaRoot {
   webviewBase: string;
 }
 
+export interface WebviewModelInfo {
+  capabilities: string[];
+  contextWindow?: number | null;
+  contextWindowOptions: number[];
+  description?: string | null;
+  id: string;
+  modelName?: string | null;
+  selectedContextWindow?: number | null;
+  selectedReasoningLevel?: string | null;
+  supportedReasoningLevels: string[];
+}
+
 export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
+  availableModelDetails?: Record<string, WebviewModelInfo>;
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   buildModel?: string;
@@ -611,6 +624,14 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "webviewError";
+      data: {
+        message: string;
+        stack?: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "retryUserMessage";
       data: {
         messageId: string;
@@ -712,6 +733,15 @@ export type WebviewIntent =
       type: "setThinkingLevel";
       data: {
         level: WebviewThinkingLevel;
+        modelId: string;
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setContextWindow";
+      data: {
+        contextWindow: number;
         modelId: string;
         sessionId?: string | null;
       };
@@ -1063,6 +1093,12 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "ready":
     case "listSessions":
       return true;
+    case "webviewError":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.message) &&
+        (value.data.stack === undefined || isString(value.data.stack))
+      );
     case "pickContext":
       return value.data === undefined || isRecord(value.data);
     case "prompt":
@@ -1087,6 +1123,14 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         isRecord(value.data) &&
         isString(value.data.modelId) &&
         isThinkingLevel(value.data.level)
+      );
+    case "setContextWindow":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.modelId) &&
+        typeof value.data.contextWindow === "number" &&
+        Number.isInteger(value.data.contextWindow) &&
+        value.data.contextWindow > 0
       );
     case "setPlanMode":
       return (

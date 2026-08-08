@@ -27,8 +27,8 @@ use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_model_thinking_path,
     resolve_plugins_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
     session_key_for_agent, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry,
-    ModelThinkingStore, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode,
-    ThinkingLevel, Tool, ToolExecutor, ToolRegistry,
+    ModelPrefsStore, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode, ThinkingLevel,
+    Tool, ToolExecutor, ToolRegistry,
 };
 
 use crate::core::llm::thinking_policy::clamp_reasoning_level;
@@ -70,7 +70,7 @@ pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
     pub fetch_http_client: Option<reqwest::Client>,
     pub shared_agent_registry: Option<Arc<crate::core::agent_registry::AgentRegistry>>,
-    pub shared_model_thinking: Option<Arc<ModelThinkingStore>>,
+    pub shared_model_prefs: Option<Arc<ModelPrefsStore>>,
     pub skip_session_plugin_activation: bool,
     pub suppress_cli_output: bool,
     pub session_cwd_override: Option<std::path::PathBuf>,
@@ -95,8 +95,8 @@ impl ChatContextOverrides {
         self
     }
 
-    pub fn with_shared_model_thinking(mut self, store: Arc<ModelThinkingStore>) -> Self {
-        self.shared_model_thinking = Some(store);
+    pub fn with_shared_model_prefs(mut self, store: Arc<ModelPrefsStore>) -> Self {
+        self.shared_model_prefs = Some(store);
         self
     }
 
@@ -143,9 +143,9 @@ fn resolve_agent_workspace_dir(
     std::env::current_dir().unwrap_or_else(|_| agent_definition_dir.to_path_buf())
 }
 
-fn build_model_thinking_store(config: &AppConfig) -> Result<Arc<ModelThinkingStore>, AppError> {
+fn build_model_prefs_store(config: &AppConfig) -> Result<Arc<ModelPrefsStore>, AppError> {
     let default_level = ThinkingLevel::parse_or_medium(&config.llm.thinking.level).0;
-    Ok(Arc::new(ModelThinkingStore::load(
+    Ok(Arc::new(ModelPrefsStore::load(
         resolve_model_thinking_path(config)?,
         default_level,
     )?))
@@ -342,6 +342,10 @@ impl ChatContext {
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
         let model_catalog = crate::core::llm::SharedModelCatalog::load(&config)?;
+        let model_prefs = match overrides.shared_model_prefs.clone() {
+            Some(store) => store,
+            None => build_model_prefs_store(&config)?,
+        };
         let web_search_runtime = Arc::new(crate::core::tools::web_search::WebSearchRuntime::new(
             &config,
             model_catalog.clone(),
@@ -350,9 +354,12 @@ impl ChatContext {
             &config,
             agent_trail_dir.join("tool-results"),
         )?);
-        let llm_resolver: Arc<dyn crate::core::llm::LlmResolver> = Arc::new(
-            crate::core::llm::DefaultLlmResolver::new(config.clone(), model_catalog.clone()),
-        );
+        let llm_resolver: Arc<dyn crate::core::llm::LlmResolver> =
+            Arc::new(crate::core::llm::DefaultLlmResolver::new(
+                config.clone(),
+                model_catalog.clone(),
+                Arc::clone(&model_prefs),
+            ));
         let _ = llm_resolver.resolve(crate::core::llm::LlmScene::Main, None)?;
 
         let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
@@ -568,10 +575,6 @@ impl ChatContext {
         let agent_registry = overrides.shared_agent_registry.unwrap_or_else(|| {
             crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone())
         });
-        let model_thinking = match overrides.shared_model_thinking.clone() {
-            Some(store) => store,
-            None => build_model_thinking_store(&config)?,
-        };
         let root_agent_guard = agent_registry
             .register_root(current_session_entry.session_id.clone())
             .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
@@ -762,7 +765,7 @@ impl ChatContext {
         let global_services = GlobalServices {
             model_catalog: model_catalog.clone(),
             llm_resolver: llm_resolver.clone(),
-            model_thinking,
+            model_prefs,
             primitive: primitive.clone(),
             tool_registry: tool_registry.clone(),
             function_registry: function_registry.clone(),
@@ -827,7 +830,7 @@ impl ChatContext {
 
     pub(crate) fn resolve_thinking_level(&self, model_id: &str) -> ThinkingLevel {
         self.global_services.model_catalog.with_catalog(|catalog| {
-            let requested = self.global_services.model_thinking.get(model_id);
+            let requested = self.global_services.model_prefs.reasoning_for(model_id);
             catalog
                 .lookup_explicit(model_id)
                 .map(|entry| clamp_reasoning_level(requested, &entry.supported_reasoning_levels))
@@ -1536,7 +1539,14 @@ mod tests {
     use super::{resolve_bash_production_policy, ChatContext};
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
     use crate::core::plan_runtime::prod_reviewer::resolve_subagent_runtime;
-    use crate::{AppConfig, ThinkingLevel};
+    use crate::{AppConfig, ModelPrefsStore, ThinkingLevel};
+
+    fn model_prefs(path: &std::path::Path) -> Arc<ModelPrefsStore> {
+        Arc::new(
+            ModelPrefsStore::load(path.join("model-thinking.json"), ThinkingLevel::Medium)
+                .expect("model preferences"),
+        )
+    }
 
     #[test]
     fn bash_production_policy_resolves_non_default_wait_output_and_path() {
@@ -1563,8 +1573,11 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.context.compaction_model = "deepseek-v4-pro".to_string();
         let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> =
-            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(
+            cfg.clone(),
+            catalog,
+            model_prefs(dir.path()),
+        ));
 
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "stub");
@@ -1599,8 +1612,11 @@ mod tests {
         cfg.llm.default_model = "deepseek-v4-pro".to_string();
         cfg.context.compaction_model = "gpt-5.4".to_string();
         let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> =
-            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(
+            cfg.clone(),
+            catalog,
+            model_prefs(dir.path()),
+        ));
 
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "stub");
@@ -1636,8 +1652,11 @@ mod tests {
         cfg.llm.default_model = "missing-compaction-model".to_string();
         cfg.context.compaction_model = "missing-compaction-model".to_string();
         let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> =
-            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(
+            cfg.clone(),
+            catalog,
+            model_prefs(dir.path()),
+        ));
 
         unsafe {
             std::env::set_var("OPENAI_API_KEY", "stub");
@@ -1704,8 +1723,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
 
         let ctx = ChatContext::from_config(cfg).expect("ctx");
         ctx.global_services
-            .model_thinking
-            .set("relay/gpt-sol", ThinkingLevel::Xhigh)
+            .model_prefs
+            .set_reasoning("relay/gpt-sol", ThinkingLevel::Xhigh)
             .expect("persist relay override");
 
         assert_eq!(
@@ -1759,8 +1778,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
 
         let ctx = ChatContext::from_config(cfg).expect("ctx");
         ctx.global_services
-            .model_thinking
-            .set("relay/toggle-only", ThinkingLevel::Low)
+            .model_prefs
+            .set_reasoning("relay/toggle-only", ThinkingLevel::Low)
             .expect("persist toggle override");
 
         assert_eq!(

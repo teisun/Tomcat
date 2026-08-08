@@ -16,8 +16,11 @@ export interface SettingsModelView {
   baseUrl?: string | null;
   capabilities: SettingsModelCapabilities;
   contextWindow?: number | null;
+  contextWindowOptions?: number[] | null;
+  description?: string | null;
   id: string;
   keyPresent: boolean;
+  maxOutputTokens?: number | null;
   modelName?: string | null;
   provider: string;
   source: SettingsModelSource;
@@ -31,7 +34,10 @@ export interface SettingsModelInput {
   baseUrl?: string | null;
   capabilities: SettingsModelCapabilities;
   contextWindow?: number | null;
+  contextWindowOptions?: number[] | null;
+  description?: string | null;
   id: string;
+  maxOutputTokens?: number | null;
   modelName?: string | null;
   provider: string;
   supportedReasoningLevels?: string[] | null;
@@ -166,7 +172,15 @@ function isSettingsModelInput(value: unknown): value is SettingsModelInput {
     (value.contextWindow === undefined ||
       value.contextWindow === null ||
       typeof value.contextWindow === "number") &&
+    (value.contextWindowOptions === undefined ||
+      value.contextWindowOptions === null ||
+      (Array.isArray(value.contextWindowOptions) &&
+        value.contextWindowOptions.every((entry) => typeof entry === "number"))) &&
+    (value.description === undefined || value.description === null || typeof value.description === "string") &&
     typeof value.id === "string" &&
+    (value.maxOutputTokens === undefined ||
+      value.maxOutputTokens === null ||
+      typeof value.maxOutputTokens === "number") &&
     (value.modelName === undefined || value.modelName === null || typeof value.modelName === "string") &&
     typeof value.provider === "string" &&
     (value.supportedReasoningLevels === undefined ||
