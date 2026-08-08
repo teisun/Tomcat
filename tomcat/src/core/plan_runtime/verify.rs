@@ -16,13 +16,13 @@ use crate::core::agent_loop::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, SubagentType,
 };
 use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcomeLabel};
-use crate::core::llm::{ChatMessage, LlmResolver};
+use crate::core::llm::{ChatMessage, LlmResolver, SharedModelCatalog};
 use crate::core::plan_runtime::review::resolve_internal_tools;
 use crate::core::plan_runtime::{PlanRuntime, VerifierDispatcher};
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
-use crate::core::CheckpointStore;
+use crate::core::{CheckpointStore, ModelPrefsStore};
 use crate::infra::config::{ContextConfig, LlmFilesConfig};
 use crate::infra::event_bus::EventBus;
 
@@ -226,6 +226,8 @@ pub struct ProdVerifierDeps {
     pub agent_registry: Arc<AgentRegistry>,
     pub parent_session_id: String,
     pub llm_resolver: Arc<dyn LlmResolver>,
+    pub model_catalog: SharedModelCatalog,
+    pub model_prefs: Arc<ModelPrefsStore>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub event_bus: Arc<dyn EventBus>,
     pub agent_trail_dir: String,
@@ -256,6 +258,11 @@ impl ProdVerifierDeps {
             plan_runtime.session_model().as_deref(),
             &self.fallback_model,
         )
+    }
+
+    fn resolve_thinking_level(&self, model_id: &str) -> crate::core::llm::ThinkingLevel {
+        self.model_catalog
+            .resolve_reasoning_level(self.model_prefs.as_ref(), model_id)
     }
 }
 
@@ -314,6 +321,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs = resolve_internal_tools(&verifier_allowed_tools_with_policy(expose_skills));
         let model_id = deps.resolve_model(&plan_runtime);
+        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
@@ -403,7 +411,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        thinking_level: None,
+                        thinking_level,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,

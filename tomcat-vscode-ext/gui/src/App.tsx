@@ -121,7 +121,7 @@ function pruneApprovalAnswers(
   const unresolved = new Set<string>();
   for (const session of Object.values(snapshot.sessionViews)) {
     for (const item of session.timeline) {
-      if (item.type === "approval" && !item.resolved) {
+      if (item.type === "approval" && !item.resolved && item.live) {
         unresolved.add(approvalAnswerKey(item.sessionId ?? session.sessionId, item.request.requestId));
       }
     }
@@ -1357,7 +1357,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     const counts: Record<string, number> = {};
     for (const [sessionId, session] of Object.entries(state.sessionViews)) {
       counts[sessionId] = session.timeline.filter(
-        (item) => item.type === "approval" && !item.resolved,
+        (item) => item.type === "approval" && !item.resolved && item.live,
       ).length;
     }
     return counts;
@@ -1367,7 +1367,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     const newlyPending: string[] = [];
     for (const [sessionId, session] of Object.entries(state.sessionViews)) {
       for (const item of session.timeline) {
-        if (item.type !== "approval" || item.resolved) continue;
+        if (item.type !== "approval" || item.resolved || !item.live) continue;
         const key = approvalAnswerKey(item.sessionId ?? sessionId, item.request.requestId);
         if (!announcedQuestionsRef.current.has(key)) {
           announcedQuestionsRef.current.add(key);
@@ -1434,7 +1434,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   }, [flushComposerDraft]);
 
   const activeApprovalCount =
-    activeSession?.timeline.filter((item) => item.type === "approval" && !item.resolved).length ?? 0;
+    activeSession?.timeline.filter(
+      (item) => item.type === "approval" && !item.resolved && item.live,
+    ).length ?? 0;
   const activeTimeline = activeSession?.timeline ?? [];
   const oldestTimelineItemId = activeTimeline[0]?.id ?? null;
   const bootstrapFillRef = useRef<{ requestCount: number; sessionId: string | null }>({
@@ -1462,6 +1464,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const modelAdminSupported = state.modelAdminSupported;
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
+    : undefined;
+  const activeSessionContextWindow = activeSession?.model
+    ? state.availableModelDetails?.[activeSession.model]?.selectedContextWindow
     : undefined;
   const {
     activeStickyMessageId,
@@ -2525,9 +2530,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 planState={activeSession.activePlan?.state}
                 planTodos={activeSession.planTodos ?? []}
                 onRestoreCheckpoint={handleOpenRestoreDialog}
+                sessionContextWindow={activeSessionContextWindow}
                 sessionModel={activeSession.model ?? ""}
+                sessionThinkingLevel={activeSession.thinkingLevel}
                 sessionTodos={activeSession.sessionTodos ?? []}
-                timeline={activeSession.timeline.filter((item) => item.type !== "approval")}
+                timeline={activeSession.timeline.filter(
+                  (item) => item.type !== "approval" || !item.live,
+                )}
                 transcriptRef={transcriptRef}
                 onZoomImage={handleZoomImage}
               />
@@ -2566,7 +2575,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         ? activeSession.timeline
             .filter(
               (item): item is WebviewApprovalCard =>
-                item.type === "approval" && !item.resolved,
+                item.type === "approval" && !item.resolved && item.live,
             )
             .map((item) => {
               const answerState = approvalAnswers[
@@ -2663,6 +2672,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         contextSearchMatches={contextSearch.matches}
         contextSearchQuery={contextSearch.query}
         contextSearchTruncated={contextSearch.truncated}
+        contextWindowValue={activeSessionContextWindow}
         contextLabel={buildContextLabel(activeSession?.contextRatio)}
         modelCapabilities={activeModelCapabilities}
         modeValue={currentModeValue(activeSession?.agentMode)}

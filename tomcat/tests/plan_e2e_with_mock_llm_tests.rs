@@ -26,6 +26,7 @@ use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 
 use tomcat::core::agent_registry::AgentRegistry;
+use tomcat::core::llm::SharedModelCatalog;
 use tomcat::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
@@ -54,9 +55,9 @@ use tomcat::core::{
 use tomcat::{
     AllowAllConfirmation, AppConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
     ContextConfig, DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, LlmProvider,
-    LlmResolver, LlmScene, NoopStore, PrimitiveExecutor, PrimitiveOperation, ReadResult,
-    ResolvedCall, SearchFilesArgs, SearchFilesOutput, SessionHeader, StreamEvent,
-    TracingAuditRecorder, TranscriptEntry, WriteFileResult,
+    LlmResolver, LlmScene, ModelPrefsStore, NoopStore, PrimitiveExecutor, PrimitiveOperation,
+    ReadResult, ResolvedCall, SearchFilesArgs, SearchFilesOutput, SessionHeader, StreamEvent,
+    ThinkingLevel, TracingAuditRecorder, TranscriptEntry, WriteFileResult,
 };
 
 // ─── 共享 fixture 与 spy ───────────────────────────────────────────────────
@@ -64,6 +65,20 @@ use tomcat::{
 struct FixedResolver {
     provider: Arc<dyn LlmProvider>,
     default_model: String,
+}
+
+fn subagent_model_selection(home: &std::path::Path) -> (SharedModelCatalog, Arc<ModelPrefsStore>) {
+    let config = AppConfig::default();
+    (
+        SharedModelCatalog::load(&config).expect("load model catalog"),
+        Arc::new(
+            ModelPrefsStore::load(
+                home.join(".tomcat/model-thinking.json"),
+                ThinkingLevel::High,
+            )
+            .expect("load model preferences"),
+        ),
+    )
 }
 
 impl FixedResolver {
@@ -1113,12 +1128,15 @@ summary: verifier child completed
     let web_fetch_runtime = Arc::new(
         WebFetchRuntime::new(&AppConfig::default(), agent_trail_dir.join("tool-results")).unwrap(),
     );
+    let (model_catalog, model_prefs) = subagent_model_selection(&home);
     let dispatcher = ProdVerifierDispatcher::new(
         "test_verifier",
         ProdVerifierDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-verifier".into(),
             llm_resolver: Arc::new(FixedResolver::new(llm, "gpt-5.4-xhigh")),
+            model_catalog,
+            model_prefs,
             llm_files_config: AppConfig::default().llm.files,
             sessions_dir: agent_trail_dir.join("sessions"),
             primitive,
@@ -1291,12 +1309,15 @@ summary: verifier observed long fake cargo to completion
     let web_fetch_runtime = Arc::new(
         WebFetchRuntime::new(&AppConfig::default(), agent_trail_dir.join("tool-results")).unwrap(),
     );
+    let (model_catalog, model_prefs) = subagent_model_selection(&home);
     let dispatcher = ProdVerifierDispatcher::new(
         "test_verifier_long",
         ProdVerifierDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-verifier-long".into(),
             llm_resolver: Arc::new(FixedResolver::new(llm, "gpt-5.4-xhigh")),
+            model_catalog,
+            model_prefs,
             llm_files_config: AppConfig::default().llm.files,
             sessions_dir: agent_trail_dir.join("sessions"),
             primitive,
@@ -1394,12 +1415,15 @@ applied_changes: false
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
     let registry = AgentRegistry::new();
     let _root_guard = registry.register_root("parent-reviewer").unwrap();
+    let (model_catalog, model_prefs) = subagent_model_selection(&home);
     let plan_dispatcher = ProdPlanReviewerDispatcher::new(
         "test_plan_reviewer",
         ProdReviewerDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-reviewer".into(),
             llm_resolver: Arc::new(FixedResolver::new(llm.clone(), "gpt-5.4-xhigh")),
+            model_catalog: model_catalog.clone(),
+            model_prefs: model_prefs.clone(),
             llm_files_config: AppConfig::default().llm.files,
             sessions_dir: agent_trail_dir.join("sessions"),
             primitive: primitive.clone(),
@@ -1428,6 +1452,8 @@ applied_changes: false
             agent_registry: registry.clone(),
             parent_session_id: "parent-reviewer".into(),
             llm_resolver: Arc::new(FixedResolver::new(llm, "gpt-5.4-xhigh")),
+            model_catalog,
+            model_prefs,
             llm_files_config: AppConfig::default().llm.files,
             sessions_dir: agent_trail_dir.join("sessions"),
             primitive,
@@ -1529,12 +1555,15 @@ applied_changes: false
     )]));
     let registry = AgentRegistry::new();
     let _root_guard = registry.register_root("parent-cross-provider").unwrap();
+    let (model_catalog, model_prefs) = subagent_model_selection(&home);
     let dispatcher = ProdPlanReviewerDispatcher::new(
         "test_cross_provider_reviewer",
         ProdReviewerDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-cross-provider".into(),
             llm_resolver: Arc::new(FixedResolver::new(llm, "deepseek-v4-flash")),
+            model_catalog,
+            model_prefs,
             primitive: Arc::new(UnusedPrimitive),
             event_bus: Arc::new(DefaultEventBus::new()),
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),

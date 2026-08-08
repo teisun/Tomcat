@@ -246,7 +246,7 @@ function timelineEntityKey(item: WebviewTimelineItem): string {
     case "tool":
       return `tool:${item.toolCallId}`;
     case "approval":
-      return `approval:${item.request.requestId}`;
+      return `approval:${approvalIdentity(item.request)}`;
     case "boundary":
       return `boundary:${item.id}`;
     case "checkpoint":
@@ -1755,7 +1755,7 @@ function applyHistoryEntry(
       if (isPendingAskQuestionResult(toolName, text)) {
         const request = pendingApprovalRequest(session.sessionId, toolCallId, args);
         if (request) {
-          upsertApproval(session, request, session.sessionId);
+          upsertApproval(session, request, session.sessionId, false);
         }
         return;
       }
@@ -2118,6 +2118,7 @@ function upsertApproval(
   session: WebviewSessionSnapshot,
   request: AskQuestionWireRequest,
   sessionId?: string | null,
+  live = false,
 ): WebviewApprovalCard {
   const identity = approvalIdentity(request);
   const existing = session.timeline.find(
@@ -2125,13 +2126,19 @@ function upsertApproval(
       item.type === "approval" && approvalIdentity(item.request) === identity,
   );
   if (existing) {
-    existing.request = request;
+    // A history rebuild may only supply a `[pending]` placeholder. Never let
+    // it replace a live control request's answerable connection-scoped route.
+    if (live || !existing.live) {
+      existing.request = request;
+      existing.sessionId = sessionId;
+    }
+    existing.live = existing.live || live;
     existing.resolved = false;
-    existing.sessionId = sessionId;
     return existing;
   }
   const created: WebviewApprovalCard = {
     id: createTimelineId(session, "approval", identity),
+    live,
     request,
     resolved: false,
     sessionId,
@@ -2156,7 +2163,9 @@ function pendingApprovalRequest(
     return null;
   }
   return {
-    requestId: `pending:${toolCallId}`,
+    // A persisted `[pending]` result proves the question exists, but cannot
+    // be answered until serve re-arms it with a connection-scoped request id.
+    requestId: "",
     responseEvent: "",
     sessionId,
     toolCallId,
@@ -3303,7 +3312,7 @@ export class WebviewStateStore {
     const session = this.ensureSession(
       frame.sessionId ?? this.state.activeSessionId ?? "unknown",
     );
-    upsertApproval(session, request, frame.sessionId);
+    upsertApproval(session, request, frame.sessionId, true);
     return sessionRenderMutation(session.sessionId);
   }
 
@@ -3382,6 +3391,25 @@ export class WebviewStateStore {
       existingKeys,
     );
     const assistantGroupIds = liveAssistantGroupIds(runtime);
+    // Approval identity is the durable toolCallId. A live control request owns
+    // the only answerable route, so it replaces a historical `[pending]`
+    // placeholder in the same chronological slot. This is the one canonical
+    // merge rule used after history reconstruction; requestId is never identity.
+    for (const live of session.timeline) {
+      if (live.type !== "approval" || !live.live) {
+        continue;
+      }
+      const identity = approvalIdentity(live.request);
+      const placeholderIndex = historySession.timeline.findIndex(
+        (item): item is WebviewApprovalCard =>
+          item.type === "approval" &&
+          approvalIdentity(item.request) === identity,
+      );
+      if (placeholderIndex >= 0) {
+        historySession.timeline[placeholderIndex] = cloneTimelineItem(live);
+        existingKeys.add(timelineEntityKey(live));
+      }
+    }
     const nextLocalUserMessageIds = new Set<string>();
     for (const item of session.timeline) {
       const key = timelineEntityKey(item);

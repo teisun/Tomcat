@@ -64,6 +64,20 @@ function ApprovalCardComponent({
   if (item.resolved) {
     return null;
   }
+  if (!item.live) {
+    return (
+      <section
+        aria-live="polite"
+        className="tc-card tc-approval-card tc-approval-card--restoring"
+        data-testid="approval-card-restoring"
+      >
+        <div className="tc-card__header">
+          <h3>Question pending</h3>
+        </div>
+        <p>Restoring this question…</p>
+      </section>
+    );
+  }
 
   const canContinue = item.request.questions.every((question) => {
     const questionDraft = draft[question.id];

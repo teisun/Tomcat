@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  type WebviewApprovalCard,
   isWebviewIntent,
   type WebviewMessageBlock,
   type WebviewToolCard,
@@ -2295,7 +2296,7 @@ describe("custom history replay", () => {
     });
   });
 
-  it("hydrates a pending ask_question result as one interactive approval card", () => {
+  it("hydrates a pending ask_question result as one passive approval placeholder", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     const questions = [{
@@ -2345,8 +2346,9 @@ describe("custom history replay", () => {
       store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "approval"),
     ).toEqual([
       expect.objectContaining({
+        live: false,
         request: expect.objectContaining({
-          requestId: "pending:ask-call-pending",
+          requestId: "",
           toolCallId: "ask-call-pending",
         }),
         resolved: false,
@@ -2371,6 +2373,7 @@ describe("custom history replay", () => {
     );
     expect(approvals).toHaveLength(1);
     expect(approvals[0]).toMatchObject({
+      live: true,
       request: expect.objectContaining({
         requestId: "live-request-1",
         toolCallId: "ask-call-pending",
@@ -2420,6 +2423,179 @@ describe("custom history replay", () => {
     expect(
       store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "approval"),
     ).toEqual([]);
+  });
+
+  it("REPRO keeps one live approval card when history rebuild sees the pending result after the live control_request", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const questions = [{
+      id: "q1",
+      options: [
+        { id: "yes", label: "Yes", recommended: true },
+        { id: "no", label: "No", recommended: false },
+      ],
+      prompt: "Proceed?",
+    }];
+
+    // 1) Live control_request arrives FIRST (the "flash"): creates the interactive card.
+    store.applyEvent({
+      payload: {
+        questions,
+        requestId: "live-request-1",
+        responseEvent: "plan.ask_question.response.live-request-1",
+        sessionId: "s1",
+        toolCallId: "ask-call-pending",
+      },
+      requestId: "live-request-1",
+      sessionId: "s1",
+      subtype: "ask_question",
+      type: "control_request",
+    });
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "approval"),
+    ).toHaveLength(1);
+
+    // 2) A history refresh then delivers the assistant tool_call + [pending] result
+    //    for the SAME toolCallId (what serve returns while the turn is blocked).
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-ask-pending",
+          message: {
+            content: "",
+            role: "assistant",
+            tool_calls: [{
+              function: { arguments: JSON.stringify({ questions }), name: "ask_question" },
+              id: "ask-call-pending",
+              type: "function",
+            }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-ask-pending",
+          message: { content: "[pending]", role: "tool", tool_call_id: "ask-call-pending" },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    const approvals = timeline.filter((item) => item.type === "approval");
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      request: expect.objectContaining({
+        requestId: "live-request-1",
+        toolCallId: "ask-call-pending",
+      }),
+      resolved: false,
+    });
+    // Guard the actual render-time failure: two cards sharing one timeline id collide on
+    // React's `key`, which is what made the card flicker and vanish.
+    const ids = timeline.map((item) => item.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("keeps a history-only pending question passive until serve re-arms it", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const questions = [{
+      id: "q1",
+      options: [{ id: "yes", label: "Yes", recommended: true }],
+      prompt: "Proceed?",
+    }];
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-ask",
+          message: {
+            content: "",
+            role: "assistant",
+            tool_calls: [{
+              function: { arguments: JSON.stringify({ questions }), name: "ask_question" },
+              id: "ask-call-history",
+              type: "function",
+            }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-ask-pending",
+          message: { content: "[pending]", role: "tool", tool_call_id: "ask-call-history" },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    let approvals = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "approval",
+    );
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      live: false,
+      request: expect.objectContaining({ requestId: "", toolCallId: "ask-call-history" }),
+      resolved: false,
+    });
+
+    store.applyEvent({
+      payload: {
+        questions,
+        requestId: "rearmed-request-1",
+        responseEvent: "plan.ask_question.response.rearmed-request-1",
+        sessionId: "s1",
+        toolCallId: "ask-call-history",
+      },
+      requestId: "rearmed-request-1",
+      sessionId: "s1",
+      subtype: "ask_question",
+      type: "control_request",
+    });
+
+    approvals = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "approval",
+    );
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      live: true,
+      request: expect.objectContaining({ requestId: "rearmed-request-1" }),
+      resolved: false,
+    });
+  });
+
+  it("keeps concurrent pending questions isolated by toolCallId", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    for (const toolCallId of ["ask-call-a", "ask-call-b"]) {
+      store.applyEvent({
+        payload: {
+          questions: [{
+            id: `q-${toolCallId}`,
+            options: [{ id: "yes", label: "Yes", recommended: true }],
+            prompt: `Question ${toolCallId}`,
+          }],
+          requestId: `live-${toolCallId}`,
+          responseEvent: `response-${toolCallId}`,
+          sessionId: "s1",
+          toolCallId,
+        },
+        requestId: `live-${toolCallId}`,
+        sessionId: "s1",
+        subtype: "ask_question",
+        type: "control_request",
+      });
+    }
+
+    const approvals = store.snapshot().sessionViews.s1.timeline.filter(
+      (item): item is WebviewApprovalCard => item.type === "approval",
+    );
+    expect(approvals).toHaveLength(2);
+    expect(approvals.map((item) => item.request.toolCallId).sort()).toEqual([
+      "ask-call-a",
+      "ask-call-b",
+    ]);
+    expect(new Set(approvals.map((item) => item.id)).size).toBe(2);
   });
 
   it("drops leading orphan tool entries until the assistant head arrives", () => {

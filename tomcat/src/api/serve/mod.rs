@@ -27,7 +27,7 @@ mod test_support;
 mod tests;
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -354,27 +354,44 @@ pub(crate) fn register_slot_hooks(state: &Arc<ServeState>, slot: &Arc<SessionSlo
     }
     match crate::api::chat::has_resumable_tail_ask_question(&slot.ctx.session_runtime.session) {
         Ok(true) => {
-            let state = Arc::clone(state);
-            let slot = Arc::clone(slot);
-            tokio::spawn(async move {
-                if let Err(error) = crate::api::serve::commands::start_turn(
-                    state,
-                    slot,
-                    None,
-                    None,
-                    crate::api::serve::commands::TurnAck::Silent,
-                )
-                .await
-                {
-                    tracing::warn!(error = %error, "serve pending ask_question auto-resume failed");
-                }
-            });
+            slot.resume_pending_ask_question
+                .store(true, Ordering::SeqCst);
+            if state.initialized.load(Ordering::SeqCst) {
+                resume_pending_ask_question(state, slot);
+            }
         }
         Ok(false) => {}
         Err(error) => {
             tracing::warn!(error = %error, "serve failed to inspect pending ask_question state");
         }
     }
+}
+
+/// Re-arm a restart-recovered ask_question only once the frontend has
+/// completed its initialize handshake. Before that handshake, a control frame
+/// can be lost because no webview has installed its receiver yet.
+pub(crate) fn resume_pending_ask_question(state: &Arc<ServeState>, slot: &Arc<SessionSlot>) {
+    if !slot
+        .resume_pending_ask_question
+        .swap(false, Ordering::SeqCst)
+    {
+        return;
+    }
+    let state = Arc::clone(state);
+    let slot = Arc::clone(slot);
+    tokio::spawn(async move {
+        if let Err(error) = crate::api::serve::commands::start_turn(
+            state,
+            slot,
+            None,
+            None,
+            crate::api::serve::commands::TurnAck::Silent,
+        )
+        .await
+        {
+            tracing::warn!(error = %error, "serve pending ask_question auto-resume failed");
+        }
+    });
 }
 
 fn spawn_background_task_listener(slot: &Arc<SessionSlot>) -> tokio::task::JoinHandle<()> {

@@ -154,6 +154,82 @@ fn serve_ask_question_roundtrip_resumes_turn() {
 
 #[test]
 #[serial]
+fn serve_restart_rearms_unanswered_ask_question_with_a_new_request_id() {
+    common::setup_logging();
+    let server = ask_question_server();
+    let fx = setup_serve_fixture(&server.base_url);
+
+    let (session_id, initial_ask_request_id) = {
+        let mut child = spawn_serve_child(&fx);
+        let session_id = initialize(&mut child);
+        child.send_value(&json!({
+            "type": "prompt",
+            "id": "ask-restart-1",
+            "sessionId": session_id,
+            "text": "ask me, then simulate a server restart",
+            "params": {}
+        }));
+        let frames = child.recv_until(WAIT_TIMEOUT, |value| {
+            value.get("type").and_then(|v| v.as_str()) == Some("control_request")
+                && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
+        });
+        assert!(
+            frames.iter().any(|value| {
+                value.get("type").and_then(|v| v.as_str()) == Some("tool_execution_start")
+                    && value.get("toolCallId").and_then(|v| v.as_str()) == Some("call_1")
+            }),
+            "ask_question must be durably started before restarting: {frames:?}"
+        );
+        let control = frames
+            .iter()
+            .find(|value| {
+                value.get("type").and_then(|v| v.as_str()) == Some("control_request")
+                    && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
+            })
+            .expect("initial ask_question control request");
+        (
+            session_id,
+            control["payload"]["requestId"]
+                .as_str()
+                .expect("initial ask_question response route")
+                .to_string(),
+        )
+    };
+
+    let mut resumed = spawn_serve_child(&fx);
+    let resumed_session_id = initialize(&mut resumed);
+    assert_eq!(resumed_session_id, session_id);
+    let frames = resumed.recv_until(WAIT_TIMEOUT, |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("control_request")
+            && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
+    });
+    let rearmed = frames
+        .iter()
+        .find(|value| {
+            value.get("type").and_then(|v| v.as_str()) == Some("control_request")
+                && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
+        })
+        .expect("re-armed ask_question control request");
+    assert_eq!(
+        rearmed["payload"]["toolCallId"].as_str(),
+        Some("call_1"),
+        "restart must retain durable question identity: {rearmed:?}"
+    );
+    assert_ne!(
+        rearmed["payload"]["requestId"].as_str(),
+        Some(initial_ask_request_id.as_str()),
+        "restart must create a new connection-scoped response route"
+    );
+    assert!(
+        rearmed["payload"]["requestId"]
+            .as_str()
+            .is_some_and(|request_id| !request_id.is_empty()),
+        "restart must issue a live response route: {rearmed:?}"
+    );
+}
+
+#[test]
+#[serial]
 fn serve_ask_question_cancel_roundtrip_does_not_hang() {
     common::setup_logging();
     let server = ask_question_server();

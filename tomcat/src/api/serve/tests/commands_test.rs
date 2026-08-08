@@ -1365,7 +1365,17 @@ async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach(
         .insert(Arc::clone(&slot))
         .expect("insert initial session");
     register_slot_hooks(&state, &slot);
-    state.initialized.store(true, Ordering::SeqCst);
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlRequest {
+            request_id: "initialize-before-rearm".to_string(),
+            subtype: "initialize".to_string(),
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::Value::Null,
+        },
+    )
+    .await
+    .expect("initialize handshake");
 
     let lines = wait_for_line(&buffer, |line| {
         line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
@@ -5843,7 +5853,9 @@ async fn serve_set_thinking_level_for_relay_persists_under_catalog_id_and_lists_
 
     let listed = lines
         .iter()
-        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("list-relay-effort"))
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-relay-effort")
+        })
         .expect("list relay models response");
     let relay = listed["payload"]["models"]
         .as_array()
@@ -5900,7 +5912,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
         ServeCommand::SetContextWindow {
             id: Some("apply-context-tier".to_string()),
             session_id: Some(slot.session_id.clone()),
-            model: "tiered-model".to_string(),
+            model: " tiered-model ".to_string(),
             context_window: 1_000_000,
         },
     )

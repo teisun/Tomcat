@@ -18,7 +18,9 @@ export function PlanActionStrip({
   onSelectContextWindow,
   onSelectThinkingLevel,
   onSetBuildModel,
+  sessionContextWindow,
   sessionModel,
+  sessionThinkingLevel,
 }: {
   availableModelDetails?: Record<string, ModelPickerModel>;
   availableModels: string[];
@@ -29,7 +31,9 @@ export function PlanActionStrip({
   onSelectContextWindow(modelId: string, contextWindow: number): void;
   onSelectThinkingLevel(modelId: string, level: string): void;
   onSetBuildModel(modelId: string): void;
+  sessionContextWindow?: number | null;
   sessionModel: string;
+  sessionThinkingLevel?: string | null;
 }) {
   const selectedModelId = buildModel || sessionModel || null;
   const pickerModels = buildPickerModels({
@@ -37,6 +41,8 @@ export function PlanActionStrip({
     availableModelDetails,
     availableModels,
     selectedModelId,
+    sessionContextWindow,
+    sessionThinkingLevel,
   });
 
   return (

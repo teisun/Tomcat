@@ -352,7 +352,7 @@ describe("SettingsApp", () => {
             files: true,
             reasoning: true,
             tools: true,
-            vision: true,
+            vision: false,
             webSearch: false,
           },
           contextWindow: 400000,
@@ -808,7 +808,7 @@ describe("SettingsApp", () => {
     });
   });
 
-  it("copies matching built-in capability tiers into a new relay without manual context configuration", async () => {
+  it("copies matching built-in metadata, but keeps only catalog limits read-only", async () => {
     const { postMessage } = mount();
     await emitState(
       readyState({
@@ -849,6 +849,7 @@ describe("SettingsApp", () => {
         target: { value: "gpt-5.6" },
       },
     );
+    await act(async () => {});
 
     expect(
       within(dialog).getByTestId("settings-builtin-capability-source")
@@ -862,13 +863,12 @@ describe("SettingsApp", () => {
     expect(
       within(dialog).queryByTestId("settings-context-window-input"),
     ).toBeNull();
-
-    fireEvent.change(
-      within(dialog).getByTestId("settings-max-output-tokens-input"),
-      {
-        target: { value: "65536" },
-      },
-    );
+    expect(
+      within(dialog).getByTestId("settings-max-output-tokens-auto").textContent,
+    ).toBe("32768");
+    expect(
+      within(dialog).queryByTestId("settings-max-output-tokens-input"),
+    ).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
 
     expect(postMessage).toHaveBeenCalledTimes(1);
@@ -878,7 +878,7 @@ describe("SettingsApp", () => {
           contextWindow: 400000,
           contextWindowOptions: [400000, 1000000],
           id: "chatanywhere/gpt-5.6",
-          maxOutputTokens: 65536,
+          maxOutputTokens: 32768,
           supportedReasoningLevels: ["high", "xhigh"],
         },
       },
@@ -969,6 +969,204 @@ describe("SettingsApp", () => {
     );
   });
 
+  it("prefers a same-name models.toml entry over built-in metadata", async () => {
+    const { postMessage } = mount();
+    await emitState(
+      readyState({
+        models: [
+          builtinModel({
+            contextWindow: 400_000,
+            id: "gpt-5.6",
+            keyPresent: true,
+            maxOutputTokens: 128_000,
+            modelName: "gpt-5.6",
+          }),
+          builtinModel({
+            capabilities: {
+              files: false,
+              reasoning: true,
+              tools: true,
+              vision: false,
+              webSearch: true,
+            },
+            contextWindow: 1_000_000,
+            contextWindowOptions: [400_000, 1_000_000],
+            description: "Local gpt-5.6 relay profile",
+            id: "local/gpt-5.6",
+            keyPresent: true,
+            maxOutputTokens: 64_000,
+            modelName: "gpt-5.6",
+            source: "user",
+            supportedReasoningLevels: ["high"],
+            thinkingFormat: "deepseek",
+          }),
+        ],
+      }),
+    );
+    postMessage.mockClear();
+
+    const dialog = openAddModelDialog();
+    fireEvent.click(
+      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
+    );
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
+      target: { value: "https://new-relay.example.test/v1" },
+    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      { target: { value: "gpt-5.6" } },
+    );
+    await act(async () => {});
+
+    expect(
+      within(dialog).getByTestId("settings-builtin-capability-source").textContent,
+    ).toContain("configured local/gpt-5.6");
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+    expect(
+      within(dialog).getByTestId("settings-context-window-auto").textContent,
+    ).toBe("1000000");
+    expect(
+      within(dialog).getByTestId("settings-max-output-tokens-auto").textContent,
+    ).toBe("64000");
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "Description" }),
+      { target: { value: "Edited local profile" } },
+    );
+    fireEvent.change(
+      within(dialog).getByRole("textbox", {
+        name: /supported effort levels/i,
+      }),
+      { target: { value: "low, high" } },
+    );
+    fireEvent.change(within(dialog).getByLabelText("API key"), {
+      target: { value: "new-relay-key" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          model: expect.objectContaining({
+            capabilities: expect.objectContaining({
+              vision: false,
+              webSearch: true,
+            }),
+            contextWindow: 1_000_000,
+            contextWindowOptions: [400_000, 1_000_000],
+            description: "Edited local profile",
+            maxOutputTokens: 64_000,
+            supportedReasoningLevels: ["low", "high"],
+            thinkingFormat: "deepseek",
+          }),
+        }),
+        type: "upsertModel",
+      }),
+    );
+  });
+
+  it("allows editing a reused relay's provider and capabilities before saving", async () => {
+    const { postMessage } = mount();
+    await emitState(
+      readyState({
+        models: [
+          builtinModel({
+            id: "gpt-5.6",
+            keyPresent: true,
+            modelName: "gpt-5.6",
+            provider: "openai",
+          }),
+        ],
+      }),
+    );
+    postMessage.mockClear();
+
+    const dialog = openAddModelDialog();
+    fireEvent.click(
+      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
+    );
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
+      target: { value: "https://relay.example.test/v1" },
+    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      { target: { value: "gpt-5.6" } },
+    );
+    await act(async () => {});
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /provider override/i }),
+      { target: { value: "my-relay" } },
+    );
+    fireEvent.click(within(dialog).getByLabelText("Vision"));
+    fireEvent.change(within(dialog).getByLabelText("API key"), {
+      target: { value: "test-relay-key" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          model: expect.objectContaining({
+            capabilities: expect.objectContaining({ vision: false }),
+            provider: "my-relay",
+          }),
+        }),
+        type: "upsertModel",
+      }),
+    );
+  });
+
+  it("reuses an exact configured relay endpoint before host heuristics", async () => {
+    const { postMessage } = mount();
+    await emitState(
+      readyState({
+        models: [
+          builtinModel({
+            apiKeyEnv: "MY_RELAY_KEY",
+            baseUrl: "https://api.chatanywhere.tech/v1",
+            id: "my-relay/existing",
+            keyPresent: true,
+            modelName: "existing",
+            provider: "my-relay",
+            source: "user",
+          }),
+        ],
+        providerKeys: [
+          providerKey({ envName: "MY_RELAY_KEY", keyPresent: true }),
+        ],
+      }),
+    );
+    postMessage.mockClear();
+
+    const dialog = openAddModelDialog();
+    fireEvent.click(
+      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
+    );
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
+      target: { value: "https://api.chatanywhere.tech/v1/" },
+    });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: /model name/i }),
+      { target: { value: "new-upstream" } },
+    );
+
+    expect(within(dialog).getByText("my-relay")).toBeTruthy();
+    expect(within(dialog).getByText("MY_RELAY_KEY")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          model: expect.objectContaining({
+            apiKeyEnv: "MY_RELAY_KEY",
+            provider: "my-relay",
+          }),
+        }),
+        type: "upsertModel",
+      }),
+    );
+  });
+
   it("uses the 400K default and never exposes a manual context field for an unmatched relay", async () => {
     mount();
     await emitState(
@@ -1010,6 +1208,9 @@ describe("SettingsApp", () => {
     expect(
       within(dialog).queryByTestId("settings-context-window-input"),
     ).toBeNull();
+    expect(
+      within(dialog).getByTestId("settings-max-output-tokens-auto").textContent,
+    ).toBe("128000");
   });
 
   it("renders warning banners pushed from the settings host", async () => {

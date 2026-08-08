@@ -25,7 +25,7 @@ use super::super::{
 use crate::core::agent_registry::{AgentRegistry, RegistrationGuard};
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene, ResolvedCall,
-    StreamEvent,
+    SharedModelCatalog, StreamEvent,
 };
 use crate::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use crate::core::skill::SkillSet;
@@ -41,8 +41,8 @@ use crate::infra::event_bus::DefaultEventBus;
 use crate::infra::TracingAuditRecorder;
 use crate::AllowAllConfirmation;
 use crate::{
-    BashResult, DirEntry, EditFileResult, EditOperation, ReadResult, SearchFilesArgs,
-    SearchFilesOutput, WriteFileResult,
+    BashResult, DirEntry, EditFileResult, EditOperation, ModelPrefsStore, ReadResult,
+    SearchFilesArgs, SearchFilesOutput, ThinkingLevel, WriteFileResult,
 };
 use async_trait::async_trait;
 use futures_util::{future, StreamExt};
@@ -414,6 +414,8 @@ struct BindingFixture {
     agent_trail_dir: PathBuf,
     workspace: tempfile::TempDir,
     resolver: Arc<FakeResolver>,
+    model_catalog: SharedModelCatalog,
+    model_prefs: Arc<ModelPrefsStore>,
     resolve_log: ResolveLog,
     #[allow(dead_code)]
     fcodex_requests: Arc<Mutex<Vec<ChatRequest>>>,
@@ -438,6 +440,26 @@ fn build_fixture(
     let agent_trail_dir = home.path.join(".tomcat/agents/main");
     std::fs::create_dir_all(&agent_trail_dir).unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    let config = AppConfig::default();
+    std::fs::write(
+        home.path.join(".tomcat/models.toml"),
+        r#"
+[[models]]
+id = "fcodex/gpt-5.6-sol"
+api = "openai-responses"
+provider = "fcodex"
+supported_reasoning_levels = ["off", "high"]
+"#,
+    )
+    .unwrap();
+    let model_catalog = SharedModelCatalog::load(&config).unwrap();
+    let model_prefs = Arc::new(
+        ModelPrefsStore::load(
+            home.path.join(".tomcat/model-thinking.json"),
+            ThinkingLevel::High,
+        )
+        .unwrap(),
+    );
 
     let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
     providers.insert("fcodex/gpt-5.6-sol".into(), fcodex_provider);
@@ -466,6 +488,8 @@ fn build_fixture(
         agent_trail_dir,
         workspace,
         resolver,
+        model_catalog,
+        model_prefs,
         resolve_log,
         fcodex_requests,
         deepseek_requests,
@@ -477,6 +501,8 @@ fn reviewer_deps(fx: &BindingFixture, model_override: Option<&str>) -> ProdRevie
         agent_registry: fx.registry.clone(),
         parent_session_id: "parent-binding".into(),
         llm_resolver: fx.resolver.clone(),
+        model_catalog: fx.model_catalog.clone(),
+        model_prefs: fx.model_prefs.clone(),
         primitive: Arc::new(UnusedPrimitive),
         event_bus: Arc::new(DefaultEventBus::new()),
         agent_trail_dir: fx.agent_trail_dir.to_string_lossy().to_string(),
@@ -505,6 +531,8 @@ fn verifier_deps(fx: &BindingFixture) -> ProdVerifierDeps {
         agent_registry: fx.registry.clone(),
         parent_session_id: "parent-binding".into(),
         llm_resolver: fx.resolver.clone(),
+        model_catalog: fx.model_catalog.clone(),
+        model_prefs: fx.model_prefs.clone(),
         primitive: Arc::new(UnusedPrimitive),
         event_bus: Arc::new(DefaultEventBus::new()),
         agent_trail_dir: fx.agent_trail_dir.to_string_lossy().to_string(),
@@ -564,6 +592,9 @@ applied_changes: false
         deepseek_requests.clone(),
         false,
     );
+    fx.model_prefs
+        .set_reasoning("fcodex/gpt-5.6-sol", ThinkingLevel::Off)
+        .unwrap();
     let dispatcher = ProdPlanReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
     let summary = dispatcher
         .dispatch("binding_plan", "## Goal\nbinding\n", true)
@@ -578,6 +609,7 @@ applied_changes: false
     let reqs = fcodex_requests.lock().clone();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].model, "gpt-5.6-sol");
+    assert_eq!(reqs[0].thinking_level, Some(ThinkingLevel::Off));
     let _ = fx.home;
 }
 
@@ -684,6 +716,9 @@ summary: verify ok
     });
     let _ = (fcodex_plan, fcodex_code, fcodex_explorer, fcodex_verifier);
     let fx = build_fixture(fcodex, deepseek, fcodex_requests, deepseek_requests, false);
+    fx.model_prefs
+        .set_reasoning("fcodex/gpt-5.6-sol", ThinkingLevel::Xhigh)
+        .unwrap();
     let parent_session =
         crate::core::session::SessionManager::new(fx.agent_trail_dir.join("sessions"));
     parent_session
@@ -751,6 +786,14 @@ summary: verify ok
     for (_scene, override_) in &main_calls {
         assert_eq!(override_.as_deref(), Some("fcodex/gpt-5.6-sol"));
     }
+    let requests = fx.fcodex_requests.lock().clone();
+    assert_eq!(requests.len(), 4);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.thinking_level == Some(ThinkingLevel::High)),
+        "unsupported Xhigh must clamp to high for every subagent: {requests:?}"
+    );
     let events = captured.lock();
     let plan_started = events
         .iter()

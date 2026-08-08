@@ -12,7 +12,9 @@ use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome, Subag
 use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcomeLabel};
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::system_prompt::render_available_skills_prompt;
-use crate::core::llm::{ChatMessage, LlmProvider, LlmResolver, LlmScene, ResolvedCall};
+use crate::core::llm::{
+    ChatMessage, LlmProvider, LlmResolver, LlmScene, ResolvedCall, SharedModelCatalog,
+};
 use crate::core::plan_runtime::code_reviewer::{
     build_code_review_prompt, code_review_system_prompt_text,
     code_reviewer_allowed_tools_with_policy, collect_git_diff_context, CodeReviewSummary,
@@ -34,7 +36,7 @@ use crate::core::plan_runtime::{
 };
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
-use crate::core::CheckpointStore;
+use crate::core::{CheckpointStore, ModelPrefsStore};
 use crate::infra::config::{ContextConfig, LlmFilesConfig};
 use crate::infra::event_bus::EventBus;
 
@@ -55,6 +57,10 @@ pub struct ProdReviewerDeps {
     pub agent_registry: Arc<AgentRegistry>,
     pub parent_session_id: String,
     pub llm_resolver: Arc<dyn LlmResolver>,
+    /// Shared catalog and per-model preferences resolve the same clamped
+    /// effort used by the main agent loop.
+    pub model_catalog: SharedModelCatalog,
+    pub model_prefs: Arc<ModelPrefsStore>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub event_bus: Arc<dyn EventBus>,
     pub agent_trail_dir: String,
@@ -90,6 +96,11 @@ impl ProdReviewerDeps {
             plan_runtime.session_model().as_deref(),
             &self.fallback_model,
         )
+    }
+
+    fn resolve_thinking_level(&self, model_id: &str) -> crate::core::llm::ThinkingLevel {
+        self.model_catalog
+            .resolve_reasoning_level(self.model_prefs.as_ref(), model_id)
     }
 }
 
@@ -220,6 +231,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
         let tool_defs =
             resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(expose_skills));
         let model_id = deps.resolve_model(&plan_runtime);
+        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
@@ -305,7 +317,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        thinking_level: None,
+                        thinking_level,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,
@@ -459,6 +471,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         let tool_defs =
             resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(expose_skills));
         let model_id = deps.resolve_model(&plan_runtime);
+        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
@@ -559,7 +572,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        thinking_level: None,
+                        thinking_level,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,
@@ -810,6 +823,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
         let bash_ast = deps.bash_ast.clone();
         let tool_defs = resolve_internal_tools(EXPLORER_ALLOWED_TOOLS);
         let model_id = deps.resolve_model(&plan_runtime);
+        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
@@ -898,7 +912,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        thinking_level: None,
+                        thinking_level,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,

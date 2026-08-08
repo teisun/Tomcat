@@ -50,6 +50,10 @@ class FakeWebview {
     return true;
   }
 
+  fireMessage(message: unknown): void {
+    this.receiveEmitter.fire(message);
+  }
+
   stateFrames(): PlanPreviewStateSnapshot[] {
     return (this.messages as PlanPreviewHostFrame[])
       .filter((frame) => frame.channel === "state")
@@ -426,6 +430,52 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
     );
     expect(deps.setBuildModel).toHaveBeenCalledWith("gpt-5.4");
     expect(postState).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports failed plan-picker preference updates instead of silently reverting", async () => {
+    const sendSetContextWindow = vi.fn().mockRejectedValue(new Error("invalid tier"));
+    const sendSetThinkingLevel = vi.fn().mockRejectedValue(new Error("unsupported effort"));
+    const deps = makeDeps({
+      ensureSession: vi.fn().mockResolvedValue("session-1"),
+      messenger: {
+        sendSetContextWindow,
+        sendSetThinkingLevel,
+      } as never,
+    });
+    const toastSpy = vi
+      .spyOn(vscode.window, "showErrorMessage")
+      .mockResolvedValue(undefined as never);
+    const provider = new PlanPreviewEditorProvider(deps);
+    const postState = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      await provider.handleIntent(
+        {
+          data: { contextWindow: 1_000_000, modelId: "gpt-5.6" },
+          messageId: "set-context",
+          type: "setContextWindow",
+        },
+        makeDoc(),
+        postState,
+      );
+      await provider.handleIntent(
+        {
+          data: { level: "xhigh", modelId: "gpt-5.6" },
+          messageId: "set-effort",
+          type: "setThinkingLevel",
+        },
+        makeDoc(),
+        postState,
+      );
+
+      expect(sendSetContextWindow).toHaveBeenCalledWith("session-1", "gpt-5.6", 1_000_000);
+      expect(sendSetThinkingLevel).toHaveBeenCalledWith("session-1", "gpt-5.6", "xhigh");
+      expect(toastSpy).toHaveBeenCalledWith("Context tier was not changed: invalid tier");
+      expect(toastSpy).toHaveBeenCalledWith("Effort was not changed: unsupported effort");
+      expect(postState).not.toHaveBeenCalled();
+    } finally {
+      toastSpy.mockRestore();
+    }
   });
 
   it("builds the plan using the planId parsed from the document", async () => {

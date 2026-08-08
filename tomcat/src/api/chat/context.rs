@@ -31,7 +31,6 @@ use crate::{
     Tool, ToolExecutor, ToolRegistry,
 };
 
-use crate::core::llm::thinking_policy::clamp_reasoning_level;
 use crate::core::llm::{LlmScene, ResolvedCall};
 use crate::core::plan_runtime;
 
@@ -598,6 +597,8 @@ impl ChatContext {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
                 llm_resolver: llm_resolver.clone(),
+                model_catalog: model_catalog.clone(),
+                model_prefs: model_prefs.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
@@ -626,6 +627,8 @@ impl ChatContext {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
                 llm_resolver: llm_resolver.clone(),
+                model_catalog: model_catalog.clone(),
+                model_prefs: model_prefs.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
@@ -654,6 +657,8 @@ impl ChatContext {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
                 llm_resolver: llm_resolver.clone(),
+                model_catalog: model_catalog.clone(),
+                model_prefs: model_prefs.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
@@ -686,6 +691,8 @@ impl ChatContext {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
                 llm_resolver: llm_resolver.clone(),
+                model_catalog: model_catalog.clone(),
+                model_prefs: model_prefs.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
@@ -829,13 +836,9 @@ impl ChatContext {
     }
 
     pub(crate) fn resolve_thinking_level(&self, model_id: &str) -> ThinkingLevel {
-        self.global_services.model_catalog.with_catalog(|catalog| {
-            let requested = self.global_services.model_prefs.reasoning_for(model_id);
-            catalog
-                .lookup_explicit(model_id)
-                .map(|entry| clamp_reasoning_level(requested, &entry.supported_reasoning_levels))
-                .unwrap_or(requested)
-        })
+        self.global_services
+            .model_catalog
+            .resolve_reasoning_level(self.global_services.model_prefs.as_ref(), model_id)
     }
 
     pub(crate) fn resolve_call(

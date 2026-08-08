@@ -712,22 +712,40 @@ export class PlanPreviewEditorProvider
       case "setContextWindow": {
         const sessionId = (await this.deps.ensureSession?.()) ?? null;
         if (!sessionId) return;
-        await this.deps.messenger.sendSetContextWindow(
-          sessionId,
-          intent.data.modelId,
-          intent.data.contextWindow,
-        );
+        try {
+          await this.deps.messenger.sendSetContextWindow(
+            sessionId,
+            intent.data.modelId,
+            intent.data.contextWindow,
+          );
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            error instanceof Error
+              ? `Context tier was not changed: ${error.message}`
+              : "Context tier was not changed.",
+          );
+          return;
+        }
         await postState();
         return;
       }
       case "setThinkingLevel": {
         const sessionId = (await this.deps.ensureSession?.()) ?? null;
         if (!sessionId) return;
-        await this.deps.messenger.sendSetThinkingLevel(
-          sessionId,
-          intent.data.modelId,
-          intent.data.level,
-        );
+        try {
+          await this.deps.messenger.sendSetThinkingLevel(
+            sessionId,
+            intent.data.modelId,
+            intent.data.level,
+          );
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            error instanceof Error
+              ? `Effort was not changed: ${error.message}`
+              : "Effort was not changed.",
+          );
+          return;
+        }
         await postState();
         return;
       }

@@ -70,6 +70,11 @@ pub(crate) async fn handle_control_or_interrupt(
                     }),
                 );
                 state.writer.send(OutFrame::Control(response))?;
+                if let Some(session_id) = state.registry.active_session_id() {
+                    if let Some(slot) = state.registry.get(&session_id) {
+                        super::resume_pending_ask_question(&state, &slot);
+                    }
+                }
                 return Ok(true);
             }
             state.writer.send(OutFrame::Response(ResponseFrame::error(

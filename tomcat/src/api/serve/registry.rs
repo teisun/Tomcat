@@ -28,6 +28,10 @@ pub struct SessionSlot {
     pub mode: SessionMode,
     pub cwd: Option<String>,
     pub busy: AtomicBool,
+    /// A restart recovered an unanswered ask_question before the frontend
+    /// completed the initialize handshake. It must be re-armed only after the
+    /// client is ready to receive the new response route.
+    pub resume_pending_ask_question: AtomicBool,
     pub terminal_emitted: AtomicBool,
     pub turn_state: Mutex<Option<SessionTurnState>>,
     /// 最近一次向该会话前端广播的可信水位（实测定基后的后续估算也会刷新它）。
@@ -55,6 +59,7 @@ impl SessionSlot {
             mode,
             cwd,
             busy: AtomicBool::new(false),
+            resume_pending_ask_question: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
             turn_state: Mutex::new(Some(turn_state)),
             last_context_ratio: Mutex::new(None),

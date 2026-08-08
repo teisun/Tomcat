@@ -291,6 +291,12 @@ export interface WebviewReviewRow {
 
 export interface WebviewApprovalCard {
   id: string;
+  /**
+   * True only while this frontend owns a currently answerable control request.
+   * Historical `[pending]` records are evidence that a question existed, not a
+   * valid route for submitting an answer.
+   */
+  live: boolean;
   request: AskQuestionWireRequest;
   resolved: boolean;
   sessionId?: string | null;

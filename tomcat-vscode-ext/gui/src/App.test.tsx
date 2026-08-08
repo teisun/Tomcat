@@ -179,6 +179,7 @@ function approvalDraftSnapshot(activeSessionId: "s1" | "s2"): WebviewStateSnapsh
     sessionViews: {
       s1: session("s1", [{
         id: "approval-draft-1",
+        live: true,
         request: {
           questions: [{
             id: "q-draft",
@@ -527,6 +528,51 @@ describe("Tomcat webview App", () => {
     expect(screen.queryByTestId("loading-state")).toBeNull();
   });
 
+  it("renders a history-only approval inline without opening the sticky answer panel", async () => {
+    mount();
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [{
+          busy: true,
+          isCurrent: true,
+          ownedByThisFrontend: true,
+          sessionId: "s1",
+          title: null,
+          updatedAt: 1,
+        }],
+        sessionViews: {
+          s1: {
+            sessionId: "s1",
+            timeline: [{
+              id: "history-approval",
+              live: false,
+              request: {
+                questions: [{
+                  id: "q1",
+                  options: [{ id: "yes", label: "Yes", recommended: true }],
+                  prompt: "Proceed?",
+                }],
+                requestId: "",
+                responseEvent: "",
+              },
+              resolved: false,
+              sessionId: "s1",
+              type: "approval",
+            }],
+          },
+        },
+      },
+      messageId: "history-only-approval",
+    });
+
+    expect(screen.getByTestId("approval-card-restoring")).toBeTruthy();
+    expect(screen.queryByTestId("pending-question-panel")).toBeNull();
+  });
+
   it("hides the context label until the first measured usage arrives", async () => {
     mount();
     expect(screen.getByTestId("context-ratio").textContent).toBe("");
@@ -660,6 +706,7 @@ describe("Tomcat webview App", () => {
               },
               {
                 id: "approval-1",
+                live: true,
                 request: {
                   questions: [
                     {
@@ -1511,6 +1558,7 @@ describe("Tomcat webview App", () => {
               },
               {
                 id: "approval-1",
+                live: true,
                 request: {
                   questions: [
                     {
@@ -1677,6 +1725,7 @@ describe("Tomcat webview App", () => {
             timeline: [
               {
                 id: "approval-1",
+                live: true,
                 request: {
                   questions: [
                     {

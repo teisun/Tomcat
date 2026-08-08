@@ -275,6 +275,43 @@ describe("PlanPreviewApp", () => {
     expect((intents[0] as { data: { modelId: string } }).data.modelId).toBe("claude-opus");
   });
 
+  it("overlays the session's context and effort in the hybrid model picker", () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(
+      makeState({
+        availableModelDetails: {
+          "gpt-5.6": {
+            capabilities: [],
+            contextWindowOptions: [400_000, 1_000_000],
+            id: "gpt-5.6",
+            selectedContextWindow: 1_000_000,
+            selectedReasoningLevel: "high",
+            supportedReasoningLevels: ["low", "high"],
+          },
+        },
+        toolbarStyle: "hybrid",
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId("plan-build-model-select"));
+    fireEvent.mouseEnter(document.querySelector('[data-model-id="gpt-5.6"]')!);
+    fireEvent.click(screen.getByTestId("model-edit-gpt-5.6"));
+
+    expect(
+      screen
+        .getAllByTestId("context-window-option")
+        .find((option) => option.textContent === "1M")
+        ?.querySelector('[aria-label="Selected"]'),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId("thinking-level-option")
+        .find((option) => option.textContent === "High")
+        ?.querySelector('[aria-label="Selected"]'),
+    ).toBeTruthy();
+  });
+
   it("resolves inline plan paths before sending openFile", async () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);

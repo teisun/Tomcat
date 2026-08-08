@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-08 09:45 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-08 21:39 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** ModelPicker 二次整改收口：子 Agent 继承会话 Effort（`ProdReviewer`/`Verifier` 经 `clamp_reasoning_level`）；`ask_question` 统一以 `toolCallId` 为身份并加诚实占位 `live`（历史 `[pending]` 被动、重臂后可答、sticky 只收 live）；Composer / Plan 卡 / Plan 预览三处经 `buildPickerModels` 叠加会话 Context+Effort；Settings 新建 relay 按名复用（`models.toml` 优先于内置）九字段预填、Context/Max output 只读默认 400K/128K，端点先精确匹配再启发式；Plan 预览 RPC 失败 toast；`SetContextWindow` trim；文档 `model-picker.md`（单档 Context、偏差表、§8 复用、ask_question 不变量）。暂缓官方 `gpt-5.6-*` 入 `models.toml`。版本 CLI `0.1.31 → 0.1.32`、扩展 `0.1.42 → 0.1.43`（`bundledCli=0.1.32`）。验证：扩展 core 365 + GUI 511、serve commands 85、plan/ask_question 集成、重臂握手回归、`release-version check`、纯插件 `tomcat-vscode-ext-0.1.43.vsix`。@2026-08-08
 - [✓] **[P0]** ModelPicker + Context/Effort 整改收口：Composer / Plan 卡共用单一 `ModelPicker`（固定宽列表、token 搜索、行内 `model id + effort`、始终可见 Edit、配置浮层 `createPortal` 左右竖中对齐且独立于列表）；`builtin_models.toml` 收录官方 `context_window_options`（默认档规则：满档 1M 不涨价用 1M，涨价用 400K；1.05M 并入 1M；去掉 `none` effort）；`model-thinking` 偏好改为 `{reasoning, context_window}` 对象（开发期不做旧串格式兼容）；Settings 新建中转站按 model name 拷贝内置档位/能力且 Context 不可手填；Webview 根挂 `WebviewErrorBoundary`；`package-vsix --skip-build` 增加预构建产物新鲜度门禁；`accept:image` 修 fake-serve `retain_attachment_leases` 与 macOS 窗口定位（弃用找 Electron 的 osascript）。版本 CLI `0.1.30 → 0.1.31`、扩展 `0.1.41 → 0.1.42`（`bundledCli=0.1.31`）。验证：相关 Rust admin/catalog/model_thinking/serve commands 与 GUI ModelPicker/Composer/Settings/Transcript 单测；fake-serve lease 单测；host E2E ModelPicker 与 image acceptance 路径。@2026-08-08
 - [✓] **[P0]** Ctx% 稳定水位整改：冷启动 / 重启后在首个 provider usage 前仍留空；一旦显示过，本进程 slot 生命周期内绝不再因“本轮没有新 usage”而变空。`StreamEvent::Usage` 到达即广播实测水位（早于工具执行）；后续 prompt、系统提示刷新、L0/L2/L3、`/compact`、`/restore` 与模型输入预算变化都广播最佳估算来原位更新已有水位。`providerUsageMeasured=true` 现严格表示本条 event 直接来自 provider usage，`false` 表示估算：它只能让已定基水位更新，不能让冷启动 slot 伪显示，也不能清空已有数字。`get_state` 继续只读 `SessionSlot.last_context_ratio`，不回读 `sessions.json`。验证覆盖 provider usage→工具执行时序、估算保持/冷启动留空、两条 prompt 的 usage pending、compact/rehydrate、模型预算切换、webview state 与 host E2E，Composer 固定宽度不跳版。@2026-08-06
 - [✓] **[P0]** Chat Completions 的移动 `EphemeralTail` 缓存退化已根治：runtime state 不再作为每轮末尾 `user` 出站，而由三 adapter 共用的 text-tail 提取规则归一化到各自 instruction 通道（Anthropic system suffix、Responses `instructions`、Chat Completions leading system）。Chat Completions 的非流式/流式共用 `transport_messages`，所以只改一处；无 system 会安全新建 leading system，tool/reasoning 历史顺序与 transcript metadata 均有回归锁定。真实 DeepSeek `deepseek-v4-pro` 六轮 Agent-shaped 探针：旧 user tail `11,648 → 11,648 → 11,648 → 14,080 → 16,512 → 19,072`，稳定 system tail `13,184 → 13,184 → 15,616 → 18,176 → 20,608 → 23,168`（r6 命中率 `74.6% → 90.3%`）；r3 单次 grant 变化 `3,072`、r4 恢复 `18,176`、r6 `23,168`。版本 CLI `0.1.28 → 0.1.29`、扩展 `0.1.39 → 0.1.40`（`bundledCli=0.1.29`）；验证：`cargo fmt --check`、`cargo test --lib`（2572 passed, 1 ignored）、三 adapter 单测、DeepSeek 真机探针、`release-version check` 与纯插件 `tomcat-vscode-ext-0.1.40.vsix`（无 `bin/tomcat`）通过。@2026-08-06
@@ -59,10 +60,15 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- `ask_question` webview：`WebviewApprovalCard.live`；timeline 身份统一为 `toolCallId`（`requestId` 仅路由）；历史 `[pending]` 不再伪造 `pending:` 门票；serve 重臂须在 `initialize` 之后发新 `control_request`。
+- 子 Agent：`ProdReviewerDeps` / verifier 注入 `model_prefs`，派发 `thinking_level` 继承会话 Effort 并夹取。
+- GUI：`buildPickerModels` 叠加会话 Context+Effort 至 Composer / PlanFileCard / PlanActionStrip；Settings `findReusableModelByName`（user 优先）+ `findConfiguredRelayByBaseUrl`；默认档 `DEFAULT_CONTEXT_WINDOW=400K` / `DEFAULT_MAX_OUTPUT_TOKENS=128K` 只读展示。
+- Plan 预览：`setContextWindow` / `setThinkingLevel` RPC 失败 `showErrorMessage`，成功才刷新。
 - 模型 Context 档位：`ModelEntry` / `ModelView` / serve schema / `wire.d.ts` / webview `types` 新增 `context_window_options` 与 `selected_context_window`；serve 命令 `set_context_window`；聊天 `/context`（`cmd_context`）；`model-thinking.json` 偏好值由裸 reasoning 字符串改为 `{ reasoning, context_window }` 对象（开发期不做旧格式读兼容）。
 - GUI：删除 `PlanBuildModelSelect`；Composer / Plan 卡共用 `ModelPicker`（含 portal 配置浮层）；Settings 中转站按内置 model name 继承 API/thinking/档位，Context Window 字段改为只读展示。
 - Webview 根组件挂载 `WebviewErrorBoundary`；`package-vsix --skip-build` 对预构建 gui/extension 产物做 mtime 新鲜度门禁。
-- 发布版本：CLI `0.1.31`、扩展 `0.1.42`、`bundledCliVersion=0.1.31`。
+- 发布版本：CLI `0.1.32`、扩展 `0.1.43`、`bundledCliVersion=0.1.32`。
+- 架构文档：`tomcat-vscode-ext/docs/architecture/model-picker.md`。
 - `context_metrics_update.providerUsageMeasured: boolean`：`true` 只表示**本条事件**直接由 provider usage 产生；`false` 表示最佳估算。消费者在从未收到 `true` 的 cold slot 上必须继续留空；已有基线时必须以 `false` 的 ratio 原位更新而非清空。wire 字段和 schema 不变，仅收紧语义。
 - OpenAI Responses：`build_responses_input` 将 `MessageKind::EphemeralTail` 合入顶层 `instructions` 并排除出 `input`；兼容路由的 `previous_response_id` continuity 以锚点 assistant 的后继索引裁剪 input，避免重复发送服务端已恢复的历史。`TOMCAT_PROMPT_PREFIX_FINGERPRINT=1` 仅输出 prompt 结构哈希，用于安全定位前缀漂移。
 - Anthropic wire：`MessageKind::EphemeralTail` 在出站时转为 `system` 后缀文本块（无独立 `cache_control`）；断点 B 停在稳定 system，D 打最新持久 wire 消息末尾；OpenAI Completions 保持 messages 尾部，Responses 走上述 instructions 提升。

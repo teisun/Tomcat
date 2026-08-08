@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SettingsModelView } from "../../../src/shared/settingsProtocol";
-import { findBuiltinModelByName } from "./modelBuiltinMatch";
+import { findReusableModelByName } from "./modelBuiltinMatch";
 
 function builtinModel(overrides: Partial<SettingsModelView> = {}): SettingsModelView {
   return {
@@ -23,9 +23,9 @@ function builtinModel(overrides: Partial<SettingsModelView> = {}): SettingsModel
   };
 }
 
-describe("findBuiltinModelByName", () => {
+describe("findReusableModelByName", () => {
   it("matches a relay-facing model name instead of its Tomcat id", () => {
-    const match = findBuiltinModelByName(
+    const match = findReusableModelByName(
       [builtinModel({ id: "gpt-5.6", modelName: "gpt-5.6" })],
       "gpt-5.6",
     );
@@ -43,17 +43,22 @@ describe("findBuiltinModelByName", () => {
       id: "utility-flash",
     });
 
-    expect(findBuiltinModelByName([first, second], "deepseek-v4-flash")).toBe(first);
+    expect(findReusableModelByName([first, second], "deepseek-v4-flash")).toBe(first);
   });
 
-  it("ignores user models and returns null for blank or unknown names", () => {
-    const models = [
-      builtinModel({ id: "relay/deepseek-v4-flash", source: "user" }),
-      builtinModel({ id: "deepseek-v4-pro", modelName: "deepseek-v4-pro" }),
-    ];
+  it("prefers the user's configured model over a built-in model with the same upstream name", () => {
+    const user = builtinModel({
+      id: "relay/deepseek-v4-flash",
+      provider: "existing-relay",
+      source: "user",
+    });
+    const builtIn = builtinModel();
 
-    expect(findBuiltinModelByName(models, "deepseek-v4-flash")).toBeNull();
-    expect(findBuiltinModelByName(models, "  ")).toBeNull();
-    expect(findBuiltinModelByName(models, "unknown")).toBeNull();
+    expect(findReusableModelByName([builtIn, user], "deepseek-v4-flash")).toBe(user);
+  });
+
+  it("returns null for blank or unknown names", () => {
+    expect(findReusableModelByName([], "  ")).toBeNull();
+    expect(findReusableModelByName([], "unknown")).toBeNull();
   });
 });

@@ -21,14 +21,20 @@ import {
   findMatchingProviderPreset,
   type ProviderPreset,
 } from "./providerPresets";
-import { findBuiltinModelByName } from "./modelBuiltinMatch";
-import { deriveRelayFields, RELAY_ID_SEPARATOR } from "./relayDerive";
+import { findReusableModelByName } from "./modelBuiltinMatch";
+import {
+  deriveRelayFields,
+  findConfiguredRelayByBaseUrl,
+  RELAY_ID_SEPARATOR,
+} from "./relayDerive";
 import { KeySlotCombobox, type KeySlotOption } from "./KeySlotCombobox";
 import { isValidKeySlotName } from "./keySlot";
 
 type FormState = SettingsModelInput;
 type FormMode = "create" | "edit";
 type DialogKind = "official" | "relay";
+const DEFAULT_CONTEXT_WINDOW = 400_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
 type SettingsDomAction = {
   kind: "clickTestId" | "setInputValue";
   testId?: string;
@@ -129,6 +135,17 @@ function normalizeOptionalText(
 
 function finiteNumberOrNull(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseReasoningLevels(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((level) => level.trim())
+        .filter(Boolean),
+    ),
+  );
 }
 
 function hasScheme(value: string): boolean {
@@ -666,20 +683,59 @@ export function SettingsApp({
       : null;
 
   const effectiveModelName = fieldText(form.modelName);
-  const builtinModelByName = useMemo(
-    () => findBuiltinModelByName(state.models, effectiveModelName),
+  const reusableModelByName = useMemo(
+    () => findReusableModelByName(state.models, effectiveModelName),
     [effectiveModelName, state.models],
   );
   // A relay id belongs to the gateway, while modelName identifies the upstream model.
-  // Only a fresh relay model inherits the upstream model's capability defaults.
-  const automaticBuiltinModel =
-    formMode === "create" && dialogKind === "relay" ? builtinModelByName : null;
+  // Reuse is a creation-time snapshot: a user's explicit models.toml entry
+  // wins over the embedded catalog, but neither changes an existing relay.
+  const automaticReusableModel =
+    formMode === "create" && dialogKind === "relay" ? reusableModelByName : null;
+  const endpointReuse =
+    formMode === "create" && dialogKind === "relay"
+      ? findConfiguredRelayByBaseUrl(state.models, form.baseUrl ?? "")
+      : null;
+  const relayAutofillSource = automaticReusableModel
+    ? `${automaticReusableModel.source}:${automaticReusableModel.id}`
+    : null;
+  const lastRelayAutofillSource = useRef<string | null>(null);
+
+  // A reuse match is a creation-time snapshot, not a permanent overlay.  Put
+  // its editable values into the draft once so every ordinary form control can
+  // subsequently override them.  Context and output limits remain calculated
+  // catalog values because those controls are intentionally read-only here.
+  useEffect(() => {
+    if (!isFormOpen || !relayAutofillSource || !automaticReusableModel) {
+      if (!isFormOpen) {
+        lastRelayAutofillSource.current = null;
+      }
+      return;
+    }
+    if (lastRelayAutofillSource.current === relayAutofillSource) {
+      return;
+    }
+    lastRelayAutofillSource.current = relayAutofillSource;
+    setForm((current) => ({
+      ...current,
+      api: automaticReusableModel.api,
+      capabilities: cloneCapabilities(automaticReusableModel.capabilities),
+      description: automaticReusableModel.description ?? null,
+      supportedReasoningLevels:
+        automaticReusableModel.supportedReasoningLevels ?? null,
+      thinkingFormat: automaticReusableModel.thinkingFormat ?? "",
+    }));
+  }, [
+    automaticReusableModel,
+    isFormOpen,
+    relayAutofillSource,
+  ]);
   const effectiveApi =
     dialogKind === "official"
       ? fieldText(form.api) || selectedPreset?.api || ""
-      : fieldText(form.api) || automaticBuiltinModel?.api || "openai";
+      : fieldText(form.api) || automaticReusableModel?.api || "openai";
   const effectiveCapabilities = cloneCapabilities(
-    automaticBuiltinModel?.capabilities ?? form.capabilities,
+    form.capabilities,
   );
   // The current Anthropic Messages adapter has no files attachment transport.
   // Keep inherited relay capabilities valid for the backend's mutable-model check.
@@ -699,7 +755,7 @@ export function SettingsApp({
   const effectiveProvider =
     dialogKind === "official"
       ? fieldText(form.provider) || selectedPreset?.provider || ""
-      : fieldText(form.provider) || relayDerived.provider;
+      : fieldText(form.provider) || endpointReuse?.provider || relayDerived.provider;
   const effectiveBaseUrl =
     dialogKind === "official"
       ? (normalizeBaseUrlInput(form.baseUrl) ?? selectedPreset?.baseUrl ?? null)
@@ -707,7 +763,7 @@ export function SettingsApp({
   const suggestedApiKeyEnv =
     dialogKind === "official"
       ? (selectedPreset?.apiKeyEnv ?? "")
-      : relayDerived.apiKeyEnv;
+      : endpointReuse?.apiKeyEnv ?? relayDerived.apiKeyEnv;
   const effectiveApiKeyEnv = fieldText(form.apiKeyEnv) || suggestedApiKeyEnv;
   const derivedId =
     dialogKind === "official" ? effectiveModelName : relayDerived.id;
@@ -716,32 +772,32 @@ export function SettingsApp({
     : fieldText(form.id) || derivedId;
   const normalizedContextWindow = finiteNumberOrNull(form.contextWindow);
   const automaticContextWindow = finiteNumberOrNull(
-    automaticBuiltinModel?.contextWindow,
+    automaticReusableModel?.contextWindow,
   );
   const effectiveContextWindow =
     formMode === "create"
-      ? (automaticContextWindow ?? normalizedContextWindow ?? 400_000)
-      : (normalizedContextWindow ?? automaticContextWindow ?? 400_000);
+      ? (automaticContextWindow ?? normalizedContextWindow ?? DEFAULT_CONTEXT_WINDOW)
+      : (normalizedContextWindow ?? automaticContextWindow ?? DEFAULT_CONTEXT_WINDOW);
   const normalizedMaxOutputTokens = finiteNumberOrNull(form.maxOutputTokens);
   const automaticMaxOutputTokens = finiteNumberOrNull(
-    automaticBuiltinModel?.maxOutputTokens,
+    automaticReusableModel?.maxOutputTokens,
   );
   const effectiveMaxOutputTokens =
-    normalizedMaxOutputTokens ?? automaticMaxOutputTokens;
+    normalizedMaxOutputTokens ?? automaticMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
   const effectiveContextWindowOptions =
     formMode === "create"
-      ? (automaticBuiltinModel?.contextWindowOptions ??
+      ? (automaticReusableModel?.contextWindowOptions ??
         form.contextWindowOptions ??
         null)
       : (form.contextWindowOptions ??
-        automaticBuiltinModel?.contextWindowOptions ??
+        automaticReusableModel?.contextWindowOptions ??
         null);
   const effectiveThinkingFormat =
     fieldText(form.thinkingFormat) ||
     (dialogKind === "official"
       ? (selectedPreset?.thinkingFormat ??
         defaultThinkingFormatForApi(effectiveApi))
-      : (automaticBuiltinModel?.thinkingFormat ??
+      : (automaticReusableModel?.thinkingFormat ??
         defaultThinkingFormatForApi(effectiveApi)));
   const effectiveModel: SettingsModelInput = normalizeModel({
     ...form,
@@ -755,10 +811,8 @@ export function SettingsApp({
     maxOutputTokens: effectiveMaxOutputTokens,
     modelName: effectiveModelName,
     provider: effectiveProvider,
-    supportedReasoningLevels:
-      form.supportedReasoningLevels ??
-      automaticBuiltinModel?.supportedReasoningLevels ??
-      null,
+    description: form.description,
+    supportedReasoningLevels: form.supportedReasoningLevels,
     thinkingFormat: effectiveThinkingFormat,
   });
 
@@ -1597,18 +1651,17 @@ export function SettingsApp({
                         <strong>{effectiveId || "—"}</strong>
                       </div>
                     </div>
-                    {automaticBuiltinModel ? (
+                    {automaticReusableModel ? (
                       <div
                         className="tc-settings-derived-model"
                         data-testid="settings-builtin-capability-source"
                       >
                         <strong>
-                          Capabilities from built-in {automaticBuiltinModel.id}
+                          Reusing {automaticReusableModel.source === "user" ? "configured" : "built-in"} {automaticReusableModel.id} model
                         </strong>
                         <span>
-                          Context tiers, maximum output, and reasoning levels
-                          are reused for this upstream model unless you override
-                          a value.
+                          Its model metadata is prefilled for this upstream model.
+                          You can change the editable fields before saving.
                         </span>
                       </div>
                     ) : null}
@@ -1791,34 +1844,16 @@ export function SettingsApp({
                               Settings always inherits the built-in default.
                             </small>
                           </div>
-                          <label className="tc-field">
+                          <div className="tc-settings-auto-field">
                             <span>Maximum output tokens</span>
-                            <input
-                              className="tc-input"
-                              data-testid="settings-max-output-tokens-input"
-                              inputMode="numeric"
-                              min="1"
-                              onChange={(event) =>
-                                setForm((current) => ({
-                                  ...current,
-                                  maxOutputTokens: event.target.value
-                                    ? Number(event.target.value)
-                                    : null,
-                                }))
-                              }
-                              placeholder={String(
-                                automaticMaxOutputTokens ?? 16384,
-                              )}
-                              step="1"
-                              type="number"
-                              value={normalizedMaxOutputTokens ?? ""}
-                            />
+                            <strong data-testid="settings-max-output-tokens-auto">
+                              {effectiveMaxOutputTokens}
+                            </strong>
                             <small className="tc-field__hint">
-                              {automaticMaxOutputTokens !== null
-                                ? `Leave empty to use the built-in value ${automaticMaxOutputTokens}.`
-                                : "Leave this empty to use Tomcat’s default output reserve."}
+                              Saved explicitly from the catalog or default; edit
+                              the model catalog to change it.
                             </small>
-                          </label>
+                          </div>
                         </div>
 
                         <label className="tc-field">
@@ -1860,6 +1895,46 @@ export function SettingsApp({
                             shape.
                           </small>
                         </label>
+
+                        <div className="tc-settings-form__row">
+                          <label className="tc-field">
+                            <span>Description</span>
+                            <input
+                              className="tc-input"
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  description: normalizeOptionalText(
+                                    event.target.value,
+                                  ),
+                                }))
+                              }
+                              placeholder="Optional model description"
+                              value={form.description ?? ""}
+                            />
+                          </label>
+                          <label className="tc-field">
+                            <span>Supported effort levels</span>
+                            <input
+                              className="tc-input"
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  supportedReasoningLevels: parseReasoningLevels(
+                                    event.target.value,
+                                  ),
+                                }))
+                              }
+                              placeholder="low, medium, high, xhigh"
+                              value={
+                                form.supportedReasoningLevels?.join(", ") ?? ""
+                              }
+                            />
+                            <small className="tc-field__hint">
+                              Comma-separated levels supported by this relay.
+                            </small>
+                          </label>
+                        </div>
 
                         <div className="tc-settings-capabilities">
                           {CAPABILITY_OPTIONS.map(([key, label]) => (

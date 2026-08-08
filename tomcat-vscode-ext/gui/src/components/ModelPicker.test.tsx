@@ -161,6 +161,31 @@ describe("ModelPicker", () => {
     expect(screen.queryByTestId("model-dropdown")).toBeNull();
   });
 
+  it("keeps Edit reachable even when a model exposes no configurable capability", () => {
+    renderPicker({
+      models: [
+        {
+          id: "no-options",
+          modelName: "No options",
+        },
+      ],
+      selectedModelId: "no-options",
+    });
+    fireEvent.click(screen.getByTestId("model-select"));
+    const option = screen
+      .getByTestId("model-dropdown")
+      .querySelector<HTMLElement>('[data-model-id="no-options"]');
+    expect(option).toBeTruthy();
+    if (!(option instanceof HTMLElement)) {
+      throw new Error("Expected the no-options model row.");
+    }
+    fireEvent.mouseEnter(option);
+
+    expect(
+      within(option).getByRole("button", { name: /edit no options/i }),
+    ).toBeTruthy();
+  });
+
   it("portals the configuration beside its source row, centers it vertically, clamps it, and closes on scroll", () => {
     const originalInnerWidth = window.innerWidth;
     const originalInnerHeight = window.innerHeight;

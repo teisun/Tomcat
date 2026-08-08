@@ -34,6 +34,7 @@ function buildItem(
 ): WebviewApprovalCard {
   return {
     id: "approval-1",
+    live: true,
     request: {
       questions,
       requestId: "request-1",
@@ -97,6 +98,19 @@ describe("ApprovalCard", () => {
     );
 
     expect(container.innerHTML).toBe("");
+  });
+
+  it("renders a passive restoring card without answer controls for history-only approvals", () => {
+    render(
+      <ControlledApprovalCard
+        item={buildItem([buildQuestion("q1", "Proceed?")], { live: false })}
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("approval-card-restoring")).toBeTruthy();
+    expect(screen.queryByTestId("approval-continue")).toBeNull();
+    expect(screen.queryByTestId("approval-skip")).toBeNull();
   });
 
   it("keeps Continue disabled until every question is answered", () => {

@@ -452,6 +452,7 @@ interface ComposerProps {
   contextSearchMatches: ContextSearchMatch[];
   contextSearchQuery: string;
   contextSearchTruncated: boolean;
+  contextWindowValue?: number | null;
   contextLabel: string;
   modelCapabilities?: string[] | undefined;
   modeValue: "chat" | "plan";
@@ -488,6 +489,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   contextSearchMatches,
   contextSearchQuery,
   contextSearchTruncated,
+  contextWindowValue,
   contextLabel,
   modelCapabilities,
   modeValue,
@@ -806,12 +808,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
         availableModels,
         selectedModelId: modelValue,
+        sessionContextWindow: contextWindowValue,
         sessionThinkingLevel: thinkingLevelValue,
       }),
     [
       availableModelDetails,
       availableModelReasoningLevels,
       availableModels,
+      contextWindowValue,
       modelValue,
       supportedReasoningLevels,
       thinkingLevelValue,

@@ -3,6 +3,7 @@ import { createRef } from "react";
 import { beforeAll, describe, expect, it, type Mock, vi } from "vitest";
 
 import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
+import type { ModelPickerModel } from "./ModelPicker";
 
 type DraftChange = (draft: {
   hasContent: boolean;
@@ -41,6 +42,7 @@ vi.mock("../attachments/imagePipeline", () => ({
 }));
 
 function renderComposer({
+  availableModelDetails,
   availableModels = ["gpt-5.4"],
   busy = false,
   canInterrupt = true,
@@ -50,6 +52,7 @@ function renderComposer({
   contextSearchMatches = [],
   contextSearchQuery = "",
   contextSearchTruncated = false,
+  contextWindowValue,
   modelCapabilities = ["vision", "files"],
   modelValue = "gpt-5.4",
   modeValue = "plan",
@@ -71,6 +74,7 @@ function renderComposer({
   supportedReasoningLevels = ["low", "medium", "high", "xhigh"],
   thinkingLevelValue = "high",
 }: {
+  availableModelDetails?: Record<string, ModelPickerModel>;
   availableModels?: string[];
   busy?: boolean;
   canInterrupt?: boolean;
@@ -91,6 +95,7 @@ function renderComposer({
   }>;
   contextSearchQuery?: string;
   contextSearchTruncated?: boolean;
+  contextWindowValue?: number | null;
   modelCapabilities?: string[];
   modelValue?: string;
   modeValue?: "chat" | "plan";
@@ -119,6 +124,7 @@ function renderComposer({
   const ref = createRef<ComposerHandle>();
   const renderResult = render(
     <Composer
+      availableModelDetails={availableModelDetails}
       availableModels={availableModels}
       busy={busy}
       canInterrupt={canInterrupt}
@@ -127,6 +133,7 @@ function renderComposer({
       contextSearchMatches={contextSearchMatches}
       contextSearchQuery={contextSearchQuery}
       contextSearchTruncated={contextSearchTruncated}
+      contextWindowValue={contextWindowValue}
       contextLabel={contextLabel}
       modelCapabilities={modelCapabilities}
       modeValue={modeValue}
@@ -325,6 +332,40 @@ describe("Composer", () => {
     expect(
       screen.getAllByTestId("thinking-level-option").map((node) => node.textContent),
     ).toEqual(["High", "Max"]);
+  });
+
+  it("overlays the active session context and effort onto its picker model", () => {
+    renderComposer({
+      availableModelDetails: {
+        "gpt-5.4": {
+          contextWindowOptions: [400_000, 1_000_000],
+          id: "gpt-5.4",
+          selectedContextWindow: 400_000,
+          selectedReasoningLevel: "low",
+          supportedReasoningLevels: ["low", "high"],
+        },
+      },
+      contextWindowValue: 1_000_000,
+      supportedReasoningLevels: ["low", "high"],
+      thinkingLevelValue: "high",
+    });
+
+    fireEvent.click(screen.getByTestId("model-select"));
+    fireEvent.mouseEnter(document.querySelector('[data-model-id="gpt-5.4"]')!);
+    fireEvent.click(screen.getByTestId("model-edit-gpt-5.4"));
+
+    expect(
+      screen
+        .getAllByTestId("context-window-option")
+        .find((option) => option.textContent === "1M")
+        ?.querySelector('[aria-label="Selected"]'),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId("thinking-level-option")
+        .find((option) => option.textContent === "High")
+        ?.querySelector('[aria-label="Selected"]'),
+    ).toBeTruthy();
   });
 
   it("keeps Edit available when the model exposes no reasoning tiers", () => {

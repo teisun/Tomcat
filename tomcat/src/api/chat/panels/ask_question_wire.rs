@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::core::plan_runtime::panels::{
     Answer, AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
@@ -258,6 +259,7 @@ pub fn ask_question_response_event_name(request_id: &str) -> String {
 /// `plan.ask_question`，并向 request 指定的 `response_event` 回包即可。
 pub struct EventBusAskQuestionPanel {
     event_bus: Arc<dyn EventBus>,
+    request_id_instance: String,
     request_emitter: ScopedEventEmitter,
     next_request_seq: AtomicU64,
     request_id_prefix: String,
@@ -268,6 +270,7 @@ impl EventBusAskQuestionPanel {
         Self {
             request_emitter: ScopedEventEmitter::new_optional(event_bus.clone(), None),
             event_bus,
+            request_id_instance: Uuid::new_v4().simple().to_string(),
             next_request_seq: AtomicU64::new(0),
             request_id_prefix: "askq".to_string(),
         }
@@ -285,7 +288,10 @@ impl EventBusAskQuestionPanel {
 
     fn next_request_id(&self) -> String {
         let seq = self.next_request_seq.fetch_add(1, Ordering::Relaxed);
-        format!("{}-{seq}", self.request_id_prefix)
+        format!(
+            "{}-{}-{seq}",
+            self.request_id_prefix, self.request_id_instance
+        )
     }
 }
 

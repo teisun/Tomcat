@@ -49,16 +49,26 @@ function isStringArray(value: unknown): value is string[] {
   );
 }
 
-function isApprovalOption(value: unknown): value is WebviewApprovalOption {
+type TranscriptApprovalOption = Omit<WebviewApprovalOption, "recommended"> & {
+  recommended?: boolean | null;
+};
+
+type TranscriptApprovalQuestion = Omit<WebviewApprovalQuestion, "options"> & {
+  options: TranscriptApprovalOption[];
+};
+
+function isApprovalOption(value: unknown): value is TranscriptApprovalOption {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
     typeof value.label === "string" &&
-    (value.recommended === undefined || typeof value.recommended === "boolean")
+    (value.recommended === undefined ||
+      value.recommended === null ||
+      typeof value.recommended === "boolean")
   );
 }
 
-function isApprovalQuestion(value: unknown): value is WebviewApprovalQuestion {
+function isApprovalQuestion(value: unknown): value is TranscriptApprovalQuestion {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
@@ -679,7 +689,17 @@ function parseApprovalQuestions(
     return null;
   }
   const parsed = questions.filter(isApprovalQuestion);
-  return parsed.length === questions.length ? parsed : null;
+  return parsed.length === questions.length
+    ? parsed.map((question) => ({
+        ...question,
+        options: question.options.map((option) => ({
+          ...option,
+          // Older transcripts may serialize an absent recommendation as null.
+          // Normalize at the protocol boundary so renderers only see booleans.
+          recommended: option.recommended === true,
+        })),
+      }))
+    : null;
 }
 
 function parseAskQuestionResult(

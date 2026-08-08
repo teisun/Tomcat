@@ -127,7 +127,9 @@ export interface PlanFileCardModelPicker {
   onSelectContextWindow(modelId: string, contextWindow: number): void;
   onSelectThinkingLevel(modelId: string, level: string): void;
   onSetBuildModel(modelId: string): void;
+  sessionContextWindow?: number | null;
   sessionModel?: string;
+  sessionThinkingLevel?: string | null;
 }
 
 function PlanFileCardComponent({
@@ -158,6 +160,8 @@ function PlanFileCardComponent({
         availableModelDetails: modelPicker.availableModelDetails,
         availableModels: modelPicker.availableModels,
         selectedModelId,
+        sessionContextWindow: modelPicker.sessionContextWindow,
+        sessionThinkingLevel: modelPicker.sessionThinkingLevel,
       })
     : [];
 

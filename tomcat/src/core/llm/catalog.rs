@@ -10,8 +10,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::thinking_policy::{
-    normalize_supported_reasoning_levels, safe_supported_reasoning_levels_for,
+    clamp_reasoning_level, normalize_supported_reasoning_levels,
+    safe_supported_reasoning_levels_for, ThinkingLevel,
 };
+use crate::core::session::ModelPrefsStore;
 use crate::infra::config::{get_work_dir, AppConfig, ContextConfig};
 use crate::infra::error::AppError;
 
@@ -288,6 +290,26 @@ impl SharedModelCatalog {
     pub fn with_catalog<R>(&self, f: impl FnOnce(&ModelCatalog) -> R) -> R {
         let snapshot = self.snapshot();
         f(snapshot.as_ref())
+    }
+
+    /// Resolves the user's requested effort for a model, clamping it to the
+    /// model's advertised capability when that model is known to the catalog.
+    ///
+    /// Keep this in the shared catalog boundary: every agent path must apply
+    /// the same preference lookup and capability clamp, rather than each
+    /// caller reimplementing (or forgetting) one half of the policy.
+    pub fn resolve_reasoning_level(
+        &self,
+        prefs: &ModelPrefsStore,
+        model_id: &str,
+    ) -> ThinkingLevel {
+        self.with_catalog(|catalog| {
+            let requested = prefs.reasoning_for(model_id);
+            catalog
+                .lookup_explicit(model_id)
+                .map(|entry| clamp_reasoning_level(requested, &entry.supported_reasoning_levels))
+                .unwrap_or(requested)
+        })
     }
 
     pub fn generation(&self) -> u64 {

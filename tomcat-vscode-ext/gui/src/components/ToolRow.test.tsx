@@ -998,6 +998,53 @@ describe("ToolRow", () => {
     ).toContain("Staging");
   });
 
+  it.each([
+    ["omitted", undefined, false],
+    ["null", null, false],
+    ["false", false, false],
+    ["true", true, true],
+  ] as const)(
+    "normalizes a %s ask_question recommendation from the transcript",
+    (_label, recommended, showsRecommended) => {
+      render(
+        <ToolRow
+          item={buildTool({
+            args: {
+              questions: [
+                {
+                  id: "recommendation",
+                  options: [{ id: "option", label: "Option", recommended }],
+                  prompt: "Choose an option",
+                },
+              ],
+            },
+            summary: JSON.stringify({
+              answers: [
+                {
+                  option_ids: ["option"],
+                  picked_recommended: showsRecommended,
+                  question_id: "recommendation",
+                },
+              ],
+              cancelled: false,
+            }),
+            toolName: "ask_question",
+          })}
+          onOpenFile={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId("answer-card-question").textContent).toContain(
+        "Choose an option",
+      );
+      if (showsRecommended) {
+        expect(screen.getByText("Recommended")).toBeTruthy();
+      } else {
+        expect(screen.queryByText("Recommended")).toBeNull();
+      }
+    },
+  );
+
   it("commandBinaries parses, dedupes and caps command-name tags", () => {
     expect(commandBinaries("git status")).toEqual(["git"]);
     expect(commandBinaries("git status && echo '---' && git log")).toEqual([

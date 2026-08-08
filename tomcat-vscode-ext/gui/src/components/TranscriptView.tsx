@@ -141,7 +141,9 @@ export function TranscriptView({
   planId,
   planState,
   planTodos = [],
+  sessionContextWindow,
   sessionModel = "",
+  sessionThinkingLevel,
   sessionTodos = [],
   timeline,
   mediaRoots,
@@ -178,7 +180,9 @@ export function TranscriptView({
   planId?: string | null;
   planState?: WebviewPlanFileState | null;
   planTodos?: WebviewTodo[];
+  sessionContextWindow?: number | null;
   sessionModel?: string;
+  sessionThinkingLevel?: string | null;
   sessionTodos?: WebviewTodo[];
   timeline: WebviewTimelineItem[];
   mediaRoots?: WebviewMediaRoot[];
@@ -209,7 +213,9 @@ export function TranscriptView({
       onSelectContextWindow,
       onSelectThinkingLevel,
       onSetBuildModel,
+      sessionContextWindow,
       sessionModel,
+      sessionThinkingLevel,
     };
 
     const renderTool = (

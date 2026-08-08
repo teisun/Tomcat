@@ -249,6 +249,59 @@ describe("PlanFileCard", () => {
     expect(screen.getByLabelText("Model")).toBeTruthy();
   });
 
+  it("overlays the active session's context and effort in its model picker", () => {
+    render(
+      <PlanFileCard
+        canBuild
+        item={{
+          id: "plan-session-overlay",
+          path: "/tmp/session-overlay.plan.md",
+          planId: "pso",
+          state: "planning",
+          type: "plan",
+        }}
+        modelPicker={{
+          availableModelDetails: {
+            "gpt-5.6": {
+              contextWindowOptions: [400_000, 1_000_000],
+              id: "gpt-5.6",
+              selectedContextWindow: 400_000,
+              selectedReasoningLevel: "low",
+              supportedReasoningLevels: ["low", "high"],
+            },
+          },
+          availableModels: ["gpt-5.6"],
+          buildModel: "gpt-5.6",
+          onSelectContextWindow: vi.fn(),
+          onSelectThinkingLevel: vi.fn(),
+          onSetBuildModel: vi.fn(),
+          sessionContextWindow: 1_000_000,
+          sessionModel: "gpt-5.6",
+          sessionThinkingLevel: "high",
+        }}
+        onBuild={() => undefined}
+        onOpenPlanFile={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("plan-card-build-model"));
+    fireEvent.mouseEnter(document.querySelector('[data-model-id="gpt-5.6"]')!);
+    fireEvent.click(screen.getByTestId("model-edit-gpt-5.6"));
+
+    expect(
+      screen
+        .getAllByTestId("context-window-option")
+        .find((option) => option.textContent === "1M")
+        ?.querySelector('[aria-label="Selected"]'),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId("thinking-level-option")
+        .find((option) => option.textContent === "High")
+        ?.querySelector('[aria-label="Selected"]'),
+    ).toBeTruthy();
+  });
+
   it("omits the build-model dropdown when picker callbacks are unavailable", () => {
     render(
       <PlanFileCard

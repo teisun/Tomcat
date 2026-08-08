@@ -310,6 +310,7 @@ export interface AskQuestionResult {
 
 export interface WebviewApprovalCard {
   id: string;
+  live: boolean;
   request: {
     questions: WebviewApprovalQuestion[];
     requestId: string;

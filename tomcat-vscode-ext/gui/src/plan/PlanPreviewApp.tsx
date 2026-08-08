@@ -520,6 +520,7 @@ export function PlanPreviewApp({
   }
 
   const isHybrid = state.toolbarStyle === "hybrid";
+  const sessionModelDetails = state.availableModelDetails[state.sessionModel];
 
   return (
     <div className="tc-plan-preview">
@@ -546,7 +547,9 @@ export function PlanPreviewApp({
               type: "setThinkingLevel",
             })
           }
+          sessionContextWindow={sessionModelDetails?.selectedContextWindow}
           sessionModel={state.sessionModel}
+          sessionThinkingLevel={sessionModelDetails?.selectedReasoningLevel}
         />
       ) : null}
       <main

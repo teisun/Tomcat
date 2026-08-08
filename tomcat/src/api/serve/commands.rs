@@ -1106,6 +1106,7 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
+            let model = model.trim().to_string();
             let entry = match slot
                 .ctx
                 .global_services
