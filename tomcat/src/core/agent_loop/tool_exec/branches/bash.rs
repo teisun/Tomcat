@@ -104,8 +104,8 @@ pub(in super::super) async fn handle_bash(
                     "logPath": ticket.log_path,
                     "recentOutput": chunk.content,
                     "nextActions": [
+                        {"when":"You do NOT strictly depend on this result for your next step (DEFAULT — prefer this)","action":"Go start other independent work now instead of waiting. The task keeps running; when it finishes, a <background-task-finished> signal carrying its exit_code and a log tail is auto-injected as a system message — react to it then. The task_id and log_path above let you pull more via task_output only if that tail is not enough. Do NOT rerun the command."},
                         {"when":"The result is needed now","tool":"task_output","arguments":{"task_id":ticket.task_id,"block":true,"wait_ms":30000}},
-                        {"when":"Independent work remains","action":"Continue that work and wait for the background completion notification"},
                         {"when":"The task is stuck, wrong, or no longer useful","tool":"task_stop","arguments":{"task_id":ticket.task_id}}
                     ],
                     "message": "Foreground wait ended; the command is still running. Do not rerun it."

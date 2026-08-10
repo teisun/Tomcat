@@ -163,6 +163,9 @@ async fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_pat
             plan_id: None,
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "step1".into(),
                 content: None,

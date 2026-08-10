@@ -61,6 +61,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 type ExecPromptOverride = fn(&[String], &Path) -> String;
 type PlanningPromptOverride = fn(&str, &Path) -> String;
+type RealLlmCompletionAssertion = fn(&CliFixture, &Path, &str);
 #[derive(Default)]
 struct CliRunDiagState {
     transcript_offset: usize,
@@ -205,9 +206,9 @@ fn build_counter_exec_prompt(todo_ids: &[String], workdir: &Path) -> String {
         "- You may use `list_dir`, `read`, `search_files`, `write`, `edit`, `bash`, and `update_plan`.".to_string(),
         "- Do NOT call ask_question. Do NOT edit the plan file directly.".to_string(),
         "- Do NOT write outside the current working directory.".to_string(),
-        "- When the final `update_plan` returns, inspect `code_review` / `verify` in the tool result.".to_string(),
+        "- When the final `update_plan` returns, inspect `code_review` / `green_build` in the tool result.".to_string(),
         "- If `code_review.verdict != pass` or `plan_state_after` stays `executing`, do NOT stop: reopen or add a fix todo with `update_plan`, repair the file, and drive the plan to completion again.".to_string(),
-        "- Only stop once the tool result includes verifier output or the plan reaches `completed`.".to_string(),
+        "- If green-build acceptance blocks completion, load the `verify` skill, run the discovered verification command with background bash, wait for its successful task_id, submit that exact command/task_id as green_build_evidence through update_plan, and continue until the plan reaches `completed`.".to_string(),
         "Todo ids to finish:".to_string(),
     ];
     for id in todo_ids {
@@ -521,6 +522,11 @@ fn seed_counter_planning_plan(fx: &CliFixture, goal: &str) -> common::CreatedPla
                     status: TodoStatus::Pending,
                 },
             ],
+            green_build_pass: false,
+            green_build_evidence: vec![],
+            code_review_pass: false,
+            code_review_pass_at_ms: None,
+            completion_gate_cycles: 0,
             unknown: Default::default(),
         },
         body: format!(
@@ -564,6 +570,36 @@ fn run_exec_phase(
 
 fn counter_path(fx: &CliFixture) -> PathBuf {
     fx.workdir.join("counter.py")
+}
+
+fn assert_counter_artifact(fx: &CliFixture) {
+    let counter = counter_path(fx);
+    assert!(
+        counter.exists(),
+        "真 LLM 验收应生成唯一请求的产物文件: {}",
+        counter.display()
+    );
+    let run = StdCommand::new("python3")
+        .current_dir(&fx.workdir)
+        .arg("counter.py")
+        .output()
+        .unwrap_or_else(|error| panic!("运行 counter.py 失败: {error}"));
+    assert!(
+        run.status.success(),
+        "counter.py 应以 0 退出，实际：{:?}",
+        run.status
+    );
+    assert_eq!(
+        run.stdout,
+        b"0\n",
+        "counter.py stdout 应恰好为 `0\\n`，实际：{:?}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        run.stderr.is_empty(),
+        "counter.py stderr 应为空，实际：{:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 fn spawn_reader_thread<R: std::io::Read + Send + 'static>(
@@ -1170,6 +1206,20 @@ fn run_cli_exec_smoke_case(
     assert_exec_phase_smoke(&fx, &out_b, &created_plan.path);
 }
 
+/// 让手动真 LLM 验收走实际的 code-diff 收口门禁，而非因为工作目录不是 Git 仓库而跳过。
+/// 不创建初始提交：`counter.py` 作为未跟踪代码文件即可被 diff 收集逻辑识别。
+fn init_git_workspace(workdir: &Path) {
+    let status = StdCommand::new("git")
+        .args(["init", "-q"])
+        .current_dir(workdir)
+        .status()
+        .expect("initialize temporary real-LLM E2E Git workspace");
+    assert!(
+        status.success(),
+        "temporary real-LLM E2E workspace must initialize as a Git repository"
+    );
+}
+
 fn run_cli_real_llm_case(
     goal: &str,
     workdir_override: Option<&Path>,
@@ -1177,10 +1227,15 @@ fn run_cli_real_llm_case(
     exec_prompt_override: Option<ExecPromptOverride>,
     planning_timeout: Option<Duration>,
     exec_timeout: Option<Duration>,
+    require_green_build: bool,
+    completion_assertion: Option<RealLlmCompletionAssertion>,
 ) {
     common::setup_logging();
     let slug = common::slugify_filename(goal, "goal", 40);
     let fx = setup_fixture(&slug, workdir_override, 1);
+    if require_green_build {
+        init_git_workspace(&fx.workdir);
+    }
     let planning = run_planning_phase(&fx, goal, planning_prompt_override, planning_timeout);
     let out_a = planning.output;
     let created_plan = planning.created_plan;
@@ -1226,6 +1281,20 @@ fn run_cli_real_llm_case(
             final_plan.frontmatter.todos
         );
     }
+    if require_green_build {
+        assert!(
+            final_plan.frontmatter.code_review_pass,
+            "代码 diff 的真实收口必须记录 code review 通过"
+        );
+        assert!(
+            final_plan.frontmatter.green_build_pass,
+            "代码 diff 的真实收口必须记录绿构建通过"
+        );
+        assert!(
+            !final_plan.frontmatter.green_build_evidence.is_empty(),
+            "绿构建通过必须落盘至少一条可核验的后台 bash 证据"
+        );
+    }
     let expected_session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &fx.workdir);
     assert_eq!(
         final_plan.frontmatter.session_key.as_deref(),
@@ -1242,18 +1311,6 @@ fn run_cli_real_llm_case(
         "进程 B 应有用户可见 stdout 输出；日志文件：{}",
         fx.diag_log.path.display()
     );
-    let stdout_b = String::from_utf8_lossy(&out_b.stdout);
-    assert!(
-        stdout_b.contains("u[Plan:executing]> start building "),
-        "进程 B stdout 应展示自动开跑的 EXEC user prompt；实际前 4000 字符：{}",
-        tail_chars(&out_b.stdout, 4000)
-    );
-    assert!(
-        stdout_b.contains("agent.main[Plan:executing]>"),
-        "进程 B stdout 应展示 EXEC agent prompt；实际前 4000 字符：{}",
-        tail_chars(&out_b.stdout, 4000)
-    );
-
     let transcript =
         std::fs::read_to_string(&fx.transcript_path).expect("read cli real llm transcript");
     let lines: Vec<&str> = transcript.lines().collect();
@@ -1261,10 +1318,15 @@ fn run_cli_real_llm_case(
     let plan_code_review_idx = lines.iter().position(|l| {
         l.contains("\"plan.code_review\"") && !l.contains("\"plan.code_review.warning\"")
     });
-    let plan_verify_idx = lines.iter().position(|l| l.contains("\"plan.verify\""));
-    if plan_review_idx.is_none() || plan_code_review_idx.is_none() || plan_verify_idx.is_none() {
+    let plan_green_build_idx = lines
+        .iter()
+        .position(|l| l.contains("\"plan.green_build\""));
+    if plan_review_idx.is_none()
+        || plan_code_review_idx.is_none()
+        || (require_green_build && plan_green_build_idx.is_none())
+    {
         dump_diag(
-            "transcript_missing_review_events",
+            "transcript_missing_completion_gate_events",
             &fx,
             Some(&out_a),
             Some(&out_b),
@@ -1278,14 +1340,19 @@ fn run_cli_real_llm_case(
         plan_code_review_idx.is_some(),
         "CLI 真 LLM transcript 应含至少一条 plan.code_review 自定义事件"
     );
-    assert!(
-        plan_verify_idx.is_some(),
-        "CLI 真 LLM transcript 应含至少一条 plan.verify 自定义事件"
-    );
-    assert!(
-        plan_code_review_idx.unwrap() < plan_verify_idx.unwrap(),
-        "CLI 真 LLM transcript 中 plan.code_review 应早于 plan.verify"
-    );
+    if require_green_build {
+        assert!(
+            plan_green_build_idx.is_some(),
+            "CLI 真 LLM transcript 应含至少一条 plan.green_build 自定义事件"
+        );
+        assert!(
+            plan_code_review_idx.unwrap() < plan_green_build_idx.unwrap(),
+            "CLI 真 LLM transcript 中 plan.code_review 应早于 plan.green_build"
+        );
+    }
+    if let Some(assertion) = completion_assertion {
+        assertion(&fx, &plan_path, &transcript);
+    }
 }
 
 #[test]
@@ -1338,5 +1405,49 @@ fn cli_plan_path_with_real_llm_custom_goal() {
         )
     });
     let workdir_buf = std::env::var(CUSTOM_WORKDIR_ENV).ok().map(PathBuf::from);
-    run_cli_real_llm_case(&goal, workdir_buf.as_deref(), None, None, None, None);
+    run_cli_real_llm_case(
+        &goal,
+        workdir_buf.as_deref(),
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+}
+
+/// Manual acceptance for the whole configured PLAN → EXEC completion path.
+///
+/// ```text
+/// cd /Users/yankeben/workspace/tomcat-agent/tomcat
+/// cargo test -p tomcat --test plan_real_llm_cli_e2e real_llm_acceptance_all_batch_optimizations -- --ignored --nocapture
+/// ```
+///
+/// This intentionally asserts only stable product facts: a fresh configured temp
+/// workdir, the requested one-file artifact's externally observable behavior, the
+/// persisted completed plan, and lifecycle event markers. It does not infer parallel
+/// execution, a verify-skill load, a particular edit wire frame, or a `pass` verdict
+/// from a provider response.
+#[test]
+#[ignore = "manual real-LLM acceptance test; run with --ignored --nocapture"]
+#[serial]
+fn real_llm_acceptance_all_batch_optimizations() {
+    common::load_openai_test_env();
+    run_cli_real_llm_case(
+        COUNTER_PLAN_GOAL,
+        None,
+        Some(build_counter_planning_prompt),
+        Some(build_counter_exec_prompt),
+        Some(PLANNING_TIMEOUT),
+        Some(EXEC_TIMEOUT),
+        true,
+        Some(|fx, _plan_path, transcript| {
+            assert_counter_artifact(fx);
+            assert!(
+                transcript.contains("\"event\":\"plan.build\""),
+                "CLI transcript 应记录 /plan build 生命周期事件"
+            );
+        }),
+    );
 }

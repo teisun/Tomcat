@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use base64::Engine as _;
 use tokio_util::sync::CancellationToken;
@@ -19,8 +20,10 @@ use crate::core::llm::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, MessageKind, ReasoningContinuation,
     ReasoningFormat, StreamEvent,
 };
+use crate::core::plan_runtime::file_store::PlanFileState;
+use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{estimate_msg_chars, ContextState, MessageAppendSink};
-use crate::infra::error::{llm_http_status_error, AppError};
+use crate::infra::error::{llm_error, llm_http_status_error, AppError, LlmError, LlmErrorStage};
 use crate::infra::event_bus::EventBus;
 use crate::infra::{wire, DefaultEventBus, EventContext};
 
@@ -264,6 +267,365 @@ async fn run_retries_on_429_then_succeeds() {
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "OK");
+}
+
+#[tokio::test]
+async fn run_unattended_transport_retries_past_interactive_budget_without_manual_resume() {
+    let mut streams = (0..4)
+        .map(|_| {
+            vec![Err(llm_error(
+                "mock",
+                LlmErrorStage::Connect,
+                "connection reset before response",
+            ))]
+        })
+        .collect::<Vec<_>>();
+    streams.push(ok_text_stream("RECOVERED_AUTONOMOUSLY"));
+    let (provider, requests) = RecordingStreamLlmProvider::new(streams);
+
+    let plan_runtime = PlanRuntime::new("unattended-transport-retry");
+    plan_runtime.seed_active_plan_for_test(
+        "unattended-transport-retry-plan".to_string(),
+        PlanFileState::Executing,
+    );
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let retry_events = Arc::clone(&retry_events);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |ctx: EventContext| {
+                retry_events.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+    }
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            // The fifth request is past the interactive budget of four.
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "unattended-transport-retry".to_string(),
+            plan_runtime: Some(plan_runtime),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_
+        .run(vec![ChatMessage::user("continue execution")])
+        .await;
+
+    let AgentRunOutcome::Completed(result) = outcome else {
+        panic!("transient transport failure should recover in the same unattended run");
+    };
+    assert_eq!(result.final_text, "RECOVERED_AUTONOMOUSLY");
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        5,
+        "the agent must issue the fifth request itself, without a user resume"
+    );
+    let retry_events = retry_events.lock().unwrap().clone();
+    assert_eq!(
+        retry_events
+            .iter()
+            .map(|event| event["attempt"].as_u64())
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(3), Some(4), Some(5)]
+    );
+    assert!(
+        retry_events
+            .iter()
+            .all(|event| event["maxAttempts"].as_u64() == Some(10)),
+        "unattended transport retries must advertise their elevated budget: {retry_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn run_unattended_billing_429_stops_without_elevated_retries() {
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![vec![Err(llm_http_status_error(
+            "mock",
+            429,
+            r#"{"error":{"code":"insufficient_quota","message":"insufficient credits"}}"#,
+        ))]]);
+    let plan_runtime = PlanRuntime::new("unattended-billing-retry");
+    plan_runtime.seed_active_plan_for_test(
+        "unattended-billing-retry-plan".to_string(),
+        PlanFileState::Executing,
+    );
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let retry_events = Arc::clone(&retry_events);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |ctx: EventContext| {
+                retry_events.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+    }
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "unattended-billing-retry".to_string(),
+            plan_runtime: Some(plan_runtime),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_
+        .run(vec![ChatMessage::user("continue execution")])
+        .await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Failed(_)),
+        "insufficient quota is an account failure, not a transient retry"
+    );
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        1,
+        "billing must not consume the elevated unattended transport budget"
+    );
+    assert!(
+        retry_events.lock().unwrap().is_empty(),
+        "billing must not emit a waiting/retry notification"
+    );
+}
+
+#[tokio::test]
+async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
+    let streams = (0..10)
+        .map(|_| {
+            vec![Err(llm_error(
+                "mock",
+                LlmErrorStage::Connect,
+                "connection reset before response",
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let (provider, requests) = RecordingStreamLlmProvider::new(streams);
+    let plan_runtime = PlanRuntime::new("unattended-transport-exhaustion");
+    plan_runtime.seed_active_plan_for_test(
+        "unattended-transport-exhaustion-plan".to_string(),
+        PlanFileState::Executing,
+    );
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_starts = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let retry_ends = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let retry_starts = Arc::clone(&retry_starts);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |ctx: EventContext| {
+                retry_starts.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+    }
+    {
+        let retry_ends = Arc::clone(&retry_ends);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_END,
+            Box::new(move |ctx: EventContext| {
+                retry_ends.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+    }
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "unattended-transport-exhaustion".to_string(),
+            plan_runtime: Some(plan_runtime),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        loop_.run(vec![ChatMessage::user("continue execution")]),
+    )
+    .await
+    .expect("elevated retries must terminate instead of hanging");
+
+    assert!(
+        matches!(
+            &outcome,
+            AgentRunOutcome::Failed(error)
+                if crate::infra::error::llm_stage(error) == Some(LlmErrorStage::Connect)
+        ),
+        "exhausting the elevated transport budget must surface the terminal LoopError::Fatal: {outcome:?}"
+    );
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        10,
+        "the unattended budget includes the initial request and must not issue an eleventh request"
+    );
+    let retry_starts = retry_starts.lock().unwrap().clone();
+    assert_eq!(
+        retry_starts
+            .iter()
+            .map(|event| event["attempt"].as_u64())
+            .collect::<Vec<_>>(),
+        (2..=10).map(|attempt| Some(attempt)).collect::<Vec<_>>()
+    );
+    assert!(
+        retry_starts
+            .iter()
+            .all(|event| event["maxAttempts"].as_u64() == Some(10)),
+        "every retry notification must retain the elevated ceiling: {retry_starts:?}"
+    );
+    let retry_ends = retry_ends.lock().unwrap().clone();
+    assert_eq!(
+        retry_ends.len(),
+        1,
+        "only the terminal retry result is emitted"
+    );
+    assert_eq!(retry_ends[0]["success"].as_bool(), Some(false));
+    assert_eq!(retry_ends[0]["attempt"].as_u64(), Some(10));
+}
+
+#[tokio::test]
+async fn run_unattended_non_billing_429_retries_past_interactive_budget() {
+    let mut streams = (0..4)
+        .map(|_| {
+            vec![Err(llm_http_status_error(
+                "mock",
+                429,
+                r#"{"error":{"code":"rate_limit_exceeded","message":"too many requests"}}"#,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    streams.push(ok_text_stream("RECOVERED_AFTER_RATE_LIMIT"));
+    let (provider, requests) = RecordingStreamLlmProvider::new(streams);
+    let plan_runtime = PlanRuntime::new("unattended-rate-limit-retry");
+    plan_runtime.seed_active_plan_for_test(
+        "unattended-rate-limit-retry-plan".to_string(),
+        PlanFileState::Executing,
+    );
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let retry_events = Arc::clone(&retry_events);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |ctx: EventContext| {
+                retry_events.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+    }
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "unattended-rate-limit-retry".to_string(),
+            plan_runtime: Some(plan_runtime),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_
+        .run(vec![ChatMessage::user("continue execution")])
+        .await;
+
+    assert!(
+        matches!(
+            outcome,
+            AgentRunOutcome::Completed(result) if result.final_text == "RECOVERED_AFTER_RATE_LIMIT"
+        ),
+        "a non-billing 429 must receive the elevated unattended retry budget"
+    );
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        5,
+        "the fifth request proves rate limiting retries beyond the interactive budget of four"
+    );
+    let retry_events = retry_events.lock().unwrap().clone();
+    assert_eq!(
+        retry_events
+            .iter()
+            .map(|event| event["attempt"].as_u64())
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(3), Some(4), Some(5)]
+    );
+    assert!(
+        retry_events
+            .iter()
+            .all(|event| event["maxAttempts"].as_u64() == Some(10)),
+        "unlike insufficient_quota, a rate-limit 429 must advertise the elevated ceiling: {retry_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn run_retry_after_is_announced_and_used_instead_of_exponential_backoff() {
+    let retry_after_error = AppError::LlmDetailed(Box::new(
+        LlmError::http_status("mock", 429, "rate limit").with_retry_after_ms(1),
+    ));
+    let llm = Arc::new(MockLlmProvider::new(vec![
+        vec![Err(retry_after_error)],
+        ok_text_stream("RETRY_AFTER_RECOVERED"),
+    ]));
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let retry_events = Arc::clone(&retry_events);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |ctx: EventContext| {
+                retry_events.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+    }
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            max_attempts: 2,
+            // A timeout below would fail if the loop ignored Retry-After and used this fallback.
+            retry_base_delay_ms: 60_000,
+            session_id: "retry-after-wait".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        loop_.run(vec![ChatMessage::user("retry with server delay")]),
+    )
+    .await
+    .expect("Retry-After should avoid the 60-second exponential fallback");
+
+    assert!(matches!(
+        outcome,
+        AgentRunOutcome::Completed(result) if result.final_text == "RETRY_AFTER_RECOVERED"
+    ));
+    let retry_events = retry_events.lock().unwrap().clone();
+    assert_eq!(retry_events.len(), 1);
+    assert_eq!(retry_events[0]["delayMs"].as_u64(), Some(1));
+    assert_eq!(retry_events[0]["maxAttempts"].as_u64(), Some(2));
 }
 
 #[tokio::test]

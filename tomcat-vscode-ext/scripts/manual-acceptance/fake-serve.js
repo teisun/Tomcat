@@ -568,6 +568,152 @@ function scheduleScriptedTerminalLlmError(sessionId) {
   });
 }
 
+function schedulePlanCloseOutReviewGreenFinalize(sessionId, session) {
+  const planId = "plan-close-out-review-green";
+  const planPath = path.join(session.cwd, `${planId}.plan.md`);
+  const todos = [
+    {
+      content: "Implement the single-file acceptance change",
+      id: "close-out-edit",
+      status: "completed",
+    },
+    {
+      content: "Review and verify the completed change",
+      id: "close-out-verify",
+      status: "completed",
+    },
+  ];
+  const updateToolCallId = "close-out-update-plan";
+  const buildToolCallId = "close-out-green-build";
+
+  schedule(80, () => {
+    session.planId = planId;
+    session.planPath = planPath;
+    session.planState = "executing";
+    persistState();
+    send({
+      path: planPath,
+      planId,
+      sessionId,
+      state: "executing",
+      type: "plan.build",
+    });
+  });
+  schedule(140, () => {
+    send({
+      args: {
+        ops: todos.map((todo) => ({
+          kind: "set_status",
+          status: todo.status,
+          todo_id: todo.id,
+        })),
+        path: planPath,
+        plan_id: planId,
+      },
+      sessionId,
+      toolCallId: updateToolCallId,
+      toolName: "update_plan",
+      type: "tool_execution_start",
+    });
+  });
+  schedule(220, () => {
+    send({
+      planId,
+      reviewAttemptId: `${planId}:1`,
+      round: 1,
+      sessionId,
+      toolCallId: updateToolCallId,
+      type: "plan.code_review.started",
+    });
+  });
+  schedule(320, () => {
+    send({
+      findings: [],
+      planId,
+      reviewAttemptId: `${planId}:1`,
+      round: 1,
+      rounds: 1,
+      sessionId,
+      summary: "Code review found no blocking findings.",
+      toolCallId: updateToolCallId,
+      type: "plan.code_review",
+      verdict: "pass",
+    });
+  });
+  schedule(420, () => {
+    send({
+      args: {
+        command: "npm run test",
+      },
+      sessionId,
+      toolCallId: buildToolCallId,
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+  });
+  schedule(500, () => {
+    send({
+      isError: false,
+      result: "Test suite passed.",
+      sessionId,
+      toolCallId: buildToolCallId,
+      toolName: "bash",
+      type: "tool_execution_end",
+    });
+  });
+  schedule(580, () => {
+    send({
+      sessionId,
+      summaryTitle: "Green build passed",
+      toolCallId: buildToolCallId,
+      type: "tool.summary_updated",
+    });
+  });
+  schedule(620, () => {
+    send({
+      isError: false,
+      result: JSON.stringify({
+        applied: todos.length,
+        items: todos,
+        path: planPath,
+        plan_id: planId,
+        plan_state_after: "completed",
+        plan_state_before: "executing",
+      }),
+      sessionId,
+      toolCallId: updateToolCallId,
+      toolName: "update_plan",
+      type: "tool_execution_end",
+    });
+  });
+  schedule(680, () => {
+    send({
+      planId,
+      sessionId,
+      todos,
+      type: "plan.todos",
+    });
+  });
+  schedule(740, () => {
+    session.planState = "completed";
+    persistState();
+    send({
+      path: planPath,
+      planId,
+      sessionId,
+      state: "completed",
+      type: "plan.complete",
+    });
+  });
+  schedule(820, () => {
+    recordHistoryEntry(session, {
+      content: "Close-out fixture completed review and green-build presentation.",
+      role: "assistant",
+    });
+    finishTurn(sessionId, null);
+  });
+}
+
 function buildLiveAssistantPayload(promptText) {
   const thinkingText = [
     "Live thinking: compare the hydrated transcript with the incoming stream so thinking always stays above the assistant reply.",
@@ -856,6 +1002,10 @@ function handlePrompt(frame) {
     scheduleScriptedTerminalLlmError(sessionId);
     return;
   }
+  if (promptScript === "plan_close_out_review_green_finalize") {
+    schedulePlanCloseOutReviewGreenFinalize(sessionId, session);
+    return;
+  }
 
   if (ASK_QUESTION_REVERIFY_PATTERN.test(promptText)) {
     schedule(160, () => emitAskQuestion(sessionId));
@@ -1091,15 +1241,28 @@ function handleCommand(frame) {
     case "get_state": {
       const sessionId = frame.sessionId || activeSessionId || createSession();
       const session = ensureSession(sessionId);
+      const activePlan =
+        typeof session.planId === "string" &&
+        typeof session.planPath === "string" &&
+        (session.planState === "planning" ||
+          session.planState === "executing" ||
+          session.planState === "completed" ||
+          session.planState === "pending")
+          ? {
+            id: session.planId,
+            path: session.planPath,
+            state: session.planState,
+          }
+          : null;
       send({
         id: frame.id,
         payload: {
+          activePlan,
+          agentMode: activePlan ? "plan" : "chat",
           busy: session.busy,
           cwd: session.cwd,
           mode: session.mode,
           model: session.model,
-          planId: session.planId,
-          planState: session.planState,
           sessionId,
           sessionKey: session.sessionKey,
           thinkingLevel: currentThinkingLevel(session),

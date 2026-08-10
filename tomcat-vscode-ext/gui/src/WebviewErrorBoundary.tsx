@@ -11,6 +11,21 @@ type BoundaryState = {
   error: Error | null;
 };
 
+function normalizeError(value: unknown): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    return new Error(value);
+  }
+  try {
+    const detail = JSON.stringify(value);
+    return new Error(detail && detail !== "{}" ? detail : "Unknown webview error");
+  } catch {
+    return new Error("Unknown webview error");
+  }
+}
+
 function WebviewErrorFallback({ error }: { error: Error }) {
   return (
     <main aria-label="Tomcat webview error" className="tc-webview-error" data-testid="webview-error-fallback">
@@ -53,12 +68,17 @@ export function WebviewErrorBoundary({ children, reportError }: BoundaryProps) {
 
   useEffect(() => {
     const report = (error: unknown) => {
-      const normalized = error instanceof Error ? error : new Error(String(error));
+      const normalized = normalizeError(error);
       reportError(normalized);
       setGlobalError(normalized);
     };
     const onError = (event: ErrorEvent) => report(event.error ?? event.message);
-    const onUnhandledRejection = (event: PromiseRejectionEvent) => report(event.reason);
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      // The report has a durable host-side destination; suppress Chromium's duplicate
+      // unhandled-rejection diagnostic after it has been handed over.
+      event.preventDefault();
+      report(event.reason);
+    };
 
     window.addEventListener("error", onError);
     window.addEventListener("unhandledrejection", onUnhandledRejection);

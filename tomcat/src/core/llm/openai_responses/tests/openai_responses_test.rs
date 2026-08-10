@@ -23,8 +23,8 @@ use crate::core::llm::types::{
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::{
-    classify_llm_failure, llm_http_status, llm_http_status_error, llm_stage, llm_summary, AppError,
-    LlmErrorStage, LlmFailureKind,
+    classify_llm_failure, llm_http_status, llm_http_status_error, llm_retry_after_ms, llm_stage,
+    llm_summary, AppError, LlmErrorStage, LlmFailureKind,
 };
 use crate::infra::events::ToolDisplay;
 use crate::infra::LlmConfig;
@@ -2309,6 +2309,20 @@ fn is_retriable_detects_429_and_5xx() {
     assert!(!OpenAiResponsesProvider::is_retriable(
         &llm_http_status_error("openai-responses", 400, "bad request",)
     ));
+}
+
+#[test]
+fn retry_after_header_overrides_exponential_backoff() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::RETRY_AFTER, "7".parse().unwrap());
+
+    let err = map_http_status_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        br#"{"error":"rate limited"}"#,
+        parse_retry_after_ms(&headers),
+    );
+
+    assert_eq!(llm_retry_after_ms(&err), Some(7_000));
 }
 
 fn responses_stream_test_provider(

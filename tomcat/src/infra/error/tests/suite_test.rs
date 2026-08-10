@@ -246,6 +246,21 @@ fn llm_failure_classification_obeys_billing_before_status() {
 }
 
 #[test]
+fn billing_labeled_429_is_not_retryable() {
+    let error = llm_http_status_error(
+        "openai",
+        429,
+        r#"{"error":{"code":"insufficient_quota","message":"insufficient credits"}}"#,
+    );
+
+    assert_eq!(classify_llm_failure(&error).kind, LlmFailureKind::Billing);
+    assert!(
+        !is_retryable_llm_error(&error),
+        "a quota-shaped 429 must not inherit generic rate-limit retryability"
+    );
+}
+
+#[test]
 fn llm_failure_classifies_402_without_body_evidence_as_billing() {
     let failure = classify_llm_failure(&llm_http_status_error("transit", 402, "Payment Required"));
 

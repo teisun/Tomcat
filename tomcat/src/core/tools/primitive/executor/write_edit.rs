@@ -557,7 +557,7 @@ fn apply_string_edits(
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(AppError::Primitive(format!(
-                "Ambiguous: edits[{}] 的 old_content 在文件 `{}` 中出现 {} 次（匹配行号：{}）；请扩大上下文使其唯一，或设置 replace_all: true",
+                "Ambiguous: edits[{}] 的 old_content 在文件 `{}` 中出现 {} 次（匹配行号：{}）；请扩大上下文使其唯一。若你的意图就是全部替换，请显式设置 replace_all: true",
                 idx, user_path, n_hits.len(), hit_lines
             )));
         }

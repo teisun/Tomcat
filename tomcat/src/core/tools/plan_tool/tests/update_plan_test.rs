@@ -47,6 +47,9 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
             plan_id: Some(plan_id.clone()),
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -68,7 +71,7 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
 }
 
 #[tokio::test]
-async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
+async fn update_plan_allows_two_independent_in_progress_todos() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -80,12 +83,15 @@ async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
     write_plan(&path, &plan, 2000).unwrap();
     rt.bind_plan_file_for_test(path.clone());
 
-    let err = update_plan::execute(
+    let out = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id),
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -101,8 +107,9 @@ async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
         },
     )
     .await
-    .expect_err("两个 in_progress 应被 ops 引擎拒");
-    matches!(err, ToolError::Op(_));
+    .expect("两个独立 todo 可并行推进");
+    assert_eq!(out["items"][0]["status"], "in_progress");
+    assert_eq!(out["items"][1]["status"], "in_progress");
     cleanup_home(&home);
 }
 
@@ -120,6 +127,9 @@ async fn update_plan_cross_session_allowed_for_planning_pending() {
             plan_id: Some(plan_id),
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "t1".into(),
                 content: Some("edited by b".into()),
@@ -154,6 +164,9 @@ async fn update_plan_cross_session_rejected_for_executing() {
             plan_id: Some(plan_id),
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "t1".into(),
                 content: Some("intruder".into()),
@@ -187,6 +200,11 @@ async fn update_plan_plan_id_prefers_active_external_path() {
                 content: "step 1".into(),
                 status: TodoStatus::Pending,
             }],
+            green_build_pass: false,
+            green_build_evidence: Vec::new(),
+            code_review_pass: false,
+            code_review_pass_at_ms: None,
+            completion_gate_cycles: 0,
             unknown: Default::default(),
         },
         body: "## Goal\nexternal\n".into(),
@@ -203,6 +221,9 @@ async fn update_plan_plan_id_prefers_active_external_path() {
             plan_id: Some("external_plan".into()),
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -244,6 +265,9 @@ async fn update_plan_in_exec_promotes_completed() {
             plan_id: Some(plan_id.clone()),
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -298,6 +322,9 @@ async fn update_plan_reopen_completed_to_pending_and_emits_plan_pending() {
             plan_id: Some(plan_id.clone()),
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,

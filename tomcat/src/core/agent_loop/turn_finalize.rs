@@ -76,8 +76,24 @@ fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
         ));
     }
 
-    // 所有 todo 都勾完了却仍是 executing —— 只可能是 code review 把计划打了回来。
-    let findings = plan_runtime.unresolved_finding_ids(&plan_id);
+    if plan.frontmatter.code_review_pass && !plan.frontmatter.green_build_pass {
+        return Some(format!(
+            "All todos and code review for plan `{plan_id}` are complete, but green-build acceptance has not passed. \
+             Load the `verify` skill, run the discovered checks through background bash, then submit its successful task_id evidence via update_plan. \
+             Do not hand back before the plan reaches `completed`."
+        ));
+    }
+
+    // 所有 todo 都勾完了却仍是 executing —— 通常是 code review 把计划打了回来。
+    // 若 review 预算已经耗尽，继续催模型「修完再审」只会空转：运行时不会再派 reviewer，
+    // 此时应把未决问题交还用户决定。
+    if plan_runtime.code_review_budget_exhausted(&plan_id)
+        || plan_runtime.code_review_infra_retry_exhausted(&plan_id)
+    {
+        return None;
+    }
+
+    let findings = plan_runtime.unresolved_finding_references(&plan_id);
     let findings = if findings.is_empty() {
         "(see the latest code review result)".to_string()
     } else {

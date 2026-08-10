@@ -96,6 +96,43 @@ fn success_rate_redline_keeps_critical_usage_in_descriptions() {
     assert!(task_output.contains("5000-600000ms"));
 }
 
+#[test]
+fn edit_schema_exposes_only_canonical_path_and_edits_shape() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "edit")
+        .expect("edit catalog entry");
+    let schema = (entry.parameters)();
+    let properties = &schema["properties"];
+    assert!(properties.get("path").is_some());
+    assert!(properties.get("edits").is_some());
+    assert!(properties.get("old_content").is_none());
+    assert!(properties.get("new_content").is_none());
+    assert!(properties.get("files").is_none());
+    assert_eq!(schema["required"], serde_json::json!(["path", "edits"]));
+}
+
+#[test]
+fn edit_guidelines_mention_batch_multi_file() {
+    let guidelines = render_tool_guidelines_with_policy(true);
+    assert!(guidelines.contains("multiple independent files"));
+    assert!(guidelines.contains("SAME tool round"));
+}
+
+#[test]
+fn green_build_evidence_schema_requires_recorded_command_and_task() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "update_plan")
+        .expect("update_plan catalog entry");
+    let schema = (entry.parameters)();
+    let evidence = &schema["properties"]["green_build_evidence"]["items"];
+    assert_eq!(
+        evidence["required"],
+        serde_json::json!(["command", "task_id"])
+    );
+}
+
 /// 聚合去重：跨工具规则只说一遍，且包含被测试依赖的关键锚点。
 #[test]
 fn tool_guidelines_aggregate_dedup_and_contain_key_anchors() {

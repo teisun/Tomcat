@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-08 22:44 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-10 10:04 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 执行效率与交付收口门禁：计划完成态硬门控 `code_review_pass` + `green_build_pass`（证据走 `BashTaskRegistry`、编辑新鲜度使门失效）；code review 按 P0/P1 过滤、轮次局部 finding ref、`dispute_findings`（仅 wontfix）、abort 退还轮次、infra-retry 耗尽停 completion_guard；默认 `max_code_review_rounds=4`、配置项 `max_completion_gate_cycles`（默认 3）；内置 `verify` skill；diff-gate 仅对代码路径生效。效率侧：`edit` schema `{path,edits}`、并行 edit/read 提示、无人值守 Retry-After、压缩保留 `logPath`、最多 3 个 `in_progress` todo、web_search 发 `model_name` 并 hosted 失败自动回退。扩展：`WebviewErrorBoundary` 冒烟 + fake-serve 收口 E2E；架构文档 `delivery-accuracy-and-completeness.md`。验证：`cargo test --lib`（~2637 passed, 1 ignored）、`cargo fmt --check`、`git diff --check`、扩展 lint、包装 VSIX ErrorBoundary/close-out E2E；ignored real-LLM 产品路径曾跑通 review→verify→green build→completed。Cov% 未跑 tarpaulin，仍为 —。@2026-08-10
 - [✓] **[P0]** ModelPicker 扁平触发器与弹出方向收口：扁平样式落到 `.tc-model-picker-trigger`（三表面一致），删死代码 `.tc-plan-model-select*`；PlanFileCard 菜单 `placement=above`（同 Composer），PlanActionStrip 保持 `below`；§7.6 文档更正。内置目录移除低于 4.6 的官方 Claude（`claude-sonnet-4-5` / `claude-opus-4-5` / `claude-opus-4-1`）。版本 CLI `0.1.32 → 0.1.33`、扩展 `0.1.43 → 0.1.44`（`bundledCli=0.1.33`）。验证：GUI PlanFileCard/PlanActionStrip/ModelPicker、`catalog_test`、`release-version check`、纯插件 `tomcat-vscode-ext-0.1.44.vsix`。@2026-08-08
 - [✓] **[P0]** ModelPicker 二次整改收口：子 Agent 继承会话 Effort（`ProdReviewer`/`Verifier` 经 `clamp_reasoning_level`）；`ask_question` 统一以 `toolCallId` 为身份并加诚实占位 `live`（历史 `[pending]` 被动、重臂后可答、sticky 只收 live）；Composer / Plan 卡 / Plan 预览三处经 `buildPickerModels` 叠加会话 Context+Effort；Settings 新建 relay 按名复用（`models.toml` 优先于内置）九字段预填、Context/Max output 只读默认 400K/128K，端点先精确匹配再启发式；Plan 预览 RPC 失败 toast；`SetContextWindow` trim；文档 `model-picker.md`（单档 Context、偏差表、§8 复用、ask_question 不变量）。暂缓官方 `gpt-5.6-*` 入 `models.toml`。版本 CLI `0.1.31 → 0.1.32`、扩展 `0.1.42 → 0.1.43`（`bundledCli=0.1.32`）。验证：扩展 core 365 + GUI 511、serve commands 85、plan/ask_question 集成、重臂握手回归、`release-version check`、纯插件 `tomcat-vscode-ext-0.1.43.vsix`。@2026-08-08
 - [✓] **[P0]** ModelPicker + Context/Effort 整改收口：Composer / Plan 卡共用单一 `ModelPicker`（固定宽列表、token 搜索、行内 `model id + effort`、始终可见 Edit、配置浮层 `createPortal` 左右竖中对齐且独立于列表）；`builtin_models.toml` 收录官方 `context_window_options`（默认档规则：满档 1M 不涨价用 1M，涨价用 400K；1.05M 并入 1M；去掉 `none` effort）；`model-thinking` 偏好改为 `{reasoning, context_window}` 对象（开发期不做旧串格式兼容）；Settings 新建中转站按 model name 拷贝内置档位/能力且 Context 不可手填；Webview 根挂 `WebviewErrorBoundary`；`package-vsix --skip-build` 增加预构建产物新鲜度门禁；`accept:image` 修 fake-serve `retain_attachment_leases` 与 macOS 窗口定位（弃用找 Electron 的 osascript）。版本 CLI `0.1.30 → 0.1.31`、扩展 `0.1.41 → 0.1.42`（`bundledCli=0.1.31`）。验证：相关 Rust admin/catalog/model_thinking/serve commands 与 GUI ModelPicker/Composer/Settings/Transcript 单测；fake-serve lease 单测；host E2E ModelPicker 与 image acceptance 路径。@2026-08-08
@@ -61,6 +62,12 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- Plan 收口：`update_plan` 完成态要求持久化 `code_review_pass` 与带证据的 `green_build_pass`；新增 `dispute_findings`；配置 `max_completion_gate_cycles`（默认 3）；`max_code_review_rounds` 默认改为 4。
+- 内置 skill：`materialize_builtin_skills` / `builtin_verify.md`（verify）。
+- `edit` 工具入参收敛为 `{path, edits[]}`；`update_plan` 描述允许多至 3 个 `in_progress` todo（运行时 `MAX_IN_PROGRESS_TODOS=3`）。
+- LLM：无人值守重试尊重 `Retry-After`；Anthropic/OpenAI Responses 解析路径补齐。
+- `web_search`：对外请求使用 catalog `model_name`；hosted 失败可自动回退。
+- 架构文档：`docs/architecture/delivery-accuracy-and-completeness.md`；`plan-exec-code-verification.md` / `tools/reviewer.md` / `tool-catalog.md` 同步。
 - `ask_question` webview：`WebviewApprovalCard.live`；timeline 身份统一为 `toolCallId`（`requestId` 仅路由）；历史 `[pending]` 不再伪造 `pending:` 门票；serve 重臂须在 `initialize` 之后发新 `control_request`。
 - 子 Agent：`ProdReviewerDeps` / verifier 注入 `model_prefs`，派发 `thinking_level` 继承会话 Effort 并夹取。
 - GUI：`buildPickerModels` 叠加会话 Context+Effort 至 Composer / PlanFileCard / PlanActionStrip；Settings `findReusableModelByName`（user 优先）+ `findConfiguredRelayByBaseUrl`；默认档 `DEFAULT_CONTEXT_WINDOW=400K` / `DEFAULT_MAX_OUTPUT_TOKENS=128K` 只读展示。
@@ -130,6 +137,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-10 10:04）：执行效率与交付收口门禁合入。完成态双硬门（code review + green build）、内置 verify skill、edit schema / parallel tools / Retry-After / compaction logPath / 最多 3 in_progress / web_search model_name 回退，以及 ErrorBoundary/fake-serve E2E 与交付准确性文档。验证：`cargo test --lib` ~2637 passed；扩展 lint 与包装 VSIX 相关 E2E 绿。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-08 09:45）：ModelPicker / Context 档位 / Effort 显示与 portal 配置浮层、WebviewErrorBoundary、VSIX 新鲜度门禁、`accept:image` lease+窗口定位修复已合入工作区；版本 CLI `0.1.31` / 扩展 `0.1.42`。既有本地 `~/.tomcat/models.toml` 若在旧 builtin 物化后未含 `context_window_options`，会盖住嵌入 catalog 的新档位——升级后需重新生成或手工补档位。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-05 23:13）：OpenAI Responses cache 增长根因与修复已合入。真实 Agent 的 `EphemeralTail` 不能作为移动 input user 项；现请求专用 tail 合并进 `instructions`，持久 `input` 保持只追加。fcodex HTTP 明确拒绝 `previous_response_id`，故不作为默认方案；真实 transcript 大 tool-result probe 已越过多个量化块持续增长至 `65,024` read tokens。验证：Responses 定向单测、真实 fcodex probe、`npm run package:vsix`；CLI `0.1.28` / 扩展 `0.1.39`，本机纯插件包已生成。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-04 17:02）：失败回合与缓存整改 + 二次复查合入。`resolved_output_limit`、空回合守卫、thinking 下限 1024、配置别名与目录期校验、恢复卡保留/`abandoned`/中断去重、指纹门禁与成对哈希；版本 CLI `0.1.26` / 扩展 `0.1.37`。验证：`cargo fmt/clippy`、`cargo test --lib` 2537 passed、webview unit 475、E2E 33、`release-version check`；真实 DeepSeek multi-timeout CLI 偶发仍记在 BLOCKED。Cov% 本轮未跑 tarpaulin，仍为 —。

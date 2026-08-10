@@ -444,6 +444,7 @@ impl ChatContext {
         let checkpoint_switcher =
             checkpoint_store_for(agent_trail_dir.clone(), agent_workspace_dir.clone());
         let checkpoint_store: Arc<dyn crate::core::CheckpointStore> = checkpoint_switcher.clone();
+        crate::core::skill::materialize_builtin_skills(&config)?;
 
         let session_arc = Arc::new(session.clone());
         let shared_scope_runtime = scope_runtime_for(
@@ -566,6 +567,9 @@ impl ChatContext {
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
         plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
+        plan_runtime.set_max_completion_gate_cycles(config.plan.max_completion_gate_cycles);
+        plan_runtime.attach_workspace_root(agent_workspace_dir.clone());
+        plan_runtime.attach_bash_task_registry(bash_task_registry.clone());
         plan_runtime.set_expose_skills_to_reviewer(config.skills.expose_to_reviewer);
         plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
         plan_runtime.register_todos_panel(Arc::new(panels::CliTodosPanel));

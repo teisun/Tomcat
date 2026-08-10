@@ -12,13 +12,13 @@ use crate::core::llm::ChatMessage;
 
 /// 单条 finding（reviewer.md §5.3）。
 ///
-/// `id` 由内容派生而非自增：同一个问题在下一轮 review 里必须拿到同一个 id，
-/// 否则没法判断"这条修好了没有"。severity 不参与派生 —— 同一问题被升级严重程度
-/// 仍然是同一个问题。
+/// `reference` 是运行时在解析本轮 `<review>` 后按出现顺序分配的 `F01` / `F02`…
+/// 局部引用。它只用于主 Agent 在本轮里无歧义地申辩，绝不试图跨轮保持稳定：
+/// reviewer 改写一句话就不再是同一个文本，内容哈希式「稳定 id」反而会制造假精确。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     #[serde(default)]
-    pub id: String,
+    pub reference: String,
     pub severity: String,
     pub area: String,
     pub note: String,
@@ -26,23 +26,39 @@ pub struct Finding {
 
 impl Finding {
     pub fn new(severity: String, area: String, note: String) -> Self {
-        let id = finding_id(&area, &note);
         Self {
-            id,
+            reference: String::new(),
             severity,
             area,
             note,
         }
     }
+
+    pub fn with_reference(mut self, reference: impl Into<String>) -> Self {
+        self.reference = reference.into();
+        self
+    }
+
+    pub fn tier(&self) -> SeverityTier {
+        match self.severity.trim().to_ascii_lowercase().as_str() {
+            "p0" | "blocker" | "critical" => SeverityTier::P0,
+            "p1" | "major" => SeverityTier::P1,
+            // `minor` / old vocabulary / malformed text must never accidentally turn
+            // into a blocking finding. The reviewer prompt's explicit contract is P0/P1/P2.
+            _ => SeverityTier::P2,
+        }
+    }
+
+    pub fn blocks(&self) -> bool {
+        matches!(self.tier(), SeverityTier::P0 | SeverityTier::P1)
+    }
 }
 
-/// 稳定 finding id：`f-` + area/note 的 FNV-1a 短哈希。
-pub fn finding_id(area: &str, note: &str) -> String {
-    let seed = format!("{}\n{}", area.trim(), note.trim());
-    format!(
-        "f-{}",
-        &crate::core::session::fnv1a_hex(seed.as_bytes())[..8]
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeverityTier {
+    P0,
+    P1,
+    P2,
 }
 
 /// `<review>` 块的中性解析结果。
@@ -97,6 +113,10 @@ pub fn parse_review_block(text: &str) -> Option<ParsedReview> {
                 findings.push(item);
             }
         }
+    }
+
+    for (index, finding) in findings.iter_mut().enumerate() {
+        finding.reference = format!("F{:02}", index + 1);
     }
 
     Some(ParsedReview {

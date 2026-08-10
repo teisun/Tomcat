@@ -93,20 +93,22 @@ fn plan_file_schema_version_v1_locked() {
 }
 
 #[test]
-fn plan_file_rejects_multiple_in_progress_on_write() {
+fn plan_file_rejects_more_than_three_in_progress_on_write() {
     let mut frontmatter = sample_frontmatter();
-    frontmatter.todos.push(TodoItem {
-        id: "t3".into(),
-        content: "另一个 in_progress".into(),
-        status: TodoStatus::InProgress,
-    });
+    for id in ["t3", "t4", "t5"] {
+        frontmatter.todos.push(TodoItem {
+            id: id.into(),
+            content: format!("另一个 in_progress: {id}"),
+            status: TodoStatus::InProgress,
+        });
+    }
     let plan = PlanFile {
         frontmatter,
         body: String::new(),
     };
-    let err = serialize_plan_file(&plan).expect_err("应拒多个 in_progress");
+    let err = serialize_plan_file(&plan).expect_err("应拒超过三个 in_progress");
     assert!(
-        matches!(err, PlanError::MultipleInProgress { count: 2 }),
+        matches!(err, PlanError::MultipleInProgress { count: 4 }),
         "got {err:?}"
     );
 }

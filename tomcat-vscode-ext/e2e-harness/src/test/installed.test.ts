@@ -35,6 +35,23 @@ type ResolvedSourceApi = {
     };
   };
 };
+
+type PackagedWebviewApi = {
+  __testing: {
+    captureWebviewDom(): Promise<{ html: string }>;
+    clearObservedWebviewErrors(): void;
+    focusWebview(): Promise<void>;
+    getObservedWebviewErrors(): Array<{ message: string; stack?: string }>;
+    sendWebviewHostEvent(content: WebviewErrorBoundaryCrashFixture): Promise<void>;
+    waitForWebviewReady(timeoutMs?: number): Promise<void>;
+  };
+};
+
+type WebviewErrorBoundaryCrashFixture = {
+  enabled: true;
+  type: "__test.webview_error_boundary_crash";
+};
+
 type PromptEntry = ResolvedSourceApi["__testing"] extends {
   getPromptHistory(): Array<infer T>;
 }
@@ -77,6 +94,23 @@ async function waitForPrompt(
     await sleep(100);
   }
   assert.fail(`Timed out waiting for prompt containing: ${expectedSubstring}`);
+}
+
+async function waitForPackagedDom(
+  api: PackagedWebviewApi,
+  predicate: (snapshot: { html: string }) => boolean,
+  timeoutMs = 10_000,
+): Promise<{ html: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSnapshot = await api.__testing.captureWebviewDom();
+  while (Date.now() < deadline) {
+    if (predicate(lastSnapshot)) {
+      return lastSnapshot;
+    }
+    await sleep(100);
+    lastSnapshot = await api.__testing.captureWebviewDom();
+  }
+  assert.fail(`Timed out waiting for packaged webview DOM: ${lastSnapshot.html}`);
 }
 
 suite("Installed Tomcat extension", () => {
@@ -144,6 +178,20 @@ suite("Installed Tomcat extension", () => {
   test("switches an executing plan back to chat in the webview", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewPlanModeSwitchFlow(api);
+  });
+
+  test("packaged_webview_not_blank", async () => {
+    const api = await hostE2e.getTomcatExtensionApi() as PackagedWebviewApi;
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    const snapshot = await api.__testing.captureWebviewDom();
+
+    assert.ok(snapshot.html.trim().length > 0, "packaged webview rendered no DOM");
+    assert.match(snapshot.html, /data-testid="stream-container"/u);
+    assert.ok(
+      !snapshot.html.includes('data-testid="webview-error-fallback"'),
+      `packaged webview rendered the crash fallback: ${snapshot.html}`,
+    );
   });
 
   test("streams in the Tomcat webview", async () => {
@@ -224,5 +272,33 @@ suite("Installed Tomcat extension", () => {
   test("renders the transcript UI groups, tool rows, file chips, and progress", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertTranscriptUiFlow(api);
+  });
+
+  // This intentionally remains last: the fixture replaces the live application with
+  // ErrorBoundary's fallback for the rest of the webview document lifetime.
+  test("packaged_webview_error_boundary_shows_fallback_and_reports_host", async () => {
+    const api = await hostE2e.getTomcatExtensionApi() as PackagedWebviewApi;
+    const expectedError = "E2E fixture intentionally crashed the Tomcat webview";
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    api.__testing.clearObservedWebviewErrors();
+    await api.__testing.sendWebviewHostEvent({
+      enabled: true,
+      type: "__test.webview_error_boundary_crash",
+    });
+
+    const fallback = await waitForPackagedDom(
+      api,
+      (snapshot) =>
+        snapshot.html.includes('data-testid="webview-error-fallback"') &&
+        snapshot.html.includes(expectedError),
+    );
+    assert.match(fallback.html, /data-testid="webview-error-fallback"/u);
+    assert.ok(
+      api.__testing
+        .getObservedWebviewErrors()
+        .some((error) => error.message === expectedError),
+      "expected the host to receive the webview error postMessage",
+    );
   });
 });

@@ -202,12 +202,16 @@ export interface TomcatExtensionApi {
     }>;
     clearObservedEvents(): void;
     clearObservedFileOpens(): void;
+    clearObservedWebviewErrors(): void;
     createFreshWebviewSession(cwd?: string | null): Promise<string>;
     dispatchImagePreviewDomAction(action: ImagePreviewDomAction): Promise<void>;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     focusWebview(): Promise<void>;
     getObservedEvents(): ServeEvent[];
     getObservedFileOpens(): Array<{ line?: number; path: string }>;
+    getObservedWebviewErrors(): ReturnType<
+      TomcatWebviewViewProvider["getObservedWebviewErrors"]
+    >;
     getPromptHistory(): PromptRecord[];
     getPreparedChange(toolCallId: string):
       | {
@@ -1381,6 +1385,9 @@ export async function activate(
       clearObservedFileOpens: () => {
         observedFileOpens.length = 0;
       },
+      clearObservedWebviewErrors: () => {
+        webviewProvider.clearObservedWebviewErrors();
+      },
       createFreshWebviewSession: (cwd) =>
         webviewProvider.createFreshSessionForTest(cwd),
       dispatchImagePreviewDomAction: async (action) => {
@@ -1397,6 +1404,8 @@ export async function activate(
       },
       getObservedEvents: () => [...observedEvents],
       getObservedFileOpens: () => [...observedFileOpens],
+      getObservedWebviewErrors: () =>
+        webviewProvider.getObservedWebviewErrors(),
       getPromptHistory: () => [...promptHistory],
       getPreparedChange: (toolCallId) => {
         const change = ide.getPreparedChange(toolCallId);

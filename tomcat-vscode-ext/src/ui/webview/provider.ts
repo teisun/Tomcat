@@ -580,6 +580,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private readonly autoOpenedPlanPaths = new Set<string>();
   /** `plan.create` gives us the path; `plan.review` is the actual open trigger. */
   private readonly pendingPlanOpenByPlanId = new Map<string, string>();
+  private readonly observedWebviewErrors: Array<{
+    message: string;
+    stack?: string;
+  }> = [];
   private initialized?: InitializeResult;
   private isReady = false;
   private lastContextSearchIntent: Extract<WebviewIntent, { type: "searchContext" }> | null = null;
@@ -917,6 +921,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   currentState() {
     return this.decorateStateSnapshot(this.stateStore.snapshot());
+  }
+
+  clearObservedWebviewErrors(): void {
+    this.observedWebviewErrors.length = 0;
+  }
+
+  getObservedWebviewErrors(): Array<{ message: string; stack?: string }> {
+    return [...this.observedWebviewErrors];
   }
 
   private peekState(): Readonly<WebviewStateSnapshot> {
@@ -1386,6 +1398,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async handleIntent(intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>): Promise<void> {
     switch (intent.type) {
       case "webviewError":
+        this.observedWebviewErrors.push({
+          message: intent.data.message,
+          stack: intent.data.stack,
+        });
         console.error(
           `[Tomcat webview] ${intent.data.message}`,
           intent.data.stack ?? "",

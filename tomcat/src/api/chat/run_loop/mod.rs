@@ -833,8 +833,19 @@ async fn run_chat_turn_with_message_and_tool_definitions(
 
     let render_cli_output = !ctx.session_runtime.suppress_cli_output;
     let renderer = Arc::new(Mutex::new(MarkdownRenderer::new()));
+    let unattended_execution = ctx
+        .session_runtime
+        .plan_runtime
+        .executing_plan_id()
+        .is_some();
     let config = AgentLoopConfig {
-        max_attempts: ctx.config.llm.agent_max_attempts,
+        // 长时间无人 PLAN/EXEC 不应因一次 Connect/429 直接把工作交还用户；
+        // 普通交互仍尊重用户配置的短重试预算。
+        max_attempts: if unattended_execution {
+            ctx.config.llm.agent_max_attempts.max(10)
+        } else {
+            ctx.config.llm.agent_max_attempts
+        },
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         thinking_level,

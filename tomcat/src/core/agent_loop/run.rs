@@ -61,8 +61,10 @@ use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::core::session::{
     find_dangling_tail_tool_call_ids, manager::INTERRUPTED_TOOL_RESULT_TEXT,
 };
+use crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS;
 use crate::infra::error::{
-    is_unsupported_multimodal_text, llm_http_status, llm_stage, llm_summary, AppError,
+    classify_llm_failure, is_unsupported_multimodal_text, llm_http_status, llm_retry_after_ms,
+    llm_stage, llm_summary, AppError, LlmFailureKind,
 };
 use crate::infra::events::{wire, AgentEvent};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -73,23 +75,71 @@ use super::reasoning_loop::run_reasoning_loop;
 use super::steering_injection::inject_steering_messages;
 use super::types::{AgentLoop, AgentRunOutcome, AgentRunResult, LoopError};
 
-const RETRY_DELAY_CAP_MS: u64 = 8_000;
+/// 自动无人执行可遇到短暂限流/网络抖动；上限 30 秒既尊重服务端恢复窗口，
+/// 又始终可被取消，不会把 Agent 卡成不可交互。
+const INTERACTIVE_RETRY_DELAY_CAP_MS: u64 = 8_000;
+const UNATTENDED_RETRY_DELAY_CAP_MS: u64 = 30_000;
+/// PLAN/EXEC 无人值守时，临时传输故障与限流获得的总请求预算（含第一次请求）。
+const UNATTENDED_TRANSIENT_MAX_ATTEMPTS: u32 = 10;
+
+fn retry_attempt_budget(unattended_execution: bool, interactive_max_attempts: u32) -> u32 {
+    if unattended_execution {
+        UNATTENDED_TRANSIENT_MAX_ATTEMPTS
+    } else {
+        interactive_max_attempts
+    }
+}
+
+#[cfg(test)]
+mod retry_budget_tests {
+    use super::*;
+
+    #[test]
+    fn unattended_mode_allows_ten_attempts() {
+        assert_eq!(
+            retry_attempt_budget(true, DEFAULT_AGENT_MAX_ATTEMPTS),
+            UNATTENDED_TRANSIENT_MAX_ATTEMPTS
+        );
+        assert_eq!(
+            retry_attempt_budget(false, DEFAULT_AGENT_MAX_ATTEMPTS),
+            DEFAULT_AGENT_MAX_ATTEMPTS
+        );
+        assert_eq!(
+            compute_retry_delay_with_cap_ms(500, 20, 40, UNATTENDED_RETRY_DELAY_CAP_MS),
+            UNATTENDED_RETRY_DELAY_CAP_MS
+        );
+    }
+}
 
 pub(super) fn compute_retry_delay_ms(base_delay_ms: u64, attempt: u32, jitter_seed: u64) -> u64 {
+    compute_retry_delay_with_cap_ms(
+        base_delay_ms,
+        attempt,
+        jitter_seed,
+        INTERACTIVE_RETRY_DELAY_CAP_MS,
+    )
+}
+
+fn compute_retry_delay_with_cap_ms(
+    base_delay_ms: u64,
+    attempt: u32,
+    jitter_seed: u64,
+    cap_ms: u64,
+) -> u64 {
     if attempt <= 1 || base_delay_ms == 0 {
         return 0;
     }
     let exp = base_delay_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(2)));
     let jitter_pct = 80 + (jitter_seed % 41);
-    (exp.saturating_mul(jitter_pct) / 100).min(RETRY_DELAY_CAP_MS)
+    (exp.saturating_mul(jitter_pct) / 100).min(cap_ms)
 }
 
-fn next_retry_delay_ms(base_delay_ms: u64, attempt: u32) -> u64 {
+fn next_retry_delay_ms(base_delay_ms: u64, attempt: u32, cap_ms: u64) -> u64 {
     let jitter_seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| u64::from(d.subsec_nanos()))
         .unwrap_or(20);
-    compute_retry_delay_ms(base_delay_ms, attempt, jitter_seed)
+    compute_retry_delay_with_cap_ms(base_delay_ms, attempt, jitter_seed, cap_ms)
 }
 
 fn append_missing_interrupted_tool_results(partial_messages: &mut Vec<ChatMessage>) -> usize {
@@ -257,23 +307,44 @@ impl AgentLoop {
     ) -> Result<String, LoopError> {
         let mut last_err: Option<AppError> = None;
         let mut unsupported_multimodal_hits = 0u32;
-        for attempt in 1..=self.config.max_attempts {
+        let unattended_execution = self
+            .config
+            .plan_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.executing_plan_id())
+            .is_some();
+        let max_attempts = retry_attempt_budget(unattended_execution, self.config.max_attempts);
+        let retry_delay_cap_ms = if unattended_execution {
+            UNATTENDED_RETRY_DELAY_CAP_MS
+        } else {
+            INTERACTIVE_RETRY_DELAY_CAP_MS
+        };
+        for attempt in 1..=max_attempts {
             if attempt > 1 {
-                let delay_ms = next_retry_delay_ms(self.config.retry_base_delay_ms, attempt);
+                let delay_ms = last_err
+                    .as_ref()
+                    .and_then(llm_retry_after_ms)
+                    .unwrap_or_else(|| {
+                        next_retry_delay_ms(
+                            self.config.retry_base_delay_ms,
+                            attempt,
+                            retry_delay_cap_ms,
+                        )
+                    });
                 let err_msg = last_err
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_else(|| "retry".to_string());
                 self.emit_event(AgentEvent::AutoRetryStart {
                     attempt,
-                    max_attempts: self.config.max_attempts,
+                    max_attempts,
                     delay_ms,
                     error_message: err_msg,
                 });
                 if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
                     "event": wire::WIRE_AUTO_RETRY_START,
                     "attempt": attempt,
-                    "max_attempts": self.config.max_attempts,
+                    "max_attempts": max_attempts,
                     "delay_ms": delay_ms,
                     "error_message": last_err.as_ref().map(ToString::to_string),
                 })) {
@@ -293,7 +364,7 @@ impl AgentLoop {
                 }
             }
 
-            match run_reasoning_loop(self, messages, attempt, self.config.max_attempts).await {
+            match run_reasoning_loop(self, messages, attempt, max_attempts).await {
                 Ok(text) => {
                     if attempt > 1 {
                         self.emit_event(AgentEvent::AutoRetryEnd {
@@ -333,6 +404,20 @@ impl AgentLoop {
                     return Err(LoopError::Fatal(e));
                 }
                 Err(LoopError::Retryable(e)) => {
+                    let elevated_retry_kind = matches!(
+                        classify_llm_failure(&e).kind,
+                        LlmFailureKind::RateLimit
+                            | LlmFailureKind::UpstreamTransient
+                            | LlmFailureKind::StreamInterrupted
+                    );
+                    // PLAN/EXEC 的 10 次预算只留给真实临时传输故障与限流；
+                    // 其他可恢复类别仍保留交互档 4 次，避免长时间重试一个不会自愈的问题。
+                    if unattended_execution
+                        && !elevated_retry_kind
+                        && attempt >= DEFAULT_AGENT_MAX_ATTEMPTS
+                    {
+                        return Err(LoopError::Fatal(e));
+                    }
                     // L3 overflow trim 与诊断日志统一放在 error_classifier 中处理；
                     // retry 控制流（last_err / max_attempts 判定）仍由本函数持有，
                     // 保证"谁拥有 attempt 循环谁决定终止"。
@@ -358,8 +443,7 @@ impl AgentLoop {
                             .is_some_and(is_unsupported_multimodal_text);
                     if unsupported_multimodal_hit {
                         unsupported_multimodal_hits = unsupported_multimodal_hits.saturating_add(1);
-                        let attempts_left_after_this =
-                            self.config.max_attempts.saturating_sub(attempt);
+                        let attempts_left_after_this = max_attempts.saturating_sub(attempt);
                         if unsupported_multimodal_hits >= 2 && attempts_left_after_this >= 1 {
                             let _stats =
                                 handle_unsupported_multimodal_retry(self, messages, attempt, &e);
@@ -368,7 +452,7 @@ impl AgentLoop {
                         unsupported_multimodal_hits = 0;
                     }
                     last_err = Some(e);
-                    if attempt == self.config.max_attempts {
+                    if attempt == max_attempts {
                         let fatal = last_err
                             .take()
                             .unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));

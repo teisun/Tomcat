@@ -146,9 +146,19 @@ async function main(): Promise<void> {
       });
     });
 
-    const reportText = await fs.readFile(reportPath, "utf8");
     console.log(`Manual acceptance artifacts: ${artifactsRoot}`);
-    console.log(reportText);
+    try {
+      console.log(await fs.readFile(reportPath, "utf8"));
+    } catch (error) {
+      if (
+        process.env.TOMCAT_E2E_GREP &&
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        console.log("No aggregate report was produced for the selected manual acceptance test.");
+        return;
+      }
+      throw error;
+    }
   } finally {
     await fs.rm(installRoot, { force: true, recursive: true });
   }

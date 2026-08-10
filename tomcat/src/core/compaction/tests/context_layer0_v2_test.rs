@@ -133,6 +133,86 @@ fn compact_tool_results_skips_placeholder() {
 }
 
 #[test]
+fn evicted_bash_result_keeps_log_path() {
+    let payload = format!("Full log: /tmp/tomcat-build.log\n{}", "x".repeat(20_000));
+    let mut state = make_state(30_000, 5_000, 1_250);
+    state.messages = vec![user_msg("q"), tool_msg("c1", &payload), user_msg("q2")];
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+
+    compact_tool_results(&mut state, &config);
+    let text = state.messages[1].text_content().unwrap_or("");
+    assert_eq!(
+        text,
+        "[Previous tool result replaced; full log at /tmp/tomcat-build.log]"
+    );
+}
+
+#[test]
+fn evicted_json_result_keeps_log_path_for_both_field_spellings() {
+    for (field, path) in [
+        ("logPath", "/tmp/tomcat-build-camel.log"),
+        ("log_path", "/tmp/tomcat-build-snake.log"),
+    ] {
+        let payload = format!(
+            r#"{{"{field}":"{path}","output":"{}"}}"#,
+            "x".repeat(20_000)
+        );
+        let mut state = make_state(30_000, 5_000, 1_250);
+        state.messages = vec![user_msg("q"), tool_msg("c1", &payload), user_msg("q2")];
+        let config = ContextConfig {
+            keep_recent_turns: 1,
+            ..Default::default()
+        };
+
+        compact_tool_results(&mut state, &config);
+        let expected = format!("[Previous tool result replaced; full log at {path}]");
+        assert_eq!(state.messages[1].text_content(), Some(expected.as_str()));
+    }
+}
+
+#[test]
+fn read_result_without_path_stays_bare_placeholder() {
+    let mut state = make_state(30_000, 5_000, 1_250);
+    state.messages = vec![
+        user_msg("q"),
+        tool_msg("c1", &"source text ".repeat(2_000)),
+        user_msg("q2"),
+    ];
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+
+    compact_tool_results(&mut state, &config);
+    assert_eq!(
+        state.messages[1].text_content(),
+        Some(TOOL_RESULT_PLACEHOLDER)
+    );
+}
+
+#[test]
+fn placeholder_text_is_stable_across_rewrites() {
+    let mut state = make_state(30_000, 5_000, 1_250);
+    state.messages = vec![
+        user_msg("q"),
+        tool_msg("c1", &"payload ".repeat(3_000)),
+        user_msg("q2"),
+    ];
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+
+    compact_tool_results(&mut state, &config);
+    let once = state.messages[1].text_content().unwrap_or("").to_string();
+    compact_tool_results(&mut state, &config);
+    assert_eq!(state.messages[1].text_content(), Some(once.as_str()));
+}
+
+#[test]
 fn compact_tool_results_respects_placeholder_threshold_from_config() {
     let big = "x".repeat(25_000);
     let mut state = make_state(30_000, 5_000, 1_250);

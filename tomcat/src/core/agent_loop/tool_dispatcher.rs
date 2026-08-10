@@ -39,6 +39,37 @@ fn plugin_tool_model_text(result: &serde_json::Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(result).unwrap_or_else(|_| String::from("{}")))
 }
 
+fn tool_parallelism_event(
+    tool_calls_per_turn: usize,
+    tool_results_completed: usize,
+    steered: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "agent.tool_parallelism",
+        "tool_calls_per_turn": tool_calls_per_turn,
+        "tool_results_completed": tool_results_completed,
+        "steered": steered,
+    })
+}
+
+#[cfg(test)]
+mod parallelism_metric_tests {
+    use super::tool_parallelism_event;
+
+    #[test]
+    fn parallelism_metric_test() {
+        assert_eq!(
+            tool_parallelism_event(4, 4, false),
+            serde_json::json!({
+                "event": "agent.tool_parallelism",
+                "tool_calls_per_turn": 4,
+                "tool_results_completed": 4,
+                "steered": false,
+            })
+        );
+    }
+}
+
 fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: serde_json::Value) {
     agent.emit_extension_event(ExtensionEvent::ToolResult {
         tool_name: tc.name.clone(),
@@ -439,6 +470,14 @@ pub(super) async fn run_tool_calls_with_usage(
             steered = true;
             break;
         }
+    }
+
+    if let Some(plan_runtime) = agent.config.plan_runtime.as_ref() {
+        plan_runtime.write_transcript_custom(tool_parallelism_event(
+            tool_calls.len(),
+            tool_results.len(),
+            steered,
+        ));
     }
 
     Ok(DispatchOutcome {

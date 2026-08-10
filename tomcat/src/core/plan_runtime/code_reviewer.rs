@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 
-use super::review::{Finding, ParsedReview};
+use super::{
+    review::{Finding, ParsedReview},
+    DisputedFinding,
+};
 
 pub const CODE_REVIEWER_ALLOWED_TOOLS: &[&str] = &["read", "search_files", "list_dir", "bash"];
 
@@ -20,27 +23,41 @@ pub fn code_review_system_prompt_text() -> &'static str {
     load_prompt(PromptKey::ReviewerCode)
 }
 
-/// 上一轮未清 finding 渲染成 prompt 片段：带上稳定 id，要求 reviewer 逐条核销。
+/// 上一轮未清 finding 渲染成 prompt 片段，要求 reviewer 逐条核销。
 fn render_open_findings_section(open_findings: &[Finding]) -> String {
     if open_findings.is_empty() {
         return String::new();
     }
     let lines = open_findings
         .iter()
-        .map(|f| {
-            format!(
-                "         - `{}` [{}] {}: {}",
-                f.id, f.severity, f.area, f.note
-            )
-        })
+        .map(|f| format!("         - [{}] {}: {}", f.severity, f.area, f.note))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
         "         Open findings from the previous review round (verify each one first):\n\
          {lines}\n\
-         - For each id above, state whether it is now fixed. Report it again ONLY if it is still\n\
-         unfixed, reusing the same `area` and `note` wording so its id stays stable.\n\
-         - Do not re-report an issue you confirmed fixed, and do not renumber existing findings.\n"
+         - Verify each item against the current code. Report it again ONLY if it is still unfixed.\n\
+         - Do not re-report an issue you confirmed fixed.\n"
+    )
+}
+
+fn render_adjudicated_section(disputed_findings: &[DisputedFinding]) -> String {
+    if disputed_findings.is_empty() {
+        return String::new();
+    }
+    let lines = disputed_findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "         - [{}] {}: {} — accepted trade-off: {}",
+                finding.severity, finding.area, finding.note, finding.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "         Known accepted trade-offs (do NOT re-flag these, including with different wording):\n\
+         {lines}\n"
     )
 }
 
@@ -52,6 +69,7 @@ pub fn build_code_review_prompt(
     diff_stat: &str,
     changed_files: &[String],
     open_findings: &[Finding],
+    disputed_findings: &[DisputedFinding],
 ) -> String {
     let plan_path = crate::infra::platform::format_home_path(plan_path);
     let workspace_hint = workspace_root
@@ -101,6 +119,10 @@ pub fn build_code_review_prompt(
             (
                 "open_findings_section",
                 &render_open_findings_section(open_findings),
+            ),
+            (
+                "adjudicated_findings_section",
+                &render_adjudicated_section(disputed_findings),
             ),
             ("plan_text", plan_text),
         ],
@@ -259,6 +281,83 @@ pub async fn collect_git_diff_context(workspace_root: &std::path::Path) -> (Stri
     }
 
     (diff_stat, changed_files.into_iter().collect())
+}
+
+/// 当前 Git diff 中的代码文件和其中最新的文件修改时间。
+///
+/// 不读取 diff 正文、更不计算内容哈希：`git --name-only` + 文件 metadata 足以把
+/// 「验收前又改过代码」和「仍是同一份代码」区分开。删除的代码文件没有 mtime，
+/// 用当前时间作为保守下界，迫使后续验收在删除之后启动。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodeDiffContext {
+    pub changed_code_files: Vec<String>,
+    pub newest_edit_mtime_ms: Option<u128>,
+}
+
+pub async fn collect_code_diff_context(workspace_root: &std::path::Path) -> CodeDiffContext {
+    let (_, changed_files) = collect_git_diff_context(workspace_root).await;
+    let changed_code_files: Vec<String> = changed_files
+        .into_iter()
+        .filter(|path| is_code_path(path))
+        .collect();
+    if changed_code_files.is_empty() {
+        return CodeDiffContext::default();
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let newest_edit_mtime_ms = changed_code_files
+        .iter()
+        .filter_map(|relative| std::fs::metadata(workspace_root.join(relative)).ok())
+        .filter_map(|metadata| metadata.modified().ok())
+        .filter_map(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .max()
+        .or(Some(now_ms));
+
+    CodeDiffContext {
+        changed_code_files,
+        newest_edit_mtime_ms,
+    }
+}
+
+fn is_code_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "rs" | "ts"
+                    | "tsx"
+                    | "js"
+                    | "jsx"
+                    | "mjs"
+                    | "cjs"
+                    | "py"
+                    | "go"
+                    | "java"
+                    | "kt"
+                    | "kts"
+                    | "c"
+                    | "cc"
+                    | "cpp"
+                    | "cxx"
+                    | "h"
+                    | "hpp"
+                    | "cs"
+                    | "rb"
+                    | "php"
+                    | "swift"
+                    | "scala"
+                    | "sh"
+                    | "sql"
+                    | "vue"
+                    | "svelte"
+            )
+        })
 }
 
 async fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Option<String> {

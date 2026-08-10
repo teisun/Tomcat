@@ -35,6 +35,11 @@ pub(super) fn sample_frontmatter() -> super::file_store::PlanFileFrontmatter {
                 status: super::file_store::TodoStatus::InProgress,
             },
         ],
+        green_build_pass: false,
+        green_build_evidence: Vec::new(),
+        code_review_pass: false,
+        code_review_pass_at_ms: None,
+        completion_gate_cycles: 0,
         unknown: serde_yaml::Mapping::new(),
     }
 }

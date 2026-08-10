@@ -93,7 +93,11 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
     ] {
         let entry = entries.iter().find(|entry| entry.id == id).unwrap();
         assert_eq!(entry.context_window, Some(1_000_000), "{id}");
-        assert_eq!(entry.context_window_options, vec![400_000, 1_000_000], "{id}");
+        assert_eq!(
+            entry.context_window_options,
+            vec![400_000, 1_000_000],
+            "{id}"
+        );
         assert_eq!(entry.max_output_tokens, Some(128_000), "{id}");
     }
 

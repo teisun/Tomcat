@@ -26,8 +26,9 @@ There are exactly three correct usage patterns — pick one:
    Do not mindlessly loop forever: if repeated timeout slices show no meaningful
    progress, stop polling and do other work or report status.
 
-2. **The current todo can do other independent work first** → spawn the background
-   task and **immediately** continue with other tools; you do **not** need to poll.
+2. **The current todo can do other independent work first (DEFAULT — prefer this)** →
+   spawn the background task and **immediately** continue with other tools instead of
+   waiting; you do **not** need to poll or rerun the command.
    When the shell finishes, the runtime auto-injects a synthetic user message:
 
    ```

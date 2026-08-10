@@ -168,7 +168,13 @@ impl CodeReviewerDispatcher for MockCodeReviewerDispatcher {
         if q.is_empty() {
             CodeReviewSummary::aborted_with("mock 队列耗尽")
         } else {
-            q.remove(0)
+            let mut summary = q.remove(0);
+            for (index, finding) in summary.findings.iter_mut().enumerate() {
+                if finding.reference.is_empty() {
+                    finding.reference = format!("F{:02}", index + 1);
+                }
+            }
+            summary
         }
     }
 }
@@ -276,6 +282,11 @@ pub fn write_plan_file_at(
             content: "do the thing".into(),
             status: TodoStatus::Pending,
         }],
+        green_build_pass: false,
+        green_build_evidence: Vec::new(),
+        code_review_pass: false,
+        code_review_pass_at_ms: None,
+        completion_gate_cycles: 0,
         unknown: Default::default(),
     };
     let plan = PlanFile {

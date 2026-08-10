@@ -62,7 +62,10 @@ impl BackendMode {
 
 #[derive(Debug, Clone)]
 pub struct HostedCandidateModel {
+    /// Tomcat catalog identifier, for diagnostics only.
     pub id: String,
+    /// Provider-facing model name. This is what must be sent in an OpenAI request.
+    pub model_name: String,
     pub api: String,
     pub provider: String,
     pub base_url: Option<String>,
@@ -74,6 +77,7 @@ pub fn discover_hosted_candidate(catalog: &ModelCatalog) -> Option<HostedCandida
         .into_iter()
         .find(|entry| entry.capabilities.web_search)
         .map(|entry| HostedCandidateModel {
+            model_name: entry.request_model_name().to_string(),
             id: entry.id,
             api: entry.api,
             provider: entry.provider,

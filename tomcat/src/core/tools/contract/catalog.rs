@@ -121,7 +121,7 @@ pub fn summarize_tool_description(description: &str) -> String {
 }
 
 // ─── 跨工具规则常量（供多个工具共享同一字符串，聚合时按 byte 相等去重） ───
-const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit.";
+const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.";
 const G_NO_DISPLAY_PREFIX: &str = "When copying from read output, never include display prefixes like `  N\\t` or `N#XX:` in edit.old_content.";
 const G_NO_FAKE_EDIT: &str = "Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.";
 const G_PATH_LINE: &str =
@@ -182,7 +182,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "edit",
         label: "Edit File",
-        description: "Edit existing text files. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Three input shapes:\n  Shape A (single segment): { path, old_content, new_content, mode?, replace_all? }\n  Shape B (preferred, multiple segments in one file): { path, edits: [ { old_content, new_content, mode?, replace_all? }, ... ] }\n  Shape C (several files at once): { files: [ { path, edits: [...] }, ... ] }\nWhen both appear on one file, `edits` wins. In Shape C every file is validated first and only the files that pass are written, so read the per-file result: a failure means that one file was left untouched, not that the batch rolled back. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. `replace_all` is valid only for mode `replace`. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.\n",
+        description: "Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.\n",
         display_summary: Some("Replace exact text in an existing file (multi-segment, original-snapshot)."),
         parameters: edit_parameters,
         scope: PermissionScope::Write,
@@ -393,7 +393,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "update_plan",
         label: "Update Plan",
-        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. When all todos reach `completed` in EXEC, the runtime auto-derives state=completed and resets the reminder/catalog/visible labels. Only frontmatter.todos is mutated; plan body markdown is left untouched.\n",
+        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. Up to three independent todos may be `in_progress`. When all todos reach `completed` in EXEC, the runtime runs applicable completion gates before allowing state=completed. Only frontmatter.todos is mutated; plan body markdown is left untouched.\n",
         display_summary: Some("Apply todo-only incremental ops to the active plan (CHAT/PLAN/EXEC)."),
         parameters: update_plan_parameters,
         scope: PermissionScope::Write,
@@ -408,8 +408,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "todos",
         label: "Todos",
-        description: "Manage a session-local todo scratchpad and return a full snapshot of all items after each call. It NEVER writes the active PlanFile (advance plan todos via `update_plan`); when persistence is configured it is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results. At most one todo may be `in_progress`.\n",
-        display_summary: Some("Maintain a session todo scratchpad (single in_progress; returns full snapshot)."),
+        description: "Manage a session-local todo scratchpad and return a full snapshot of all items after each call. It NEVER writes the active PlanFile (advance plan todos via `update_plan`); when persistence is configured it is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results. At most three independent todos may be `in_progress`.\n",
+        display_summary: Some("Maintain a session todo scratchpad (up to three in_progress; returns full snapshot)."),
         parameters: todos_parameters,
         scope: PermissionScope::Write,
         category: None,
@@ -736,41 +736,22 @@ fn write_parameters() -> Value {
 }
 
 fn edit_parameters() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Read before editing. Shape A uses top-level old_content/new_content; Shape B uses edits[] for one file; Shape C uses files[] for several files. `edits` wins. Segment mode: `replace` (default), `insert_before`, or `insert_after`; inserts retain old_content as anchor. Segments match the ORIGINAL snapshot. Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
-        "properties": {
+    object_schema(
+        serde_json::json!({
             "path": {
                 "type": "string",
-                "description": "Absolute or relative file path to edit."
-            },
-            "old_content": {
-                "type": "string",
-                "description": "Shape A: exact existing text to replace; include enough context to be unique unless `replace_all: true`. Copy real file text, not display prefixes."
-            },
-            "new_content": {
-                "type": "string",
-                "description": "Shape A: replacement text, or text to insert for insert modes."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["replace", "insert_before", "insert_after"],
-                "description": "Shape A: defaults to replace. insert_before/insert_after preserve old_content as an anchor; replace_all is only valid with replace."
-            },
-            "replace_all": {
-                "type": "boolean",
-                "description": "Shape A: replace every occurrence of `old_content` instead of failing on multiple matches. Defaults to false."
+                "description": "Absolute or relative path to the one existing file to edit."
             },
             "edits": {
                 "type": "array",
                 "minItems": 1,
-                "description": "Shape B (preferred): edit segments applied to the file's ORIGINAL snapshot. Overlapping spans are rejected.",
+                "description": "One or more independent segments applied to this file's ORIGINAL snapshot. Overlapping spans are rejected.",
                 "items": {
                     "type": "object",
                     "properties": {
                         "old_content": {
                             "type": "string",
-                            "description": "Exact existing text to replace in this segment (real file text, no display prefixes)."
+                            "description": "Exact existing text or insertion anchor (real file text; no read display prefixes)."
                         },
                         "new_content": {
                             "type": "string",
@@ -779,53 +760,20 @@ fn edit_parameters() -> Value {
                         "mode": {
                             "type": "string",
                             "enum": ["replace", "insert_before", "insert_after"],
-                            "description": "Defaults to replace. Insert modes preserve old_content as an anchor."
+                            "description": "Defaults to replace. Insert modes preserve old_content as the anchor."
                         },
                         "replace_all": {
                             "type": "boolean",
-                            "description": "Replace every occurrence of `old_content` in this segment. Defaults to false."
+                            "description": "Change every occurrence intentionally; defaults to false. Valid only with mode=replace."
                         }
                     },
                     "required": ["old_content", "new_content"],
                     "additionalProperties": false
                 }
-            },
-            "files": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 10,
-                "description": "Shape C: edit several files in one call. Mutually exclusive with `path`. Each file must appear at most once — merge its segments instead of listing it twice. Every file is checked first, then only the ones that pass are written; a file that fails is left untouched on disk and reported individually, so a partial batch is a normal outcome you must read the per-file result for.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "File to edit." },
-                        "old_content": { "type": "string", "description": "Single-segment form for this file." },
-                        "new_content": { "type": "string", "description": "Replacement text for the single-segment form." },
-                        "mode": { "type": "string", "enum": ["replace", "insert_before", "insert_after"], "description": "Defaults to replace; insert modes preserve old_content as an anchor." },
-                        "replace_all": { "type": "boolean", "description": "Replace every occurrence in the single-segment form. Defaults to false." },
-                        "edits": {
-                            "type": "array",
-                            "minItems": 1,
-                            "description": "Multi-segment form for this file; same semantics as the top-level `edits`.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "old_content": { "type": "string" },
-                                    "new_content": { "type": "string" },
-                                    "mode": { "type": "string", "enum": ["replace", "insert_before", "insert_after"] },
-                                    "replace_all": { "type": "boolean" }
-                                },
-                                "required": ["old_content", "new_content"],
-                                "additionalProperties": false
-                            }
-                        }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": false
-                }
             }
-        }
-    })
+        }),
+        &["path", "edits"],
+    )
 }
 
 fn bash_parameters() -> Value {
@@ -1164,7 +1112,7 @@ fn create_plan_parameters() -> Value {
 fn update_plan_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Apply incremental todo-only ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
+        "description": "Apply todo ops, submit a P1 code-review dispute, or submit verified green-build evidence to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
         "properties": {
             "plan_id": {
                 "type": "string",
@@ -1180,14 +1128,44 @@ fn update_plan_parameters() -> Value {
             },
             "ops": {
                 "type": "array",
-                "description": "Ordered mutations applied atomically (one frontmatter write under advisory lock).",
-                "minItems": 1,
+                "description": "Ordered todo mutations applied atomically. Omit or pass [] only when submitting dispute_findings or green-build evidence.",
                 "items": shared_todo_op_item_schema(
                     "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing."
                 )
+            },
+            "dispute_findings": {
+                "type": "array",
+                "description": "P1 findings the main Agent explicitly accepts as a trade-off. Use only for wontfix; fixing code is communicated by a later review, not here.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ref": { "type": "string", "description": "Round-local finding reference such as F01." },
+                        "area": { "type": "string", "description": "Finding area copied for audit readability; matching uses ref." },
+                        "resolution": { "type": "string", "enum": ["wontfix"] },
+                        "reason": { "type": "string", "description": "Concrete accepted trade-off reason." }
+                    },
+                    "required": ["ref", "area", "resolution", "reason"],
+                    "additionalProperties": false
+                }
+            },
+            "green_build_pass": {
+                "type": "boolean",
+                "description": "Set true only after loading the verify skill and completing its background acceptance commands."
+            },
+            "green_build_evidence": {
+                "type": "array",
+                "description": "Finished background bash commands used as green-build evidence. Required with green_build_pass=true; command must exactly match the recorded task.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" },
+                        "task_id": { "type": "string" }
+                    },
+                    "required": ["command", "task_id"],
+                    "additionalProperties": false
+                }
             }
-        },
-        "required": ["ops"]
+        }
     })
 }
 
@@ -1213,7 +1191,7 @@ fn todos_parameters() -> Value {
                 "description": "Ordered list of mutations applied in order.",
                 "minItems": 1,
                 "items": shared_todo_op_item_schema(
-                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`."
+                    "For `upsert` (optional) and `set_status` (required). At most three independent todos may be `in_progress`."
                 )
             }
         },

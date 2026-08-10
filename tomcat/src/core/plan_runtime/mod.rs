@@ -50,6 +50,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::session::manager::{AgentMode, ResumeControlState};
@@ -64,6 +65,20 @@ pub use panels::{
 pub use plan_reviewer::{PlanReviewSummary, REVIEWER_ALLOW_REVIEW_EDIT};
 pub use review::Finding;
 pub use verify::VerifySummary;
+
+/// 主 Agent 对一条 P1 finding 的明确取舍。
+///
+/// 只存 P1：P0 必须修复或交还用户，P2 从不阻塞、不需要申辩。`reference` 是本轮
+/// `F0X` 审计标签，不是跨轮稳定 id；跨轮去重依靠 reviewer brief 中的完整文本与理由。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisputedFinding {
+    pub reference: String,
+    pub severity: String,
+    pub area: String,
+    pub note: String,
+    pub resolution: String,
+    pub reason: String,
+}
 
 /// The single authoritative todo source preserved in a compaction summary.
 ///
@@ -168,8 +183,10 @@ pub struct PlanRuntime {
     explorer: Mutex<Option<Arc<dyn ExplorerDispatcher>>>,
     /// `[plan].verify_gate` 当前值：`soft`（默认）或 `gate`。
     verify_gate_mode: RwLock<String>,
-    /// verifier 前 code reviewer 的最大尝试轮次。默认 8；0 表示直接跳过 code review。
+    /// green build 前 code reviewer 的最大尝试轮次。默认 4；0 表示直接跳过 code review。
     max_code_review_rounds: AtomicU32,
+    /// 代码编辑使上一轮验收失效后，允许重新运行 review + green build 的最大周期。
+    max_completion_gate_cycles: AtomicU32,
     /// 计数 reviewer 派发轮次（用于 `[reviewer] max_review_rounds` 软上限 warning）。
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// 计数 verifier 前 code reviewer 实际派发轮次。
@@ -179,6 +196,15 @@ pub struct PlanRuntime {
     /// 还差什么（C1）。
     unresolved_findings:
         parking_lot::Mutex<std::collections::HashMap<String, Vec<review::Finding>>>,
+    /// 主 Agent 已书面申辩、用户需要看到的 P1 取舍。仅在当前计划执行期间保留；
+    /// 重新 build 同一计划意味着重新开始一次审查，因此与未清 finding 一起清空。
+    disputed_findings: parking_lot::Mutex<std::collections::HashMap<String, Vec<DisputedFinding>>>,
+    /// 技术故障不会消耗正常 review 预算，但也不能无限重试。
+    review_infra_retries: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// 根 Agent 工作区；无工作区（大多数纯单测 / 非 Git 项目）时跳过代码 diff 门禁。
+    workspace_root: Mutex<Option<PathBuf>>,
+    /// 后台 bash 任务账本，用于核验 green build 证据。
+    bash_task_registry: Mutex<Option<Arc<crate::core::tools::primitive::BashTaskRegistry>>>,
     /// 当前会话正在用的主模型。run loop 每回合写入，reviewer / verifier 派发时读取——
     /// 这样会话中途换模型，子 Agent 下一次派发就跟着换。
     session_model: parking_lot::Mutex<Option<String>>,
@@ -266,10 +292,15 @@ impl PlanRuntime {
             verifier: Mutex::new(None),
             explorer: Mutex::new(None),
             verify_gate_mode: RwLock::new("soft".into()),
-            max_code_review_rounds: AtomicU32::new(8),
+            max_code_review_rounds: AtomicU32::new(4),
+            max_completion_gate_cycles: AtomicU32::new(3),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             code_review_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             unresolved_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            disputed_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            review_infra_retries: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            workspace_root: Mutex::new(None),
+            bash_task_registry: Mutex::new(None),
             session_model: parking_lot::Mutex::new(None),
             ask_question_panel: Mutex::new(None),
             active_todos_id: Mutex::new(None),
@@ -718,6 +749,36 @@ impl PlanRuntime {
         self.max_code_review_rounds.load(Ordering::Acquire)
     }
 
+    pub fn set_max_completion_gate_cycles(&self, value: u32) {
+        self.max_completion_gate_cycles
+            .store(value.max(1), Ordering::Release);
+    }
+
+    pub fn max_completion_gate_cycles(&self) -> u32 {
+        self.max_completion_gate_cycles.load(Ordering::Acquire)
+    }
+
+    pub fn attach_workspace_root(&self, workspace_root: PathBuf) {
+        *self.workspace_root.lock() = Some(workspace_root);
+    }
+
+    pub fn workspace_root(&self) -> Option<PathBuf> {
+        self.workspace_root.lock().clone()
+    }
+
+    pub fn attach_bash_task_registry(
+        &self,
+        registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
+    ) {
+        *self.bash_task_registry.lock() = Some(registry);
+    }
+
+    pub fn bash_task_registry(
+        &self,
+    ) -> Option<Arc<crate::core::tools::primitive::BashTaskRegistry>> {
+        self.bash_task_registry.lock().clone()
+    }
+
     /// `[skills].expose_to_reviewer` 当前值：为 true 时 reviewer/verifier 可见技能目录并允许
     /// `load_skill`，否则保持默认禁用。
     pub fn expose_skills_to_reviewer(&self) -> bool {
@@ -1083,6 +1144,8 @@ impl PlanRuntime {
     pub fn reset_code_review_rounds(&self, plan_id: &str) {
         self.code_review_rounds.lock().remove(plan_id);
         self.unresolved_findings.lock().remove(plan_id);
+        self.disputed_findings.lock().remove(plan_id);
+        self.review_infra_retries.lock().remove(plan_id);
     }
 
     /// 记录本轮 code review 之后仍未清掉的 finding（`pass` 时传空 Vec 即可清空）。
@@ -1103,11 +1166,16 @@ impl PlanRuntime {
             .unwrap_or_default()
     }
 
-    pub fn unresolved_finding_ids(&self, plan_id: &str) -> Vec<String> {
+    pub fn unresolved_finding_references(&self, plan_id: &str) -> Vec<String> {
         self.unresolved_findings
             .lock()
             .get(plan_id)
-            .map(|findings| findings.iter().map(|f| f.id.clone()).collect())
+            .map(|findings| {
+                findings
+                    .iter()
+                    .map(|finding| finding.reference.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1117,6 +1185,76 @@ impl PlanRuntime {
             .get(plan_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// 返回计划的 code review 轮次是否已经用尽。
+    ///
+    /// 仅在至少派发过一次 review 时才视为「耗尽」；`max=0` 表示调用方关闭了
+    /// review 门禁，而不是「review 失败后耗尽」。这样 completion guard 不会把
+    /// 未启用门禁的计划误当作 handoff。
+    pub fn code_review_budget_exhausted(&self, plan_id: &str) -> bool {
+        let rounds = self.code_review_rounds(plan_id);
+        rounds > 0 && rounds >= self.max_code_review_rounds()
+    }
+
+    /// 技术故障刚发生时退还本轮正常 review 配额。
+    pub fn refund_code_review_round(&self, plan_id: &str) {
+        if let Some(rounds) = self.code_review_rounds.lock().get_mut(plan_id) {
+            *rounds = rounds.saturating_sub(1);
+        }
+    }
+
+    /// 增加技术故障重试次数，返回增加后的次数。
+    pub fn bump_review_infra_retry(&self, plan_id: &str) -> u32 {
+        let mut retries = self.review_infra_retries.lock();
+        let retry = retries.entry(plan_id.to_owned()).or_insert(0);
+        *retry += 1;
+        *retry
+    }
+
+    pub fn review_infra_retries(&self, plan_id: &str) -> u32 {
+        self.review_infra_retries
+            .lock()
+            .get(plan_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn code_review_infra_retry_exhausted(&self, plan_id: &str) -> bool {
+        self.review_infra_retries(plan_id) > 2
+    }
+
+    pub fn add_disputed_finding(&self, plan_id: &str, finding: review::Finding, reason: String) {
+        let reference = finding.reference.clone();
+        let disputed = DisputedFinding {
+            reference,
+            severity: finding.severity,
+            area: finding.area,
+            note: finding.note,
+            resolution: "wontfix".into(),
+            reason,
+        };
+        self.write_transcript_custom(serde_json::json!({
+            "event": "plan.code_review.dispute",
+            "plan_id": plan_id,
+            "finding": disputed,
+        }));
+        self.disputed_findings
+            .lock()
+            .entry(plan_id.to_owned())
+            .or_default()
+            .push(disputed);
+        if let Some(open) = self.unresolved_findings.lock().get_mut(plan_id) {
+            open.retain(|item| item.reference != finding.reference);
+        }
+    }
+
+    pub fn disputed_findings(&self, plan_id: &str) -> Vec<DisputedFinding> {
+        self.disputed_findings
+            .lock()
+            .get(plan_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     // ─── P5 ask_question 面板注入 ──────────────────────────────────────

@@ -1,3 +1,11 @@
+## Investigation discipline (before you assert, not after)
+
+When elaborating on issue root causes, delivering technical solutions, or producing investigation reports, all conclusions must be paired with supporting evidence; unfounded assertions are strictly prohibited.
+
+- Rationalizing is a trigger, not an excuse: “looks right / probably fine / it was like this before” means DO the check, not skip it.
+- Cheapest evidence first: never skip a cheap local check (grep / read / list_dir) by claiming “already confirmed”.
+- Negative claims need evidence: before writing “there is no X / not found / doesn't exist”, grep or web-search first. If still not found, write “UNVERIFIED: could not find X” — never a bare “no X”.
+
 ## Finishing and verifying
 
 Drive each task to real completion; do not stop at a half-finished state or a mere description of a plan. Never fabricate tool output, file contents, or results — if you cannot run or verify something, say so and give the next step.

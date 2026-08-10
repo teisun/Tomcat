@@ -8,7 +8,7 @@ function ThrowOnRender(): never {
 }
 
 describe("WebviewErrorBoundary", () => {
-  it("renders a recoverable fallback and reports a child render failure", () => {
+  it("gui_error_boundary_reports_to_host", () => {
     const reportError = vi.fn();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -20,7 +20,12 @@ describe("WebviewErrorBoundary", () => {
       );
 
       expect(screen.getByTestId("webview-error-fallback").textContent).toContain("render exploded");
-      expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ message: "render exploded" }));
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "render exploded",
+          stack: expect.any(String),
+        }),
+      );
     } finally {
       consoleError.mockRestore();
     }
@@ -47,6 +52,32 @@ describe("WebviewErrorBoundary", () => {
     );
     expect(reportError).toHaveBeenCalledWith(
       expect.objectContaining({ message: "async initialization exploded" }),
+    );
+  });
+
+  it("reports unhandled rejections and renders the fallback", () => {
+    const reportError = vi.fn();
+    render(
+      <WebviewErrorBoundary reportError={reportError}>
+        <div>healthy view</div>
+      </WebviewErrorBoundary>,
+    );
+
+    const event = new Event("unhandledrejection", { cancelable: true });
+    Object.defineProperty(event, "reason", {
+      value: new Error("promise initialization exploded"),
+    });
+    fireEvent(window, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(screen.getByTestId("webview-error-fallback").textContent).toContain(
+      "promise initialization exploded",
+    );
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "promise initialization exploded",
+        stack: expect.any(String),
+      }),
     );
   });
 });

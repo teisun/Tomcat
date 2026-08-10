@@ -359,6 +359,16 @@ fn verification_template_contains_shared_discovery_and_reporting_rules() {
 }
 
 #[test]
+fn negative_assertion_prompt_present() {
+    let s = load(PromptKey::SystemVerification);
+    assert!(s.contains("unfounded assertions are strictly prohibited."));
+    assert!(s.contains("Rationalizing is a trigger"));
+    assert!(s.contains("Cheapest evidence first"));
+    assert!(s.contains("Negative claims need evidence"));
+    assert!(s.contains("UNVERIFIED: could not find X"));
+}
+
+#[test]
 fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
     let s = load(PromptKey::PlannerReminder);
     const TODO_POLICY: &str = concat!(

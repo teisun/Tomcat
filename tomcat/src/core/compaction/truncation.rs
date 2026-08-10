@@ -45,6 +45,39 @@ pub(crate) fn is_persisted_tool_result_text(text: &str) -> bool {
     text.starts_with(TOOL_RESULT_PERSISTED_PREFIX)
 }
 
+/// 从本来就已落盘的工具结果里找回可再次读取的路径。
+///
+/// Layer 1 不负责再复制一份结果到磁盘；它只避免把 bash/task_output 已经返回的
+/// `Full log:` 或 JSON `logPath` 一并抹掉。read/search 的源路径仍在 tool call 参数，
+/// 不应在这里重复塞进上下文。
+fn existing_result_path(text: &str) -> Option<&str> {
+    if let Some(path) = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Full log:").map(str::trim))
+        .filter(|path| !path.is_empty())
+    {
+        return Some(path);
+    }
+
+    for marker in ["\"logPath\":\"", "\"log_path\":\""] {
+        if let Some(rest) = text.split_once(marker).map(|(_, rest)| rest) {
+            if let Some((path, _)) = rest.split_once('"') {
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn tool_result_placeholder(content: &str) -> String {
+    match existing_result_path(content) {
+        Some(path) => format!("[Previous tool result replaced; full log at {path}]"),
+        None => TOOL_RESULT_PLACEHOLDER.to_string(),
+    }
+}
+
 pub(crate) fn persist_tool_result_text(
     content: &mut String,
     tool_call_id: &str,
@@ -210,8 +243,9 @@ pub fn compact_tool_results(
         }
 
         let old_len = content.len();
-        let reduced = old_len - TOOL_RESULT_PLACEHOLDER.len();
-        *content = TOOL_RESULT_PLACEHOLDER.to_string();
+        let replacement = tool_result_placeholder(content);
+        let reduced = old_len.saturating_sub(replacement.len());
+        *content = replacement;
         state.estimate_context_chars = state.estimate_context_chars.saturating_sub(reduced);
         outcome.chars_freed += reduced;
         if let Some(id) = msg.tool_call_id.clone() {

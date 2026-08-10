@@ -21,8 +21,8 @@ use crate::core::llm::types::{
 };
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
-    is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status_error, AppError,
-    LlmErrorStage,
+    is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status_error,
+    llm_retry_after_ms, AppError, LlmErrorStage,
 };
 
 use super::super::auth::Credential;
@@ -34,6 +34,23 @@ mod stream;
 mod wire;
 
 const PROVIDER_NAME: &str = "anthropic";
+
+fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
+    }
+    let retry_at = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    let remaining = retry_at
+        .with_timezone(&chrono::Utc)
+        .signed_duration_since(chrono::Utc::now())
+        .num_milliseconds();
+    Some(remaining.max(0) as u64)
+}
 
 pub(super) struct AnthropicProvider {
     client: reqwest::Client,
@@ -271,11 +288,18 @@ impl AnthropicProvider {
             })?;
         let status = response.status();
         if !status.is_success() {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
             let body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "anthropic error".to_string());
-            return Err(llm_http_status_error(PROVIDER_NAME, status.as_u16(), body));
+            let error = llm_http_status_error(PROVIDER_NAME, status.as_u16(), body);
+            return Err(match (error, retry_after_ms) {
+                (AppError::LlmDetailed(detail), Some(delay)) => {
+                    AppError::LlmDetailed(Box::new((*detail).with_retry_after_ms(delay)))
+                }
+                (error, _) => error,
+            });
         }
         Ok(response)
     }
@@ -319,7 +343,9 @@ impl AnthropicProvider {
                     }
                 }
                 Err(error) if is_retryable_llm_error(&error) && attempt < self.retry_count => {
-                    let delay = provider_retry_delay(attempt);
+                    let delay = llm_retry_after_ms(&error)
+                        .map(Duration::from_millis)
+                        .unwrap_or_else(|| provider_retry_delay(attempt));
                     warn!(
                         "Anthropic 请求失败，{}ms 后重试 ({}/{}): {}",
                         delay.as_millis(),
@@ -479,6 +505,49 @@ mod tests {
     use bytes::Bytes;
     use tokio_stream::wrappers::IntervalStream;
     use tokio_stream::StreamExt;
+
+    #[test]
+    fn parse_retry_after_ms_converts_integer_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("17"),
+        );
+
+        assert_eq!(parse_retry_after_ms(&headers), Some(17_000));
+    }
+
+    #[test]
+    fn parse_retry_after_ms_converts_rfc2822_http_date() {
+        let retry_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let raw = retry_at.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let retry_at = chrono::DateTime::parse_from_rfc2822(&raw)
+            .expect("formatted HTTP date must remain RFC2822-compatible")
+            .with_timezone(&chrono::Utc);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            raw.parse().expect("valid HTTP header value"),
+        );
+
+        let before = chrono::Utc::now();
+        let delay_ms = parse_retry_after_ms(&headers).expect("HTTP date must produce a delay");
+        let after = chrono::Utc::now();
+        let min_delay_ms = retry_at
+            .signed_duration_since(after)
+            .num_milliseconds()
+            .max(0) as u64;
+        let max_delay_ms = retry_at
+            .signed_duration_since(before)
+            .num_milliseconds()
+            .max(0) as u64;
+
+        assert!(
+            (min_delay_ms..=max_delay_ms).contains(&delay_ms),
+            "parsed delay {delay_ms}ms must be bounded by its two observed UTC instants \
+             [{min_delay_ms}, {max_delay_ms}]ms"
+        );
+    }
 
     #[test]
     fn switches_only_between_the_two_anthropic_thinking_formats() {

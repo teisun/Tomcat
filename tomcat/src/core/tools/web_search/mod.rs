@@ -120,47 +120,41 @@ impl WebSearchRuntime {
         if let Some(candidate) = hosted_candidate {
             match self.execute_openai_hosted(request, &candidate).await {
                 Ok(output) => return Ok(output),
-                Err(BackendFailure::Incompatible { .. }) => warnings.push(format!(
-                    "hosted_candidate_unavailable, fallback={}",
-                    first_fallback.unwrap_or("auto")
-                )),
-                Err(failure) if failure.is_retryable_unavailable() => {
-                    warnings.push(format!(
-                        "openai_unavailable, fallback={}",
-                        first_fallback.unwrap_or("auto")
-                    ));
+                Err(failure) => {
+                    // Auto means "try every configured backend". A malformed hosted request
+                    // must be visible in warnings, but must not prevent a configured plugin
+                    // fallback from answering the user.
                     extend_unique(
                         &mut warnings,
                         failure
                             .auto_fallback_warnings(BackendName::Openai.as_str(), first_fallback),
                     );
                 }
-                Err(failure) => {
-                    return Err(log_hard_failure(
-                        BackendName::Openai.as_str(),
-                        failure.to_tool_error(BackendName::Openai.as_str()),
-                    ))
-                }
             }
         }
 
         if plugin_slot {
             if self.plugin_invoker.get().is_none() {
-                return Err(plugin_invoker_missing_error());
-            }
-            match self
-                .execute_plugin_backend(request, "auto", session_id)
-                .await
-            {
-                Ok(mut output) => {
-                    prepend_unique(&mut output.warnings, warnings);
-                    return Ok(output);
-                }
-                Err(failure) if failure.is_retryable_unavailable() => {
-                    extend_unique(&mut warnings, failure.auto_fallback_warnings("auto", None));
-                }
-                Err(failure) => {
-                    return Err(log_hard_failure("auto", failure.to_tool_error("auto")))
+                warnings.push("backend_unavailable:auto (plugin invoker not configured)".into());
+            } else {
+                match self
+                    .execute_plugin_backend(request, "auto", session_id)
+                    .await
+                {
+                    Ok(mut output) => {
+                        prepend_unique(&mut output.warnings, warnings);
+                        return Ok(output);
+                    }
+                    Err(failure @ BackendFailure::PluginRuntime { .. }) => {
+                        // `auto` here is the plugin's own provider-selection slot. A runtime
+                        // failure means the plugin host itself is broken, not that a particular
+                        // provider is unavailable; flattening it into "all unavailable" hides
+                        // an actionable integration defect.
+                        return Err(log_hard_failure("auto", failure.to_tool_error("auto")));
+                    }
+                    Err(failure) => {
+                        extend_unique(&mut warnings, failure.auto_fallback_warnings("auto", None));
+                    }
                 }
             }
         }
@@ -244,7 +238,7 @@ impl WebSearchRuntime {
             &self.client,
             &base_url,
             &credential.value,
-            &candidate.id,
+            &candidate.model_name,
             request,
         )
         .await

@@ -1225,7 +1225,7 @@ async fn auto_plugin_runtime_failure_fails_loud_without_all_backends_unavailable
 
 #[tokio::test]
 #[serial]
-async fn auto_backend_uses_project_hosted_candidate() {
+async fn web_search_sends_request_model_name_not_id() {
     let hosted = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
@@ -1266,7 +1266,8 @@ async fn auto_backend_uses_project_hosted_candidate() {
         Some(format!(
             r#"
 [[models]]
-id = "gpt-5.4-web"
+id = "tomcat-catalog-web-search-model"
+model_name = "provider-facing-web-search-model"
 api = "openai-responses"
 provider = "openai"
 base_url = "{}"
@@ -1298,7 +1299,7 @@ web_search = true
     let requests = hosted.received_requests().await.expect("requests");
     let request = requests.last().expect("hosted request");
     let body: serde_json::Value = serde_json::from_slice(&request.body).expect("json body");
-    assert_eq!(body["model"], json!("gpt-5.4-web"));
+    assert_eq!(body["model"], json!("provider-facing-web-search-model"));
     assert_eq!(body["tools"][0]["type"], json!("web_search"));
     assert_eq!(
         body["tools"][0]["filters"]["allowed_domains"],
@@ -1359,7 +1360,7 @@ web_search = true
     assert!(output
         .warnings
         .iter()
-        .any(|w| w == "hosted_candidate_unavailable, fallback=auto"));
+        .any(|w| w == "backend_unavailable:openai, fallback=auto"));
 }
 
 #[tokio::test]

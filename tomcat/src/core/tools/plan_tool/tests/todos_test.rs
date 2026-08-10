@@ -165,7 +165,7 @@ fn todos_never_writes_plan_file_in_chat() {
 }
 
 #[test]
-fn todos_state_enforces_single_in_progress() {
+fn todos_state_allows_independent_in_progress_items() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -191,7 +191,7 @@ fn todos_state_enforces_single_in_progress() {
         },
     )
     .unwrap();
-    let err = todos::execute(
+    let out = todos::execute(
         &rt,
         None,
         todos::TodosArgs {
@@ -205,8 +205,9 @@ fn todos_state_enforces_single_in_progress() {
             }],
         },
     )
-    .expect_err("第二个 in_progress 应被 ops 引擎拒");
-    assert!(matches!(err, ToolError::Op(_)));
+    .expect("第二个独立 todo 可并行推进");
+    assert_eq!(out["items"][0]["status"], "in_progress");
+    assert_eq!(out["items"][1]["status"], "in_progress");
     cleanup_home(&home);
 }
 

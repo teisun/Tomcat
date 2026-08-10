@@ -49,7 +49,8 @@ use crate::core::llm::{
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
     is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
-    llm_http_status_error, llm_http_status_error_with_stage, AppError, LlmErrorStage,
+    llm_http_status_error, llm_http_status_error_with_stage, llm_retry_after_ms, AppError,
+    LlmErrorStage,
 };
 
 use super::super::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
@@ -172,12 +173,40 @@ fn gateway_http_stage(status: u16, body: &str) -> Option<LlmErrorStage> {
     None
 }
 
-fn map_http_status_error(status: reqwest::StatusCode, body: &[u8]) -> AppError {
-    let message = String::from_utf8_lossy(body).into_owned();
-    if let Some(stage) = gateway_http_stage(status.as_u16(), &message) {
-        return llm_http_status_error_with_stage(PROVIDER_NAME, stage, status.as_u16(), message);
+fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
     }
-    llm_http_status_error(PROVIDER_NAME, status.as_u16(), message)
+    let retry_at = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    let remaining = retry_at
+        .with_timezone(&chrono::Utc)
+        .signed_duration_since(chrono::Utc::now())
+        .num_milliseconds();
+    Some(remaining.max(0) as u64)
+}
+
+fn map_http_status_error(
+    status: reqwest::StatusCode,
+    body: &[u8],
+    retry_after_ms: Option<u64>,
+) -> AppError {
+    let message = String::from_utf8_lossy(body).into_owned();
+    let error = if let Some(stage) = gateway_http_stage(status.as_u16(), &message) {
+        llm_http_status_error_with_stage(PROVIDER_NAME, stage, status.as_u16(), message)
+    } else {
+        llm_http_status_error(PROVIDER_NAME, status.as_u16(), message)
+    };
+    match (error, retry_after_ms) {
+        (AppError::LlmDetailed(detail), Some(delay)) => {
+            AppError::LlmDetailed(Box::new((*detail).with_retry_after_ms(delay)))
+        }
+        (error, _) => error,
+    }
 }
 
 /// `POST {base}/v1/responses` 适配器；与 [`OpenAiProvider`] 共享 [`LlmRuntimeConfig`] 横切字段，
@@ -658,13 +687,14 @@ impl OpenAiResponsesProvider {
             .map_err(|e| map_send_error("请求", e, self.http_read_timeout_sec))?;
 
         let status = resp.status();
+        let retry_after_ms = parse_retry_after_ms(resp.headers());
         let bytes = resp
             .bytes()
             .await
             .map_err(|e| map_body_read_error("读取响应", e, self.http_read_timeout_sec))?;
 
         if !status.is_success() {
-            return Err(map_http_status_error(status, &bytes));
+            return Err(map_http_status_error(status, &bytes, retry_after_ms));
         }
 
         let raw: Value =
@@ -686,7 +716,9 @@ impl OpenAiResponsesProvider {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
-                        let delay = provider_retry_delay(attempt);
+                        let delay = llm_retry_after_ms(&e)
+                            .map(std::time::Duration::from_millis)
+                            .unwrap_or_else(|| provider_retry_delay(attempt));
                         warn!(
                             "Responses 请求失败，{}ms 后重试 ({}/{}): {}",
                             delay.as_millis(),
@@ -746,12 +778,13 @@ impl OpenAiResponsesProvider {
             .await
             .map_err(|e| map_send_error("流式请求", e, self.http_read_timeout_sec))?;
         let status = resp.status();
+        let retry_after_ms = parse_retry_after_ms(resp.headers());
         if !status.is_success() {
             let bytes = resp
                 .bytes()
                 .await
                 .map_err(|e| map_body_read_error("读取错误响应", e, self.http_read_timeout_sec))?;
-            return Err(map_http_status_error(status, &bytes));
+            return Err(map_http_status_error(status, &bytes, retry_after_ms));
         }
         Ok(resp)
     }
@@ -766,7 +799,9 @@ impl OpenAiResponsesProvider {
             match self.stream_post_once(base_url, body).await {
                 Ok(resp) => return Ok(resp),
                 Err(err) if Self::is_retriable(&err) && attempt < self.retry_count => {
-                    let delay = provider_retry_delay(attempt);
+                    let delay = llm_retry_after_ms(&err)
+                        .map(std::time::Duration::from_millis)
+                        .unwrap_or_else(|| provider_retry_delay(attempt));
                     warn!(
                         "Responses 流式建连失败，{}ms 后重试 ({}/{}): {}",
                         delay.as_millis(),

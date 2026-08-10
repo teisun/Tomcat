@@ -22,9 +22,9 @@ update_plan(all todos completed)
            +--> parent transcript: plan.code_review.started -> plan.code_review
            +--> child audit: sub_agent_start -> sub_agent_end (不驱动产品 UI)
            +--> tool result: update_plan.code_review
-           +--> verdict=pass      -> completed
+           +--> verdict=pass      -> verified green build -> completed
            +--> verdict=fail/partial -> stay executing, 强指令要求 reopen/add fix todo
-           +--> rounds exhausted  -> best-effort completed
+           +--> rounds exhausted  -> stay executing and hand back to the user
 ```
 
 ### Code review 时间线契约
@@ -63,13 +63,17 @@ plan.update + plan.todos
 
 ### 3. EXEC 收口现在怎么走
 
-- 默认只跑 **1 轮** code review，也就是“审一次、修一次”。
-- `verdict = pass`：直接 completed，并切回 CHAT。
+- 默认最多跑 **4 轮** code review：每次修复后重新 `update_plan` 收口，会进入下一轮复审。
+- `verdict = pass`：先记录 review 已通过；仍必须提供当前代码 diff 的 green-build 证据，才会
+  completed 并切回 CHAT。
 - `verdict = fail | partial`：plan 保持 `executing`，runtime 不自动造 todo，而是明确要求主 Agent：
   - `reopen` 一个已有 todo，或
   - `add` 一个修复 todo。
-- 修完再次 `update_plan` 收口时，因为轮次默认已耗尽，所以 runtime **不再复审**，直接 best-effort completed。
-- `verdict = aborted`：按 reviewer 不可用处理，best-effort completed。
+- 修完再次 `update_plan` 收口时，只要 4 轮预算尚未耗尽，就继续多轮复审。
+- 轮次耗尽但仍没有通过结论时，runtime 保持 `executing` 并交还用户决定；不会
+  best-effort completed。
+- `verdict = aborted`：按技术故障处理，不消耗正常轮次；重试仍无法恢复时同样保持
+  `executing` 并交还用户。
 
 ### 4. verifier 当前状态
 

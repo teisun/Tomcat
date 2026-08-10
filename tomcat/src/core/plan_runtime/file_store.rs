@@ -70,8 +70,8 @@ pub enum PlanError {
     #[error("非法 plan_id: {reason}")]
     InvalidPlanId { reason: String },
 
-    /// 单一文件最多一个 in_progress；写盘前校验。
-    #[error("plan 文件最多允许一个 in_progress todo，当前: {count}")]
+    /// 单一文件最多允许有限数量的 in_progress；写盘前校验。
+    #[error("plan 文件最多允许 {MAX_IN_PROGRESS_TODOS} 个 in_progress todo，当前: {count}")]
     MultipleInProgress { count: usize },
 
     /// todo id 在单文件内必须唯一。
@@ -107,7 +107,7 @@ impl PlanFileState {
     }
 }
 
-/// 单个 todo 的状态。**单一文件**最多一个 `in_progress`（写盘前校验）。
+/// 单个 todo 的状态。单一文件最多允许 [`MAX_IN_PROGRESS_TODOS`] 个 `in_progress`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
@@ -116,6 +116,9 @@ pub enum TodoStatus {
     Completed,
     Cancelled,
 }
+
+/// 同时进行的 todo 上限：允许有限并行，仍保持面板和收口状态可读。
+pub const MAX_IN_PROGRESS_TODOS: usize = 3;
 
 impl TodoStatus {
     pub fn as_str(&self) -> &'static str {
@@ -135,6 +138,18 @@ pub struct TodoItem {
     pub status: TodoStatus,
 }
 
+/// 一次可复核的绿构建任务引用。
+///
+/// `task_id` 指向运行时创建的后台 bash 任务；其余字段是验证通过时的快照，便于
+/// transcript 与计划文件在会话恢复后解释“哪次命令放行了收口”。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GreenBuildEvidence {
+    pub command: String,
+    pub task_id: String,
+    pub started_at_ms: u128,
+    pub exit_code: i32,
+}
+
 /// PlanFile 顶部 YAML frontmatter；**v1 schema**。
 ///
 /// 未声明字段通过 `#[serde(flatten)]` 兜底到 `unknown`，写盘时保留，
@@ -151,6 +166,19 @@ pub struct PlanFileFrontmatter {
     pub created_at: String,
     pub schema_version: i32,
     pub todos: Vec<TodoItem>,
+    /// 最近一次针对当前代码 diff 的绿构建验收是否已经通过。
+    #[serde(default)]
+    pub green_build_pass: bool,
+    #[serde(default)]
+    pub green_build_evidence: Vec<GreenBuildEvidence>,
+    /// 最近一次针对当前代码 diff 的 P0/P1 review 是否通过。
+    #[serde(default)]
+    pub code_review_pass: bool,
+    #[serde(default)]
+    pub code_review_pass_at_ms: Option<u128>,
+    /// 已实际运行的「review → green build」门禁周期数。
+    #[serde(default)]
+    pub completion_gate_cycles: u32,
     /// 未来扩展字段；read 时收集，write 时原样写回（保前向兼容）。
     #[serde(flatten)]
     pub unknown: serde_yaml::Mapping,
@@ -264,7 +292,7 @@ fn enforce_required_fields(fm: &PlanFileFrontmatter) -> Result<(), PlanError> {
     Ok(())
 }
 
-/// 写盘前对 frontmatter 做不变量校验（单 in_progress / id 唯一）。
+/// 写盘前对 frontmatter 做不变量校验（有限 in_progress / id 唯一）。
 pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), PlanError> {
     enforce_required_fields(fm)?;
     let in_progress_count = fm
@@ -272,7 +300,7 @@ pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), P
         .iter()
         .filter(|t| matches!(t.status, TodoStatus::InProgress))
         .count();
-    if in_progress_count > 1 {
+    if in_progress_count > MAX_IN_PROGRESS_TODOS {
         return Err(PlanError::MultipleInProgress {
             count: in_progress_count,
         });

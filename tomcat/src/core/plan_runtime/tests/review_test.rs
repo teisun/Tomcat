@@ -141,6 +141,7 @@ fn reviewer_system_prompt_contains_constraints() {
 fn code_review_system_prompt_contains_verdict_and_bash() {
     let p = code_review_system_prompt_text();
     assert!(p.contains("verdict: pass|fail|partial|aborted"));
+    assert!(p.contains("P0 / P1 / P2"));
     assert!(p.contains("read, search_files, list_dir, bash"));
     assert!(p.contains("STRICTLY read-only") || p.contains("stay read-only"));
 }
@@ -169,6 +170,7 @@ fn build_code_review_prompt_includes_diff_context() {
         " src/lib.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
         &["src/lib.rs".into(), "tests/lib.rs".into()],
         &[],
+        &[],
     );
     assert!(prompt.contains("git diff --stat HEAD"));
     assert!(prompt.contains("src/lib.rs"));
@@ -182,6 +184,18 @@ fn parse_review_block_with_verdict() {
     let r = parse_review_block(text).unwrap();
     assert_eq!(r.verdict.as_deref(), Some("fail"));
     assert_eq!(r.findings.len(), 1);
+}
+
+#[test]
+fn parse_review_block_assigns_round_local_references_and_tiers() {
+    let text = "<review>\nfindings:\n  - { severity: P0, area: \"logic\", note: \"missing authorization\" }\n  - { severity: P1, area: \"ui\", note: \"dialog cannot close\" }\n  - { severity: P2, area: \"style\", note: \"rename helper\" }\nverdict: fail\nsummary: found issues\nchanges_summary: none\napplied_changes: false\n</review>";
+    let review = parse_review_block(text).expect("review parses");
+    assert_eq!(review.findings[0].reference, "F01");
+    assert_eq!(review.findings[1].reference, "F02");
+    assert_eq!(review.findings[2].reference, "F03");
+    assert!(review.findings[0].blocks());
+    assert!(review.findings[1].blocks());
+    assert!(!review.findings[2].blocks());
 }
 
 #[test]

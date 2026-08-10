@@ -24,6 +24,7 @@ type TomcatApi = {
     captureWebviewDom(): Promise<{
       activeSessionId: string | null;
       approvalCount: number;
+      composerFooterPlanStatus: string | null;
       composerControlMetrics: Record<string, { top: number; width: number }>;
       composerRowCount: number;
       expandedThinkingCount: number;
@@ -128,6 +129,14 @@ async function captureScreenshot(name: string): Promise<string> {
     stdio: "inherit",
   });
   return targetPath;
+}
+
+async function setNextFakeServePromptScript(script: string): Promise<void> {
+  const scriptPath = path.join(
+    requireEnv("TOMCAT_FAKE_SERVE_STATE_DIR"),
+    "manual-acceptance-next-prompt-script.txt",
+  );
+  await fs.writeFile(scriptPath, `${script}\n`, "utf8");
 }
 
 async function waitForDom<T>(
@@ -876,5 +885,64 @@ suite("Tomcat manual acceptance", () => {
     for (const [name, value] of Object.entries(report.checks)) {
       assert.equal(value.passed, true, `expected ${name} acceptance check to pass`);
     }
+  });
+});
+
+suite("Tomcat fake serve plan close-out", () => {
+  test("renders completed plan with code review and green build rows", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady(20_000);
+
+    const priorSessionId = api.__testing.getWebviewState().activeSessionId;
+    await api.__testing.sendWebviewIntent({
+      messageId: "plan-close-out-new-session",
+      type: "newSession",
+    });
+    const sessionId = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId && snapshot.activeSessionId !== priorSessionId
+          ? snapshot.activeSessionId
+          : undefined,
+      20_000,
+    );
+
+    await setNextFakeServePromptScript("plan_close_out_review_green_finalize");
+    api.__testing.clearObservedEvents();
+    await api.__testing.sendWebviewIntent({
+      data: {
+        sessionId,
+        text: "render deterministic plan close-out presentation",
+      },
+      messageId: "plan-close-out-prompt",
+      type: "prompt",
+    });
+    await api.__testing.waitForEvent({ timeoutMs: 20_000, type: "agent_end" });
+
+    const completed = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId === sessionId &&
+        snapshot.composerFooterPlanStatus === "Plan: completed" &&
+        snapshot.toolTitles.some(
+          (title) => title.includes("Green build passed"),
+        )
+          ? snapshot
+          : undefined,
+      20_000,
+    );
+
+    assert.equal(completed.composerFooterPlanStatus, "Plan: completed");
+    assert.ok(
+      completed.html.includes("Code review") && completed.html.includes("PASS"),
+      `expected completed code-review row; DOM=${completed.html}`,
+    );
+    assert.ok(
+      completed.toolTitles.some(
+        (title) => title.includes("Green build passed"),
+      ),
+      `expected green-build command row; titles=${JSON.stringify(completed.toolTitles)}`,
+    );
   });
 });

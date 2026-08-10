@@ -20,6 +20,9 @@ async fn update_plan_does_not_dispatch_dormant_verifier_even_when_attached() {
             plan_id: Some(plan_id.clone()),
             path: None,
             replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),

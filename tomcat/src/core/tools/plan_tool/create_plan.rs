@@ -160,7 +160,7 @@ pub fn execute(
             status: t.status,
         })
         .collect();
-    // 复用 ops 引擎的不变量校验：duplicate id / single in_progress
+    // 复用 ops 引擎的不变量校验：duplicate id / bounded in_progress
     let mut v = Vec::with_capacity(todos.len());
     let add_ops: Vec<_> = todos
         .iter()
@@ -178,6 +178,11 @@ pub fn execute(
         created_at: now,
         schema_version: PLAN_FILE_SCHEMA_VERSION,
         todos,
+        green_build_pass: false,
+        green_build_evidence: Vec::new(),
+        code_review_pass: false,
+        code_review_pass_at_ms: None,
+        completion_gate_cycles: 0,
         unknown: serde_yaml::Mapping::new(),
     };
     let body = default_body(&args.goal, &args.draft);

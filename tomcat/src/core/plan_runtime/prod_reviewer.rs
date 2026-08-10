@@ -451,6 +451,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             &diff_stat,
             &changed_files,
             open_findings,
+            &plan_runtime.disputed_findings(plan_id),
         );
         let turns_limit = deps.max_turns.max(1);
 

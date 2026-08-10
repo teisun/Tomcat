@@ -108,6 +108,7 @@ pub struct LlmError {
     provider: Option<String>,
     stage: Option<LlmErrorStage>,
     http_status: Option<u16>,
+    retry_after_ms: Option<u64>,
     code: Option<String>,
     summary: String,
     source: Option<AnyhowError>,
@@ -139,6 +140,7 @@ pub fn llm_stream_interrupted_error(
         provider: Some(provider.into()),
         stage: Some(LlmErrorStage::BodyRead),
         http_status: None,
+        retry_after_ms: None,
         code: Some("stream_interrupted".to_string()),
         summary: summary.into(),
         source: None,
@@ -223,6 +225,7 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: Some(stage),
             http_status: None,
+            retry_after_ms: None,
             code: None,
             summary: summary.into(),
             source: None,
@@ -242,6 +245,7 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: Some(stage),
             http_status: None,
+            retry_after_ms: None,
             code: None,
             summary: summary.into(),
             source: Some(source.into()),
@@ -257,6 +261,7 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: None,
             http_status: None,
+            retry_after_ms: None,
             code,
             summary: summary.into(),
             source: None,
@@ -272,6 +277,7 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: None,
             http_status: Some(http_status),
+            retry_after_ms: None,
             code: None,
             summary: summary.into(),
             source: None,
@@ -288,6 +294,7 @@ impl LlmError {
             provider: Some(provider.into()),
             stage: Some(stage),
             http_status: Some(http_status),
+            retry_after_ms: None,
             code: None,
             summary: summary.into(),
             source: None,
@@ -308,6 +315,15 @@ impl LlmError {
 
     pub fn http_status_value(&self) -> Option<u16> {
         self.http_status
+    }
+
+    pub fn with_retry_after_ms(mut self, retry_after_ms: u64) -> Self {
+        self.retry_after_ms = Some(retry_after_ms);
+        self
+    }
+
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        self.retry_after_ms
     }
 
     pub fn code(&self) -> Option<&str> {
@@ -344,6 +360,13 @@ pub fn llm_stage(err: &AppError) -> Option<LlmErrorStage> {
 pub fn llm_http_status(err: &AppError) -> Option<u16> {
     match err {
         AppError::LlmDetailed(detail) => detail.http_status_value(),
+        _ => None,
+    }
+}
+
+pub fn llm_retry_after_ms(err: &AppError) -> Option<u64> {
+    match err {
+        AppError::LlmDetailed(detail) => detail.retry_after_ms(),
         _ => None,
     }
 }

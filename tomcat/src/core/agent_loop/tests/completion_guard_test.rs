@@ -58,6 +58,11 @@ fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) ->
             created_at: "2026-07-27T00:00:00Z".to_string(),
             schema_version: 1,
             todos,
+            green_build_pass: false,
+            green_build_evidence: Vec::new(),
+            code_review_pass: false,
+            code_review_pass_at_ms: None,
+            completion_gate_cycles: 0,
             unknown: serde_yaml::Mapping::new(),
         },
         body: "## body\n".to_string(),
@@ -641,8 +646,10 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
             "concern".into(),
             "logic".into(),
             "missing null check".into(),
-        ),
-        Finding::new("nit".into(), "tests".into(), "no regression test".into()),
+        )
+        .with_reference("F01"),
+        Finding::new("nit".into(), "tests".into(), "no regression test".into())
+            .with_reference("F02"),
     ];
     plan_runtime.set_unresolved_findings(&plan_id, findings.clone());
 
@@ -653,8 +660,86 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
     assert_eq!(outcome, TurnOutcome::Continue);
     let text = messages.last().unwrap().text_content().unwrap_or("");
     assert!(text.contains("code review has not passed"), "text={text}");
-    let expected_ids = format!("{}, {}", findings[0].id, findings[1].id);
-    assert!(text.contains(&expected_ids), "text={text}");
+    assert!(text.contains("F01, F02"), "text={text}");
+
+    cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn exhausted_budget_stops_completion_guard() {
+    let _home = home_guard();
+    let plan_id = unique_plan_id("guard_review_budget_exhausted");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Completed)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
+    plan_runtime.set_max_code_review_rounds(1);
+    plan_runtime
+        .try_begin_code_review_round(&plan_id)
+        .expect("the only review round starts");
+    plan_runtime.set_unresolved_findings(
+        &plan_id,
+        vec![Finding::new(
+            "concern".into(),
+            "logic".into(),
+            "missing null check".into(),
+        )],
+    );
+
+    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
+    let mut messages = vec![ChatMessage::user("start building")];
+    assert_eq!(
+        finalize(&mut agent, &mut messages).await,
+        TurnOutcome::Finished,
+        "review budget exhaustion is a handoff state, not another completion nudge"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.kind != MessageKind::Nudge),
+        "an exhausted review budget must not append a completion nudge"
+    );
+
+    cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn exhausted_infra_retries_stop_completion_guard() {
+    let _home = home_guard();
+    let plan_id = unique_plan_id("guard_review_infra_retries_exhausted");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Completed)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
+    for _ in 0..3 {
+        plan_runtime.bump_review_infra_retry(&plan_id);
+    }
+    assert!(
+        plan_runtime.code_review_infra_retry_exhausted(&plan_id),
+        "three technical review failures must exhaust the bounded retry budget"
+    );
+
+    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
+    let mut messages = vec![ChatMessage::user("start building")];
+    assert_eq!(
+        finalize(&mut agent, &mut messages).await,
+        TurnOutcome::Finished,
+        "exhausted infrastructure retries are a handoff state, not another completion nudge"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.kind != MessageKind::Nudge),
+        "exhausted infrastructure retries must not append a completion nudge"
+    );
 
     cleanup_plan_file(&plan_path);
 }
