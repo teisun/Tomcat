@@ -620,6 +620,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           return false;
         },
         keydown: (_view, event) => {
+          const key = event.key.toLowerCase();
+          if (
+            (event.metaKey || event.ctrlKey) &&
+            (key === "z" || key === "y")
+          ) {
+            // VS Code forwards webview shortcuts to its workbench. Do not let a
+            // Composer undo/redo escape this contentEditable: Tiptap handles the
+            // history action locally, while the workbench could undo the active
+            // editor or issue a second browser undo.
+            event.stopPropagation();
+            return false;
+          }
           if (isMentionOpenRef.current) {
             return false;
           }

@@ -751,6 +751,52 @@ describe("Composer", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("keeps undo and redo local to the composer", async () => {
+    const { ref } = renderComposer();
+    const textbox = screen.getByTestId("composer-input");
+    const outerKeydownListener = vi.fn();
+    window.addEventListener("keydown", outerKeydownListener);
+
+    try {
+      await act(async () => {
+        fireEvent.paste(textbox, {
+          clipboardData: {
+            getData: (type: string) => (type === "text/plain" ? "undo me" : ""),
+          },
+        });
+      });
+      expect(ref.current?.getDraft().text).toBe("undo me");
+
+      fireEvent.keyDown(textbox, { ctrlKey: true, key: "z" });
+      expect(ref.current?.getDraft().text).toBe("");
+      expect(outerKeydownListener).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(textbox, { ctrlKey: true, key: "y" });
+      expect(ref.current?.getDraft().text).toBe("undo me");
+      expect(outerKeydownListener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("keydown", outerKeydownListener);
+    }
+  });
+
+  it.each([
+    { key: "z", metaKey: true, shiftKey: false },
+    { key: "Z", metaKey: true, shiftKey: true },
+    { ctrlKey: true, key: "z", shiftKey: false },
+    { ctrlKey: true, key: "y", shiftKey: false },
+  ])("does not let $key undo or redo shortcut reach the webview window", (keyboardEvent) => {
+    renderComposer();
+    const outerKeydownListener = vi.fn();
+    window.addEventListener("keydown", outerKeydownListener);
+
+    try {
+      fireEvent.keyDown(screen.getByTestId("composer-input"), keyboardEvent);
+      expect(outerKeydownListener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("keydown", outerKeydownListener);
+    }
+  });
+
   it("opens @ context search and forwards raw query updates", async () => {
     const onContextSearchOpen = vi.fn();
     const onContextSearchQueryChange = vi.fn();

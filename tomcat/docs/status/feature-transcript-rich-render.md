@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-10 21:11 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-10 23:10 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Composer 撤销隔离：Tiptap `contentEditable` 上的 Mod+Z/Y（含 Shift-Z）在 `handleDOMEvents.keydown` 中 `stopPropagation()`，阻断 VS Code webview→workbench 转发，避免二次 `execCommand('undo')` 隔字撤销，以及旧可写计划预览被 undo 改盘；撤销/重做只由本地 history 处理。P0 GUI：撤销恰好一次且 window 冒泡监听未触发；P1 host E2E：只读预览活动时 `undo` 后计划文件字节不变。CLI `0.1.35 → 0.1.36`、扩展 `0.1.47 → 0.1.48`、bundled CLI 同步；纯插件 `tomcat-vscode-ext-0.1.48.vsix`。@2026-08-10
 - [✓] **[P0]** `.plan.md` 预览数据丢失根治：`PlanPreviewEditorProvider` 从可写 `CustomTextEditorProvider` 迁为无文本缓冲的 `CustomReadonlyEditorProvider`；所有预览/serve 刷新只读磁盘，逐面板 `FileSystemWatcher` 覆盖 change/create（原子 rename）并在 delete 时关闭面板，彻底移除 `tomcat.plan.autoSave` 与 `TextDocument.save()` 路径。手改仍只经原生 Markdown 编辑器保存；Provider 46、GUI 19、serve 事件集成和聚焦真机 plan E2E 通过。CLI `0.1.34 → 0.1.35`、扩展 `0.1.46 → 0.1.47`、bundled CLI 同步。@2026-08-10
 - [✓] **[P0]** `ask_question` 实时卡片闪现/消失根治：工具卡与问答卡此前共用裸 `toolCallId` 作时间线 `.id`，增量 patch、分组和 React key 会把两张卡当同一张；问答卡现使用 `approval:<toolCallId>` 渲染键，跨重连合并仍用 `toolCallId`。状态仓库强制每个 session 的 timeline id 唯一；补齐实时共存、interrupt、patch≡full、GUI DOM 与 host E2E（fake serve 也发真实的 tool start + control request）回归。扩展 `0.1.45 → 0.1.46`，`bundledCli=0.1.34` 不变。@2026-08-10
 - [✓] **(版本发布)** CLI `0.1.33 → 0.1.34`、扩展 `0.1.44 → 0.1.45`（`bundledCli=0.1.34`）：`node scripts/release-version.mjs bump --all patch`；`check` 通过。便于验收交付门禁与 in_progress≤3 文案对齐后的整包安装。@2026-08-10
@@ -79,7 +80,8 @@
 - 模型 Context 档位：`ModelEntry` / `ModelView` / serve schema / `wire.d.ts` / webview `types` 新增 `context_window_options` 与 `selected_context_window`；serve 命令 `set_context_window`；聊天 `/context`（`cmd_context`）；`model-thinking.json` 偏好值由裸 reasoning 字符串改为 `{ reasoning, context_window }` 对象（开发期不做旧格式读兼容）。
 - GUI：删除 `PlanBuildModelSelect`；Composer / Plan 卡共用 `ModelPicker`（含 portal 配置浮层）；Settings 中转站按内置 model name 继承 API/thinking/档位，Context Window 字段改为只读展示。
 - Webview 根组件挂载 `WebviewErrorBoundary`；`package-vsix --skip-build` 对预构建 gui/extension 产物做 mtime 新鲜度门禁。
-- 发布版本：CLI `0.1.35`、扩展 `0.1.47`、`bundledCliVersion=0.1.35`。
+- 发布版本：CLI `0.1.36`、扩展 `0.1.48`、`bundledCliVersion=0.1.36`。
+- Composer：Mod+Z / Mod+Y / Mod+Shift+Z 在 Tiptap `keydown` 中 `stopPropagation()`，撤销/重做留在本地 history，不转发 workbench。
 - 架构文档：`tomcat-vscode-ext/docs/architecture/model-picker.md`。
 - `context_metrics_update.providerUsageMeasured: boolean`：`true` 只表示**本条事件**直接由 provider usage 产生；`false` 表示最佳估算。消费者在从未收到 `true` 的 cold slot 上必须继续留空；已有基线时必须以 `false` 的 ratio 原位更新而非清空。wire 字段和 schema 不变，仅收紧语义。
 - OpenAI Responses：`build_responses_input` 将 `MessageKind::EphemeralTail` 合入顶层 `instructions` 并排除出 `input`；兼容路由的 `previous_response_id` continuity 以锚点 assistant 的后继索引裁剪 input，避免重复发送服务端已恢复的历史。`TOMCAT_PROMPT_PREFIX_FINGERPRINT=1` 仅输出 prompt 结构哈希，用于安全定位前缀漂移。
@@ -142,6 +144,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-10 23:10）：Composer 撤销不再冒泡到 VS Code workbench；GUI Composer 定向单测与只读计划预览 undo 守卫 E2E 通过；`npm run lint` 绿；版本已升 CLI `0.1.36` / 扩展 `0.1.48` / bundled CLI `0.1.36`；本机纯插件 `tomcat-vscode-ext-0.1.48.vsix`。Cov% 仍为 —。
 - 最新补充（2026-08-10 21:11）：计划预览已改成只读自定义编辑器，磁盘成为唯一权威；watcher/serve 两路刷新均只读磁盘，手改仅走原生 Markdown 编辑器。Provider 46、GUI 19、serve plan event 与聚焦 devhost `.plan.md` E2E 通过；全量扩展集成/host E2E 的既有 fixture 失败详见 BLOCKED。版本已升 CLI `0.1.35` / 扩展 `0.1.47` / bundled CLI `0.1.35`；Cov% 仍为 —。
 - 最新补充（2026-08-10 16:10）：`ask_question` 实时工具卡与问答卡不再共享 timeline `.id`；新增 live / interrupt / patch≡full / GUI DOM 回归，targeted devhost E2E 通过；扩展已升至 `0.1.46`，纯插件 VSIX 已重打。Cov% 仍为 —。
 - 最新补充（2026-08-10 13:56）：版本 bump CLI `0.1.34` / 扩展 `0.1.45` / bundledCli `0.1.34`；`release-version check` 通过。Cov% 仍为 —。

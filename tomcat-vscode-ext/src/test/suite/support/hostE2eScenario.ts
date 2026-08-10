@@ -6060,6 +6060,15 @@ export async function assertPlanPreviewCustomEditorFlow(
       updatedText,
       "expected Save from the readonly preview to leave disk content unchanged",
     );
+    // `undo` must likewise be unable to alter a plan while its readonly preview
+    // is active. This guards against the workbench custom-editor undo route
+    // recreating a writable text buffer for the preview.
+    await api.__testing.executeCommand("undo");
+    assert.equal(
+      await fs.readFile(planPath, "utf8"),
+      updatedText,
+      "expected Undo from the readonly preview to leave disk content unchanged",
+    );
 
     // When the serve exposes ready models, selecting one on the hybrid strip
     // persists it to the global config.
