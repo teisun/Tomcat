@@ -1408,6 +1408,7 @@ function handlePrompt(frame) {
   }
   if (text.includes("answer card showcase")) {
     const requestId = \`ask-answer-\${sessionId}\`;
+    const toolCallId = \`tool-ask-\${requestId}\`;
     const request = {
       questions: [
         {
@@ -1421,9 +1422,17 @@ function handlePrompt(frame) {
       ],
       requestId,
       responseEvent: \`plan.ask_question.response.\${requestId}\`,
+      toolCallId,
     };
     pendingApproval = { kind: "answer-card", request, requestId, sessionId };
     persistPendingApproval();
+    send({
+      args: { questions: request.questions },
+      sessionId,
+      toolCallId,
+      toolName: "ask_question",
+      type: "tool_execution_start",
+    });
     send({
       payload: request,
       requestId,
@@ -2079,7 +2088,7 @@ function handleControlResponse(frame) {
     const tool = {
       args: { questions: pending.request.questions },
       result,
-      toolCallId: \`tool-ask-\${pending.requestId}\`,
+      toolCallId: pending.request.toolCallId,
       toolName: "ask_question",
     };
     emitCompletedTool(sessionId, tool);

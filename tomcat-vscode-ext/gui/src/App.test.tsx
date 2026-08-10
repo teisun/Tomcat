@@ -573,6 +573,64 @@ describe("Tomcat webview App", () => {
     expect(screen.queryByTestId("pending-question-panel")).toBeNull();
   });
 
+  it("renders one asking-question row and its live sticky answer panel", async () => {
+    mount();
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [{
+          busy: true,
+          isCurrent: true,
+          ownedByThisFrontend: true,
+          sessionId: "s1",
+          title: null,
+          updatedAt: 1,
+        }],
+        sessionViews: {
+          s1: {
+            busy: true,
+            sessionId: "s1",
+            timeline: [
+              {
+                id: "ask-call-live",
+                isError: false,
+                status: "running",
+                toolCallId: "ask-call-live",
+                toolName: "ask_question",
+                type: "tool",
+              },
+              {
+                id: "approval:ask-call-live",
+                live: true,
+                request: {
+                  questions: [{
+                    id: "q1",
+                    options: [{ id: "yes", label: "Yes", recommended: true }],
+                    prompt: "Proceed?",
+                  }],
+                  requestId: "request-live",
+                  responseEvent: "plan.ask_question.response.request-live",
+                  toolCallId: "ask-call-live",
+                },
+                resolved: false,
+                sessionId: "s1",
+                type: "approval",
+              },
+            ],
+          },
+        },
+      },
+      messageId: "ask-question-live",
+    });
+
+    expect(screen.getAllByText("Asking question")).toHaveLength(1);
+    expect(screen.getByTestId("pending-question-panel")).toBeTruthy();
+    expect(screen.getByText("Proceed?")).toBeTruthy();
+  });
+
   it("hides the context label until the first measured usage arrives", async () => {
     mount();
     expect(screen.getByTestId("context-ratio").textContent).toBe("");

@@ -223,14 +223,11 @@ function getAssistantDelta(
   return { delta, kind };
 }
 
-function createTimelineId(
+/** Allocates an id only for timeline items without a durable external id. */
+function createGeneratedTimelineId(
   session: WebviewSessionSnapshot,
   prefix: string,
-  preferredId?: string | null,
 ): string {
-  if (preferredId) {
-    return preferredId;
-  }
   return `${session.sessionId}-${prefix}-${session.timeline.length + 1}`;
 }
 
@@ -2087,7 +2084,7 @@ function upsertTool(
     return existing;
   }
   const next: WebviewToolCard = {
-    id: createTimelineId(session, "tool", toolCallId),
+    id: toolCallId,
     isError: false,
     status: "running",
     toolCallId,
@@ -2137,7 +2134,10 @@ function upsertApproval(
     return existing;
   }
   const created: WebviewApprovalCard = {
-    id: createTimelineId(session, "approval", identity),
+    // A durable toolCallId identifies the question across reconnects, but is
+    // also the live tool card id. Namespace this render/patch key so both
+    // timeline items can coexist.
+    id: `approval:${identity}`,
     live,
     request,
     resolved: false,
@@ -2192,7 +2192,7 @@ function pushMessage(
   options: AppendMessageOptions = {},
 ): WebviewMessageBlock {
   const next: WebviewMessageBlock = {
-    id: createTimelineId(session, kind, preferredId),
+    id: preferredId ?? createGeneratedTimelineId(session, kind),
     kind,
     text,
     type: "message",
@@ -2459,15 +2459,32 @@ export class WebviewStateStore {
     };
   }
 
+  private assertUniqueTimelineIds(): void {
+    for (const session of Object.values(this.state.sessionViews)) {
+      const ids = new Set<string>();
+      for (const item of session.timeline) {
+        if (ids.has(item.id)) {
+          throw new Error(
+            `duplicate timeline id in session ${session.sessionId}: ${item.id}`,
+          );
+        }
+        ids.add(item.id);
+      }
+    }
+  }
+
   view(): Readonly<WebviewStateSnapshot> {
+    this.assertUniqueTimelineIds();
     return this.state;
   }
 
   snapshot(): WebviewStateSnapshot {
+    this.assertUniqueTimelineIds();
     return cloneSnapshot(this.state);
   }
 
   snapshotSession(sessionId: string): WebviewSessionSnapshot | null {
+    this.assertUniqueTimelineIds();
     const session = this.state.sessionViews[sessionId];
     if (!session) {
       return null;
@@ -2872,6 +2889,12 @@ export class WebviewStateStore {
   }
 
   applyEvent(frame: HostEventFrameContent): SessionRenderMutation {
+    const mutation = this.applyEventUnchecked(frame);
+    this.assertUniqueTimelineIds();
+    return mutation;
+  }
+
+  private applyEventUnchecked(frame: HostEventFrameContent): SessionRenderMutation {
     if (
       frame.type === "__test.capture_dom" ||
       frame.type === "__test.dom_action" ||
@@ -3454,6 +3477,7 @@ export class WebviewStateStore {
     session.hasMoreHistory = runtime.hasMoreHistory;
     session.historyLoading = runtime.historyLoading;
     this.resolveHistoryAttachmentUris(session);
+    this.assertUniqueTimelineIds();
   }
 
   /**

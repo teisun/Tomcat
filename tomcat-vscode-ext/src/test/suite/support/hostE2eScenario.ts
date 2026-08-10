@@ -1950,7 +1950,7 @@ export async function assertWebviewAnswerCardFlow(
       if (!session) {
         return undefined;
       }
-      const pending = session?.timeline.find(
+      const pending = session.timeline.find(
         (
           item,
         ): item is Extract<
@@ -1958,9 +1958,25 @@ export async function assertWebviewAnswerCardFlow(
           { type: "approval" }
         > => item.type === "approval" && !item.resolved,
       );
-      return pending ? { pending } : undefined;
+      return pending ? { pending, timeline: session.timeline } : undefined;
     },
     20_000,
+  );
+  const liveIds = approval.timeline.map((item) => item.id);
+  assert.equal(
+    new Set(liveIds).size,
+    liveIds.length,
+    `live ask_question timeline must have unique ids: ${JSON.stringify(liveIds)}`,
+  );
+  assert.equal(
+    approval.timeline.filter(
+      (item) =>
+        item.type === "tool" &&
+        item.toolName === "ask_question" &&
+        item.toolCallId === approval.pending.request.toolCallId,
+    ).length,
+    1,
+    "expected one running ask_question tool next to the live approval card",
   );
   const pendingSnapshot = await waitForWebviewDomSnapshot(
     api,

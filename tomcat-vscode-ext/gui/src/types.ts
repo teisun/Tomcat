@@ -315,6 +315,8 @@ export interface WebviewApprovalCard {
     questions: WebviewApprovalQuestion[];
     requestId: string;
     responseEvent: string;
+    /** Durable identity shared with the corresponding ask_question tool card. */
+    toolCallId?: string;
   };
   resolved: boolean;
   sessionId?: string | null;

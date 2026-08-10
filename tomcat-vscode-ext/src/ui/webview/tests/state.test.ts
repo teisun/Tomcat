@@ -2425,6 +2425,106 @@ describe("custom history replay", () => {
     ).toEqual([]);
   });
 
+  it("keeps one live ask_question tool and approval card with unique timeline ids", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const questions = [{
+      id: "q1",
+      options: [{ id: "yes", label: "Yes", recommended: true }],
+      prompt: "Proceed?",
+    }];
+
+    store.applyEvent({
+      args: { questions },
+      sessionId: "s1",
+      toolCallId: "ask-call-live",
+      toolName: "ask_question",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      payload: {
+        questions,
+        requestId: "request-live",
+        responseEvent: "plan.ask_question.response.request-live",
+        sessionId: "s1",
+        toolCallId: "ask-call-live",
+      },
+      requestId: "request-live",
+      sessionId: "s1",
+      subtype: "ask_question",
+      type: "control_request",
+    });
+
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    const tool = timeline.find(
+      (item): item is WebviewToolCard =>
+        item.type === "tool" && item.toolCallId === "ask-call-live",
+    );
+    const approval = timeline.find(
+      (item): item is WebviewApprovalCard =>
+        item.type === "approval" && item.request.toolCallId === "ask-call-live",
+    );
+    expect(tool).toMatchObject({ id: "ask-call-live", status: "running" });
+    expect(approval).toMatchObject({
+      id: "approval:ask-call-live",
+      live: true,
+      resolved: false,
+    });
+    expect(new Set(timeline.map((item) => item.id)).size).toBe(timeline.length);
+  });
+
+  it("keeps a live ask_question approval answerable after interruption", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const questions = [{
+      id: "q1",
+      options: [{ id: "yes", label: "Yes", recommended: true }],
+      prompt: "Proceed?",
+    }];
+
+    store.applyEvent({
+      args: { questions },
+      sessionId: "s1",
+      toolCallId: "ask-call-interrupted",
+      toolName: "ask_question",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      payload: {
+        questions,
+        requestId: "request-interrupted",
+        responseEvent: "plan.ask_question.response.request-interrupted",
+        sessionId: "s1",
+        toolCallId: "ask-call-interrupted",
+      },
+      requestId: "request-interrupted",
+      sessionId: "s1",
+      subtype: "ask_question",
+      type: "control_request",
+    });
+    store.applyEvent({
+      partialTextLen: 0,
+      sessionId: "s1",
+      toolResultsCount: 0,
+      type: "agent_interrupted",
+    });
+
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(
+      timeline.find(
+        (item): item is WebviewToolCard =>
+          item.type === "tool" && item.toolCallId === "ask-call-interrupted",
+      ),
+    ).toMatchObject({ status: "interrupted" });
+    expect(
+      timeline.find(
+        (item): item is WebviewApprovalCard =>
+          item.type === "approval" && item.request.toolCallId === "ask-call-interrupted",
+      ),
+    ).toMatchObject({ live: true, resolved: false });
+    expect(new Set(timeline.map((item) => item.id)).size).toBe(timeline.length);
+  });
+
   it("REPRO keeps one live approval card when history rebuild sees the pending result after the live control_request", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -2437,7 +2537,14 @@ describe("custom history replay", () => {
       prompt: "Proceed?",
     }];
 
-    // 1) Live control_request arrives FIRST (the "flash"): creates the interactive card.
+    // 1) A live tool card plus control request arrive for the same durable id.
+    store.applyEvent({
+      args: { questions },
+      sessionId: "s1",
+      toolCallId: "ask-call-pending",
+      toolName: "ask_question",
+      type: "tool_execution_start",
+    });
     store.applyEvent({
       payload: {
         questions,
@@ -2484,6 +2591,11 @@ describe("custom history replay", () => {
     const timeline = store.snapshot().sessionViews.s1.timeline;
     const approvals = timeline.filter((item) => item.type === "approval");
     expect(approvals).toHaveLength(1);
+    expect(
+      timeline.filter(
+        (item) => item.type === "tool" && item.toolCallId === "ask-call-pending",
+      ),
+    ).toHaveLength(1);
     expect(approvals[0]).toMatchObject({
       request: expect.objectContaining({
         requestId: "live-request-1",

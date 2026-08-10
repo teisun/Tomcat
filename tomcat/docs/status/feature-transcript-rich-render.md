@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-10 13:56 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-10 16:10 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** `ask_question` 实时卡片闪现/消失根治：工具卡与问答卡此前共用裸 `toolCallId` 作时间线 `.id`，增量 patch、分组和 React key 会把两张卡当同一张；问答卡现使用 `approval:<toolCallId>` 渲染键，跨重连合并仍用 `toolCallId`。状态仓库强制每个 session 的 timeline id 唯一；补齐实时共存、interrupt、patch≡full、GUI DOM 与 host E2E（fake serve 也发真实的 tool start + control request）回归。扩展 `0.1.45 → 0.1.46`，`bundledCli=0.1.34` 不变。@2026-08-10
 - [✓] **(版本发布)** CLI `0.1.33 → 0.1.34`、扩展 `0.1.44 → 0.1.45`（`bundledCli=0.1.34`）：`node scripts/release-version.mjs bump --all patch`；`check` 通过。便于验收交付门禁与 in_progress≤3 文案对齐后的整包安装。@2026-08-10
 - [✓] **[P1]** in_progress≤3 文案对齐：`executor.txt` 与 `update_plan` 工具顶层 description 写清「最多三个互不依赖」；参数层 `status` 描述去掉整表上限复读（只保留字段语义 / executing 约束）；`plan-runtime.md` / `todos.md` / `update-plan.md` / `planner.md` 与派生 `tool-catalog.md` 同步。@2026-08-10
 - [✓] **[P0]** 执行效率与交付收口门禁：计划完成态硬门控 `code_review_pass` + `green_build_pass`（证据走 `BashTaskRegistry`、编辑新鲜度使门失效）；code review 按 P0/P1 过滤、轮次局部 finding ref、`dispute_findings`（仅 wontfix）、abort 退还轮次、infra-retry 耗尽停 completion_guard；默认 `max_code_review_rounds=4`、配置项 `max_completion_gate_cycles`（默认 3）；内置 `verify` skill；diff-gate 仅对代码路径生效。效率侧：`edit` schema `{path,edits}`、并行 edit/read 提示、无人值守 Retry-After、压缩保留 `logPath`、最多 3 个 `in_progress` todo、web_search 发 `model_name` 并 hosted 失败自动回退。扩展：`WebviewErrorBoundary` 冒烟 + fake-serve 收口 E2E；架构文档 `delivery-accuracy-and-completeness.md`。验证：`cargo test --lib`（~2637 passed, 1 ignored）、`cargo fmt --check`、`git diff --check`、扩展 lint、包装 VSIX ErrorBoundary/close-out E2E；ignored real-LLM 产品路径曾跑通 review→verify→green build→completed。Cov% 未跑 tarpaulin，仍为 —。@2026-08-10
@@ -70,14 +71,14 @@
 - LLM：无人值守重试尊重 `Retry-After`；Anthropic/OpenAI Responses 解析路径补齐。
 - `web_search`：对外请求使用 catalog `model_name`；hosted 失败可自动回退。
 - 架构文档：`docs/architecture/delivery-accuracy-and-completeness.md`；`plan-exec-code-verification.md` / `tools/reviewer.md` / `tool-catalog.md` 同步。
-- `ask_question` webview：`WebviewApprovalCard.live`；timeline 身份统一为 `toolCallId`（`requestId` 仅路由）；历史 `[pending]` 不再伪造 `pending:` 门票；serve 重臂须在 `initialize` 之后发新 `control_request`。
+- `ask_question` webview：`WebviewApprovalCard.live`；跨重连的合并身份为 `toolCallId`（`requestId` 仅路由），但问答卡的 timeline/render id 为 `approval:<toolCallId>`，避免与工具卡撞号；历史 `[pending]` 不再伪造 `pending:` 门票；serve 重臂须在 `initialize` 之后发新 `control_request`。
 - 子 Agent：`ProdReviewerDeps` / verifier 注入 `model_prefs`，派发 `thinking_level` 继承会话 Effort 并夹取。
 - GUI：`buildPickerModels` 叠加会话 Context+Effort 至 Composer / PlanFileCard / PlanActionStrip；Settings `findReusableModelByName`（user 优先）+ `findConfiguredRelayByBaseUrl`；默认档 `DEFAULT_CONTEXT_WINDOW=400K` / `DEFAULT_MAX_OUTPUT_TOKENS=128K` 只读展示。
 - Plan 预览：`setContextWindow` / `setThinkingLevel` RPC 失败 `showErrorMessage`，成功才刷新。
 - 模型 Context 档位：`ModelEntry` / `ModelView` / serve schema / `wire.d.ts` / webview `types` 新增 `context_window_options` 与 `selected_context_window`；serve 命令 `set_context_window`；聊天 `/context`（`cmd_context`）；`model-thinking.json` 偏好值由裸 reasoning 字符串改为 `{ reasoning, context_window }` 对象（开发期不做旧格式读兼容）。
 - GUI：删除 `PlanBuildModelSelect`；Composer / Plan 卡共用 `ModelPicker`（含 portal 配置浮层）；Settings 中转站按内置 model name 继承 API/thinking/档位，Context Window 字段改为只读展示。
 - Webview 根组件挂载 `WebviewErrorBoundary`；`package-vsix --skip-build` 对预构建 gui/extension 产物做 mtime 新鲜度门禁。
-- 发布版本：CLI `0.1.32`、扩展 `0.1.43`、`bundledCliVersion=0.1.32`。
+- 发布版本：CLI `0.1.34`、扩展 `0.1.46`、`bundledCliVersion=0.1.34`。
 - 架构文档：`tomcat-vscode-ext/docs/architecture/model-picker.md`。
 - `context_metrics_update.providerUsageMeasured: boolean`：`true` 只表示**本条事件**直接由 provider usage 产生；`false` 表示最佳估算。消费者在从未收到 `true` 的 cold slot 上必须继续留空；已有基线时必须以 `false` 的 ratio 原位更新而非清空。wire 字段和 schema 不变，仅收紧语义。
 - OpenAI Responses：`build_responses_input` 将 `MessageKind::EphemeralTail` 合入顶层 `instructions` 并排除出 `input`；兼容路由的 `previous_response_id` continuity 以锚点 assistant 的后继索引裁剪 input，避免重复发送服务端已恢复的历史。`TOMCAT_PROMPT_PREFIX_FINGERPRINT=1` 仅输出 prompt 结构哈希，用于安全定位前缀漂移。
@@ -139,6 +140,8 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-10 16:10）：`ask_question` 实时工具卡与问答卡不再共享 timeline `.id`；新增 live / interrupt / patch≡full / GUI DOM 回归，targeted devhost E2E 通过；扩展已升至 `0.1.46`，纯插件 VSIX 已重打。Cov% 仍为 —。
+- 最新补充（2026-08-10 13:56）：版本 bump CLI `0.1.34` / 扩展 `0.1.45` / bundledCli `0.1.34`；`release-version check` 通过。Cov% 仍为 —。
 - 最新补充（2026-08-10 12:24）：in_progress≤3 文案对齐——executor / 工具顶层保留一句，参数层 `status` 不再复读整表上限；架构文档与 `tool-catalog.md` 同步。Cov% 仍为 —。
 - 最新补充（2026-08-10 10:04）：执行效率与交付收口门禁合入。完成态双硬门（code review + green build）、内置 verify skill、edit schema / parallel tools / Retry-After / compaction logPath / 最多 3 in_progress / web_search model_name 回退，以及 ErrorBoundary/fake-serve E2E 与交付准确性文档。验证：`cargo test --lib` ~2637 passed；扩展 lint 与包装 VSIX 相关 E2E 绿。Cov% 本轮未跑 tarpaulin，仍为 —。
 - 最新补充（2026-08-08 09:45）：ModelPicker / Context 档位 / Effort 显示与 portal 配置浮层、WebviewErrorBoundary、VSIX 新鲜度门禁、`accept:image` lease+窗口定位修复已合入工作区；版本 CLI `0.1.31` / 扩展 `0.1.42`。既有本地 `~/.tomcat/models.toml` 若在旧 builtin 物化后未含 `context_window_options`，会盖住嵌入 catalog 的新档位——升级后需重新生成或手工补档位。Cov% 本轮未跑 tarpaulin，仍为 —。
