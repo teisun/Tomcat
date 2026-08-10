@@ -1,8 +1,9 @@
+import fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import type { InitializeResult } from "../../../serveClient/initialize";
@@ -12,7 +13,6 @@ import type {
   PlanPreviewEditorProviderDeps,
 } from "../PlanPreviewEditorProvider";
 import {
-  PLAN_AUTO_SAVE_DELAY_MS,
   PlanPreviewEditorProvider,
   classifyPlanLink,
   deriveCanBuild,
@@ -27,6 +27,9 @@ const __testing = (
   vscode as typeof vscode & {
     __testing: {
       reset(): void;
+      deleteFile(filePath: string): void;
+      fireDidChangeFile(filePath: string): void;
+      registerFile(filePath: string, text: string): void;
       setConfiguration(key: string, value: unknown): void;
       setWarningMessageHandler(handler: (message: string, items: string[]) => unknown): void;
     };
@@ -68,6 +71,7 @@ class FakeWebview {
 
 class FakeWebviewPanel {
   active: boolean;
+  disposed = false;
   readonly webview = new FakeWebview();
   private readonly viewStateEmitter = new vscode.EventEmitter<void>();
   private readonly disposeEmitter = new vscode.EventEmitter<void>();
@@ -84,21 +88,13 @@ class FakeWebviewPanel {
   }
 
   fireDispose(): void {
+    this.disposed = true;
     this.disposeEmitter.fire();
   }
-}
 
-function fakeDocument(
-  text: string,
-  docPath: string,
-  options: { isDirty?: boolean; save?: () => Promise<boolean> } = {},
-) {
-  return {
-    getText: () => text,
-    isDirty: options.isDirty ?? false,
-    save: options.save ?? (async () => true),
-    uri: vscode.Uri.file(docPath),
-  };
+  dispose(): void {
+    this.fireDispose();
+  }
 }
 
 function hostRefreshCounters(provider: PlanPreviewEditorProvider): {
@@ -121,11 +117,14 @@ async function resolveEditor(
   text: string,
   docPath: string,
   active = true,
-  document = fakeDocument(text, docPath),
-): Promise<{ document: ReturnType<typeof fakeDocument>; panel: FakeWebviewPanel }> {
+): Promise<{ document: vscode.CustomDocument; panel: FakeWebviewPanel }> {
+  if (!fs.existsSync(docPath)) {
+    virtualPlanTexts.set(docPath, text);
+  }
+  const document = provider.openCustomDocument(vscode.Uri.file(docPath));
   const panel = new FakeWebviewPanel(active);
-  provider.resolveCustomTextEditor(
-    document as unknown as vscode.TextDocument,
+  provider.resolveCustomEditor(
+    document,
     panel as unknown as vscode.WebviewPanel,
   );
   await flush();
@@ -191,6 +190,8 @@ function makeDoc(text = PLAN_TEXT, docPath = "/workspace/plans/sample.plan.md"):
 }
 
 const refreshTempDirs: string[] = [];
+const virtualPlanTexts = new Map<string, string>();
+const realReadFileSync = fs.readFileSync;
 
 async function createTempPlanFile(text: string): Promise<string> {
   const dir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "tomcat-plan-refresh-"));
@@ -200,12 +201,30 @@ async function createTempPlanFile(text: string): Promise<string> {
   return planPath;
 }
 
+beforeEach(() => {
+  __testing.reset();
+  virtualPlanTexts.clear();
+  vi.spyOn(fs, "readFileSync").mockImplementation(
+    ((file: unknown, ...args: unknown[]) => {
+      if (typeof file === "string") {
+        const text = virtualPlanTexts.get(file);
+        if (text !== undefined) {
+          return text;
+        }
+      }
+      return Reflect.apply(realReadFileSync, fs, [file, ...args]);
+    }) as never,
+  );
+});
+
 afterEach(async () => {
   vi.useRealTimers();
   await Promise.all(
     refreshTempDirs.map((dir) => fsPromises.rm(dir, { force: true, recursive: true })),
   );
   refreshTempDirs.length = 0;
+  virtualPlanTexts.clear();
+  vi.restoreAllMocks();
 });
 
 describe("deriveCanBuild", () => {
@@ -668,6 +687,18 @@ describe("PlanPreviewEditorProvider active-panel + native controls", () => {
 });
 
 describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
+  it("opens an opaque readonly document with no text buffer or save capability", () => {
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const document = provider.openCustomDocument(
+      vscode.Uri.file("/workspace/plans/readonly.plan.md"),
+    );
+
+    expect(document.uri.fsPath).toBe("/workspace/plans/readonly.plan.md");
+    expect(document).not.toHaveProperty("getText");
+    expect(document).not.toHaveProperty("save");
+    expect(document).not.toHaveProperty("isDirty");
+  });
+
   it("refreshes an open preview from disk even when the VS Code document is stale", async () => {
     const oldText = PLAN_TEXT.replace("Body paragraph.", "Old buffered paragraph.");
     const newText = PLAN_TEXT.replace("Body paragraph.", "Disk refreshed paragraph.");
@@ -683,18 +714,86 @@ describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
     expect(panel.webview.lastState()?.bodyMarkdown).toContain("Disk refreshed paragraph.");
   });
 
-  it("keeps dirty buffer text while applying the event's non-text plan state", async () => {
-    const bufferedText = PLAN_TEXT.replace("Body paragraph.", "Unsaved editor paragraph.");
+  it("never writes the plan file while refreshing agent-written disk content", async () => {
+    const initialText = PLAN_TEXT.replace("Body paragraph.", "Initial disk paragraph.");
+    const agentText = PLAN_TEXT.replace("Body paragraph.", "Agent-written disk paragraph.");
+    const planPath = await createTempPlanFile(initialText);
+    const writeSpy = vi.spyOn(fs, "writeFileSync");
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    await resolveEditor(provider, initialText, planPath);
+
+    await fsPromises.writeFile(planPath, agentText, "utf8");
+    await provider.refreshFromServeEvent("plan-xyz");
+
+    expect(fs.readFileSync(planPath, "utf8")).toBe(agentText);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it("refreshes from disk when its watcher receives a change", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Before watcher change.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "After watcher change.");
+    const planPath = await createTempPlanFile(oldText);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+
+    await fsPromises.writeFile(planPath, newText, "utf8");
+    __testing.fireDidChangeFile(planPath);
+    await flush();
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("After watcher change.");
+  });
+
+  it("refreshes from disk when an atomic rename is reported as a create", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Before atomic rename.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "After atomic rename.");
+    const planPath = await createTempPlanFile(oldText);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+
+    await fsPromises.writeFile(planPath, newText, "utf8");
+    __testing.registerFile(planPath, newText);
+    await flush();
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("After atomic rename.");
+  });
+
+  it("watches plan files outside the workspace", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Outside workspace before.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "Outside workspace after.");
+    const planPath = await createTempPlanFile(oldText);
+    expect(planPath.startsWith("/workspace/")).toBe(false);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+
+    await fsPromises.writeFile(planPath, newText, "utf8");
+    __testing.fireDidChangeFile(planPath);
+    await flush();
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Outside workspace after.");
+  });
+
+  it("closes the panel when its plan file is deleted", async () => {
+    const planPath = await createTempPlanFile(PLAN_TEXT);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, PLAN_TEXT, planPath);
+
+    await fsPromises.rm(planPath, { force: true });
+    __testing.deleteFile(planPath);
+
+    expect(panel.disposed).toBe(true);
+    expect(provider.getActivePlanPath()).toBeNull();
+  });
+
+  it("always renders agent-written disk text while applying the event's non-text plan state", async () => {
     const diskText = PLAN_TEXT.replace("Body paragraph.", "Agent-written disk paragraph.");
     const planPath = await createTempPlanFile(diskText);
     const provider = new PlanPreviewEditorProvider(makeDeps());
-    const document = fakeDocument(bufferedText, planPath, { isDirty: true });
-    const { panel } = await resolveEditor(provider, bufferedText, planPath, true, document);
+    const { panel } = await resolveEditor(provider, diskText, planPath);
 
     await provider.refreshFromServeEvent("plan-xyz", null, "executing");
 
     expect(panel.webview.lastState()).toMatchObject({
-      bodyMarkdown: expect.stringContaining("Unsaved editor paragraph."),
+      bodyMarkdown: expect.stringContaining("Agent-written disk paragraph."),
       canBuild: false,
       state: "executing",
     });
@@ -770,75 +869,6 @@ describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
     await provider.refreshFromServeEvent("plan-xyz");
 
     expect(panel.webview.stateFrames()).toHaveLength(frameCount);
-  });
-});
-
-describe("PlanPreviewEditorProvider plan auto-save", () => {
-  function scheduleAutoSave(provider: PlanPreviewEditorProvider, document: ReturnType<typeof fakeDocument>): void {
-    (
-      provider as unknown as {
-        scheduleAutoSave(document: vscode.TextDocument): void;
-      }
-    ).scheduleAutoSave(document as unknown as vscode.TextDocument);
-  }
-
-  it("debounces plan saves into one write", async () => {
-    vi.useFakeTimers();
-    const provider = new PlanPreviewEditorProvider(makeDeps());
-    const save = vi.fn().mockResolvedValue(true);
-    const document = fakeDocument(PLAN_TEXT, "/workspace/plans/auto-save.plan.md", {
-      isDirty: true,
-      save,
-    });
-
-    scheduleAutoSave(provider, document);
-    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS - 1);
-    expect(save).not.toHaveBeenCalled();
-
-    scheduleAutoSave(provider, document);
-    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS);
-    expect(save).toHaveBeenCalledTimes(1);
-    provider.dispose();
-  });
-
-  it("does not save when tomcat.plan.autoSave is disabled", async () => {
-    vi.useFakeTimers();
-    __testing.setConfiguration("tomcat.plan.autoSave", false);
-    const provider = new PlanPreviewEditorProvider(makeDeps());
-    const save = vi.fn().mockResolvedValue(true);
-    const document = fakeDocument(PLAN_TEXT, "/workspace/plans/manual-save.plan.md", {
-      isDirty: true,
-      save,
-    });
-
-    scheduleAutoSave(provider, document);
-    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS);
-    expect(save).not.toHaveBeenCalled();
-
-    __testing.setConfiguration("tomcat.plan.autoSave", true);
-    provider.dispose();
-  });
-
-  it("warns once and does not retry after a save conflict", async () => {
-    vi.useFakeTimers();
-    const warning = vi.fn().mockResolvedValue(undefined);
-    __testing.setWarningMessageHandler(warning);
-    const provider = new PlanPreviewEditorProvider(makeDeps());
-    const save = vi.fn().mockResolvedValue(false);
-    const document = fakeDocument(PLAN_TEXT, "/workspace/plans/conflict.plan.md", {
-      isDirty: true,
-      save,
-    });
-
-    scheduleAutoSave(provider, document);
-    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS);
-    await Promise.resolve();
-    scheduleAutoSave(provider, document);
-    await vi.advanceTimersByTimeAsync(PLAN_AUTO_SAVE_DELAY_MS);
-
-    expect(save).toHaveBeenCalledTimes(1);
-    expect(warning).toHaveBeenCalledTimes(1);
-    provider.dispose();
   });
 });
 

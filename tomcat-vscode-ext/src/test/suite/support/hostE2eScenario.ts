@@ -5913,14 +5913,45 @@ export async function assertPlanPreviewCustomEditorFlow(
       "expected 'Markdown' to open the raw plan file in the native text editor",
     );
 
-    // "Preview" from the native editor reopens the custom preview; hot-update the
-    // document afterwards via disk write + serve event, and expect the checklist
-    // to grow without kicking the user back to the top of the scroll column.
+    // A user can edit and save only in the native text editor. The preview then
+    // renders that disk state without owning a source buffer itself.
+    const manuallyEditedText = initialText.replace(
+      "Body paragraph for the preview.",
+      "User-saved native editor paragraph.",
+    );
+    const lastLine = nativeEditor.document.lineAt(
+      nativeEditor.document.lineCount - 1,
+    );
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      nativeEditor.document.uri,
+      new vscode.Range(
+        new vscode.Position(0, 0),
+        new vscode.Position(
+          nativeEditor.document.lineCount - 1,
+          lastLine.text.length,
+        ),
+      ),
+      manuallyEditedText,
+    );
+    const applied = await vscode.workspace.applyEdit(edit);
+    assert.equal(applied, true, "expected the native editor change to apply");
+    assert.equal(
+      await nativeEditor.document.save(),
+      true,
+      "expected the native editor change to save",
+    );
+
+    // "Preview" from the native editor reopens the custom preview; verify that
+    // it reads the user-saved disk state, then hot-update it via agent disk write
+    // + serve event. The checklist must grow without jumping to the scroll top.
     await api.__testing.executeCommand("tomcat.plan.viewAsPreview");
     await waitForPlanPreviewDom(
       api,
       planPath,
-      (snapshot) => snapshot.bodyHasContent,
+      (snapshot) =>
+        snapshot.bodyHasContent &&
+        snapshot.bodyText.includes("User-saved native editor paragraph."),
     );
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
       kind: "setContentScrollTop",
@@ -5932,7 +5963,7 @@ export async function assertPlanPreviewCustomEditorFlow(
       (snapshot) => (snapshot.contentScrollTop ?? 0) >= 200,
     );
 
-    const updatedText = initialText.replace(
+    const updatedText = manuallyEditedText.replace(
       "---\n\n# E2E heading",
       [
         "- id: t4",
@@ -5981,8 +6012,8 @@ export async function assertPlanPreviewCustomEditorFlow(
     const headingLine = updatedLines.indexOf("# E2E heading") + 1;
     const paragraphLine =
       updatedLines.indexOf(
-      `Body paragraph for the preview. ${bodyFindToken} with \`inline-code\`.`,
-    ) + 1;
+        `User-saved native editor paragraph. ${bodyFindToken} with \`inline-code\`.`,
+      ) + 1;
     const firstListLine =
       updatedLines.indexOf("- First markdown selection") + 1;
     const secondListLine =
@@ -6009,6 +6040,25 @@ export async function assertPlanPreviewCustomEditorFlow(
           hotUpdated.contentScrollTop - scrollBeforeHotUpdate.contentScrollTop,
         ) <= 32,
       `expected hot-update to preserve the reading position, before=${String(scrollBeforeHotUpdate.contentScrollTop)} after=${String(hotUpdated.contentScrollTop)}`,
+    );
+    assert.equal(
+      await fs.readFile(planPath, "utf8"),
+      updatedText,
+      "expected the preview to leave agent-written disk content untouched",
+    );
+    const planTextDocuments = vscode.workspace.textDocuments.filter(
+      (document) => document.uri.fsPath === planPath,
+    );
+    assert.ok(
+      planTextDocuments.every((document) => !document.isDirty),
+      "expected no dirty source text buffer after the readonly preview refresh",
+    );
+    await api.__testing.openPlanPreview(planPath);
+    await api.__testing.executeCommand("workbench.action.files.save");
+    assert.equal(
+      await fs.readFile(planPath, "utf8"),
+      updatedText,
+      "expected Save from the readonly preview to leave disk content unchanged",
     );
 
     // When the serve exposes ready models, selecting one on the hybrid strip

@@ -28,7 +28,6 @@ export const TOMCAT_PLAN_VIEW_AS_PREVIEW_COMMAND = "tomcat.plan.viewAsPreview";
 export const TOMCAT_PLAN_VIEW_AS_MARKDOWN_COMMAND = "tomcat.plan.viewAsMarkdown";
 
 export const TOMCAT_PLAN_CAN_BUILD_CONTEXT_KEY = "tomcat.plan.canBuild";
-export const TOMCAT_PLAN_AUTO_SAVE_SETTING = "plan.autoSave";
 export const TOMCAT_PLAN_TOOLBAR_STYLE_SETTING = "plan.toolbarStyle";
 
 export const TOMCAT_WEBVIEW_CONTAINER_ID = "tomcat-sidebar";

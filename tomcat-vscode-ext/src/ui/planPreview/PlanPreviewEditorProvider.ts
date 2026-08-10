@@ -5,7 +5,6 @@ import * as vscode from "vscode";
 
 import {
   TOMCAT_CONFIG_SECTION,
-  TOMCAT_PLAN_AUTO_SAVE_SETTING,
   TOMCAT_PLAN_TOOLBAR_STYLE_SETTING,
 } from "../../constants";
 import {
@@ -37,7 +36,6 @@ import { parsePlanDocument } from "./planDocument";
 
 export const PLAN_PREVIEW_VIEW_TYPE = "tomcat.planPreview";
 export const PLAN_BUILD_MODEL_SETTING = "plan.buildModel";
-export const PLAN_AUTO_SAVE_DELAY_MS = 1_000;
 
 /** Snapshot of the plan editor VS Code currently has focused (drives context keys). */
 export interface PlanActivePanelInfo {
@@ -148,12 +146,13 @@ export interface PlanPreviewEditorProviderDeps {
 interface PlanPanelEntry {
   canonicalPath: string;
   getText(): string;
-  isDirty(): boolean;
   panel: vscode.WebviewPanel;
+  watcher: vscode.FileSystemWatcher;
+  watcherSubscriptions: vscode.Disposable[];
 }
 
 export class PlanPreviewEditorProvider
-  implements vscode.CustomTextEditorProvider, vscode.Disposable
+  implements vscode.CustomReadonlyEditorProvider, vscode.Disposable
 {
   static readonly viewType = PLAN_PREVIEW_VIEW_TYPE;
 
@@ -174,25 +173,13 @@ export class PlanPreviewEditorProvider
   private hostRefreshCalls = 0;
   private hostStatePostAttempts = 0;
   private hostStatePostDeliveries = 0;
-  private readonly autoSaveTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
-  /** A failed save awaits an explicit user save before automatic attempts resume. */
-  private readonly autoSaveBlockedDocuments = new Set<string>();
-  private readonly documentSubscriptions: vscode.Disposable[];
+  private readonly subscriptions: vscode.Disposable[];
 
   /** Fires whenever the focused plan editor (or its mode/canBuild) changes. */
   readonly onDidChangeActivePlan = this.activeEmitter.event;
 
   constructor(private readonly deps: PlanPreviewEditorProviderDeps) {
-    this.documentSubscriptions = [
-      vscode.workspace.onDidChangeTextDocument((event) =>
-        this.handleDocumentChange(event),
-      ),
-      vscode.workspace.onDidSaveTextDocument((document) =>
-        this.handleDocumentSave(document),
-      ),
+    this.subscriptions = [
       vscode.workspace.onDidChangeConfiguration((event) =>
         this.handleConfigurationChange(event),
       ),
@@ -200,19 +187,29 @@ export class PlanPreviewEditorProvider
   }
 
   dispose(): void {
-    for (const timer of this.autoSaveTimers.values()) {
-      clearTimeout(timer);
+    for (const entry of this.panels.values()) {
+      for (const subscription of entry.watcherSubscriptions) {
+        subscription.dispose();
+      }
+      entry.watcher.dispose();
     }
-    this.autoSaveTimers.clear();
-    for (const subscription of this.documentSubscriptions) {
+    this.panels.clear();
+    for (const subscription of this.subscriptions) {
       subscription.dispose();
     }
     this.activeEmitter.dispose();
     this.pathResolver.dispose();
   }
 
-  resolveCustomTextEditor(
-    document: vscode.TextDocument,
+  openCustomDocument(uri: vscode.Uri): vscode.CustomDocument {
+    return {
+      dispose: () => undefined,
+      uri,
+    };
+  }
+
+  resolveCustomEditor(
+    document: vscode.CustomDocument,
     webviewPanel: vscode.WebviewPanel,
   ): void {
     webviewPanel.webview.options = {
@@ -224,11 +221,25 @@ export class PlanPreviewEditorProvider
     webviewPanel.webview.html = this.renderHtml(webviewPanel.webview);
 
     const fsPath = document.uri.fsPath;
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(document.uri, "*"),
+    );
+    const refresh = () => {
+      void this.postFor(fsPath);
+    };
+    const watcherSubscriptions = [
+      watcher.onDidChange(refresh),
+      watcher.onDidCreate(refresh),
+      watcher.onDidDelete(() => {
+        webviewPanel.dispose();
+      }),
+    ];
     this.panels.set(fsPath, {
       canonicalPath: normalizePlanPath(fsPath),
-      getText: () => document.getText(),
-      isDirty: () => document.isDirty,
+      getText: () => fs.readFileSync(fsPath, "utf8"),
       panel: webviewPanel,
+      watcher,
+      watcherSubscriptions,
     });
     if (webviewPanel.active) {
       this.activePanelPath = fsPath;
@@ -237,7 +248,7 @@ export class PlanPreviewEditorProvider
     const post = () => this.postFor(fsPath);
 
     const doc: PlanPreviewDocumentLike = {
-      getText: () => document.getText(),
+      getText: () => fs.readFileSync(fsPath, "utf8"),
       path: document.uri.fsPath,
     };
 
@@ -273,6 +284,10 @@ export class PlanPreviewEditorProvider
       messageSub.dispose();
       viewStateSub.dispose();
       if (this.panels.get(fsPath)?.panel === webviewPanel) {
+        for (const subscription of watcherSubscriptions) {
+          subscription.dispose();
+        }
+        watcher.dispose();
         this.panels.delete(fsPath);
         this.panelCanBuild.delete(fsPath);
         this.panelPlanId.delete(fsPath);
@@ -362,51 +377,9 @@ export class PlanPreviewEditorProvider
     );
   }
 
-  private isPlanDocument(document: vscode.TextDocument): boolean {
-    return document.uri.fsPath.endsWith(".plan.md");
-  }
-
-  private isAutoSaveEnabled(): boolean {
-    return vscode.workspace
-      .getConfiguration(TOMCAT_CONFIG_SECTION)
-      .get<boolean>(TOMCAT_PLAN_AUTO_SAVE_SETTING, true);
-  }
-
-  private handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
-    const { document } = event;
-    if (!this.isPlanDocument(document)) {
-      return;
-    }
-    const panelPath = document.uri.fsPath;
-    if (this.panels.has(panelPath)) {
-      void this.postFor(panelPath);
-    }
-    this.scheduleAutoSave(document);
-  }
-
-  private handleDocumentSave(document: vscode.TextDocument): void {
-    if (!this.isPlanDocument(document)) {
-      return;
-    }
-    const documentKey = document.uri.toString();
-    this.clearAutoSaveTimer(documentKey);
-    this.autoSaveBlockedDocuments.delete(documentKey);
-  }
-
   private handleConfigurationChange(
     event: vscode.ConfigurationChangeEvent,
   ): void {
-    if (
-      event.affectsConfiguration(
-        `${TOMCAT_CONFIG_SECTION}.${TOMCAT_PLAN_AUTO_SAVE_SETTING}`,
-      )
-    ) {
-      if (!this.isAutoSaveEnabled()) {
-        for (const documentKey of [...this.autoSaveTimers.keys()]) {
-          this.clearAutoSaveTimer(documentKey);
-        }
-      }
-    }
     if (
       event.affectsConfiguration(
         `${TOMCAT_CONFIG_SECTION}.${PLAN_BUILD_MODEL_SETTING}`,
@@ -421,66 +394,18 @@ export class PlanPreviewEditorProvider
     }
   }
 
-  private clearAutoSaveTimer(documentKey: string): void {
-    const timer = this.autoSaveTimers.get(documentKey);
-    if (timer) {
-      clearTimeout(timer);
-      this.autoSaveTimers.delete(documentKey);
-    }
-  }
-
-  private scheduleAutoSave(document: vscode.TextDocument): void {
-    const documentKey = document.uri.toString();
-    if (
-      !document.isDirty ||
-      !this.isAutoSaveEnabled() ||
-      this.autoSaveBlockedDocuments.has(documentKey)
-    ) {
-      return;
-    }
-    this.clearAutoSaveTimer(documentKey);
-    const timer = setTimeout(() => {
-      this.autoSaveTimers.delete(documentKey);
-      void this.savePlanDocument(document);
-    }, PLAN_AUTO_SAVE_DELAY_MS);
-    this.autoSaveTimers.set(documentKey, timer);
-  }
-
-  private async savePlanDocument(document: vscode.TextDocument): Promise<void> {
-    const documentKey = document.uri.toString();
-    if (
-      !document.isDirty ||
-      !this.isAutoSaveEnabled() ||
-      this.autoSaveBlockedDocuments.has(documentKey)
-    ) {
-      return;
-    }
-    try {
-      if (await document.save()) {
-        return;
-      }
-    } catch {
-      // The warning below gives the user a single explicit recovery path.
-    }
-    this.autoSaveBlockedDocuments.add(documentKey);
-    const action = await vscode.window.showWarningMessage(
-      `Tomcat could not automatically save ${path.basename(document.uri.fsPath)} because its disk version changed.`,
-      "Compare",
-    );
-    if (action === "Compare") {
-      await vscode.window.showTextDocument(document, { preview: false });
-      await vscode.commands.executeCommand(
-        "workbench.files.action.compareWithSaved",
-      );
-    }
-  }
-
   private async postFor(path: string): Promise<void> {
     const entry = this.panels.get(path);
     if (!entry) {
       return;
     }
-    await this.postSnapshot(path, entry.getText(), {
+    let text: string;
+    try {
+      text = entry.getText();
+    } catch {
+      return;
+    }
+    await this.postSnapshot(path, text, {
       toolbarStyle: this.readToolbarStyle(),
     });
   }
@@ -500,14 +425,10 @@ export class PlanPreviewEditorProvider
       return;
     }
     let text: string;
-    if (entry.isDirty()) {
+    try {
       text = entry.getText();
-    } else {
-      try {
-        text = fs.readFileSync(panelPath, "utf8");
-      } catch {
-        return;
-      }
+    } catch {
+      return;
     }
     await this.postSnapshot(panelPath, text, {
       stateHint: normalizePlanFileState(stateHint),

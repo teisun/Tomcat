@@ -12,9 +12,10 @@ const configurationListeners = new Set<
 const textDocumentChangeListeners = new Set<(event: { document: TextDocument }) => void>();
 const textDocumentSaveListeners = new Set<(document: TextDocument) => void>();
 const fileWatchers = new Set<{
+  changeListeners: Set<(uri: Uri) => void>;
   createListeners: Set<(uri: Uri) => void>;
   deleteListeners: Set<(uri: Uri) => void>;
-  glob: string;
+  glob: string | RelativePattern;
 }>();
 const textDocuments: TextDocument[] = [];
 
@@ -122,13 +123,42 @@ function isInWorkspace(uri: Uri): boolean {
   });
 }
 
-function notifyWatchers(kind: "create" | "delete", uri: Uri): void {
-  const normalized = normalizePath(uri.fsPath);
+function matchesWatcherGlob(
+  glob: string | RelativePattern,
+  candidateUri: Uri,
+): boolean {
+  if (typeof glob === "string") {
+    return globToRegExp(glob).test(normalizePath(candidateUri.fsPath));
+  }
+
+  const basePath = normalizePath(
+    typeof glob.base === "string" ? glob.base : glob.base.fsPath,
+  ).replace(/\/+$/u, "");
+  const candidatePath = normalizePath(candidateUri.fsPath);
+  if (candidatePath === basePath) {
+    return globToRegExp(glob.pattern).test(
+      candidatePath.slice(candidatePath.lastIndexOf("/") + 1),
+    );
+  }
+  if (!candidatePath.startsWith(`${basePath}/`)) {
+    return false;
+  }
+  return globToRegExp(glob.pattern).test(
+    candidatePath.slice(basePath.length + 1),
+  );
+}
+
+function notifyWatchers(kind: "change" | "create" | "delete", uri: Uri): void {
   for (const watcher of fileWatchers) {
-    if (!globToRegExp(watcher.glob).test(normalized)) {
+    if (!matchesWatcherGlob(watcher.glob, uri)) {
       continue;
     }
-    const listeners = kind === "create" ? watcher.createListeners : watcher.deleteListeners;
+    const listeners =
+      kind === "change"
+        ? watcher.changeListeners
+        : kind === "create"
+          ? watcher.createListeners
+          : watcher.deleteListeners;
     for (const listener of listeners) {
       listener(uri);
     }
@@ -307,6 +337,13 @@ export class Uri {
     const query = this.query ? `?${this.query}` : "";
     return `${this.scheme}:${authority}${this.path}${query}`;
   }
+}
+
+export class RelativePattern {
+  constructor(
+    public readonly base: Uri | string,
+    public readonly pattern: string,
+  ) {}
 }
 
 export const FileType = {
@@ -584,12 +621,14 @@ export const workspace = {
     }
     return results;
   },
-  createFileSystemWatcher(glob: string): {
+  createFileSystemWatcher(glob: string | RelativePattern): {
     dispose(): void;
+    onDidChange(listener: (uri: Uri) => void): Disposable;
     onDidCreate(listener: (uri: Uri) => void): Disposable;
     onDidDelete(listener: (uri: Uri) => void): Disposable;
   } {
     const watcher = {
+      changeListeners: new Set<(uri: Uri) => void>(),
       createListeners: new Set<(uri: Uri) => void>(),
       deleteListeners: new Set<(uri: Uri) => void>(),
       glob,
@@ -598,8 +637,15 @@ export const workspace = {
     return {
       dispose() {
         fileWatchers.delete(watcher);
+        watcher.changeListeners.clear();
         watcher.createListeners.clear();
         watcher.deleteListeners.clear();
+      },
+      onDidChange(listener: (uri: Uri) => void): Disposable {
+        watcher.changeListeners.add(listener);
+        return new Disposable(() => {
+          watcher.changeListeners.delete(listener);
+        });
       },
       onDidCreate(listener: (uri: Uri) => void): Disposable {
         watcher.createListeners.add(listener);
@@ -756,6 +802,9 @@ export const __testing = {
     const uri = Uri.file(filePath);
     files.delete(uri.toString());
     notifyWatchers("delete", uri);
+  },
+  fireDidChangeFile(filePath: string): void {
+    notifyWatchers("change", Uri.file(filePath));
   },
   get lastDiffCommand() {
     return lastDiffCommand;

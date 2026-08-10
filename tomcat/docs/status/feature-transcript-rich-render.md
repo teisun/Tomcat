@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-10 16:10 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-10 21:11 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** `.plan.md` 预览数据丢失根治：`PlanPreviewEditorProvider` 从可写 `CustomTextEditorProvider` 迁为无文本缓冲的 `CustomReadonlyEditorProvider`；所有预览/serve 刷新只读磁盘，逐面板 `FileSystemWatcher` 覆盖 change/create（原子 rename）并在 delete 时关闭面板，彻底移除 `tomcat.plan.autoSave` 与 `TextDocument.save()` 路径。手改仍只经原生 Markdown 编辑器保存；Provider 46、GUI 19、serve 事件集成和聚焦真机 plan E2E 通过。CLI `0.1.34 → 0.1.35`、扩展 `0.1.46 → 0.1.47`、bundled CLI 同步。@2026-08-10
 - [✓] **[P0]** `ask_question` 实时卡片闪现/消失根治：工具卡与问答卡此前共用裸 `toolCallId` 作时间线 `.id`，增量 patch、分组和 React key 会把两张卡当同一张；问答卡现使用 `approval:<toolCallId>` 渲染键，跨重连合并仍用 `toolCallId`。状态仓库强制每个 session 的 timeline id 唯一；补齐实时共存、interrupt、patch≡full、GUI DOM 与 host E2E（fake serve 也发真实的 tool start + control request）回归。扩展 `0.1.45 → 0.1.46`，`bundledCli=0.1.34` 不变。@2026-08-10
 - [✓] **(版本发布)** CLI `0.1.33 → 0.1.34`、扩展 `0.1.44 → 0.1.45`（`bundledCli=0.1.34`）：`node scripts/release-version.mjs bump --all patch`；`check` 通过。便于验收交付门禁与 in_progress≤3 文案对齐后的整包安装。@2026-08-10
 - [✓] **[P1]** in_progress≤3 文案对齐：`executor.txt` 与 `update_plan` 工具顶层 description 写清「最多三个互不依赖」；参数层 `status` 描述去掉整表上限复读（只保留字段语义 / executing 约束）；`plan-runtime.md` / `todos.md` / `update-plan.md` / `planner.md` 与派生 `tool-catalog.md` 同步。@2026-08-10
@@ -78,7 +79,7 @@
 - 模型 Context 档位：`ModelEntry` / `ModelView` / serve schema / `wire.d.ts` / webview `types` 新增 `context_window_options` 与 `selected_context_window`；serve 命令 `set_context_window`；聊天 `/context`（`cmd_context`）；`model-thinking.json` 偏好值由裸 reasoning 字符串改为 `{ reasoning, context_window }` 对象（开发期不做旧格式读兼容）。
 - GUI：删除 `PlanBuildModelSelect`；Composer / Plan 卡共用 `ModelPicker`（含 portal 配置浮层）；Settings 中转站按内置 model name 继承 API/thinking/档位，Context Window 字段改为只读展示。
 - Webview 根组件挂载 `WebviewErrorBoundary`；`package-vsix --skip-build` 对预构建 gui/extension 产物做 mtime 新鲜度门禁。
-- 发布版本：CLI `0.1.34`、扩展 `0.1.46`、`bundledCliVersion=0.1.34`。
+- 发布版本：CLI `0.1.35`、扩展 `0.1.47`、`bundledCliVersion=0.1.35`。
 - 架构文档：`tomcat-vscode-ext/docs/architecture/model-picker.md`。
 - `context_metrics_update.providerUsageMeasured: boolean`：`true` 只表示**本条事件**直接由 provider usage 产生；`false` 表示最佳估算。消费者在从未收到 `true` 的 cold slot 上必须继续留空；已有基线时必须以 `false` 的 ratio 原位更新而非清空。wire 字段和 schema 不变，仅收紧语义。
 - OpenAI Responses：`build_responses_input` 将 `MessageKind::EphemeralTail` 合入顶层 `instructions` 并排除出 `input`；兼容路由的 `previous_response_id` continuity 以锚点 assistant 的后继索引裁剪 input，避免重复发送服务端已恢复的历史。`TOMCAT_PROMPT_PREFIX_FINGERPRINT=1` 仅输出 prompt 结构哈希，用于安全定位前缀漂移。
@@ -90,7 +91,7 @@
 - Webview 恢复 UX：错误卡 dismiss 后保留卡片、去掉 `recoveryAction`；Retry copy-forward 源 user 带 `abandoned`；`agent.interrupted` live+history 去重恰好一张。
 - 会话/计划状态拆分：删除五态 `PlanState`；`AgentMode`=`chat|plan`；`ActivePlan`/`PlanFileState`；`get_state` 用 `agentMode`+`activePlan`，旧 `mode` 改名 `workspaceMode`；新增 `session.agent_mode.changed`；`RESUME_INDEX_SCHEMA_VERSION=3` 公开导出。
 - Build 用户消息：`MessageKind::PlanBuild`（`plan_build`）；扩展渲染为「开始执行计划」折叠摘要；pending 计划 Build 按钮文案 `Resume`。
-- Plan 预览：`refreshFromServeEvent` dirty 时用缓冲文本、非文本态可跟事件；设置 `tomcat.plan.autoSave`（默认 true，~1s 防抖）；`PlanPreviewDomSnapshot.refreshCounters` 保留热更新诊断四计数器。
+- Plan 预览：`PlanPreviewEditorProvider` 改为 `CustomReadonlyEditorProvider`，预览不再拥有 `TextDocument` 缓冲、dirty/undo/save 能力；每个面板以 `RelativePattern(planUri,"*")` 监听 change/create/delete，只从磁盘重读。`refreshFromServeEvent` 同样始终读磁盘；移除 `tomcat.plan.autoSave`。`PlanPreviewDomSnapshot` 增 `bodyText` 供真机 E2E 验证用户手改后的刷新结果。
 - Overflow 恢复：`force_drop_oldest_after_confirmed_overflow`（服务端确认溢出至少删一完整 turn，不删空）。
 - `ResolvedCall::from_provider_and_entry_unchecked(provider, &ModelEntry)`：测试/适配层工厂，从 catalog entry 复制 wire model 与 capabilities；`from_parts_unchecked` 仍默认关闭 vision/files。
 - `SessionRuntime.openai_files_runtime`：会话级缓存 `(provider_key, Arc<OpenAiFilesRuntime>)`；`ChatContext::openai_files_runtime_for(&ResolvedCall)` 按 resolve 身份复用，避免 cleanup 与 enqueue 队列分裂。
@@ -122,7 +123,7 @@
 - `task_output` 的 wait-slice 合同已更新为：`timeout_ms` schema `maximum 30000 -> 600000`，运行时实际对 `block=true` 的等待做 `5000..600000ms` clamp，`0` 仍等价 `block=false`；`task_output` 描述、`background_shell_monitor.txt`、CLI renderer 倒计时文案与 `docs/tool-catalog.md` 已同步收口。`bash(run_in_background=true)` 的回执 JSON 新增 `next` 字段；webview `WebviewToolCard` 新增 `startedAt?: number`，TranscriptView 的 `task_output(block=true)` 行现在会本地渲染 `Waiting up to {9m59s} for shell` / `Waited for shell` / `Stopped waiting for shell`。
 - 推理档位解析统一走 `ChatContext::resolve_thinking_level(model_id)`（catalog id）；HTTP 请求体仍发 `request_model_name()` 真名，不改变 wire 模型名语义。CLI `0.1.15` / 扩展 `0.1.18`；Settings 展示 Extension 与 Serve 版本。
 - 推理强度 / 模型设置接口现显式暴露 `supported_reasoning_levels` / `supportedReasoningLevels` 与 `warnings`：Rust `ModelEntry` / `UserModelEntry` / `ModelView` / `ModelEntryInput`、serve schema / `wire.d.ts`、`settingsProtocol.ts`、webview state `availableModelReasoningLevels` 全链同步；`Composer` 的 thinking 控件改为按模型动态渲染；`ProviderCacheKey` 新增 `catalog_generation` 支持模型配置热生效；Anthropic 新增 `anthropic-adaptive` 编码路径（`thinking.type=adaptive` + `output_config.effort`）。
-- plan 预览热更新链改为 **serve `plan.update` / `plan.todos` → `provider.handleServeEvent()` 桥接 → `PlanPreviewEditorProvider.refreshFromServeEvent(planId, pathHint)` 磁盘重读 → webview `state` 帧重发**；`onDidChangeTextDocument` 仅保留给用户手改文本编辑器/缓冲重载场景。测试侧 `PlanPreviewDomSnapshot` 新增 `contentScrollTop` / `topVisibleSourceLine`，`PlanPreviewDomAction` 新增 `setContentScrollTop` 以验证刷新不跳顶。
+- plan 预览热更新链为 **磁盘 `FileSystemWatcher(change/create)` 或 serve `plan.update` / `plan.todos` → `PlanPreviewEditorProvider.refreshFromServeEvent(planId, pathHint)` → 磁盘重读 → webview `state` 帧重发**；用户手改只在原生文本编辑器缓冲区内发生，保存后由 watcher 刷新预览。测试侧 `PlanPreviewDomSnapshot` 保留 `contentScrollTop` / `topVisibleSourceLine`，`PlanPreviewDomAction` 保留 `setContentScrollTop` 以验证刷新不跳顶。
 - 前端四次整改新增 `splitTopLevelBlocks(markdown)`、同步 `highlightToHtml(code, language)` 与 `dist/chunks/highlight.js` 独立分包；聊天正文改为“父组件切块 + 子块 `React.memo(raw)` + 同步高亮 + mermaid 按块异步”，`ChatMarkdown` / `MessageBubble` / `TranscriptView` 的 assistant 富渲染链不再透传 `isStreaming`。
 - `WebviewToolCard` 新增 `planActivity / planId / planPath`；`create_plan / update_plan` 的可见 transcript 足迹统一改挂在 `tool` 项上，`PlanFileCard` 由 `create_plan` 这条 `tool` 项承载；`plan.*` 事件只维护 ambient 当前态，不再新建/迁移 `type:"plan"` timeline 项，但 `plan.create` 会把 `path/planId` 盖到运行中的 `create_plan` 工具上，以恢复 `view-plan-pending` → `View Plan` 的旧过渡；事件行 `View Plan` 使用 `--plan` 修饰类（常显淡下划线 + chevron），卡片 footer `View Plan` hover 变白，卡片 `Build` 使用可复用的 `tc-plan-build-button`（黄底 / 黑字 / `font-weight: 400`）。
 - 前端新增 `ChatMarkdown` / `markdownRuntime` / `codeFence` / `inlinePath`；assistant 正文富渲染；**代码围栏不再显示语言标签**：有文件路径时显示 basename 头部并可点击打开，无路径时为 `bare` 块 + 内容区右上角浮动 copy；正文内联路径显示 basename，`title` 保留完整相对路径；thinking 为弱化纯文本 `<pre>`。
@@ -135,11 +136,13 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
+| 扩展全量 integration / host E2E | 本轮聚焦 plan 场景已通过；全量 integration 仍有 14 条既有 plan-state/model fixture 断言失败，host E2E 另有 bundled CLI 夹具期待 `0.1.30`（升级前已是 `0.1.34`）与 reasoning/loading 超时 | 由相关 fixture owner 单独对齐 |
 | 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但真实 `dispatch_agent > 0` 路径仍待授权验证 | 获得明确授权后，在隔离夹具中补跑一次并检查首次是否合并全部独立问题 |
 | `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；与本轮恢复整改无关 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-10 21:11）：计划预览已改成只读自定义编辑器，磁盘成为唯一权威；watcher/serve 两路刷新均只读磁盘，手改仅走原生 Markdown 编辑器。Provider 46、GUI 19、serve plan event 与聚焦 devhost `.plan.md` E2E 通过；全量扩展集成/host E2E 的既有 fixture 失败详见 BLOCKED。版本已升 CLI `0.1.35` / 扩展 `0.1.47` / bundled CLI `0.1.35`；Cov% 仍为 —。
 - 最新补充（2026-08-10 16:10）：`ask_question` 实时工具卡与问答卡不再共享 timeline `.id`；新增 live / interrupt / patch≡full / GUI DOM 回归，targeted devhost E2E 通过；扩展已升至 `0.1.46`，纯插件 VSIX 已重打。Cov% 仍为 —。
 - 最新补充（2026-08-10 13:56）：版本 bump CLI `0.1.34` / 扩展 `0.1.45` / bundledCli `0.1.34`；`release-version check` 通过。Cov% 仍为 —。
 - 最新补充（2026-08-10 12:24）：in_progress≤3 文案对齐——executor / 工具顶层保留一句，参数层 `status` 不再复读整表上限；架构文档与 `tool-catalog.md` 同步。Cov% 仍为 —。

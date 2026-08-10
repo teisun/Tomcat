@@ -64,6 +64,8 @@ export interface PlanPreviewDomSnapshot {
   /** VS Code's unmodified webview base font size. */
   baseFontSizePx: number | null;
   bodyHasContent: boolean;
+  /** Rendered plan body text, exposed only for deterministic host E2E assertions. */
+  bodyText: string;
   /** Computed Plan body reading size; contract is baseFontSizePx + 1. */
   bodyFontSizePx: number | null;
   /** Computed inline code size; it must remain at the Plan reading size. */

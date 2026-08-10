@@ -634,7 +634,7 @@ TranscriptView
 
 ## 10. Plan 预览自定义编辑器（`.plan.md`）
 
-> 专业：这是 phase 2 里**第二个** webview 表面——不再是侧边栏的 `WebviewViewProvider`，而是一个 `vscode.CustomTextEditorProvider`（viewType `tomcat.planPreview`，`selector: *.plan.md`）。它照抄 Cursor 的 Plan 预览：自定义编辑器**恒为 Preview**（渲染正文 + 四态清单），全程**只读**（不写回 `.plan.md`），但正文**可选中**，选中的文字能通过浮动按钮或右键菜单**加入 Tomcat 聊天**（复用现有 selection 引用链路）。**没有 webview 内的 Markdown 视图**：标题栏 “...” 里的 **Markdown** 直接 `openWith(uri,"default")` 打开原生文本编辑器；原生文本编辑器的 “...” 里的 **Preview** 再 `openWith(uri,"tomcat.planPreview")` 切回——两态是两个真实编辑器，靠 `vscode.openWith` 互切，而非 webview 内部 `mode`。
+> 专业：这是 phase 2 里**第二个** webview 表面——不再是侧边栏的 `WebviewViewProvider`，而是一个 `vscode.CustomReadonlyEditorProvider`（viewType `tomcat.planPreview`，`selector: *.plan.md`）。它照抄 Cursor 的 Plan 预览：自定义编辑器**恒为 Preview**（渲染正文 + 四态清单），全程**只读**（不写回 `.plan.md`），并且只持有不透明的 `CustomDocument` 句柄——**没有 `TextDocument` 文本缓冲、脏点、撤销栈或 save 能力**。正文可选中，选中的文字能通过浮动按钮或右键菜单**加入 Tomcat 聊天**（复用现有 selection 引用链路）。**没有 webview 内的 Markdown 视图**：标题栏 “...” 里的 **Markdown** 直接 `openWith(uri,"default")` 打开原生文本编辑器；原生文本编辑器的 “...” 里的 **Preview** 再 `openWith(uri,"tomcat.planPreview")` 切回——两态是两个真实编辑器，靠 `vscode.openWith` 互切，而非 webview 内部 `mode`。
 >
 > 说人话：打开一个 `.plan.md`，看到的不是原始 YAML，而是像 Cursor 那样把 `todos` 画成勾选清单的漂亮预览。顶部路径由 VS Code 自己的标题栏承载——省得我们再画一条重复的路径条。想看/改源码就在 “...” 里点 **Markdown**，直接进原生文本编辑器；在那儿的 “...” 里点 **Preview** 就切回漂亮预览。选中一段正文会浮现一个「Add to Tomcat Chat」小按钮（也可右键），点它就把这段文字塞进侧边栏聊天的输入框当引用。计划文件会在**审稿完成**（serve 发 `plan.review`）后自动打开，不用手点卡片，也不会在 reviewer 还没跑完时抢焦点。
 >
@@ -645,16 +645,18 @@ TranscriptView
 ```text
 serve plan.create(写盘完成) ─▶ provider.handleServeEvent ─▶ 记录 pendingPlanOpenByPlanId[planId]=path
 serve plan.review(审稿完成) ─▶ provider.handleServeEvent ─▶ ide.openWith(path,"tomcat.planPreview")  (每 path 去重, 只自动开一次)
-.plan.md 文档 ──vscode.openWith(uri,"tomcat.planPreview")──▶ PlanPreviewEditorProvider.resolveCustomTextEditor()
+.plan.md 文档 ──vscode.openWith(uri,"tomcat.planPreview")──▶ PlanPreviewEditorProvider.openCustomDocument()
                                                                      │
 原生 editor/title (命令+图标)                                         ├─ parsePlanDocument(text) 唯一解析器
    │ executeCommand                                                  │   title/overview/todos[4态]/bodyMarkdown/raw/planId/state
    ├─ tomcat.plan.build ─────────▶ provider.runBuildForActive()      ├─ buildState(text,path,{toolbarStyle})
    │                                → deps.buildPlan → focus 侧栏     │   + availableModels(sendListModels)+buildModel(配置)+canBuild(能力)
    ├─ tomcat.plan.selectBuildModel▶ showQuickPick → 写 buildModel     ├─ onDidChangeViewState  维护 active panel
-   ├─ tomcat.plan.viewAsMarkdown ─▶ openWith(activePlanPath,"default")├─ onDidChangeTextDocument  用户手改/缓冲重载 → 预览热更新
+   ├─ tomcat.plan.viewAsMarkdown ─▶ openWith(activePlanPath,"default")├─ resolveCustomEditor() 按磁盘读文件 → 预览首帧
    └─ tomcat.plan.viewAsPreview ──▶ openWith(activeTextUri,          ├─ serve plan.update/plan.todos → provider 桥接 → 从磁盘重读后热更新
-        (原生文本编辑器上)             "tomcat.planPreview")            └─ onDidChangeConfiguration  buildModel / toolbarStyle → 回推
+        (原生文本编辑器上)             "tomcat.planPreview")            ├─ FileSystemWatcher change/create → 从磁盘重读后热更新
+                                                                     │   ├─ FileSystemWatcher delete → 关闭预览面板
+                                                                     │   └─ onDidChangeConfiguration  buildModel / toolbarStyle → 回推
                                                                      │
 provider.onDidChangeActivePlan ──▶ extension.ts setContext            │  postMessage(state 帧: 含 toolbarStyle)
    tomcat.plan.canBuild ──────────驱动 native Build 图标可见            ▼
@@ -670,7 +672,7 @@ provider.onDidChangeActivePlan ──▶ extension.ts setContext            │ 
 
 关键实现约束：
 
-1. **薄 Provider、纯逻辑可测**：`buildState(text, path, ui?)`（文本 + host UI 态 → state 帧）与 `handleIntent(intent, doc, postState)`（意图处理）抽成纯方法，连同 `deriveCanBuild` / `classifyPlanLink` 都不碰真实 webview panel。原生控件的活动面板机账（`onDidChangeViewState` 记 active panel、`runBuildForActive` / `getActivePlanPath` / `getActivePlanInfo`）由单测用**伪造的 `WebviewPanel`** 驱动（[`tests/stubs/vscode.ts`](../../../tests/stubs/vscode.ts) 补了 `onDidChangeTextDocument`，但仍不含 `createWebviewPanel`）。后续又补了 `refreshFromServeEvent(planId,pathHint)`，专门覆盖 Agent 外部写盘场景：触发来自 serve `plan.update`/`plan.todos`，数据源来自磁盘而不是旧 `TextDocument` 缓冲。真实 resolve/webview 由 §7 的 E2E 场景 `assertPlanPreviewCustomEditorFlow` 覆盖。
+1. **薄 Provider、纯逻辑可测**：`buildState(text, path, ui?)`（文本 + host UI 态 → state 帧）与 `handleIntent(intent, doc, postState)`（意图处理）抽成纯方法，连同 `deriveCanBuild` / `classifyPlanLink` 都不碰真实 webview panel。原生控件的活动面板机账（`onDidChangeViewState` 记 active panel、`runBuildForActive` / `getActivePlanPath` / `getActivePlanInfo`）由单测用**伪造的 `WebviewPanel`** 驱动（[`tests/stubs/vscode.ts`](../../../tests/stubs/vscode.ts) 提供 `RelativePattern` 和 `createFileSystemWatcher`，但仍不含 `createWebviewPanel`）。每个面板以 `RelativePattern(planUri,"*")` 监听自身文件：`change`/`create`（包括临时文件+rename 原子写）重新读磁盘，`delete` 关闭面板。`refreshFromServeEvent(planId,pathHint)` 也只读磁盘，绝不从旧 `TextDocument` 缓冲取值或写回。真实 resolve/webview 由 §7 的 E2E 场景 `assertPlanPreviewCustomEditorFlow` 覆盖。
 2. **唯一解析器**：`.plan.md` 的解析全部收敛在 [`planDocument.ts`](../../../src/ui/planPreview/planDocument.ts)；侧边栏卡片用的 `parsePlanFrontmatter` / `readPlanMetadata` 也委托它，`truncatePlanTitle` / `PLAN_TITLE_MAX` / `stripYamlQuotes` 一并下沉，避免两处各写。`bodyMarkdown` 在解析层就剥掉自动维护的 `## Todos Board` 段（标题在 `<!-- todos-board:auto:begin -->` 之上，剥离范围从标题行到 `end` 标记含尾随空行），避免与底部四态清单重复。
 3. **Preview 顺序照抄 Cursor**：自上而下 = 渲染后的正文 → 『N To-dos』计数头 → 分割线 → 四态清单；**不渲染** `name`/`overview`（这两个字段仍解析出来给卡片等其它组件用）。四态图标为内联 SVG（pending 空心圈 / in_progress 虚线圈 / cancelled 圈+斜杠 / completed 勾选），尺寸由 `--tc-todo-icon-size` 控制。
 4. **原生标题栏承载动作（照抄 Cursor 的复用思路）**：`.plan.md` 以自定义编辑器打开时，用 `when: activeCustomEditorId == 'tomcat.planPreview'` 把命令挂到原生 `editor/title`。因为原生标题栏按钮**只能单色图标**：Build/选模型仅在 `config.tomcat.plan.toolbarStyle == 'native'` 时进 `navigation` 组显示为图标（B 下由正文固定头承载）。Markdown/Preview 放非 navigation 组自动收进 “...” 溢出菜单——但它们不再是「同一编辑器里的两个 mode」，而是**互开对方编辑器**：自定义编辑器活跃时 “...” 只出 **Markdown**（`viewAsMarkdown`）；原生文本编辑器活跃且文件名匹配 `/\.plan\.md$/`（`when: resourceFilename =~ /\.plan\.md$/ && activeEditor == 'workbench.editors.files.textFileEditor'`）时 “...” 只出 **Preview**（`viewAsPreview`）。因此**不需要 `✓` 打勾、也删掉了 `viewAsX.active` 双生命令与 `tomcat.plan.mode` 上下文键**——「哪个编辑器在前台」本身就是当前态。

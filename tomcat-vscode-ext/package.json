@@ -2,7 +2,7 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
   "description": "Tomcat Agent Box, an AI coding agent in your VS Code sidebar.",
-  "version": "0.1.46",
+  "version": "0.1.47",
   "publisher": "tomcat",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/teisun/tomcat-agent.git"
   },
   "tomcat": {
-    "bundledCliVersion": "0.1.34"
+    "bundledCliVersion": "0.1.35"
   },
   "categories": [
     "AI",
@@ -231,12 +231,6 @@
           "default": "",
           "scope": "application",
           "description": "Model used when building a plan from the plan preview or a plan card. Empty means the session's current model is used."
-        },
-        "tomcat.plan.autoSave": {
-          "type": "boolean",
-          "default": true,
-          "scope": "window",
-          "description": "Automatically save modified .plan.md files after a short pause so the agent and editor use the same plan."
         },
         "tomcat.plan.toolbarStyle": {
           "type": "string",

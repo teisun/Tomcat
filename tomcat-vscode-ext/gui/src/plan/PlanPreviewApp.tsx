@@ -255,6 +255,7 @@ function readDomSnapshot(
     baseFontSizePx: computedFontSize(document.body),
     bodyFontSizePx: computedFontSize(body),
     bodyHasContent: Boolean(body && (body.textContent ?? "").trim().length > 0),
+    bodyText: body?.textContent ?? "",
     bodyInsetLeft: body ? Math.round(body.getBoundingClientRect().left) : null,
     buildModelLabel,
     buildModelOptions: options,
