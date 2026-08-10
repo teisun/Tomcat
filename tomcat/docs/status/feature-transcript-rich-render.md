@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-10 12:24 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-10 13:56 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **(版本发布)** CLI `0.1.33 → 0.1.34`、扩展 `0.1.44 → 0.1.45`（`bundledCli=0.1.34`）：`node scripts/release-version.mjs bump --all patch`；`check` 通过。便于验收交付门禁与 in_progress≤3 文案对齐后的整包安装。@2026-08-10
 - [✓] **[P1]** in_progress≤3 文案对齐：`executor.txt` 与 `update_plan` 工具顶层 description 写清「最多三个互不依赖」；参数层 `status` 描述去掉整表上限复读（只保留字段语义 / executing 约束）；`plan-runtime.md` / `todos.md` / `update-plan.md` / `planner.md` 与派生 `tool-catalog.md` 同步。@2026-08-10
 - [✓] **[P0]** 执行效率与交付收口门禁：计划完成态硬门控 `code_review_pass` + `green_build_pass`（证据走 `BashTaskRegistry`、编辑新鲜度使门失效）；code review 按 P0/P1 过滤、轮次局部 finding ref、`dispute_findings`（仅 wontfix）、abort 退还轮次、infra-retry 耗尽停 completion_guard；默认 `max_code_review_rounds=4`、配置项 `max_completion_gate_cycles`（默认 3）；内置 `verify` skill；diff-gate 仅对代码路径生效。效率侧：`edit` schema `{path,edits}`、并行 edit/read 提示、无人值守 Retry-After、压缩保留 `logPath`、最多 3 个 `in_progress` todo、web_search 发 `model_name` 并 hosted 失败自动回退。扩展：`WebviewErrorBoundary` 冒烟 + fake-serve 收口 E2E；架构文档 `delivery-accuracy-and-completeness.md`。验证：`cargo test --lib`（~2637 passed, 1 ignored）、`cargo fmt --check`、`git diff --check`、扩展 lint、包装 VSIX ErrorBoundary/close-out E2E；ignored real-LLM 产品路径曾跑通 review→verify→green build→completed。Cov% 未跑 tarpaulin，仍为 —。@2026-08-10
 - [✓] **[P0]** ModelPicker 扁平触发器与弹出方向收口：扁平样式落到 `.tc-model-picker-trigger`（三表面一致），删死代码 `.tc-plan-model-select*`；PlanFileCard 菜单 `placement=above`（同 Composer），PlanActionStrip 保持 `below`；§7.6 文档更正。内置目录移除低于 4.6 的官方 Claude（`claude-sonnet-4-5` / `claude-opus-4-5` / `claude-opus-4-1`）。版本 CLI `0.1.32 → 0.1.33`、扩展 `0.1.43 → 0.1.44`（`bundledCli=0.1.33`）。验证：GUI PlanFileCard/PlanActionStrip/ModelPicker、`catalog_test`、`release-version check`、纯插件 `tomcat-vscode-ext-0.1.44.vsix`。@2026-08-08
