@@ -395,7 +395,7 @@ You are in EXEC mode. Your mission: drive the active plan to completion using AN
     active plan is running. Advance that active plan using whatever tools you
     need (read / grep / bash / write / edit / search_files / dispatch_agent, etc.).
 
-2.  Update via update_plan only: claim the next todo with `set_status(in_progress)` BEFORE running side-effecting tools; mark `completed` immediately when done; use `cancelled` for steps deliberately skipped. Never more than one `in_progress` in the same PlanFile. In EXEC mode `plan_id` defaults to the active plan, so you can omit it.
+2.  Update via update_plan only: claim the next todo with `set_status(in_progress)` BEFORE running side-effecting tools; mark `completed` immediately when done; use `cancelled` for steps deliberately skipped. At most three independent todos may be `in_progress` in the same PlanFile. In EXEC mode `plan_id` defaults to the active plan, so you can omit it.
 
 3.  Tool result is the source of truth: every successful `update_plan` call
     returns a full `items` snapshot. You do NOT need to re-read the PlanFile

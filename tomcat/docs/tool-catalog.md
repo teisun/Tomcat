@@ -171,7 +171,7 @@ Parameters:
 - Destructive: `true`
 - Search hint: `edit replace old_content new_content file`
 
-Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files. Legacy top-level `old_content` / `new_content` input is silently normalized into one `edits` entry, but is not exposed in the schema.
+Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
 
 Guidelines:
 - Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.
@@ -461,7 +461,7 @@ Parameters:
             "type": "string"
           },
           "status": {
-            "description": "Initial status. Defaults to `pending`; at most one todo may be `in_progress`.",
+            "description": "Initial status. Defaults to `pending`.",
             "enum": [
               "pending",
               "in_progress",
@@ -587,7 +587,7 @@ Parameters:
                 "type": "string"
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
+                "description": "For `upsert` (optional) and `set_status` (required). `in_progress` only allowed when plan.state == executing.",
                 "enum": [
                   "pending",
                   "in_progress",
@@ -617,7 +617,7 @@ Parameters:
                 "type": "string"
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
+                "description": "For `upsert` (optional) and `set_status` (required). `in_progress` only allowed when plan.state == executing.",
                 "enum": [
                   "pending",
                   "in_progress",
@@ -718,7 +718,7 @@ Parameters:
                 "type": "string"
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required). At most three independent todos may be `in_progress`.",
+                "description": "For `upsert` (optional) and `set_status` (required).",
                 "enum": [
                   "pending",
                   "in_progress",
@@ -748,7 +748,7 @@ Parameters:
                 "type": "string"
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required). At most three independent todos may be `in_progress`.",
+                "description": "For `upsert` (optional) and `set_status` (required).",
                 "enum": [
                   "pending",
                   "in_progress",

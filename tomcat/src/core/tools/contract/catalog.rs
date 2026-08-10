@@ -1098,7 +1098,7 @@ fn create_plan_parameters() -> Value {
                         "status": {
                             "type": "string",
                             "enum": ["pending", "in_progress", "completed", "cancelled"],
-                            "description": "Initial status. Defaults to `pending`; at most one todo may be `in_progress`."
+                            "description": "Initial status. Defaults to `pending`."
                         }
                     },
                     "required": ["id", "content"]
@@ -1191,7 +1191,7 @@ fn todos_parameters() -> Value {
                 "description": "Ordered list of mutations applied in order.",
                 "minItems": 1,
                 "items": shared_todo_op_item_schema(
-                    "For `upsert` (optional) and `set_status` (required). At most three independent todos may be `in_progress`."
+                    "For `upsert` (optional) and `set_status` (required)."
                 )
             }
         },

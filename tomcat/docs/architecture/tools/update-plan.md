@@ -63,7 +63,7 @@ completed 计划 reopen:  completed → pending   （会话保持 Chat）
 |------|--------------|----------|----------|--------|
 | **`update_plan`** | 对 PlanFile `todos[]` 的**增量**编辑工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "update_plan"` | **任何模式可见**；按 `plan_id` 或显式 `path` 路由，EXEC/Pending 缺省跟随当前 active plan path；frontmatter 中**只**能动 `todos[]`；不能动 mode / session_* / plan_id / goal / created_at 等机器字段；不能动 markdown 正文 | 改 plan 的待办进度用这个。 |
 | **target PlanFile** | 本次操作的目标计划文件 | 由 `plan_id` 或显式 `path` 解析；若当前 session 已在 EXEC/Pending，缺省目标跟随 active plan path | EXEC/Pending 可缺省；其它模式需显式传 `plan_id` 或 `path` | 改哪份 plan 要说清楚。 |
-| **同 op 模型** | 复用 `todos` 的 op 数据结构 | `kind ∈ {upsert, set_status, remove}` | `id` 在目标 PlanFile 内唯一；同一文件最多一个 `in_progress` | 操作语义与 `todos` 一致。 |
+| **同 op 模型** | 复用 `todos` 的 op 数据结构 | `kind ∈ {upsert, set_status, remove}` | `id` 在目标 PlanFile 内唯一；同一文件最多三个互不依赖的 `in_progress` | 操作语义与 `todos` 一致。 |
 | **跨 session 编辑** | 任何 session 都能改任意 plan 的 todos | `update_plan` 不读 / 不写 session_* frontmatter | 跨 session 改 todos 允许；但同时只一个 session 能「执行」（active_plan_id 受 build gate 约束） | 任意聊天窗口都能勾 plan 待办。 |
 | **active plan path（per-session runtime）** | 当前 session 正在 EXEC/Pending 的真实 plan 路径 | `PlanRuntime.active_plan_path: Option<PathBuf>`；不写 frontmatter | EXEC/Pending 下 update_plan 默认指向它；`plan_id` 仍来自 frontmatter | 执行态默认改自己手上的那份。 |
 
@@ -161,7 +161,7 @@ completed 计划 reopen:  completed → pending   （会话保持 Chat）
 ```json
 {
   "name": "update_plan",
-  "description": "Incrementally update a PlanFile's todos[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo\n- rewrite or prune an existing todo list\n\nCallable in ANY mode. Target resolution order is: explicit `plan_id` -> explicit `path` -> retained `active_plan_path` -> current Executing/Pending state. Cross-session editing is allowed for plans whose state is planning, pending, or completed; an executing plan can only be edited by the session that owns it. Completed plans may be reopened: if your edit makes the plan no longer all-completed, disk state changes from completed -> pending.\n\nReturn value: every successful call returns full items snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; in_progress is only allowed when plan.state == executing; replace=true replaces the entire todos[] list with the provided upsert results.",
+  "description": "Incrementally update a PlanFile's todos[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo\n- rewrite or prune an existing todo list\n\nCallable in ANY mode. Target resolution order is: explicit `plan_id` -> explicit `path` -> retained `active_plan_path` -> current Executing/Pending state. Cross-session editing is allowed for plans whose state is planning, pending, or completed; an executing plan can only be edited by the session that owns it. Completed plans may be reopened: if your edit makes the plan no longer all-completed, disk state changes from completed -> pending.\n\nReturn value: every successful call returns full items snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most three independent in_progress per PlanFile; in_progress is only allowed when plan.state == executing; replace=true replaces the entire todos[] list with the provided upsert results.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -363,7 +363,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 | `plan_id` 解析不到文件 | tool error | 编错 id。 |
 | 跨 session 改 `executing` plan | tool error，usage「该 plan 正由 session X 执行」 | 跨 session 不许动正在跑的。 |
 | `set_status(in_progress)` 且 `target.state != executing` | tool error | plan 没在 EXEC 标 in_progress 没意义。 |
-| 同 plan 两个 `in_progress` | tool error；整批回滚 | 一个 plan 文件最多一个在干。 |
+| 同 plan 超过三个 `in_progress` | tool error；整批回滚 | 一个 plan 文件最多三个互不依赖并行。 |
 | 未知 `id` | tool error | 别瞎编 id。 |
 | frontmatter round-trip 解析失败 | tool error，附最后 50 字节上下文 | 文件被外部改坏了。 |
 | advisory lock 抢不到 | tool error，`LockBusy`，retry hint | 拿不到锁。 |

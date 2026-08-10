@@ -151,7 +151,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 | 术语 | 语义（大白话） | 数据载体 | 行为约束 | 说人话 |
 |------|----------------|----------|----------|--------|
 | **GoalObjective** | 用户给 Agent 的高层目标 | PLAN 会话中的后续对话；计划文件 frontmatter `goal` | 更新 Goal 不会直接改 `TodoItem`；`/plan` 只负责进入 PLAN，真正落盘的目标来自后续讨论后传给 `create_plan` 的 `goal` | 先定方向，不等于马上开干。 |
-| **TodoItem** | 最小可执行步骤 | 运行态 `TodoItem { id, content, status, milestone_id }`；存放载体由工具决定：`todos` → `TodoFile`；[`update_plan`](./tools/update-plan.md) → `PlanFile.frontmatter.todos[]` | `status ∈ {pending, in_progress, completed, cancelled}`；同一文件最多一个 `in_progress`；`id` 单文件唯一 | 真正能推进进度的是 todos。 |
+| **TodoItem** | 最小可执行步骤 | 运行态 `TodoItem { id, content, status, milestone_id }`；存放载体由工具决定：`todos` → `TodoFile`；[`update_plan`](./tools/update-plan.md) → `PlanFile.frontmatter.todos[]` | `status ∈ {pending, in_progress, completed, cancelled}`；同一文件最多三个互不依赖的 `in_progress`（`MAX_IN_PROGRESS_TODOS=3`）；`id` 单文件唯一 | 真正能推进进度的是 todos。 |
 | **Milestone** | 一组 `TodoItem` 的上层分组 | `PlanFile` frontmatter `milestones` | 一条 `TodoItem` 至多属于一个 `Milestone`；状态派生 | todos 管细节，里程碑管大段落。 |
 | **PlanFile** | 持久化计划文件 | `~/.tomcat/plans/<slug>_<hash>.plan.md`；详尽 schema 见 [`tools/create-plan.md`](./tools/create-plan.md) §5 | frontmatter（机写）+ 正文（人读）；写入前 advisory file lock；frontmatter 由 `create_plan`（整盘）/ [`update_plan`](./tools/update-plan.md)（增量）/ runtime（mode、session 绑定）/ 自动派生（all completed / cancel_token）**四方协同** | 计划最终得落成一份文件。 |
 | **TodoFile** | 任意模式下的会话级轻量待办文件 | `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md`；详见 [`tools/todos.md`](./tools/todos.md) §3.4 | 同一 session 固定这一份文件；`new_todos` 时覆盖写；任何模式下 `todos` 工具都写它 | 会话本地小白板，始终就这一份。 |
@@ -228,7 +228,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 | 目标 | 观察指标（落地后可核对） | 说人话 |
 |------|--------------------------|--------|
 | **G1 本地 `/plan` 命令族闭环** | `tomcat chat` 识别 `/plan`、`/plan exit`、`/plan build <plan_id/path>`；这些命令**不**进入 LLM transcript 作为普通 user 文本；进入 PLAN/EXEC 模式后注入对应 `<system_reminder>` 与 catalog 切换 | `/plan` 像 `/restore` 一样先在 chat 层吃掉。 |
-| **G2 `todos` 一等状态** | 内置 `todos` 工具可读写完整 todo 列表；同一文件最多一个 `in_progress`；tool、panel、文件三者同步；**工具结果返回完整 items snapshot**，LLM 不需要再读 user message 拿状态 | todos 是结构化状态，且 LLM 拿到工具结果就知道全貌。 |
+| **G2 `todos` 一等状态** | 内置 `todos` 工具可读写完整 todo 列表；同一文件最多三个互不依赖的 `in_progress`；tool、panel、文件三者同步；**工具结果返回完整 items snapshot**，LLM 不需要再读 user message 拿状态 | todos 是结构化状态，且 LLM 拿到工具结果就知道全貌。 |
 | **G3 `/plan build` 是 EXEC 唯一入口** | reviewer accepted 不自动 build；用户敲 `/plan build <plan_id/path>` 才进 EXEC；build 前置：当前 session 不能处于 `Executing`；若是 `Pending`，默认续跑当前盘，但也允许显式切到另一份 `planning/pending` plan；若仅有 session scratchpad todos 未收口则 warning 后继续 | 进执行态由用户拍。 |
 | **G4 review 是辅助不是闸门** | `CreatePlan` 写入后内部同步派发 reviewer；reviewer 摘要落 `transcript.plan.review`；**不**写 PlanFile frontmatter、**不**改 mode | 审稿员只挑刺。 |
 | **G5 计划文件可恢复** | 每次计划变更刷新 `~/.tomcat/plans/<slug>_<hash>.plan.md`；advisory file lock 冲突时有可见错误；`state == pending` 可被 `/plan build` 续跑；详细协议见 [`tools/create-plan.md`](./tools/create-plan.md) §5 | 重启之后还能接着看，pending 还能续跑。 |
@@ -1096,7 +1096,7 @@ EXEC 中：
                 本地 Error / Tool Err  active plan/todos 占用
                         │
                         ▼
-                 todo schema 非法 / >1 in_progress
+                 todo schema 非法 / >3 in_progress
                  Tool Err（拒绝写入）
 ```
 
@@ -1109,7 +1109,7 @@ EXEC 中：
 | `/plan build` 目标 PlanFile `mode ∉ {planning, pending}` | 本地 UsageError | 已 executing / completed 不能再 build。 |
 | 计划文件锁冲突 | 本地错误；保持旧状态不变 | 有人正在写，就别偷偷覆盖。 |
 | reviewer 异常退出 | tool error 携带 reviewer stderr 摘要；`PlanFile` 保留；mode 仍 planning | 审稿员挂了不影响计划文件。 |
-| `todos` 非法状态或两个 `in_progress` | tool error；拒绝写入 | todos 规则要硬。 |
+| `todos` 非法状态或超过三个 `in_progress` | tool error；拒绝写入 | todos 规则要硬。 |
 | `PlanFile` 落盘失败 | 本地错误 / tool error；此次状态变更不提交 | 文件没写进去，就别假装成功。 |
 | milestone checkpoint 失败 | warning；执行流继续 | 快照打点失败应可见，但不卡 todos。 |
 | 在非 Planning 调 `create_plan` / `ask_question` | catalog 不可见；强行调用 → tool error | 模式不对工具看不见，硬调也拦。 |
@@ -1132,7 +1132,7 @@ EXEC 中：
 | 单元：/plan build prompt | `plan_build_emits_executing_prompt` | DONE | 自动开跑时能看到 `u[Plan:executing]> ...`。 |
 | 单元：catalog 动态可见集 | `catalog_visible_set_by_current_mode`（待新增） | PENDING | PLAN 看不到 todos；CHAT/EXEC 看不到 create_plan。 |
 | 单元：todos 返回 full snapshot | `todos_returns_full_items_snapshot`（待新增） | PENDING | tool result 自带完整 items。 |
-| 单元：todos 单进行中约束 | `todos_state_enforces_single_in_progress`（待新增） | PENDING | 两个进行中要被硬拒绝。 |
+| 单元：todos in_progress 上限 | `ops_test::allows_three_in_progress_but_rejects_four_after_batch` / `todos_state_allows_independent_in_progress_items` | DONE | 最多三个互不依赖；第四个硬拒绝。 |
 | 单元：计划文件 round-trip | `plan_file_round_trip_frontmatter`（待新增） | PENDING | 字段不能丢。 |
 | 单元：文件锁 | `plan_file_lock_is_exclusive`（待新增） | PENDING | 并发写必须能挡住。 |
 | 单元：build gate | `plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan` | DONE | 冲突运行态继续拒绝；scratchpad todos 仅 warning；`Completed` 可显式切新盘。 |
