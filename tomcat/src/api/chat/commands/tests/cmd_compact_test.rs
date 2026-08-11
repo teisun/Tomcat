@@ -3,14 +3,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serial_test::serial;
 
-use super::super::cmd_compact::run;
+use super::super::cmd_compact::{compact_session, run};
 use super::super::parse::ChatCommandOutcome;
 use crate::api::chat::ChatContext;
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, LlmResolver, LlmScene,
     ResolvedCall,
 };
+use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 use crate::core::session::TranscriptEntry;
+
 use crate::{init_context_state, AppConfig, AppError};
 
 /// `/compact` should use the non-streaming compaction scene; a streamed main-turn request here
@@ -141,6 +143,62 @@ async fn compact_command_persists_boundary_and_rehydrates_cli_context() {
         context_state.usage_ratio() < before_ratio,
         "/compact 的验收不能只看 boundary 落盘，重载后的上下文占用必须严格下降: before={before_ratio}, after={}",
         context_state.usage_ratio()
+    );
+    let transcript = ctx
+        .session_runtime
+        .session
+        .current_transcript_path()
+        .expect("current transcript query")
+        .expect("current transcript");
+    let sidecar_path = user_message_sidecar_path(&transcript);
+    assert!(
+        sidecar_path.is_file(),
+        "/compact must materialize the user-message sidecar"
+    );
+    assert!(
+        std::fs::read_to_string(&sidecar_path)
+            .expect("read sidecar")
+            .contains("first CLI message"),
+        "sidecar must preserve the original user JSON"
+    );
+    let summary = context_state
+        .messages
+        .iter()
+        .find(|message| message.kind == crate::core::llm::MessageKind::CompactionSummary)
+        .and_then(|message| message.text_content())
+        .expect("rehydrated boundary summary");
+    assert!(
+        summary.contains(&sidecar_path.display().to_string()),
+        "/compact summary must point to its readable sidecar"
+    );
+    // 真实跨 boundary 回归：reload 后内存只有旧摘要，第二次 /compact 的 verbatim 可以为空，
+    // 但 sidecar 必须仍从权威 transcript 给出 boundary 前的 Normal user 原文。
+    let second = compact_session(&ctx).await.expect("reload 后再次 /compact");
+    assert!(second.covered_count > 0);
+    let latest_summary = ctx
+        .session_runtime
+        .session
+        .get_entries(32)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|entry| match entry {
+            TranscriptEntry::BranchSummary(summary) if summary.is_boundary == Some(true) => {
+                summary.summary
+            }
+            _ => None,
+        })
+        .expect("second boundary summary");
+    assert!(
+        latest_summary.contains("(none)"),
+        "reload 后 snapshot 只有旧 summary，不应伪造 verbatim user"
+    );
+    assert!(latest_summary.contains(&sidecar_path.display().to_string()));
+    assert!(
+        std::fs::read_to_string(&sidecar_path)
+            .unwrap()
+            .contains("first CLI message"),
+        "sidecar 必须保留 boundary 前的 Normal user"
     );
 
     match old_key {

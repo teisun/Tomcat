@@ -13,6 +13,8 @@ use crate::core::session::append_message_chain::{
     find_dangling_tail_tool_calls, pending_replay_safe_tail_tool_call_ids, validate_append_message,
 };
 use crate::core::session::resume_index::remove_resume_index;
+use crate::core::session::user_message_sidecar::user_message_sidecar_path;
+
 use crate::core::session::store::{
     load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
 };
@@ -39,6 +41,14 @@ const SESSIONS_FILE: &str = "sessions.json";
 const TITLE_MAX_CHARS: usize = 40;
 const PENDING_QUESTION_SKIPPED_RESULT: &str =
     r#"{"outcome":"skipped","cancelled":true,"answers":[]}"#;
+/// 只有主 transcript 才能参与 session 枚举与附件引用判定；派生 sidecar 不是会话。
+fn is_session_transcript_path(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        && !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".user_messages.jsonl"))
+}
 
 /// 在内存中试算 tool result 落盘后的逻辑消息链。
 ///
@@ -268,7 +278,7 @@ impl SessionManager {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            if !is_session_transcript_path(&path) {
                 continue;
             }
             if std::fs::read_to_string(&path)
@@ -566,7 +576,7 @@ impl SessionManager {
         let mut ids: Vec<String> = rd
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+            .filter(|path| is_session_transcript_path(path))
             .filter_map(|path| {
                 path.file_stem()
                     .and_then(|s| s.to_str())
@@ -744,7 +754,9 @@ impl SessionManager {
             Ok(entry)
         })?;
         let path = self.transcript_path(&entry.session_id);
+        let sidecar_path = user_message_sidecar_path(&path);
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&sidecar_path);
         let _ = remove_resume_index(&path);
         // 本会话的 transcript 已删，但内容寻址意味着同一份字节可能被别的会话共享。
         // 所以判据必须是「问遍所有 transcript」——只看自己会把别人还在用的图删掉。

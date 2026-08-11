@@ -20,6 +20,8 @@ use crate::core::session::manager::{
 use crate::core::session::transcript::{
     append_entry, read_entries_tail, write_header, MessageEntry, SessionHeader, TranscriptEntry,
 };
+use crate::core::session::user_message_sidecar::user_message_sidecar_path;
+
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::DefaultEventBus;
@@ -276,6 +278,22 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     assert!(text.starts_with("<control_state>"));
     assert!(text.contains("mode: plan"));
     assert!(text.contains("<verbatim_user_messages>"));
+    let sidecar_path = user_message_sidecar_path(&transcript);
+    assert!(
+        sidecar_path.is_file(),
+        "collapse must materialize the user-message sidecar"
+    );
+    assert!(
+        text.contains(&sidecar_path.display().to_string()),
+        "collapse summary must point to its readable sidecar"
+    );
+    assert!(
+        std::fs::read_to_string(&sidecar_path)
+            .unwrap()
+            .contains("\"id\":\"u1\""),
+        "sidecar must preserve the Normal user message"
+    );
+
     assert!(text.contains("## Progress"));
     assert!(text.contains("Rendered from the session todo scratchpad"));
     assert!(text.contains("t2: step active"));

@@ -408,6 +408,11 @@ fn write_test_plan(plan_id: &str, body: &str) {
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
                 }],
+                green_build_pass: false,
+                green_build_evidence: vec![],
+                code_review_pass: false,
+                code_review_pass_at_ms: None,
+                completion_gate_cycles: 0,
                 unknown: Default::default(),
             },
             body: body.to_string(),
@@ -579,6 +584,9 @@ async fn complete_all_plan_todos(rt: &PlanRuntime, plan_id: &str) -> serde_json:
                     status: TodoStatus::Completed,
                 },
             ],
+            dispute_findings: vec![],
+            green_build_pass: None,
+            green_build_evidence: vec![],
         },
     )
     .await
@@ -645,6 +653,9 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
                     content: None,
                     status: *st,
                 }],
+                dispute_findings: vec![],
+                green_build_pass: None,
+                green_build_evidence: vec![],
             },
         )
         .await
@@ -800,6 +811,9 @@ async fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
                 content: None,
                 status: TodoStatus::InProgress,
             }],
+            dispute_findings: vec![],
+            green_build_pass: None,
+            green_build_evidence: vec![],
         },
     )
     .await
@@ -993,6 +1007,9 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_ba
                 content: None,
                 status: TodoStatus::InProgress,
             }],
+            dispute_findings: vec![],
+            green_build_pass: None,
+            green_build_evidence: vec![],
         },
     )
     .await
@@ -1009,6 +1026,9 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_ba
                 content: None,
                 status: TodoStatus::Completed,
             }],
+            dispute_findings: vec![],
+            green_build_pass: None,
+            green_build_evidence: vec![],
         },
     )
     .await

@@ -74,6 +74,11 @@ fn write_external_plan(path: &std::path::Path, plan_id: &str) {
             content: "ship it".into(),
             status: TodoStatus::Pending,
         }],
+        green_build_pass: false,
+        green_build_evidence: vec![],
+        code_review_pass: false,
+        code_review_pass_at_ms: None,
+        completion_gate_cycles: 0,
         unknown: Default::default(),
     };
     let plan = PlanFile {
@@ -224,6 +229,9 @@ async fn full_plan_lifecycle_create_build_complete() {
                     content: None,
                     status: TodoStatus::InProgress,
                 }],
+                dispute_findings: vec![],
+                green_build_pass: None,
+                green_build_evidence: vec![],
             },
         )
         .await
@@ -240,6 +248,9 @@ async fn full_plan_lifecycle_create_build_complete() {
                     content: None,
                     status: TodoStatus::Completed,
                 }],
+                dispute_findings: vec![],
+                green_build_pass: None,
+                green_build_evidence: vec![],
             },
         )
         .await
@@ -256,6 +267,9 @@ async fn full_plan_lifecycle_create_build_complete() {
                     content: None,
                     status: TodoStatus::Completed,
                 }],
+                dispute_findings: vec![],
+                green_build_pass: None,
+                green_build_evidence: vec![],
             },
         )
         .await
@@ -351,6 +365,9 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
                     content: None,
                     status: TodoStatus::Completed,
                 }],
+                dispute_findings: vec![],
+                green_build_pass: None,
+                green_build_evidence: vec![],
             },
         )
         .await

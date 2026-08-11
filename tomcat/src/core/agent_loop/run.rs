@@ -90,6 +90,7 @@ fn retry_attempt_budget(unattended_execution: bool, interactive_max_attempts: u3
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod retry_budget_tests {
     use super::*;
@@ -111,6 +112,7 @@ mod retry_budget_tests {
     }
 }
 
+#[cfg(test)]
 pub(super) fn compute_retry_delay_ms(base_delay_ms: u64, attempt: u32, jitter_seed: u64) -> u64 {
     compute_retry_delay_with_cap_ms(
         base_delay_ms,

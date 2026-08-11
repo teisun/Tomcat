@@ -2,7 +2,8 @@ use std::path::Path;
 
 use super::super::code_reviewer::{
     build_code_review_prompt, code_review_system_prompt_text,
-    code_reviewer_allowed_tools_with_policy, CodeReviewSummary, CODE_REVIEWER_ALLOWED_TOOLS,
+    code_reviewer_allowed_tools_with_policy, CodeReviewPromptInput, CodeReviewSummary,
+    CODE_REVIEWER_ALLOWED_TOOLS,
 };
 use super::super::plan_reviewer::{
     build_review_prompt, plan_reviewer_allowed_tools_with_policy, reviewer_system_prompt_text,
@@ -162,16 +163,16 @@ fn build_review_prompt_includes_plan_and_workspace_paths() {
 
 #[test]
 fn build_code_review_prompt_includes_diff_context() {
-    let prompt = build_code_review_prompt(
-        "plan-1",
-        "body",
-        Path::new("/tmp/plan-1.plan.md"),
-        Some(Path::new("/repo/root")),
-        " src/lib.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
-        &["src/lib.rs".into(), "tests/lib.rs".into()],
-        &[],
-        &[],
-    );
+    let prompt = build_code_review_prompt(CodeReviewPromptInput {
+        plan_id: "plan-1",
+        plan_text: "body",
+        plan_path: Path::new("/tmp/plan-1.plan.md"),
+        workspace_root: Some(Path::new("/repo/root")),
+        diff_stat: " src/lib.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
+        changed_files: &["src/lib.rs".into(), "tests/lib.rs".into()],
+        open_findings: &[],
+        disputed_findings: &[],
+    });
     assert!(prompt.contains("git diff --stat HEAD"));
     assert!(prompt.contains("src/lib.rs"));
     assert!(prompt.contains("tests/lib.rs"));

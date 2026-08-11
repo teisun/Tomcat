@@ -189,6 +189,11 @@ fn build_plan_fixture(label: &str) -> PlanFixture {
                     status: TodoStatus::Pending,
                 },
             ],
+            green_build_pass: false,
+            green_build_evidence: vec![],
+            code_review_pass: false,
+            code_review_pass_at_ms: None,
+            completion_gate_cycles: 0,
             unknown: Default::default(),
         },
         body: "\

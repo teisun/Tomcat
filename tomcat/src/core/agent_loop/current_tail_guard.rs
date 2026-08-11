@@ -5,7 +5,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use crate::core::compaction::apply::{check_after_reply, BoundaryEnv};
-use crate::core::compaction::preheat::generate_summary_with_output_limit;
+use crate::core::compaction::preheat::{generate_summary_with_output_limit, SummaryRequestOptions};
 use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
     TOOL_RESULT_PLACEHOLDER,
@@ -22,6 +22,8 @@ use crate::core::session::transcript::{
     insert_entry_after_message_id, rewrite_message_text_entries_by_id, BranchSummaryEntry,
     MessageTextRewrite, TranscriptEntry,
 };
+use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
+
 use crate::infra::error::AppError;
 
 use super::types::AgentLoop;
@@ -598,27 +600,40 @@ pub(super) async fn collapse_to_branch_summary(
         .cloned()
         .collect();
     ensure_working_message_ids(agent, &mut working)?;
+    let transcript_path = agent
+        .context_state
+        .as_ref()
+        .map(|state| state.transcript_path.clone())
+        .unwrap_or_default();
+
     let compaction_provider = agent.compaction_provider();
     let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let artifacts = build_collapse_summary_artifacts(
         &working,
         compaction_provider.as_ref(),
         &agent.config.context_config.compaction_model,
-        plan_runtime.as_deref(),
-        Some(session_model.as_str()),
-        cache_key.as_deref(),
-        agent.config.compaction_output_limit,
+        CollapseSummaryRequest {
+            plan_runtime: plan_runtime.as_deref(),
+            session_model: Some(session_model.as_str()),
+            cache_key: cache_key.as_deref(),
+            resolved_output_limit: agent.config.compaction_output_limit,
+            transcript_path: (!transcript_path.as_os_str().is_empty())
+                .then_some(transcript_path.as_path()),
+        },
     )
     .await?;
     let Some(ctx_state) = agent.context_state.as_mut() else {
         return Ok(());
     };
-    if let Err(err) = maybe_write_collapse_entry(
+    match maybe_write_collapse_entry(
         &ctx_state.transcript_path,
         &artifacts.covered_end_id,
         &artifacts.transcript_entry,
     ) {
-        warn!(error = %err, "collapse branch_summary transcript write failed");
+        Ok(()) => {
+            let _ = ensure_user_message_sidecar_current(&ctx_state.transcript_path).await;
+        }
+        Err(err) => warn!(error = %err, "collapse branch_summary transcript write failed"),
     }
 
     let summary_msg = artifacts.summary_message;
@@ -646,6 +661,15 @@ pub(super) async fn collapse_to_branch_summary(
     Ok(())
 }
 
+/// 生成 collapse 摘要所需的可选运行时资料，集中传递避免 helper 位置参数继续增长。
+struct CollapseSummaryRequest<'a> {
+    plan_runtime: Option<&'a PlanRuntime>,
+    session_model: Option<&'a str>,
+    cache_key: Option<&'a str>,
+    resolved_output_limit: Option<u32>,
+    transcript_path: Option<&'a Path>,
+}
+
 #[doc(hidden)]
 pub async fn build_collapse_summary_artifacts_for_test(
     messages: &[ChatMessage],
@@ -658,10 +682,13 @@ pub async fn build_collapse_summary_artifacts_for_test(
         messages,
         llm,
         compaction_model,
-        plan_runtime,
-        session_model,
-        None,
-        None,
+        CollapseSummaryRequest {
+            plan_runtime,
+            session_model,
+            cache_key: None,
+            resolved_output_limit: None,
+            transcript_path: None,
+        },
     )
     .await
 }
@@ -670,10 +697,7 @@ async fn build_collapse_summary_artifacts(
     messages: &[ChatMessage],
     llm: &dyn LlmProvider,
     compaction_model: &str,
-    plan_runtime: Option<&PlanRuntime>,
-    session_model: Option<&str>,
-    cache_key: Option<&str>,
-    resolved_output_limit: Option<u32>,
+    request: CollapseSummaryRequest<'_>,
 ) -> Result<CollapseSummaryArtifacts, AppError> {
     let working: Vec<ChatMessage> = messages
         .iter()
@@ -684,15 +708,20 @@ async fn build_collapse_summary_artifacts(
         .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // 这里不再自己拼一份 keepalive —— 两份机器区块只会互相矛盾。
-    let control = plan_runtime.map(|rt| rt.control_snapshot(session_model));
+    let control = request
+        .plan_runtime
+        .map(|rt| rt.control_snapshot(request.session_model));
     let summary_text = generate_summary_with_output_limit(
         &working,
         None,
         llm,
         compaction_model,
         control.as_ref(),
-        cache_key,
-        resolved_output_limit,
+        SummaryRequestOptions {
+            cache_key: request.cache_key,
+            resolved_output_limit: request.resolved_output_limit,
+            transcript_path: request.transcript_path,
+        },
     )
     .await?;
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);

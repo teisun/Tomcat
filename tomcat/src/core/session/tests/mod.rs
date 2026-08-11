@@ -21,3 +21,4 @@ mod transcript_header_test;
 mod transcript_lookup_test;
 mod transcript_mutate_test;
 mod transcript_read_test;
+mod user_message_sidecar_integrity_test;

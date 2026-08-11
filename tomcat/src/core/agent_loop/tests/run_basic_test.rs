@@ -482,7 +482,7 @@ async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
             .iter()
             .map(|event| event["attempt"].as_u64())
             .collect::<Vec<_>>(),
-        (2..=10).map(|attempt| Some(attempt)).collect::<Vec<_>>()
+        (2..=10).map(Some).collect::<Vec<_>>()
     );
     assert!(
         retry_starts

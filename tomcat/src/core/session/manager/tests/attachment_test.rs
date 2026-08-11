@@ -9,6 +9,7 @@
 
 use super::super::*;
 use super::mocks::temp_sessions_dir;
+use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 
 fn fresh_dir() -> std::path::PathBuf {
     let dir = temp_sessions_dir();
@@ -80,6 +81,25 @@ fn any_transcript_references_blob_ignores_non_transcript_files() {
 }
 
 #[test]
+fn any_transcript_references_blob_ignores_user_message_sidecar() {
+    let dir = fresh_dir();
+    let mgr = SessionManager::new(dir.clone());
+    let sha = mgr.attachment_store().put(b"sidecar-only bytes").unwrap();
+    let session = mgr.create_session(mgr.current_session_key(), None).unwrap();
+    std::fs::write(
+        user_message_sidecar_path(&mgr.transcript_path(&session.session_id)),
+        format!("{{\"message\":{{\"content\":[{{\"blobSha\":\"{sha}\"}}]}}}}\n"),
+    )
+    .unwrap();
+
+    assert!(
+        !mgr.any_transcript_references_blob(&sha),
+        "派生 sidecar 不能把已删除 transcript 的附件误判为仍被引用"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn delete_session_reclaims_its_unsent_attachment_bytes() {
     let dir = fresh_dir();
     let mgr = SessionManager::new(dir.clone());
@@ -88,6 +108,11 @@ fn delete_session_reclaims_its_unsent_attachment_bytes() {
     let store = mgr.attachment_store();
     let sha = store.put(b"unsent image bytes").unwrap();
     store.mark_pending(&entry.session_id, &sha).unwrap();
+    std::fs::write(
+        user_message_sidecar_path(&mgr.transcript_path(&entry.session_id)),
+        format!("{{\"message\":{{\"content\":[{{\"blobSha\":\"{sha}\"}}]}}}}\n"),
+    )
+    .unwrap();
 
     mgr.delete_session(&entry.session_id).unwrap();
 

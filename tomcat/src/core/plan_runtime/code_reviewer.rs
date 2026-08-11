@@ -61,16 +61,29 @@ fn render_adjudicated_section(disputed_findings: &[DisputedFinding]) -> String {
     )
 }
 
-pub fn build_code_review_prompt(
-    plan_id: &str,
-    plan_text: &str,
-    plan_path: &Path,
-    workspace_root: Option<&Path>,
-    diff_stat: &str,
-    changed_files: &[String],
-    open_findings: &[Finding],
-    disputed_findings: &[DisputedFinding],
-) -> String {
+/// 构建 code-review 首轮请求的输入集合，避免 prompt 组装继续堆叠位置参数。
+pub(crate) struct CodeReviewPromptInput<'a> {
+    pub plan_id: &'a str,
+    pub plan_text: &'a str,
+    pub plan_path: &'a Path,
+    pub workspace_root: Option<&'a Path>,
+    pub diff_stat: &'a str,
+    pub changed_files: &'a [String],
+    pub open_findings: &'a [Finding],
+    pub disputed_findings: &'a [DisputedFinding],
+}
+
+pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> String {
+    let CodeReviewPromptInput {
+        plan_id,
+        plan_text,
+        plan_path,
+        workspace_root,
+        diff_stat,
+        changed_files,
+        open_findings,
+        disputed_findings,
+    } = input;
     let plan_path = crate::infra::platform::format_home_path(plan_path);
     let workspace_hint = workspace_root
         .map(|path| {

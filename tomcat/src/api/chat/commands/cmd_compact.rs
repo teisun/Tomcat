@@ -2,9 +2,11 @@
 
 use crate::api::chat::ChatContext;
 use crate::core::compaction::compact_tool_results;
-use crate::core::compaction::preheat::generate_summary_with_output_limit;
+use crate::core::compaction::preheat::{generate_summary_with_output_limit, SummaryRequestOptions};
 use crate::core::llm::{LlmScene, PromptCacheKeyFamily};
 use crate::core::session::manager::{init_context_state_with_limits, ContextState};
+use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
+
 use crate::AppError;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
@@ -97,10 +99,13 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
         compaction_call.provider_impl.as_ref(),
         &compaction_call.model,
         Some(&control),
-        PromptCacheKeyFamily::Compaction
-            .key_for(ctx.session_runtime.session.current_session_key())
-            .as_deref(),
-        compaction_call.output_limit_for_request(None).0,
+        SummaryRequestOptions {
+            cache_key: PromptCacheKeyFamily::Compaction
+                .key_for(ctx.session_runtime.session.current_session_key())
+                .as_deref(),
+            resolved_output_limit: compaction_call.output_limit_for_request(None).0,
+            transcript_path: Some(&state.transcript_path),
+        },
     )
     .await?;
 
@@ -110,6 +115,7 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
         covered_end_id,
         covered_count,
     )?;
+    let _ = ensure_user_message_sidecar_current(&state.transcript_path).await;
 
     let after_ratio = load_context_state(ctx, "")?.usage_ratio();
     Ok(CompactReport {

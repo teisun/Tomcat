@@ -9,6 +9,8 @@ pub(crate) mod resume_index;
 pub mod scope;
 pub(crate) mod store;
 pub(crate) mod subagent_transcript;
+pub(crate) mod user_message_sidecar;
+
 pub mod transcript;
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-10 23:10 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-11 16:46 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** session 用户输入侧车 + UPDATE 机器区回灌修复：新建 `user_message_sidecar`，压缩入口（preheat / `/compact` / current-tail collapse）在 LLM 返回后从 transcript 懒重建 `*.user_messages.jsonl`（仅 active Normal user 原始 JSON；fingerprint + integrity 命中跳过；IO 失败降级省略路径）；机器区 verbatim 收紧为 Normal-only 并在关闭标签前追加侧车路径提示；`messages_to_text` 的 `[Previous Summary]` 与 system `{existing_summary}` 双通道 strip 旧 control/verbatim；删除/枚举/附件 GC 排除侧车并不再误当会话。顺带 `#[cfg(test)]` 收口 `compute_retry_delay_ms` release dead_code，以及 clippy 参数对象收拢。验证：计划记录 `cargo fmt --check`、`clippy -D warnings`、`cargo build --release`、串行 `--lib` 与 `context_management_tests` 全绿；Cov% 未跑 tarpaulin，仍为 —。@2026-08-11
 - [✓] **[P0]** Composer 撤销隔离：Tiptap `contentEditable` 上的 Mod+Z/Y（含 Shift-Z）在 `handleDOMEvents.keydown` 中 `stopPropagation()`，阻断 VS Code webview→workbench 转发，避免二次 `execCommand('undo')` 隔字撤销，以及旧可写计划预览被 undo 改盘；撤销/重做只由本地 history 处理。P0 GUI：撤销恰好一次且 window 冒泡监听未触发；P1 host E2E：只读预览活动时 `undo` 后计划文件字节不变。CLI `0.1.35 → 0.1.36`、扩展 `0.1.47 → 0.1.48`、bundled CLI 同步；纯插件 `tomcat-vscode-ext-0.1.48.vsix`。@2026-08-10
 - [✓] **[P0]** `.plan.md` 预览数据丢失根治：`PlanPreviewEditorProvider` 从可写 `CustomTextEditorProvider` 迁为无文本缓冲的 `CustomReadonlyEditorProvider`；所有预览/serve 刷新只读磁盘，逐面板 `FileSystemWatcher` 覆盖 change/create（原子 rename）并在 delete 时关闭面板，彻底移除 `tomcat.plan.autoSave` 与 `TextDocument.save()` 路径。手改仍只经原生 Markdown 编辑器保存；Provider 46、GUI 19、serve 事件集成和聚焦真机 plan E2E 通过。CLI `0.1.34 → 0.1.35`、扩展 `0.1.46 → 0.1.47`、bundled CLI 同步。@2026-08-10
 - [✓] **[P0]** `ask_question` 实时卡片闪现/消失根治：工具卡与问答卡此前共用裸 `toolCallId` 作时间线 `.id`，增量 patch、分组和 React key 会把两张卡当同一张；问答卡现使用 `approval:<toolCallId>` 渲染键，跨重连合并仍用 `toolCallId`。状态仓库强制每个 session 的 timeline id 唯一；补齐实时共存、interrupt、patch≡full、GUI DOM 与 host E2E（fake serve 也发真实的 tool start + control request）回归。扩展 `0.1.45 → 0.1.46`，`bundledCli=0.1.34` 不变。@2026-08-10
@@ -67,6 +68,8 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- 压缩：新增 session 派生侧车 `<session_id>.user_messages.jsonl`（与 transcript 同目录）；`ensure_user_message_sidecar` / `ensure_user_message_sidecar_current`；`machine_block::render_with_sidecar`；`SummaryRequestOptions.transcript_path`；verbatim 候选收紧为 `kind.is_normal()`；UPDATE 时 `messages_to_text` 对 `CompactionSummary` 先 `machine_block::strip`。
+- Session：枚举/附件引用只认主 transcript（排除 `*.user_messages.jsonl`）；`delete_session` 同步删除侧车。
 - Plan 收口：`update_plan` 完成态要求持久化 `code_review_pass` 与带证据的 `green_build_pass`；新增 `dispute_findings`；配置 `max_completion_gate_cycles`（默认 3）；`max_code_review_rounds` 默认改为 4。
 - 内置 skill：`materialize_builtin_skills` / `builtin_verify.md`（verify）。
 - `edit` 工具入参收敛为 `{path, edits[]}`；`update_plan` 描述允许多至 3 个 `in_progress` todo（运行时 `MAX_IN_PROGRESS_TODOS=3`）。
@@ -144,6 +147,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-11 16:46）：user-message sidecar + UPDATE 机器区双通道 strip 已落地；计划 green build（fmt / clippy -D warnings / release / 串行 lib / context_management_tests）通过。Cov% 仍为 —。
 - 最新补充（2026-08-10 23:10）：Composer 撤销不再冒泡到 VS Code workbench；GUI Composer 定向单测与只读计划预览 undo 守卫 E2E 通过；`npm run lint` 绿；版本已升 CLI `0.1.36` / 扩展 `0.1.48` / bundled CLI `0.1.36`；本机纯插件 `tomcat-vscode-ext-0.1.48.vsix`。Cov% 仍为 —。
 - 最新补充（2026-08-10 21:11）：计划预览已改成只读自定义编辑器，磁盘成为唯一权威；watcher/serve 两路刷新均只读磁盘，手改仅走原生 Markdown 编辑器。Provider 46、GUI 19、serve plan event 与聚焦 devhost `.plan.md` E2E 通过；全量扩展集成/host E2E 的既有 fixture 失败详见 BLOCKED。版本已升 CLI `0.1.35` / 扩展 `0.1.47` / bundled CLI `0.1.35`；Cov% 仍为 —。
 - 最新补充（2026-08-10 16:10）：`ask_question` 实时工具卡与问答卡不再共享 timeline `.id`；新增 live / interrupt / patch≡full / GUI DOM 回归，targeted devhost E2E 通过；扩展已升至 `0.1.46`，纯插件 VSIX 已重打。Cov% 仍为 —。

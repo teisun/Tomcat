@@ -52,6 +52,7 @@ fn tool_parallelism_event(
     })
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod parallelism_metric_tests {
     use super::tool_parallelism_event;

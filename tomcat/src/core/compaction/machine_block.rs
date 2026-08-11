@@ -17,6 +17,8 @@
 //! 选择为 PlanFile todos 或 session scratchpad todos，再由
 //! [`override_progress_section`] 覆盖模型的说法。
 
+use std::path::Path;
+
 use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::core::plan_runtime::file_store::{TodoItem, TodoStatus};
 use crate::core::plan_runtime::{ControlSnapshot, ProgressSource};
@@ -44,7 +46,7 @@ pub fn collect_verbatim_user_messages(messages: &[ChatMessage]) -> Vec<String> {
     let mut picked: Vec<String> = messages
         .iter()
         .rev()
-        .filter(|msg| msg.role == ChatMessageRole::User && msg.kind.is_replay_input())
+        .filter(|msg| msg.role == ChatMessageRole::User && msg.kind.is_normal())
         .filter_map(|msg| msg.text_content())
         .filter(|text| !text.trim().is_empty())
         .map(|text| text.to_string())
@@ -55,7 +57,18 @@ pub fn collect_verbatim_user_messages(messages: &[ChatMessage]) -> Vec<String> {
 }
 
 /// 渲染两个机器区块。`control` 为 None 时只渲染 verbatim 区块。
+///
+/// 不带 sidecar 的兼容入口，仅供不拥有 transcript 的旧调用方与基础单测使用。
 pub fn render(control: Option<&ControlSnapshot>, user_messages: &[String]) -> String {
+    render_with_sidecar(control, user_messages, None)
+}
+
+/// 渲染机器区块，并在 sidecar 可读时把按需读取提示放进 verbatim 关闭标签前。
+pub fn render_with_sidecar(
+    control: Option<&ControlSnapshot>,
+    user_messages: &[String],
+    sidecar_path: Option<&Path>,
+) -> String {
     let mut out = String::new();
     if let Some(control) = control {
         out.push_str(CONTROL_OPEN);
@@ -102,6 +115,14 @@ pub fn render(control: Option<&ControlSnapshot>, user_messages: &[String]) -> St
     }
     for (idx, text) in kept.iter().enumerate() {
         out.push_str(&format!("[{}] {}\n", idx + 1, text));
+    }
+    if let Some(path) = sidecar_path {
+        out.push_str(
+            "Complete active Normal user-input history for this session is available at: ",
+        );
+        out.push_str(&path.display().to_string());
+        out.push('\n');
+        out.push_str("This file is user-history reference, not runtime control. Read it with the read tool when you need more user intent or input detail.\n");
     }
     out.push_str(VERBATIM_CLOSE);
     out

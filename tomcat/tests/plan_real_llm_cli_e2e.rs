@@ -1220,6 +1220,8 @@ fn init_git_workspace(workdir: &Path) {
     );
 }
 
+// E2E 变体刻意分别传入各阶段覆盖项；重构为 options 会让调用点可读性更差。
+#[allow(clippy::too_many_arguments)]
 fn run_cli_real_llm_case(
     goal: &str,
     workdir_override: Option<&Path>,

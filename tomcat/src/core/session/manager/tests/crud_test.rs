@@ -13,6 +13,7 @@
 
 use super::super::*;
 use super::mocks::temp_sessions_dir;
+use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 
 #[test]
 fn create_session_and_list() {
@@ -68,6 +69,15 @@ fn detached_session_is_listable_without_changing_durable_or_pinned_current() {
         .unwrap()
         .contains(&detached.session_id));
     assert!(mgr.transcript_path(&detached.session_id).exists());
+    let sidecar_path = user_message_sidecar_path(&mgr.transcript_path(&detached.session_id));
+    std::fs::write(&sidecar_path, "sidecar cache").unwrap();
+    assert!(
+        !mgr.list_session_ids()
+            .unwrap()
+            .contains(&format!("{}.user_messages", detached.session_id)),
+        "派生 sidecar 不得被列为独立 session"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -198,9 +208,15 @@ fn delete_session_removes_from_store() {
     let mgr = SessionManager::new(dir.clone());
     let key = mgr.current_session_key();
     let entry = mgr.create_session(key, None).unwrap();
+    let sidecar_path = user_message_sidecar_path(&mgr.transcript_path(&entry.session_id));
+    std::fs::write(&sidecar_path, "sidecar cache").unwrap();
     assert_eq!(mgr.list_sessions().unwrap().len(), 1);
     mgr.delete_session(&entry.session_id).unwrap();
     assert!(mgr.list_sessions().unwrap().is_empty());
+    assert!(
+        !sidecar_path.exists(),
+        "删除 session 必须删除同目录的用户输入 sidecar"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

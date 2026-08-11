@@ -63,7 +63,9 @@
 //! 把 `BranchSummaryEntry` 写回 JSONL，并发射 `AgentEvent::AutoCompactionEnd`。
 //! 重试与失败路径分别发 `AutoCompactionStart` / `CompactionError`。
 
+use std::path::Path;
 use std::sync::Arc;
+
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
@@ -77,6 +79,8 @@ use crate::core::session::manager::{
 use crate::core::session::transcript::{
     insert_entry_after_message_id, BranchSummaryEntry, TranscriptEntry,
 };
+use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
+
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::ScopedEventEmitter;
@@ -86,6 +90,13 @@ use super::machine_block;
 use super::truncation::floor_char_boundary;
 
 const MAX_PREHEAT_RETRIES: u32 = 3;
+/// 生成摘要时随调用携带的可选运行时资料，避免入口继续膨胀位置参数。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SummaryRequestOptions<'a> {
+    pub cache_key: Option<&'a str>,
+    pub resolved_output_limit: Option<u32>,
+    pub transcript_path: Option<&'a Path>,
+}
 
 // ---------------------------------------------------------------------------
 // Prompt templates (T2-P0-002 Phase B — 9 节模板，唯一来源：
@@ -379,8 +390,12 @@ impl Preheat {
                     &*llm,
                     &compaction_model,
                     control.as_ref(),
-                    (!cache_key.is_empty()).then_some(cache_key.as_str()),
-                    resolved_output_limit,
+                    SummaryRequestOptions {
+                        cache_key: (!cache_key.is_empty()).then_some(cache_key.as_str()),
+                        resolved_output_limit,
+                        transcript_path: (!transcript_path.as_os_str().is_empty())
+                            .then_some(transcript_path.as_path()),
+                    },
                 )
                 .await
                 {
@@ -442,6 +457,7 @@ impl Preheat {
                         };
 
                         if append_ok {
+                            let _ = ensure_user_message_sidecar_current(&transcript_path).await;
                             let _ = eb.emit(AgentEvent::AutoCompactionEnd {
                                 elapsed_ms,
                                 summary_chars: result.summary_text.len(),
@@ -679,22 +695,23 @@ pub async fn generate_summary(
         llm,
         compaction_model,
         control,
-        cache_key,
-        None,
+        SummaryRequestOptions {
+            cache_key,
+            ..Default::default()
+        },
     )
     .await
 }
 
 /// Same as [`generate_summary`], with a provider-wire output limit resolved
 /// from the selected compaction model's capability.
-pub async fn generate_summary_with_output_limit(
+pub(crate) async fn generate_summary_with_output_limit(
     snapshot: &[ChatMessage],
     previous_summary: Option<&str>,
     llm: &dyn LlmProvider,
     compaction_model: &str,
     control: Option<&ControlSnapshot>,
-    cache_key: Option<&str>,
-    resolved_output_limit: Option<u32>,
+    options: SummaryRequestOptions<'_>,
 ) -> Result<String, AppError> {
     let batch_text = messages_to_text(snapshot);
 
@@ -713,10 +730,10 @@ pub async fn generate_summary_with_output_limit(
     let req = ChatRequest {
         model: compaction_model.to_string(),
         messages: vec![ChatMessage::system(&prompt), ChatMessage::user(&batch_text)],
-        resolved_output_limit,
+        resolved_output_limit: options.resolved_output_limit,
         stream: Some(false),
         tools: None,
-        cache_key: cache_key.map(str::to_owned),
+        cache_key: options.cache_key.map(str::to_owned),
         ..Default::default()
     };
 
@@ -736,9 +753,14 @@ pub async fn generate_summary_with_output_limit(
         text = machine_block::override_progress_section(&text, progress);
     }
 
-    let blocks = machine_block::render(
+    let sidecar_path = match options.transcript_path {
+        Some(path) => ensure_user_message_sidecar_current(path).await,
+        None => None,
+    };
+    let blocks = machine_block::render_with_sidecar(
         control,
         &machine_block::collect_verbatim_user_messages(snapshot),
+        sidecar_path.as_deref(),
     );
     Ok(machine_block::prepend(&blocks, &text))
 }
@@ -785,7 +807,7 @@ pub(super) fn messages_to_text(messages: &[ChatMessage]) -> String {
             MessageKind::CompactionSummary => {
                 buf.push_str("[Previous Summary]\n");
                 if let Some(text) = m.text_content() {
-                    buf.push_str(text);
+                    buf.push_str(&machine_block::strip(text));
                     buf.push('\n');
                 }
             }

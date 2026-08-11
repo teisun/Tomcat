@@ -858,6 +858,9 @@ async fn update_plan_emits_plan_todos_event() {
                 content: None,
                 status: TodoStatus::InProgress,
             }],
+            dispute_findings: vec![],
+            green_build_pass: None,
+            green_build_evidence: vec![],
         },
     )
     .await

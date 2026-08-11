@@ -17,7 +17,8 @@ use crate::core::llm::{
 };
 use crate::core::plan_runtime::code_reviewer::{
     build_code_review_prompt, code_review_system_prompt_text,
-    code_reviewer_allowed_tools_with_policy, collect_git_diff_context, CodeReviewSummary,
+    code_reviewer_allowed_tools_with_policy, collect_git_diff_context, CodeReviewPromptInput,
+    CodeReviewSummary,
 };
 use crate::core::plan_runtime::explorer::{
     build_explorer_prompt, explorer_system_prompt_text, ExplorerReport, ExplorerTask,
@@ -443,16 +444,16 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let (diff_stat, changed_files) =
             collect_git_diff_context(deps.agent_workspace_dir.as_path()).await;
-        let initial_user_message = build_code_review_prompt(
+        let initial_user_message = build_code_review_prompt(CodeReviewPromptInput {
             plan_id,
             plan_text,
-            &plan_path,
+            plan_path: &plan_path,
             workspace_root,
-            &diff_stat,
-            &changed_files,
+            diff_stat: &diff_stat,
+            changed_files: &changed_files,
             open_findings,
-            &plan_runtime.disputed_findings(plan_id),
-        );
+            disputed_findings: &plan_runtime.disputed_findings(plan_id),
+        });
         let turns_limit = deps.max_turns.max(1);
 
         let primitive = Arc::clone(&deps.primitive);
