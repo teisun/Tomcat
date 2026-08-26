@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use crate::core::plan_runtime::{
-    file_store::{TodoItem, TodoStatus},
+    file_store::{TodoItem, TodoKind, TodoStatus},
     ops,
 };
 
@@ -125,6 +125,7 @@ fn apply_upsert(
             id: id.to_string(),
             content: content.clone(),
             status: status.unwrap_or(TodoStatus::Pending),
+            kind: TodoKind::Work,
         })],
     )?;
     Ok(())
@@ -138,6 +139,7 @@ pub fn items_json(todos: &[TodoItem]) -> Vec<serde_json::Value> {
                 "id": t.id,
                 "content": t.content,
                 "status": t.status.as_str(),
+                "kind": t.kind.as_str(),
             })
         })
         .collect()

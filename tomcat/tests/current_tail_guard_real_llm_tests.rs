@@ -182,11 +182,13 @@ fn build_plan_fixture(label: &str) -> PlanFixture {
                     id: active_id.clone(),
                     content: active_content.clone(),
                     status: TodoStatus::InProgress,
+                    kind: Default::default(),
                 },
                 TodoItem {
                     id: next_id.clone(),
                     content: next_content.clone(),
                     status: TodoStatus::Pending,
+                    kind: Default::default(),
                 },
             ],
             green_build_pass: false,

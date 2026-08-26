@@ -117,8 +117,42 @@ pub enum TodoStatus {
     Cancelled,
 }
 
+/// Todo 的所有者和生命周期。
+///
+/// 普通工作项由 planner / executor 推进；两种 gate 由 runtime 创建，并且只有 runtime
+/// 能把它们写入终态。将此语义落在数据模型中，而不是根据标题匹配，避免提示词、UI 文案或
+/// 用户自定义 id 漂移后绕过收口门禁。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoKind {
+    #[default]
+    Work,
+    GateCodeReview,
+    GateAcceptance,
+}
+
+impl TodoKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TodoKind::Work => "work",
+            TodoKind::GateCodeReview => "gate_code_review",
+            TodoKind::GateAcceptance => "gate_acceptance",
+        }
+    }
+
+    pub fn is_gate(self) -> bool {
+        !matches!(self, TodoKind::Work)
+    }
+}
+
 /// 同时进行的 todo 上限：允许有限并行，仍保持面板和收口状态可读。
 pub const MAX_IN_PROGRESS_TODOS: usize = 3;
+
+/// Runtime 追加的收口门禁 id。它们是工具契约的一部分，不能由模型创建或删除。
+pub const GATE_CODE_REVIEW_TODO_ID: &str = "gate-review";
+pub const GATE_ACCEPTANCE_TODO_ID: &str = "gate-acceptance";
+pub const GATE_CODE_REVIEW_TODO_CONTENT: &str = "[gate] review";
+pub const GATE_ACCEPTANCE_TODO_CONTENT: &str = "[gate] Acceptance";
 
 impl TodoStatus {
     pub fn as_str(&self) -> &'static str {
@@ -136,6 +170,9 @@ pub struct TodoItem {
     pub id: String,
     pub content: String,
     pub status: TodoStatus,
+    /// 旧计划 / session scratchpad 没有该字段时默认普通工作项。
+    #[serde(default)]
+    pub kind: TodoKind,
 }
 
 /// 一次可复核的绿构建任务引用。

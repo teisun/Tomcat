@@ -137,9 +137,19 @@ async fn read_file_missing_path_returns_not_found_error() {
         msg.contains("no such file")
             || msg.contains("not found")
             || msg.contains("os error 2")
+            || msg.contains("does not exist")
             || msg.contains("不存在"),
         "错误文案应包含路径不存在语义，实际: {}",
         err
+    );
+    assert!(
+        err.to_string().contains("project root is"),
+        "绝对路径不存在时应给出真实项目根纠偏，实际: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains(std::env::current_dir().unwrap().to_string_lossy().as_ref()),
+        "错误应回显实际 agent 工作目录，实际: {err}"
     );
     let _ = std::fs::remove_dir(&dir);
 }
@@ -613,6 +623,9 @@ async fn execute_bash_nonexistent_absolute_cwd_returns_clear_error() {
     assert!(msg.contains("bash.cwd does not exist:"));
     assert!(msg.contains(&path_str));
     assert!(msg.contains(&format!("input: {:?}", path_str)));
+    assert!(msg.contains("project root is"));
+    assert!(msg.contains("use \".\""));
+    assert!(msg.contains(std::env::current_dir().unwrap().to_string_lossy().as_ref()));
 }
 
 #[tokio::test]

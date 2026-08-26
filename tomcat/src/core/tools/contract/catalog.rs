@@ -378,7 +378,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "create_plan",
         label: "Create Plan",
-        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, writes frontmatter under an advisory lock, then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.\n",
+        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, writes frontmatter under an advisory lock, then appends runtime-owned `[gate] review` and `[gate] Acceptance` todos to the end of the returned list. The gates are the visible close-out flow and must not be supplied by the caller. The runtime then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.\n",
         display_summary: Some("Create a plan file under ~/.tomcat/plans/ and run an advisory reviewer (PLAN mode only)."),
         parameters: create_plan_parameters,
         scope: PermissionScope::Write,

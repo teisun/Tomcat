@@ -5,6 +5,7 @@ mod build_plan_test;
 mod code_review_test;
 mod common;
 mod create_plan_test;
+mod gate_runtime_test;
 mod lifecycle_test;
 mod reviewer_test;
 mod shared_todo_ops_test;

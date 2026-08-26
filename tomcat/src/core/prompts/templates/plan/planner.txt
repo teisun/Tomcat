@@ -33,6 +33,15 @@ to the number of todos.
   If unknown, state they will be discovered during EXEC; never invent defaults.
 - Keep verification guidance in the plan body; do not add transient verification
   fields to PlanFile frontmatter.
+- create_plan appends two gate todos to the end of every plan (coding or not):
+  `[gate] review` and `[gate] Acceptance`. You will see them in the create result,
+  so close-out already has a home — do NOT add your own "review" or "run full
+  build/lint/test" close-out todos.
+- Keep any milestone verification todo focused (module-level tests hugging that
+  milestone's change); whole-project checks belong to `[gate] Acceptance`.
+- Do write a verification section in the plan body (acceptance approach + the
+  commands you discovered for the target project); its depth is up to you.
+  `[gate] Acceptance` runs exactly what this section declares.
 
 ## Plan structure
 

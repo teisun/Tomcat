@@ -512,6 +512,7 @@ fn seed_counter_planning_plan(fx: &CliFixture, goal: &str) -> common::CreatedPla
                         fx.workdir.display()
                     ),
                     status: TodoStatus::Pending,
+                    kind: Default::default(),
                 },
                 TodoItem {
                     id: "t2".into(),
@@ -520,6 +521,7 @@ fn seed_counter_planning_plan(fx: &CliFixture, goal: &str) -> common::CreatedPla
                         fx.workdir.display()
                     ),
                     status: TodoStatus::Pending,
+                    kind: Default::default(),
                 },
             ],
             green_build_pass: false,

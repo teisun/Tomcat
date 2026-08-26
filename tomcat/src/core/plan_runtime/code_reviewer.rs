@@ -89,6 +89,7 @@ pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> Stri
         .map(|path| {
             format!(
                 "         - Project/workspace root (start repo inspection here first): `{}`\n\
+                 - Path discipline: use the relative changed-file paths below. For bash, leave cwd empty or use `.`; do not guess an absolute root.\n\
                  - Access note: reads and bash still follow runtime authorization / permission rules.\n",
                 crate::infra::platform::format_home_path(path)
             )
@@ -249,6 +250,11 @@ impl CodeReviewSummary {
     }
 
     pub fn to_json(&self) -> serde_json::Value {
+        let non_blocking_findings = self
+            .findings
+            .iter()
+            .filter(|finding| !finding.blocks())
+            .count();
         serde_json::json!({
             "aborted": self.aborted,
             "verdict": self.verdict,
@@ -256,6 +262,10 @@ impl CodeReviewSummary {
             "changes_summary": self.changes_summary,
             "applied_changes": self.applied_changes,
             "findings": self.findings,
+            "non_blocking_findings": non_blocking_findings,
+            "p2_guidance": (non_blocking_findings > 0).then_some(
+                "P2 findings are non-blocking suggestions; do not create a todo or delay close-out unless the user asks to address them."
+            ),
             "reviewer_turns_used": self.reviewer_turns_used,
             "reviewer_turns_limit": self.reviewer_turns_limit,
             "reviewer_stop_reason": self.reviewer_stop_reason,

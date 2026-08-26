@@ -107,6 +107,11 @@ pub trait EphemeralTailProvider: Send + Sync {
 
 pub struct AgentLoopConfig {
     pub max_attempts: u32,
+    /// Explicitly select the larger retry budget for a headless child agent.
+    ///
+    /// This is intentionally independent from `plan_runtime`: read-only reviewers must not
+    /// receive plan-writing capabilities merely to gain a transport retry budget.
+    pub unattended_retry: bool,
     /// 单次 Attempt 最大工具轮次。默认 `usize::MAX`（不限制）；
     /// 上下文预算自然约束轮次。TODO: 待 tool-loop-detection 方案替代。
     pub max_tool_rounds: usize,
@@ -175,6 +180,7 @@ impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
             max_attempts: DEFAULT_AGENT_MAX_ATTEMPTS,
+            unattended_retry: false,
             max_tool_rounds: usize::MAX,
             retry_base_delay_ms: DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
             thinking_level: None,

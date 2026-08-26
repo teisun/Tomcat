@@ -5,7 +5,9 @@ use async_trait::async_trait;
 
 pub(crate) use crate::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, validate_frontmatter_invariants, write_plan, PlanFile,
-    PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+    PlanFileFrontmatter, PlanFileState, TodoItem, TodoKind, TodoStatus,
+    GATE_ACCEPTANCE_TODO_CONTENT, GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_CONTENT,
+    GATE_CODE_REVIEW_TODO_ID,
 };
 pub(crate) use crate::core::plan_runtime::review::Finding;
 pub(crate) use crate::core::plan_runtime::todo_runtime::TodosRuntime;
@@ -277,11 +279,26 @@ pub fn write_plan_file_at(
         session_id: Some("orig-uuid".into()),
         created_at: "2026-05-19T00:00:00Z".into(),
         schema_version: 1,
-        todos: vec![TodoItem {
-            id: "step1".into(),
-            content: "do the thing".into(),
-            status: TodoStatus::Pending,
-        }],
+        todos: vec![
+            TodoItem {
+                id: "step1".into(),
+                content: "do the thing".into(),
+                status: TodoStatus::Pending,
+                kind: TodoKind::Work,
+            },
+            TodoItem {
+                id: GATE_CODE_REVIEW_TODO_ID.into(),
+                content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
+                status: TodoStatus::Pending,
+                kind: TodoKind::GateCodeReview,
+            },
+            TodoItem {
+                id: GATE_ACCEPTANCE_TODO_ID.into(),
+                content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
+                status: TodoStatus::Pending,
+                kind: TodoKind::GateAcceptance,
+            },
+        ],
         green_build_pass: false,
         green_build_evidence: Vec::new(),
         code_review_pass: false,

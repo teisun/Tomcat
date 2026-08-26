@@ -73,6 +73,7 @@ fn write_external_plan(path: &std::path::Path, plan_id: &str) {
             id: "t1".into(),
             content: "ship it".into(),
             status: TodoStatus::Pending,
+            kind: Default::default(),
         }],
         green_build_pass: false,
         green_build_evidence: vec![],

@@ -35,6 +35,24 @@ const READ_DEFAULT_LIMIT_LINES: u64 = 2000;
 /// 并返回 `offset=<next>` 续读提示，避免单个 `read` 窗口直接把上下文顶爆。
 pub(crate) const READ_POST_OUTPUT_BUDGET_BYTES: usize = 128 * 1024;
 
+fn metadata_with_project_root_hint(
+    path: &Path,
+    raw_path: &str,
+) -> Result<std::fs::Metadata, AppError> {
+    std::fs::metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound && Path::new(raw_path).is_absolute() {
+            if let Ok(project_root) = std::env::current_dir() {
+                return AppError::Primitive(format!(
+                    "read.path does not exist: {}; project root is {} — use a relative path under it",
+                    path.display(),
+                    project_root.display()
+                ));
+            }
+        }
+        AppError::Io(error)
+    })
+}
+
 fn rendered_prefix_len(line_no: u64, line_numbers: bool, hashline: bool) -> usize {
     let width = std::cmp::max(6, line_no.to_string().len());
     if hashline {
@@ -422,7 +440,7 @@ pub(super) async fn read_file_impl(
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;
-    let meta = std::fs::metadata(&path_buf).map_err(AppError::Io)?;
+    let meta = metadata_with_project_root_hint(&path_buf, path)?;
     if meta.is_dir() {
         return Err(AppError::Primitive(
             "路径是目录，无法读取为文件".to_string(),
@@ -477,7 +495,7 @@ pub(super) async fn read_impl(
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;
-    let meta = std::fs::metadata(&path_buf).map_err(AppError::Io)?;
+    let meta = metadata_with_project_root_hint(&path_buf, path)?;
     if meta.is_dir() {
         return Err(AppError::Primitive(
             "路径是目录，无法读取为文件".to_string(),

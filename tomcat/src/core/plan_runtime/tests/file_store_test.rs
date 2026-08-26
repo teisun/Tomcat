@@ -1,11 +1,33 @@
 use super::super::file_store::{
-    read_plan, update_plan_locked, write_plan, PlanError, PlanFile, TodoItem, TodoStatus,
+    read_plan, update_plan_locked, write_plan, PlanError, PlanFile, TodoItem, TodoKind, TodoStatus,
 };
 use super::{sample_frontmatter, temp_plans_dir};
 use fs2::FileExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[test]
+fn todo_kind_round_trips_and_missing_kind_defaults_to_work() {
+    let legacy: TodoItem = serde_json::from_value(serde_json::json!({
+        "id": "legacy",
+        "content": "old plan item",
+        "status": "pending",
+    }))
+    .unwrap();
+    assert_eq!(legacy.kind, TodoKind::Work);
+
+    let gate = TodoItem {
+        id: "gate-review".into(),
+        content: "[gate] review".into(),
+        status: TodoStatus::Pending,
+        kind: TodoKind::GateCodeReview,
+    };
+    assert_eq!(
+        serde_json::from_value::<TodoItem>(serde_json::to_value(&gate).unwrap()).unwrap(),
+        gate
+    );
+}
 
 #[test]
 fn write_plan_writes_and_reads_back_atomically() {
@@ -163,6 +185,7 @@ fn update_plan_locked_preserves_incremental_updates_under_concurrency() {
                     id: format!("a-{i}"),
                     content: format!("a-{i}"),
                     status: TodoStatus::Pending,
+                    kind: Default::default(),
                 });
                 Ok::<_, std::convert::Infallible>(())
             })
@@ -176,6 +199,7 @@ fn update_plan_locked_preserves_incremental_updates_under_concurrency() {
                     id: format!("b-{i}"),
                     content: format!("b-{i}"),
                     status: TodoStatus::Pending,
+                    kind: Default::default(),
                 });
                 Ok::<_, std::convert::Infallible>(())
             })

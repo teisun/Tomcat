@@ -105,6 +105,7 @@ fn write_planning_plan(plan_id: &str, body: &str) -> PathBuf {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
+                    kind: Default::default(),
                 }],
                 green_build_pass: false,
                 green_build_evidence: Vec::new(),
@@ -173,7 +174,7 @@ impl RecordingProvider {
     ) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let mut streams = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..10 {
             streams.push(RecordingStreamPlan::KeepaliveOnlyIdle {
                 interval_ms: 200,
                 timeout_sec,
@@ -904,8 +905,8 @@ async fn first_llm_fatal_uses_no_transcript_hint_and_llm_error_stop_reason() {
     let lines: Vec<_> = raw.lines().collect();
     assert_eq!(
         lines.len(),
-        2,
-        "zero-message transcript should contain header + meta"
+        4,
+        "seed system/user messages should follow header + meta"
     );
     assert!(
         raw.contains("\"event\":\"subagent.transcript.meta\""),

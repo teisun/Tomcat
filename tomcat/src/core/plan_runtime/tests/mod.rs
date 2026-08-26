@@ -28,11 +28,13 @@ pub(super) fn sample_frontmatter() -> super::file_store::PlanFileFrontmatter {
                 id: "t1".into(),
                 content: "step 1".into(),
                 status: super::file_store::TodoStatus::Pending,
+                kind: Default::default(),
             },
             super::file_store::TodoItem {
                 id: "t2".into(),
                 content: "step 2".into(),
                 status: super::file_store::TodoStatus::InProgress,
+                kind: Default::default(),
             },
         ],
         green_build_pass: false,

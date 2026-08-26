@@ -121,6 +121,7 @@ fn review_prompt_uses_active_external_plan_path() {
                     id: "t1".into(),
                     content: "ship".into(),
                     status: TodoStatus::Pending,
+                    kind: Default::default(),
                 }],
                 green_build_pass: false,
                 green_build_evidence: Vec::new(),

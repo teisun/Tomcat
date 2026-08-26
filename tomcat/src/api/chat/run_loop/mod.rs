@@ -846,6 +846,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         } else {
             ctx.config.llm.agent_max_attempts
         },
+        unattended_retry: false,
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         thinking_level,

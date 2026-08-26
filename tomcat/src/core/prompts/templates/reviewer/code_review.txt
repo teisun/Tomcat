@@ -16,6 +16,9 @@ Workflow:
    `search_files` / `list_dir`.
 2. Use `bash` only for read-only inspection or lightweight evidence gathering
    (for example `git diff`, `cargo test -- --list`, `rg`, or manifest lookup).
+   Prefer the relative paths from the review brief. For `bash`, leave `cwd` empty
+   or use `.` unless you intentionally need another existing directory; do not
+   invent an absolute workspace root.
 3. Record only concrete findings with an explicit P0 / P1 / P2 tier:
    - P0 = blocker / critical: correctness bug, crash, data loss, security issue, or build break.
    - P1 = major: a real user-visible defect or material mismatch with the approved plan.

@@ -10,6 +10,7 @@ fn rewrite_todos_board_replaces_between_markers() {
         id: "t1".into(),
         content: "step".into(),
         status: TodoStatus::InProgress,
+        kind: Default::default(),
     }];
     rewrite_todos_board(&mut body, &todos);
     assert!(!body.contains("OLD CONTENT"));
@@ -61,7 +62,7 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
     .unwrap();
     assert_eq!(out["plan_id"], plan_id);
     let items = out["items"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 4);
     assert_eq!(items[0]["status"], "in_progress");
     assert_eq!(items[1]["status"], "pending");
     assert!(out.get("path").is_some());
@@ -195,11 +196,26 @@ async fn update_plan_plan_id_prefers_active_external_path() {
             session_id: Some("sid-a".into()),
             created_at: "2026-05-24T00:00:00Z".into(),
             schema_version: 1,
-            todos: vec![TodoItem {
-                id: "t1".into(),
-                content: "step 1".into(),
-                status: TodoStatus::Pending,
-            }],
+            todos: vec![
+                TodoItem {
+                    id: "t1".into(),
+                    content: "step 1".into(),
+                    status: TodoStatus::Pending,
+                    kind: Default::default(),
+                },
+                TodoItem {
+                    id: GATE_CODE_REVIEW_TODO_ID.into(),
+                    content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
+                    status: TodoStatus::Pending,
+                    kind: TodoKind::GateCodeReview,
+                },
+                TodoItem {
+                    id: GATE_ACCEPTANCE_TODO_ID.into(),
+                    content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
+                    status: TodoStatus::Pending,
+                    kind: TodoKind::GateAcceptance,
+                },
+            ],
             green_build_pass: false,
             green_build_evidence: Vec::new(),
             code_review_pass: false,
@@ -285,7 +301,8 @@ async fn update_plan_in_exec_promotes_completed() {
     .await
     .unwrap();
     assert_eq!(out["plan_state_before"], "executing");
-    assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(out["plan_state_after"], "executing");
+    assert_eq!(out["next_step"]["phase"], "start_review");
     assert_eq!(rt.mode(), AgentMode::Plan);
     assert_eq!(rt.active_plan_path(), Some(path));
     cleanup_home(&home);

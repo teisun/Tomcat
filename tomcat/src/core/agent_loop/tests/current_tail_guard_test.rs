@@ -209,11 +209,13 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
             id: "t1".to_string(),
             content: "step pending".to_string(),
             status: TodoStatus::Pending,
+            kind: Default::default(),
         },
         TodoItem {
             id: "t2".to_string(),
             content: "step active".to_string(),
             status: TodoStatus::InProgress,
+            kind: Default::default(),
         },
     ]);
 

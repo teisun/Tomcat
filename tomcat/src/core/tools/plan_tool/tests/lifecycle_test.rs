@@ -92,6 +92,7 @@ fn concurrent_write_plan_serialized_by_lock() {
                 id: format!("t{i}-a"),
                 content: format!("a-{i}"),
                 status: TodoStatus::Pending,
+                kind: Default::default(),
             }];
             write_plan(&p1, &plan, 2000).unwrap();
         }
@@ -103,6 +104,7 @@ fn concurrent_write_plan_serialized_by_lock() {
                 id: format!("t{i}-b"),
                 content: format!("b-{i}"),
                 status: TodoStatus::Pending,
+                kind: Default::default(),
             }];
             write_plan(&p2, &plan, 2000).unwrap();
         }
@@ -354,7 +356,10 @@ fn control_snapshot_reports_three_valued_mode_and_file_state() {
     assert!(matches!(
         snap.progress,
         Some(ProgressSource::PlanFile { ref todos })
-            if todos.len() == 1 && todos[0].id == "step1"
+            if todos.len() == 3
+                && todos[0].id == "step1"
+                && todos[1].id == GATE_CODE_REVIEW_TODO_ID
+                && todos[2].id == GATE_ACCEPTANCE_TODO_ID
     ));
     cleanup_home(&home);
 }
@@ -375,6 +380,7 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
         id: "scratch".into(),
         content: "must not leak over a readable empty plan".into(),
         status: TodoStatus::Pending,
+        kind: Default::default(),
     }]);
     assert!(matches!(
         with_plan.control_snapshot(None).progress,
@@ -387,6 +393,7 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
         id: "scratch".into(),
         content: "keep investigating".into(),
         status: TodoStatus::InProgress,
+        kind: Default::default(),
     }]);
     assert!(matches!(
         scratchpad_only.control_snapshot(None).progress,

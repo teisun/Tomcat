@@ -283,11 +283,6 @@ async fn run_unattended_transport_retries_past_interactive_budget_without_manual
     streams.push(ok_text_stream("RECOVERED_AUTONOMOUSLY"));
     let (provider, requests) = RecordingStreamLlmProvider::new(streams);
 
-    let plan_runtime = PlanRuntime::new("unattended-transport-retry");
-    plan_runtime.seed_active_plan_for_test(
-        "unattended-transport-retry-plan".to_string(),
-        PlanFileState::Executing,
-    );
     let event_bus = Arc::new(DefaultEventBus::new());
     let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     {
@@ -309,7 +304,8 @@ async fn run_unattended_transport_retries_past_interactive_budget_without_manual
             max_attempts: 4,
             retry_base_delay_ms: 0,
             session_id: "unattended-transport-retry".to_string(),
-            plan_runtime: Some(plan_runtime),
+            unattended_retry: true,
+            plan_runtime: None,
             ..Default::default()
         },
         CancellationToken::new(),

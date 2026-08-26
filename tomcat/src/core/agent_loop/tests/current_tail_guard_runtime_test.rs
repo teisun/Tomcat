@@ -178,11 +178,13 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
                 id: "t1".to_string(),
                 content: "step pending".to_string(),
                 status: TodoStatus::Pending,
+                kind: Default::default(),
             },
             TodoItem {
                 id: "t2".to_string(),
                 content: "step active".to_string(),
                 status: TodoStatus::InProgress,
+                kind: Default::default(),
             },
         ],
     );
@@ -281,11 +283,13 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
                 id: "t1".to_string(),
                 content: "first pending".to_string(),
                 status: TodoStatus::Pending,
+                kind: Default::default(),
             },
             TodoItem {
                 id: "t2".to_string(),
                 content: "second pending".to_string(),
                 status: TodoStatus::Pending,
+                kind: Default::default(),
             },
         ],
     );

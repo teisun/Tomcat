@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Run evidence-backed green-build acceptance before completing a code-changing plan.
+description: Discover and run this project's build/test/lint verification commands (P0–P5 discovery), scaled to the change, and report real green-build evidence.
 allowed-tools:
   - read
   - search_files
@@ -12,9 +12,10 @@ allowed-tools:
   - update_plan
 ---
 
-## Green-build acceptance
+## Green-build verification
 
-Use this skill only after a plan's code review reports pass (or its runtime explicitly says review is skipped). Your job is to produce real evidence that the current code can run, not to describe what would be tested.
+Produce real evidence that the current code builds and passes its checks — do not
+describe what would be tested.
 
 1. First identify the project and its documented acceptance commands. Use this order:
    - P0: an explicit command from the user or the approved plan;
@@ -24,13 +25,21 @@ Use this skill only after a plan's code review reports pass (or its runtime expl
    - P4: a narrowly scoped smoke command inferred from the changed code;
    - P5: if no runnable command can be found, explain that fact with the files inspected and run the smallest safe parse/type/build check available.
 
-2. Select commands that directly cover the edited behavior: build/compile, focused tests, lint/typecheck when available, and existing project-specific UI smoke tests when UI code changed. Do not invent project tests or claim visual checks that do not exist.
+2. Scale the checks to the change:
+   - Default: the project's full check set (format / lint / full tests / build,
+     each discovered per project).
+   - May narrow: a small, isolated change (for example a single-module bugfix) →
+     that package's / module's tests + lint are sufficient evidence.
+   - Must NOT narrow: a cross-module refactor, a core path, or a dependency change →
+     run the full check set.
 
-3. Start every acceptance command with `bash(run_in_background=true)`. If the next step does not strictly depend on its result, do other independent work and wait for `<background-task-finished>`. If it does, call `task_output(block=true)` with a realistic wait slice until it finishes.
+3. Select commands that directly cover the edited behavior: build/compile, focused tests, lint/typecheck when available, and existing project-specific UI smoke tests when UI code changed. Do not invent project tests or claim visual checks that do not exist.
 
-4. A command is valid evidence only when its background task is `Finished` with `exit_code=0`, and it started after the newest code edit. Failed, stopped, reused, or still-running tasks are not evidence.
+4. Start every acceptance command with `bash(run_in_background=true)`. If the next step does not strictly depend on its result, do other independent work and wait for `<background-task-finished>`. If it does, call `task_output(block=true)` with a realistic wait slice until it finishes.
 
-5. When all selected checks pass, call `update_plan` with:
+5. A command is valid evidence only when its background task is `Finished` with `exit_code=0`, and it started after the newest code edit. Failed, stopped, reused, or still-running tasks are not evidence.
+
+6. When all selected checks pass, call `update_plan` with:
 
 ```json
 {

@@ -15,7 +15,8 @@ use serde::Deserialize;
 use crate::core::plan_runtime::{
     file_store::{
         plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
-        TodoStatus, PLAN_FILE_SCHEMA_VERSION,
+        TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_CONTENT, GATE_ACCEPTANCE_TODO_ID,
+        GATE_CODE_REVIEW_TODO_CONTENT, GATE_CODE_REVIEW_TODO_ID, PLAN_FILE_SCHEMA_VERSION,
     },
     ops,
     safety::assert_plan_id_safe,
@@ -151,13 +152,25 @@ pub fn execute(
     assert_plan_id_safe(&plan_id)
         .map_err(|e| ToolError::BadArgs(format!("派生 plan_id 非法: {e}")))?;
 
-    let todos: Vec<TodoItem> = args
+    if args.todos.iter().any(|todo| {
+        matches!(
+            todo.id.as_str(),
+            GATE_CODE_REVIEW_TODO_ID | GATE_ACCEPTANCE_TODO_ID
+        )
+    }) {
+        return Err(ToolError::BadArgs(format!(
+            "todo id `{GATE_CODE_REVIEW_TODO_ID}` / `{GATE_ACCEPTANCE_TODO_ID}` is reserved for runtime close-out gates"
+        )));
+    }
+
+    let mut todos: Vec<TodoItem> = args
         .todos
         .iter()
         .map(|t| TodoItem {
             id: t.id.clone(),
             content: t.content.clone(),
             status: t.status,
+            kind: TodoKind::Work,
         })
         .collect();
     // 复用 ops 引擎的不变量校验：duplicate id / bounded in_progress
@@ -167,6 +180,18 @@ pub fn execute(
         .map(|t| ops::TodoOp::AddTodo(t.clone()))
         .collect();
     ops::apply_todos_ops(&mut v, &add_ops)?;
+    todos.push(TodoItem {
+        id: GATE_CODE_REVIEW_TODO_ID.into(),
+        content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
+        status: TodoStatus::Pending,
+        kind: TodoKind::GateCodeReview,
+    });
+    todos.push(TodoItem {
+        id: GATE_ACCEPTANCE_TODO_ID.into(),
+        content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
+        status: TodoStatus::Pending,
+        kind: TodoKind::GateAcceptance,
+    });
 
     let now = chrono::Local::now().to_rfc3339();
     let frontmatter = PlanFileFrontmatter {
@@ -212,6 +237,7 @@ pub fn execute(
         "plan_id": plan_id,
         "path": crate::infra::platform::format_home_path(&path),
         "state": "planning",
+        "items": super::shared_todo_ops::items_json(&plan.frontmatter.todos),
         "review": crate::core::plan_runtime::plan_reviewer::PlanReviewSummary::placeholder_pending().to_json(),
     }))
 }

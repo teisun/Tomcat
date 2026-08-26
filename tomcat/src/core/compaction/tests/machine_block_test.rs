@@ -31,6 +31,7 @@ fn todo(id: &str, content: &str, status: TodoStatus) -> TodoItem {
         id: id.to_string(),
         content: content.to_string(),
         status,
+        kind: Default::default(),
     }
 }
 

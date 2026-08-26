@@ -52,6 +52,7 @@ fn plan_build_warns_but_continues_with_active_session_todos() {
         id: "live".into(),
         content: "x".into(),
         status: TodoStatus::Pending,
+        kind: Default::default(),
     }]);
     let outcome = rt
         .build_plan("blockee", Some("sid-a".into()))
@@ -179,7 +180,7 @@ async fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_pat
     assert_eq!(out["path"].as_str(), Some(expected_path_str.as_str()));
 
     let plan = read_plan(&external_path).unwrap();
-    assert!(matches!(plan.frontmatter.state, PlanFileState::Completed));
+    assert!(matches!(plan.frontmatter.state, PlanFileState::Executing));
     assert!(matches!(
         plan.frontmatter.todos[0].status,
         TodoStatus::Completed

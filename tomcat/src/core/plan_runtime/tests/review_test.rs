@@ -126,6 +126,11 @@ fn code_review_summary_serializes_findings_and_turns() {
     assert_eq!(j["findings"][0]["area"], "logic");
     assert_eq!(j["reviewer_turns_used"], 2);
     assert_eq!(j["child_session_id"], "child-1");
+    assert_eq!(j["non_blocking_findings"], 1);
+    assert!(j["p2_guidance"]
+        .as_str()
+        .unwrap()
+        .contains("do not create a todo"));
 }
 
 #[test]
@@ -145,6 +150,7 @@ fn code_review_system_prompt_contains_verdict_and_bash() {
     assert!(p.contains("P0 / P1 / P2"));
     assert!(p.contains("read, search_files, list_dir, bash"));
     assert!(p.contains("STRICTLY read-only") || p.contains("stay read-only"));
+    assert!(p.contains("leave `cwd` empty") || p.contains("use `.`"));
 }
 
 #[test]
@@ -177,6 +183,8 @@ fn build_code_review_prompt_includes_diff_context() {
     assert!(prompt.contains("src/lib.rs"));
     assert!(prompt.contains("tests/lib.rs"));
     assert!(prompt.contains("STRICTLY read-only"));
+    assert!(prompt.contains("use `.`"));
+    assert!(prompt.contains("do not guess an absolute root"));
 }
 
 #[test]

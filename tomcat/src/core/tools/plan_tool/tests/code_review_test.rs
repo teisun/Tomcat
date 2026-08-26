@@ -3,6 +3,118 @@ use std::time::Duration;
 
 use crate::core::plan_runtime::file_store::GreenBuildEvidence;
 
+// These tests predate visible close-out gates. Keep their domain assertions, but
+// drive the production protocol explicitly: work update → review gate → (when
+// evidence is supplied) acceptance gate. Production never performs this implicit
+// driving; it remains the agent's responsibility.
+mod explicit_gates_update_plan {
+    use crate::core::plan_runtime::file_store::{
+        TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_ID,
+    };
+    use crate::core::plan_runtime::PlanRuntime;
+    use crate::core::tools::plan_tool::{update_plan as raw, ToolError};
+
+    pub use raw::{DisputeFindingArg, GreenBuildEvidenceArg, UpdateOp, UpdatePlanArgs};
+
+    pub async fn execute(
+        runtime: &PlanRuntime,
+        args: UpdatePlanArgs,
+    ) -> Result<serde_json::Value, ToolError> {
+        // Legacy unit tests often supplied a mock reviewer without an isolated
+        // workspace. Give those tests an actual code workspace so they exercise
+        // review semantics; docs-only tests attach their own workspace explicitly.
+        if runtime.workspace_root().is_none() {
+            runtime.attach_workspace_root(std::env::current_dir().expect("test workspace root"));
+        }
+        let UpdatePlanArgs {
+            plan_id,
+            path,
+            replace,
+            ops,
+            dispute_findings,
+            green_build_pass,
+            green_build_evidence,
+        } = args;
+        let mut out = raw::execute(
+            runtime,
+            UpdatePlanArgs {
+                plan_id: plan_id.clone(),
+                path: path.clone(),
+                replace,
+                ops,
+                dispute_findings,
+                green_build_pass: None,
+                green_build_evidence: Vec::new(),
+            },
+        )
+        .await?;
+
+        if out["next_step"]["phase"].as_str() == Some("start_review") {
+            out = raw::execute(
+                runtime,
+                gate_args(plan_id.clone(), path.clone(), GATE_CODE_REVIEW_TODO_ID),
+            )
+            .await?;
+        }
+
+        if green_build_pass.is_some() && out["code_review_pass"].as_bool() == Some(true) {
+            let review_result = out["code_review"].clone();
+            if !gate_is_in_progress(&out, TodoKind::GateAcceptance) {
+                raw::execute(
+                    runtime,
+                    gate_args(plan_id.clone(), path.clone(), GATE_ACCEPTANCE_TODO_ID),
+                )
+                .await?;
+            }
+            let mut completed = raw::execute(
+                runtime,
+                UpdatePlanArgs {
+                    plan_id,
+                    path,
+                    replace: false,
+                    ops: Vec::new(),
+                    dispute_findings: Vec::new(),
+                    green_build_pass,
+                    green_build_evidence,
+                },
+            )
+            .await?;
+            if !review_result.is_null() {
+                completed["code_review"] = review_result;
+            }
+            out = completed;
+        }
+        Ok(out)
+    }
+
+    fn gate_args(plan_id: Option<String>, path: Option<String>, id: &str) -> UpdatePlanArgs {
+        UpdatePlanArgs {
+            plan_id,
+            path,
+            replace: false,
+            ops: vec![UpdateOp::SetStatus {
+                id: id.into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+        }
+    }
+
+    fn gate_is_in_progress(out: &serde_json::Value, kind: TodoKind) -> bool {
+        out["items"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["kind"].as_str() == Some(kind.as_str())
+                    && item["status"].as_str() == Some("in_progress")
+            })
+        })
+    }
+}
+
+use explicit_gates_update_plan as update_plan;
+
 fn git_workspace_with_code(prefix: &str) -> tempfile::TempDir {
     let workspace = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
     std::fs::create_dir_all(workspace.path().join("src")).unwrap();
@@ -157,7 +269,8 @@ async fn code_review_pass_completes_without_verifier() {
 
     assert_eq!(out["code_review"]["verdict"], "pass");
     assert_eq!(out["code_review"]["findings"][0]["area"], "tests");
-    assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(out["plan_state_after"], "executing");
+    assert_eq!(out["next_step"]["phase"], "run_acceptance");
     assert!(out.get("verify").is_none());
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
     assert_eq!(
@@ -167,7 +280,7 @@ async fn code_review_pass_completes_without_verifier() {
         0
     );
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
-    assert_eq!(persisted.frontmatter.state, PlanFileState::Completed);
+    assert_eq!(persisted.frontmatter.state, PlanFileState::Executing);
     assert_eq!(rt.mode(), AgentMode::Plan);
     let events = captured.lock();
     let code_review_event = events
@@ -290,7 +403,8 @@ async fn p2_only_finding_does_not_block_completion_even_when_reviewer_says_fail(
     .unwrap();
 
     assert_eq!(out["code_review"]["verdict"], "fail");
-    assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(out["plan_state_after"], "executing");
+    assert_eq!(out["next_step"]["phase"], "run_acceptance");
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
     assert!(rt.unresolved_findings(&plan_id).is_empty());
     assert_eq!(
@@ -300,7 +414,7 @@ async fn p2_only_finding_does_not_block_completion_even_when_reviewer_says_fail(
         1
     );
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
-    assert_eq!(persisted.frontmatter.state, PlanFileState::Completed);
+    assert_eq!(persisted.frontmatter.state, PlanFileState::Executing);
     assert!(persisted.frontmatter.code_review_pass);
     cleanup_home(&home);
 }
@@ -368,7 +482,8 @@ async fn p1_dispute_with_reason_unblocks_and_excludes_open_finding() {
     dispute.ops.clear();
     let out = update_plan::execute(&rt, dispute).await.unwrap();
 
-    assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(out["plan_state_after"], "executing");
+    assert_eq!(out["next_step"]["phase"], "run_acceptance");
     assert!(rt.unresolved_findings(&plan_id).is_empty());
     assert_eq!(rt.disputed_findings(&plan_id).len(), 1);
     let open_findings = reviewer.open_findings_per_round();
@@ -518,10 +633,13 @@ async fn green_build_gate_blocks_completion_until_pass() {
         ],
     };
 
-    let error = update_plan::execute(&rt, close(None, Vec::new()))
+    let review_passed = update_plan::execute(&rt, close(None, Vec::new()))
         .await
-        .expect_err("green build evidence must be required after review passes");
-    assert!(error.to_string().contains("load_skill(name=\"verify\")"));
+        .expect("review pass should navigate to the visible acceptance gate");
+    assert_eq!(review_passed["next_step"]["phase"], "run_acceptance");
+    assert!(review_passed["next_step"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("load_skill(verify)")));
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert!(persisted.frontmatter.code_review_pass);
     assert!(!persisted.frontmatter.green_build_pass);
@@ -862,7 +980,7 @@ async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back()
     assert_eq!(first["plan_state_after"], "executing");
     assert!(first.get("verify").is_none());
     assert_eq!(first["code_review"]["findings"][0]["note"], "missing guard");
-    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    assert_eq!(first["items"].as_array().unwrap().len(), 4);
     assert!(first["items"]
         .as_array()
         .unwrap()
@@ -883,13 +1001,10 @@ async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back()
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
-    let warnings = first["warnings"].as_array().expect("warnings array");
-    assert!(warnings.iter().any(|warning| warning
+    assert_eq!(first["next_step"]["phase"], "implement_focused");
+    assert!(first["next_step"]["hint"]
         .as_str()
-        .is_some_and(|text| text.contains("重新打开一个已有 todo"))));
-    assert!(warnings.iter().any(|warning| warning
-        .as_str()
-        .is_some_and(|text| text.contains("新增一个修复 todo"))));
+        .is_some_and(|hint| hint.contains("F01: missing guard")));
 
     let reopen = update_plan::execute(
         &rt,
@@ -1054,7 +1169,8 @@ async fn resolved_findings_converge_to_completion_within_review_budget() {
     let second = update_plan::execute(&rt, complete_all()).await.unwrap();
 
     assert_eq!(second["code_review"]["verdict"], "pass");
-    assert_eq!(second["plan_state_after"], "completed");
+    assert_eq!(second["plan_state_after"], "executing");
+    assert_eq!(second["next_step"]["phase"], "run_acceptance");
     assert_eq!(rt.code_review_rounds(&plan_id), 2);
     assert!(rt.unresolved_findings(&plan_id).is_empty());
     assert_eq!(
@@ -1069,7 +1185,7 @@ async fn resolved_findings_converge_to_completion_within_review_budget() {
         "the second round must recheck the first round's unresolved finding"
     );
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
-    assert_eq!(persisted.frontmatter.state, PlanFileState::Completed);
+    assert_eq!(persisted.frontmatter.state, PlanFileState::Executing);
     assert!(persisted.frontmatter.code_review_pass);
     cleanup_home(&home);
 }
@@ -1379,9 +1495,10 @@ async fn persisted_fresh_review_skips_rerun_after_runtime_recreation() {
     mark_plan_executing(&rt, &plan_id, "session-a");
     rt.set_max_code_review_rounds(1);
 
-    update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
+    let review_passed = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
         .await
-        .expect_err("review pass still requires fresh green-build evidence");
+        .expect("review pass should navigate to acceptance");
+    assert_eq!(review_passed["next_step"]["phase"], "run_acceptance");
     let path = plan_path_for_id(&plan_id).unwrap();
     let after_review = read_plan(&path).unwrap();
     assert!(after_review.frontmatter.code_review_pass);
@@ -1544,9 +1661,9 @@ async fn completion_gate_cycle_cap_closes_without_another_review_rerun() {
 
     assert_eq!(out["plan_state_after"], "completed");
     assert!(out["warnings"].as_array().unwrap().iter().any(|warning| {
-        warning.as_str().is_some_and(|text| {
-            text.contains("重跑已达到上限 1") && text.contains("门禁通过标志已失效")
-        })
+        warning
+            .as_str()
+            .is_some_and(|text| text.contains("验收重跑已达到上限 1"))
     }));
     assert_eq!(
         reviewer
@@ -1895,13 +2012,10 @@ async fn missing_reviewer_skips_review_but_still_requires_real_green_build_evide
     mark_plan_executing(&rt, &plan_id, "session-a");
     rt.set_max_code_review_rounds(1);
 
-    let blocked_error = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
+    let review_skipped = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
         .await
-        .expect_err("skipped code review must not skip the green-build gate");
-    assert_bad_args(
-        blocked_error,
-        "代码 diff 已通过（或跳过）code review，但绿构建验收尚未通过。请先调用 load_skill(name=\"verify\")，按 skill 发现并运行适合当前项目的 build/test/lint 或 UI smoke 命令；命令必须通过 bash(run_in_background=true) 启动。完成后调用 update_plan，传 green_build_pass:true 和 green_build_evidence:[{command:\"<实际 bash 命令>\",task_id:\"...\"}]。运行时会核验命令、任务 exit_code=0 且 started_at 不早于最新代码修改时间。",
-    );
+        .expect("skipped review should navigate to the green-build acceptance gate");
+    assert_eq!(review_skipped["next_step"]["phase"], "run_acceptance");
     let after_skipped_review = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert!(after_skipped_review.frontmatter.code_review_pass);
     assert!(!after_skipped_review.frontmatter.green_build_pass);

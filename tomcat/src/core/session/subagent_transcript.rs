@@ -7,6 +7,7 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::core::agent_loop::SubagentType;
+use crate::core::llm::ChatMessage;
 use crate::core::session::manager::{generate_entry_id, MessageAppendSink};
 use crate::core::session::transcript::{
     append_entry_with_sync, write_header, CustomEntry, MessageEntry, SessionHeader, SyncLevel,
@@ -91,6 +92,29 @@ pub(crate) fn append_subagent_transcript_hint(
     } else {
         summary.push(' ');
         summary.push_str(&note);
+    }
+}
+
+/// Persist seed messages before a subagent starts its first LLM request.
+///
+/// AgentLoop persists messages it creates while running, but its caller owns the initial
+/// system/user brief. Recording them here makes the injected workspace root, diff, and review
+/// scope auditable without changing their roles or adding them twice to the live conversation.
+pub(crate) fn persist_initial_messages(
+    sink: Option<&Arc<dyn MessageAppendSink>>,
+    messages: &[ChatMessage],
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    for message in messages {
+        let Ok(value) = serde_json::to_value(message) else {
+            warn!("subagent seed message serialization failed; continuing without persistence");
+            continue;
+        };
+        if let Err(error) = sink.append_message(value) {
+            warn!(error = %error, "subagent seed message persistence failed");
+        }
     }
 }
 

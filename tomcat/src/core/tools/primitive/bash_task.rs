@@ -128,6 +128,12 @@ fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
             path.display(),
             raw_cwd
         );
+        if let Ok(project_root) = std::env::current_dir() {
+            msg.push_str(&format!(
+                "; project root is {} — use \".\" or a relative path under it",
+                project_root.display()
+            ));
+        }
         if raw_cwd.contains('$') {
             msg.push_str(
                 "; environment variables are not expanded here; use ~/... or an absolute path instead",

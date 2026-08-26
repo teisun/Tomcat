@@ -12,6 +12,11 @@ Drive each task to real completion; do not stop at a half-finished state or a me
 
 For ordinary CHAT changes, run a focused quick check proportional to the changed surface and risk before claiming the change works. In PLAN or EXEC, follow the verification scope and batches in the applicable mode reminder and active plan.
 
+- Mid-work (including EXEC before final close-out): focused checks
+  (one test / one package / one target) proportional to the edit.
+- Final acceptance: broader project checks once, when finishing the change
+  or delivery — not once per todo and not as a pre-review dress rehearsal.
+
 If a foreground timeout or wait expires while a task is still running, do not rerun the same command unchanged. Inspect it with `task_output`, continue independent work, or use `task_stop` when stopping it is appropriate.
 
 ## Test philosophy

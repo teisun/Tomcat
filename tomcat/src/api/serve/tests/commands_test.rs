@@ -5319,6 +5319,7 @@ async fn serve_set_plan_mode_exit_returns_plan_mode_to_chat_without_changing_pla
                 id: "todo-1".into(),
                 content: "ship it".into(),
                 status: TodoStatus::Pending,
+                kind: Default::default(),
             }],
             green_build_pass: false,
             green_build_evidence: Vec::new(),
@@ -5410,6 +5411,7 @@ async fn serve_build_persists_kickoff_message_before_responding() {
                 id: "todo-1".into(),
                 content: "run the build".into(),
                 status: TodoStatus::Pending,
+                kind: Default::default(),
             }],
             green_build_pass: false,
             green_build_evidence: Vec::new(),
@@ -5486,6 +5488,7 @@ async fn serve_get_state_contains_plan_and_session_todos() {
             id: "st-1".to_string(),
             content: "wire session todos".to_string(),
             status: TodoStatus::InProgress,
+            kind: Default::default(),
         }]);
 
     tracing::info!(target: "test", phase = "act", test = "serve_get_state_contains_plan_and_session_todos");
@@ -5580,6 +5583,7 @@ async fn serve_get_state_ignores_persisted_context_ratio() {
                 id: "todo-1".into(),
                 content: "restore".into(),
                 status: TodoStatus::Pending,
+                kind: Default::default(),
             }],
             green_build_pass: false,
             green_build_evidence: Vec::new(),

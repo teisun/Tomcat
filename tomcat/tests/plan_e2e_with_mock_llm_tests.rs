@@ -30,7 +30,7 @@ use tomcat::core::llm::SharedModelCatalog;
 use tomcat::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
-    TodoItem, TodoStatus,
+    TodoItem, TodoStatus, GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_ID,
 };
 use tomcat::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
 use tomcat::core::plan_runtime::prod_reviewer::{
@@ -47,6 +47,7 @@ use tomcat::core::session::{AgentMode, ResumeControlState};
 use tomcat::core::skill::SkillSet;
 use tomcat::core::tools::pipeline::read_state::ReadFileState;
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
+use tomcat::core::tools::primitive::BashTaskRegistry;
 use tomcat::core::tools::web_fetch::WebFetchRuntime;
 use tomcat::core::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
@@ -407,6 +408,7 @@ fn write_test_plan(plan_id: &str, body: &str) {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
+                    kind: Default::default(),
                 }],
                 green_build_pass: false,
                 green_build_evidence: vec![],
@@ -468,17 +470,6 @@ fn pass_code_review() -> CodeReviewSummary {
         aborted: false,
         verdict: Some("pass".into()),
         summary: "implementation looks good".into(),
-        changes_summary: "none".into(),
-        applied_changes: false,
-        ..Default::default()
-    }
-}
-
-fn fail_code_review() -> CodeReviewSummary {
-    CodeReviewSummary {
-        aborted: false,
-        verdict: Some("fail".into()),
-        summary: "missed a concrete fix".into(),
         changes_summary: "none".into(),
         applied_changes: false,
         ..Default::default()
@@ -593,6 +584,27 @@ async fn complete_all_plan_todos(rt: &PlanRuntime, plan_id: &str) -> serde_json:
     .unwrap()
 }
 
+async fn start_close_out_gate(rt: &PlanRuntime, plan_id: &str, gate_id: &str) -> serde_json::Value {
+    update_plan::execute(
+        rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.to_string()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: gate_id.into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+            dispute_findings: vec![],
+            green_build_pass: None,
+            green_build_evidence: vec![],
+        },
+    )
+    .await
+    .unwrap()
+}
+
 // ─── H1：full lifecycle, 多次 update_plan → plan.complete ──────────────────
 
 #[tokio::test]
@@ -662,20 +674,148 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
         .unwrap();
     }
 
-    // 全 completed → 瞬时 Completed 后立即回 Chat(retain)
+    let finished = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
+    // 文档变更在可见的 review gate 启动后，两个 close-out gate 同一调用自动跳过。
+    assert_eq!(finished["next_step"]["phase"], "done");
     assert_eq!(rt.mode(), AgentMode::Chat);
     assert_eq!(
         rt.active_plan_path(),
         Some(plan_path_for_id(&plan_id).unwrap())
     );
-    // 6 次 update_plan → 6 次 panel refresh
+    // 6 次工作更新 + 1 次显式启动 review gate。
     let snaps = panel.snapshots.lock().clone();
-    assert_eq!(snaps.len(), 6, "应触发 6 次 panel snapshot");
-    // 最后一次 snapshot：最后一条 todo 已完成
+    assert_eq!(snaps.len(), 7, "应触发 7 次 panel snapshot");
+    // 最后一次 snapshot：两条 runtime-owned gate 都已自动完成。
     let last = snaps.last().unwrap();
-    assert_eq!(last.items.last().unwrap().id, "t3");
+    assert_eq!(last.items.last().unwrap().id, GATE_ACCEPTANCE_TODO_ID);
     assert_eq!(last.items.last().unwrap().status, TodoStatus::Completed);
-    assert_eq!(last.progress_summary(), "3 of 3 Done");
+    assert_eq!(last.progress_summary(), "5 of 5 Done");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let task_dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(BashTaskRegistry::new(task_dir.path().join("task-logs")));
+    rt.attach_workspace_root(workspace.clone());
+    rt.attach_bash_task_registry(registry.clone());
+    rt.set_max_code_review_rounds(2);
+    rt.attach_code_reviewer(Arc::new(QueueCodeReviewer::new(vec![
+        CodeReviewSummary {
+            verdict: Some("fail".into()),
+            findings: vec![tomcat::core::plan_runtime::review::Finding::new(
+                "P1".into(),
+                "tests".into(),
+                "missing regression coverage".into(),
+            )],
+            ..Default::default()
+        },
+        pass_code_review(),
+    ])));
+
+    rt.enter_plan().unwrap();
+    let created = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "coding gate trajectory".into(),
+            draft: "## Goal\nexercise visible gates".into(),
+            todos: vec![
+                create_plan::TodoArg {
+                    id: "t1".into(),
+                    content: "implement".into(),
+                    status: TodoStatus::Pending,
+                },
+                create_plan::TodoArg {
+                    id: "t2".into(),
+                    content: "test".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let plan_id = created["plan_id"].as_str().unwrap().to_string();
+    promote_to_exec(&rt, &plan_id);
+
+    let ready = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(ready["next_step"]["phase"], "start_review");
+    let rejected = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
+    assert_eq!(rejected["next_step"]["phase"], "implement_focused");
+    assert_eq!(
+        rejected["code_review"]["findings"][0]["note"],
+        "missing regression coverage"
+    );
+
+    update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+            dispute_findings: vec![],
+            green_build_pass: None,
+            green_build_evidence: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let ready_again = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::Completed,
+            }],
+            dispute_findings: vec![],
+            green_build_pass: None,
+            green_build_evidence: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ready_again["next_step"]["phase"], "start_review");
+    let reviewed = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
+    assert_eq!(reviewed["next_step"]["phase"], "run_acceptance");
+
+    let ticket = registry
+        .spawn("true".into(), None, Some(workspace))
+        .await
+        .unwrap();
+    registry.wait_for_finish(&ticket.task_id).await.unwrap();
+    let acceptance = start_close_out_gate(&rt, &plan_id, GATE_ACCEPTANCE_TODO_ID).await;
+    assert_eq!(acceptance["items"][3]["status"], "in_progress");
+    let done = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            ops: vec![],
+            dispute_findings: vec![],
+            green_build_pass: Some(true),
+            green_build_evidence: vec![update_plan::GreenBuildEvidenceArg {
+                command: "true".into(),
+                task_id: ticket.task_id.to_string(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(done["next_step"]["phase"], "done");
+    assert_eq!(done["plan_state_after"], "completed");
     cleanup_home(&home);
 }
 
@@ -894,6 +1034,7 @@ async fn h8_code_review_pass_completes_without_verifier() {
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
+    rt.attach_workspace_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     let reviewer = Arc::new(QueueCodeReviewer::new(vec![pass_code_review()]));
     let verifier = Arc::new(QueueVerifier::new(vec![pass_verify()]));
     rt.attach_code_reviewer(reviewer.clone());
@@ -923,10 +1064,13 @@ async fn h8_code_review_pass_completes_without_verifier() {
     let plan_id = out["plan_id"].as_str().unwrap().to_string();
     promote_to_exec(&rt, &plan_id);
 
-    let out = complete_all_plan_todos(&rt, &plan_id).await;
+    let ready = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(ready["next_step"]["phase"], "start_review");
+    let out = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
     assert_eq!(out["code_review"]["verdict"], "pass");
     assert!(out.get("verify").is_none());
-    assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(out["plan_state_after"], "executing");
+    assert_eq!(out["next_step"]["phase"], "run_acceptance");
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
     assert_eq!(
         reviewer
@@ -949,7 +1093,16 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_ba
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
-    let reviewer = Arc::new(QueueCodeReviewer::new(vec![fail_code_review()]));
+    rt.attach_workspace_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let reviewer = Arc::new(QueueCodeReviewer::new(vec![CodeReviewSummary {
+        verdict: Some("fail".into()),
+        findings: vec![tomcat::core::plan_runtime::review::Finding::new(
+            "P1".into(),
+            "tests".into(),
+            "missing regression coverage".into(),
+        )],
+        ..Default::default()
+    }]));
     let verifier = Arc::new(QueueVerifier::new(vec![pass_verify()]));
     rt.attach_code_reviewer(reviewer.clone());
     rt.attach_verifier(verifier.clone());
@@ -978,7 +1131,9 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_ba
     let plan_id = out["plan_id"].as_str().unwrap().to_string();
     promote_to_exec(&rt, &plan_id);
 
-    let first = complete_all_plan_todos(&rt, &plan_id).await;
+    let ready = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(ready["next_step"]["phase"], "start_review");
+    let first = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
     assert_eq!(first["code_review"]["verdict"], "fail");
     assert!(first.get("verify").is_none());
     assert_eq!(first["plan_state_after"], "executing");
@@ -1033,6 +1188,8 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_ba
     )
     .await
     .unwrap();
+    assert_eq!(second["next_step"]["phase"], "start_review");
+    let second = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
     assert_eq!(second["code_review"], serde_json::Value::Null);
     assert!(second.get("verify").is_none());
     // 复审说了 fail 却没列出 finding，轮次又用尽了 —— 这不是「没有已知问题」，
@@ -1065,6 +1222,7 @@ async fn h10_code_review_long_multibyte_summary_round_trips_without_truncation()
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
+    rt.attach_workspace_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     let long_summary = "修".repeat(250);
     let reviewer = Arc::new(QueueCodeReviewer::new(vec![long_multibyte_code_review(
         long_summary.clone(),
@@ -1097,10 +1255,13 @@ async fn h10_code_review_long_multibyte_summary_round_trips_without_truncation()
     let plan_id = out["plan_id"].as_str().unwrap().to_string();
     promote_to_exec(&rt, &plan_id);
 
-    let out = complete_all_plan_todos(&rt, &plan_id).await;
+    let ready = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(ready["next_step"]["phase"], "start_review");
+    let out = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
     assert_eq!(out["code_review"]["summary"], long_summary);
     assert!(out.get("verify").is_none());
-    assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(out["plan_state_after"], "executing");
+    assert_eq!(out["next_step"]["phase"], "run_acceptance");
     assert_eq!(
         verifier
             .call_count

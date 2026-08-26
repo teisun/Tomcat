@@ -50,6 +50,7 @@ fn shared_todo_ops_replace_requires_upsert_only() {
         id: "t1".into(),
         content: "old".into(),
         status: TodoStatus::Pending,
+        kind: Default::default(),
     }];
     let err = shared_todo_ops::apply_shared_todo_ops(
         &mut todos,

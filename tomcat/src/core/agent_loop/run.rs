@@ -309,12 +309,13 @@ impl AgentLoop {
     ) -> Result<String, LoopError> {
         let mut last_err: Option<AppError> = None;
         let mut unsupported_multimodal_hits = 0u32;
-        let unattended_execution = self
-            .config
-            .plan_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.executing_plan_id())
-            .is_some();
+        let unattended_execution = self.config.unattended_retry
+            || self
+                .config
+                .plan_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.executing_plan_id())
+                .is_some();
         let max_attempts = retry_attempt_budget(unattended_execution, self.config.max_attempts);
         let retry_delay_cap_ms = if unattended_execution {
             UNATTENDED_RETRY_DELAY_CAP_MS

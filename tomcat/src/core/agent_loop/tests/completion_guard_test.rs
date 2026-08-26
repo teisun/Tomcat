@@ -85,6 +85,7 @@ fn todo(id: &str, status: TodoStatus) -> TodoItem {
         id: id.to_string(),
         content: format!("work on {id}"),
         status,
+        kind: Default::default(),
     }
 }
 

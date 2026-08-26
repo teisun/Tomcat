@@ -25,19 +25,14 @@ fn executor_prompt_renders_plan_id() {
 }
 
 #[test]
-fn executor_prompt_says_a_non_pass_verdict_never_completes_the_plan() {
+fn executor_prompt_describes_visible_close_out_gates() {
     let rendered = load(PromptKey::ExecutorReminderFmt);
-    assert!(rendered.contains("reopen an existing todo"));
-    assert!(rendered.contains("add a fix todo"));
-    assert!(rendered.contains("The runtime will review again"));
-    assert!(rendered.contains("A non-pass verdict never completes the plan"));
-    assert!(rendered.contains("hands control back to the user"));
-    assert!(rendered.contains("Do not describe the plan as delivered"));
-    // 旧契约把「带着未修 finding 收工」写成了正式行为，与 D1 的运行时行为冲突。
-    assert!(!rendered.contains("ONE review round"));
-    assert!(!rendered.contains("best-effort"));
-    assert!(!rendered.contains("Verifier"));
-    assert!(!rendered.contains("adversarial"));
+    assert!(rendered.contains("[gate] review"));
+    assert!(rendered.contains("[gate] Acceptance"));
+    assert!(rendered.contains("set `[gate] review` to in_progress"));
+    assert!(rendered.contains("load_skill(verify)"));
+    assert!(rendered.contains("next_step"));
+    assert!(!rendered.contains("when ALL todos in the PlanFile flip to `completed`"));
 }
 
 #[test]
@@ -46,6 +41,22 @@ fn verification_prompt_requires_separating_regressions_from_pre_existing_failure
     assert!(s.contains("separate new regressions caused by your change"));
     assert!(s.contains("pre-existing failures and environment failures"));
     assert!(s.contains("never let one block verification of your own change"));
+}
+
+#[test]
+fn verification_and_planner_prompts_keep_focused_and_acceptance_roles_separate() {
+    let verification = load(PromptKey::SystemVerification);
+    let planner = load(PromptKey::PlannerReminder);
+
+    assert!(
+        verification.contains("Mid-work (including EXEC before final close-out): focused checks")
+    );
+    assert!(verification.contains("Final acceptance: broader project checks once"));
+    assert!(!verification.contains("green_build_evidence"));
+
+    assert!(planner.contains("create_plan appends two gate todos"));
+    assert!(planner.contains("Keep any milestone verification todo focused"));
+    assert!(planner.contains("verification section in the plan body"));
 }
 
 #[test]
@@ -181,17 +192,21 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
         "cancelled",
         "changes_summary",
         "code_review",
+        "code_review_pass",
         "completed",
         "concern",
         "content",
+        "cwd",
         "exit_code",
         "fail",
         "false",
         "finished",
         "goal",
+        "green_build_pass",
         "in_progress",
         "log_path",
         "next_offset",
+        "next_step",
         "none",
         "partial",
         "pass",

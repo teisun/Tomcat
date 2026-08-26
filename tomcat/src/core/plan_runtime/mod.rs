@@ -694,6 +694,11 @@ impl PlanRuntime {
         *self.code_reviewer.lock() = Some(dispatcher);
     }
 
+    /// Whether a code-review dispatcher is available for a close-out gate.
+    pub fn has_code_reviewer(&self) -> bool {
+        self.code_reviewer.lock().is_some()
+    }
+
     /// 注入 verifier 派发器（生产由 `ChatContext::from_config` 装配 verifier 子 Agent 派发；
     /// 测试可注入 mock / 自定义实现）。
     pub fn attach_verifier(&self, dispatcher: Arc<dyn VerifierDispatcher>) {

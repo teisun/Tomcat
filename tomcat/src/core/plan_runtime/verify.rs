@@ -405,9 +405,11 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                             &transcript_model,
                             &parent_session_id_for_closure,
                         );
+                    let initial_message_sink = transcript_sink.clone();
 
                     let cfg = AgentLoopConfig {
                         max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
@@ -444,6 +446,10 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
                     ];
+                    crate::core::session::subagent_transcript::persist_initial_messages(
+                        initial_message_sink.as_ref(),
+                        &initial_messages,
+                    );
                     let run_outcome = agent_loop.run(initial_messages).await;
 
                     let (summary, label) = build_summary_from_outcome(
