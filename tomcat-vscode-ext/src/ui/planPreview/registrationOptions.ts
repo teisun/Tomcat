@@ -1,7 +1,7 @@
 export interface PlanPreviewEditorRegistrationOptions {
   readonly supportsMultipleEditorsPerDocument: false;
   readonly webviewOptions: {
-    readonly enableFindWidget: true;
+    readonly enableFindWidget: false;
     readonly retainContextWhenHidden: true;
   };
 }
@@ -16,7 +16,7 @@ export const PLAN_PREVIEW_EDITOR_OPTIONS: PlanPreviewEditorRegistrationOptions =
   Object.freeze({
     supportsMultipleEditorsPerDocument: false,
     webviewOptions: Object.freeze({
-      enableFindWidget: true,
+      enableFindWidget: false,
       retainContextWhenHidden: true,
     }),
   });

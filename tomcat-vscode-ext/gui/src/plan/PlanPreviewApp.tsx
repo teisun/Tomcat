@@ -20,6 +20,13 @@ import type { PathResolution } from "../../../src/shared/pathResolution";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { PlanActionStrip } from "../components/PlanActionStrip";
 import { TodoList } from "../components/TodoList";
+import { PlanFindWidget } from "./PlanFindWidget";
+import { collectPlanFindMatches } from "./planFindEngine";
+import {
+  clearPlanFindHighlights,
+  paintPlanFindHighlights,
+  scrollPlanFindMatchIntoView,
+} from "./planFindHighlight";
 import { PlanSelectionActionButton } from "./PlanSelectionActionButton";
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown
@@ -212,6 +219,8 @@ function readDomSnapshot(
   const content = document.querySelector<HTMLElement>(
     '[data-testid="plan-content"]',
   );
+  const find = document.querySelector('[data-testid="plan-find"]');
+  const findCount = document.querySelector('[data-testid="plan-find-count"]');
   const mermaidText = document.querySelector(
     '[data-testid="plan-mermaid"] svg text, [data-testid="plan-mermaid"] svg foreignObject span, [data-testid="plan-mermaid"] .nodeLabel',
   );
@@ -261,6 +270,8 @@ function readDomSnapshot(
     buildModelOptions: options,
     buildModelValue,
     codeFontSizePx: computedFontSize(code),
+    findCountText: findCount ? findCount.textContent : null,
+    findVisible: Boolean(find),
     contentScrollTop: content ? Math.round(content.scrollTop) : null,
     hasActionStrip: Boolean(strip),
     inlinePathCount,
@@ -289,6 +300,24 @@ function readDomSnapshot(
   };
 }
 
+function setPlanFindInputValue(query: string): boolean {
+  const input = document.querySelector<HTMLInputElement>(
+    '[data-testid="plan-find-input"]',
+  );
+  if (!input) {
+    return false;
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(input),
+    "value",
+  );
+  descriptor?.set?.call(input, query);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
+}
+
+
 function runDomAction(action: PlanPreviewDomAction): void {
   switch (action.kind) {
     case "clickBuild":
@@ -301,6 +330,22 @@ function runDomAction(action: PlanPreviewDomAction): void {
         .querySelector<HTMLButtonElement>('[data-testid="plan-selection-add"]')
         ?.click();
       return;
+    case "setFindQuery": {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: "f",
+        }),
+      );
+      // Opening Find schedules React work, so wait one task for its input to
+      // mount before dispatching the same native events a user edit produces.
+      window.setTimeout(() => {
+        setPlanFindInputValue(action.query);
+      }, 0);
+      return;
+    }
     case "clickSelector":
       document.querySelector<HTMLElement>(action.selector)?.click();
       return;
@@ -401,14 +446,54 @@ export function PlanPreviewApp({
   vscodeApi: VsCodeApiLike<PlanPreviewIntent>;
 }) {
   const [state, setState] = useState<PlanPreviewStateSnapshot | null>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findActiveIndex, setFindActiveIndex] = useState(0);
+  const [findMatches, setFindMatches] = useState<
+    ReturnType<typeof collectPlanFindMatches>
+  >([]);
   const stateRef = useRef<PlanPreviewStateSnapshot | null>(state);
   const contentRef = useRef<HTMLElement>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const findMatchesRef = useRef<ReturnType<typeof collectPlanFindMatches>>([]);
+  const didFocusPlanRef = useRef(false);
   const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
   const stateFrameCountRef = useRef(0);
   const pendingPathResolutionsRef = useRef(
     new Map<string, { resolve(results: PathResolution[]): void }>(),
   );
   stateRef.current = state;
+
+  // Once the first state arrives, put focus inside the webview. This is the
+  // activation handoff that lets Cmd/Ctrl+F reach this document instead of
+  // remaining in VS Code chrome after the custom editor opens.
+  useEffect(() => {
+    if (!state || didFocusPlanRef.current) {
+      return;
+    }
+    didFocusPlanRef.current = true;
+    contentRef.current?.focus({ preventScroll: true });
+  }, [state]);
+
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    clearPlanFindHighlights();
+  }, []);
+
+  const moveFindMatch = useCallback((direction: -1 | 1) => {
+    const total = findMatchesRef.current.length;
+    if (total === 0) {
+      return;
+    }
+    setFindActiveIndex((current) => (current + direction + total) % total);
+  }, []);
+
+  const updateFindQuery = useCallback((query: string) => {
+    // A changed term always begins at its first result, matching Cursor and
+    // avoiding a confusing inherited index from the previous search.
+    setFindQuery(query);
+    setFindActiveIndex(0);
+  }, []);
 
   const sendSelection = useCallback(
     (selectedText: string) => {
@@ -509,7 +594,64 @@ export function PlanPreviewApp({
     restoreScrollPosition(container, restore);
   }, [state]);
 
+  // Re-scan only after React has committed the current plan body/todos. The
+  // search root is the existing content scroller, so the floating Find UI is
+  // excluded while both Markdown and todo text remain in scope.
+  useLayoutEffect(() => {
+    const container = contentRef.current;
+    if (!findOpen || !findQuery || !container) {
+      findMatchesRef.current = [];
+      setFindMatches([]);
+      clearPlanFindHighlights();
+      return;
+    }
+
+    const matches = collectPlanFindMatches(container, findQuery);
+    findMatchesRef.current = matches;
+    setFindMatches(matches);
+    setFindActiveIndex((current) =>
+      matches.length === 0 ? 0 : Math.min(current, matches.length - 1),
+    );
+  }, [findOpen, findQuery, state]);
+
+  // Painting uses browser ranges rather than changing the rendered plan DOM.
+  // The active match is centred only after its latest ranges have been painted.
+  useLayoutEffect(() => {
+    paintPlanFindHighlights(findMatches, findActiveIndex);
+    const activeMatch = findMatches[findActiveIndex];
+    const container = contentRef.current;
+    if (activeMatch && container) {
+      scrollPlanFindMatchIntoView(activeMatch, container);
+    }
+  }, [findActiveIndex, findMatches]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setFindOpen(true);
+        return;
+      }
+      if (event.key === "Escape" && findOpen) {
+        event.preventDefault();
+        closeFind();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeFind, findOpen]);
+
+  useEffect(
+    () => () => {
+      clearPlanFindHighlights();
+    },
+    [],
+  );
+
   if (!state) {
+
     return (
       <div
         className="tc-plan-preview tc-plan-preview--loading"
@@ -558,6 +700,7 @@ export function PlanPreviewApp({
         className="tc-plan-preview__content"
         data-testid="plan-content"
         ref={contentRef}
+        tabIndex={-1}
       >
         <MarkdownBody
           markdown={state.bodyMarkdown}
@@ -580,6 +723,18 @@ export function PlanPreviewApp({
         <hr className="tc-plan-preview__divider" />
         <TodoList labelledBy="plan-todos-heading" todos={state.todos} />
       </main>
+      {findOpen ? (
+        <PlanFindWidget
+          activeIndex={findActiveIndex}
+          inputRef={findInputRef}
+          onClose={closeFind}
+          onNext={() => moveFindMatch(1)}
+          onPrevious={() => moveFindMatch(-1)}
+          onQueryChange={updateFindQuery}
+          query={findQuery}
+          total={findMatches.length}
+        />
+      ) : null}
       <PlanSelectionActionButton onAdd={sendSelection} />
     </div>
   );

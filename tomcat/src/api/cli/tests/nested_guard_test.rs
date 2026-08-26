@@ -155,6 +155,11 @@ fn blocked_commands() -> Vec<Commands> {
 fn allowed_commands() -> Vec<Commands> {
     vec![
         Commands::Doctor,
+        Commands::Serve {
+            stdio: false,
+            ws: false,
+            print_schema: true,
+        },
         Commands::Session {
             sub: SessionSub::List { scope: None },
         },
@@ -265,6 +270,17 @@ fn nested_guard_allows_readonly_commands_when_agent_env_is_set() {
     for cmd in allowed_commands() {
         assert_allowed(cmd);
     }
+}
+
+#[test]
+#[serial(env_lock)]
+fn nested_guard_allows_serve_print_schema_when_agent_env_is_set() {
+    let _guard = EnvGuard::set("TOMCAT_AGENT_ACTIVE", "1");
+    assert_allowed(Commands::Serve {
+        stdio: false,
+        ws: false,
+        print_schema: true,
+    });
 }
 
 #[test]

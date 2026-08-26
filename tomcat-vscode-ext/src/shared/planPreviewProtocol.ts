@@ -79,6 +79,10 @@ export interface PlanPreviewDomSnapshot {
   buildModelLabel: string;
   /** Current scrollTop of the content scroller. */
   contentScrollTop: number | null;
+  /** Rendered custom-Find counter, such as "1 of 17" or "No results". */
+  findCountText: string | null;
+  /** Whether the in-webview Plan Find control is open. */
+  findVisible: boolean;
   hasActionStrip: boolean;
   inlinePathCount: number;
   /** Rendered mermaid diagrams (fenced ```mermaid``` blocks turned into SVG). */
@@ -122,6 +126,7 @@ export type PlanPreviewDomAction =
   | { kind: "clickSelector"; selector: string }
   | { kind: "clickSelectionAdd" }
   | { kind: "setContentScrollTop"; scrollTop: number }
+  | { kind: "setFindQuery"; query: string }
   | { kind: "selectBuildModel"; modelId: string }
   | { contextWindow: number; kind: "selectContextWindow"; modelId: string }
   | { kind: "selectThinkingLevel"; level: string; modelId: string }

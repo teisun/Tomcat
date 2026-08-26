@@ -36,4 +36,19 @@ describe("Plan preview reading CSS contract", () => {
     expect(css).toContain("stroke: CanvasText");
     expect(css).toContain("fill: Highlight");
   });
+  it("defines a theme-aware fixed Find widget and separate all/current match highlights", () => {
+    expect(rule(".tc-plan-find")).toContain("position: fixed");
+    expect(rule(".tc-plan-find")).toContain("var(--vscode-editorWidget-background");
+    expect(rule(".tc-plan-find__input")).toContain("var(--vscode-input-background)");
+    expect(rule(".tc-plan-find__count--empty")).toContain(
+      "var(--vscode-inputValidation-errorForeground",
+    );
+    expect(rule("::highlight(tc-plan-find)")).toContain(
+      "var(--vscode-editor-findMatchHighlightBackground",
+    );
+    expect(rule("::highlight(tc-plan-find-active)")).toContain(
+      "var(--vscode-editor-findMatchBackground",
+    );
+  });
+
 });

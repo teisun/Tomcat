@@ -488,10 +488,9 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
             matches!(sub, WorkspaceSub::Add { .. } | WorkspaceSub::Remove { .. })
         }
         Commands::Pathrules { sub } => matches!(sub, PathRulesSub::Add { .. }),
-        Commands::Claw { .. }
-        | Commands::Code { .. }
-        | Commands::Serve { .. }
-        | Commands::Chat { .. } => true,
+        // Schema export exits immediately and never starts a session or server.
+        Commands::Serve { print_schema, .. } => !print_schema,
+        Commands::Claw { .. } | Commands::Code { .. } | Commands::Chat { .. } => true,
     }
 }
 

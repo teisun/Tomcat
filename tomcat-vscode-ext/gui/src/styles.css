@@ -4624,6 +4624,100 @@ span.tc-attachment-strip__file-chip {
   color: var(--vscode-descriptionForeground);
 }
 
+/* Floating Find control, scoped to the Plan Preview webview. The compact layout
+ * deliberately uses VS Code's editor-widget / input tokens so it follows every
+ * installed color theme instead of imitating a fixed dark toolbar. */
+.tc-plan-find {
+  align-items: center;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  display: flex;
+  gap: 2px;
+  max-width: calc(100vw - 16px);
+  padding: 4px;
+  position: fixed;
+  right: 8px;
+  top: 8px;
+  z-index: 20;
+}
+
+.tc-plan-find__input {
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+  color: var(--vscode-input-foreground);
+  font: inherit;
+  height: 26px;
+  min-width: 150px;
+  outline: none;
+  padding: 0 7px;
+}
+
+.tc-plan-find__input:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+.tc-plan-find__input.tc-plan-find__input--empty {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+}
+
+.tc-plan-find__count {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 auto;
+  font-size: 12px;
+  min-width: 48px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.tc-plan-find__count--empty {
+  color: var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground));
+}
+
+.tc-plan-find__button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 26px;
+  justify-content: center;
+  padding: 0;
+  width: 26px;
+}
+
+.tc-plan-find__button:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.tc-plan-find__button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.tc-plan-find__button:disabled {
+  color: var(--vscode-disabledForeground);
+  cursor: default;
+}
+
+/* Custom Highlight keeps plan DOM untouched: React, Mermaid, links and source
+ * mapping retain their structure while every match gets a theme-aware color. */
+::highlight(tc-plan-find) {
+  background: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 184, 55, 0.35));
+  color: var(--vscode-editor-findMatchHighlightForeground, inherit);
+}
+
+::highlight(tc-plan-find-active) {
+  background: var(--vscode-editor-findMatchBackground, rgba(234, 184, 55, 0.65));
+  color: var(--vscode-editor-findMatchHighlightForeground, inherit);
+}
+
 /* Browser zoom reduces the CSS viewport width. This keeps the reading column and
  * long todo text usable at 200% without introducing a page-level horizontal scroll. */
 @media (max-width: 480px) {

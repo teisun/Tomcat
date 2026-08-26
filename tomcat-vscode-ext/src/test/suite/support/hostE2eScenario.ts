@@ -18,7 +18,6 @@ import type {
   WebviewIntent,
 } from "../../../extension";
 import type { SettingsIntent } from "../../../shared/settingsProtocol";
-import { WorkbenchFindDriver } from "./workbenchFindDriver";
 
 let dummyLanguageModelRegistration: vscode.Disposable | undefined;
 type LanguageModelRegistry = {
@@ -5627,6 +5626,7 @@ export async function assertPlanPreviewCustomEditorFlow(
   const planId = `e2e-plan-${Date.now().toString(36)}`;
   const bodyFindToken = `PLAN_BODY_FIND_${planId}`;
   const todoFindToken = `PLAN_TODO_FIND_${planId}`;
+  const sharedFindToken = `PLAN_SHARED_FIND_${planId}`;
   const fillerParagraphs = Array.from(
     { length: 24 },
     (_, index) => `Scroll filler paragraph ${index + 1}.`,
@@ -5645,13 +5645,13 @@ export async function assertPlanPreviewCustomEditorFlow(
     "  content: Second task",
     "  status: in_progress",
     "- id: t3",
-    `  content: ${todoFindToken}`,
+    `  content: ${todoFindToken} ${sharedFindToken}`,
     "  status: pending",
     "---",
     "",
     "# E2E heading",
     "",
-    `Body paragraph for the preview. ${bodyFindToken} with \`inline-code\`.`,
+    `Body paragraph for the preview. ${bodyFindToken} ${sharedFindToken} with \`inline-code\`.`,
     "",
     "- First markdown selection",
     "- Second markdown selection",
@@ -5776,40 +5776,85 @@ export async function assertPlanPreviewCustomEditorFlow(
       `expected todo copy to keep the Plan reading size, body=${String(preview.bodyFontSizePx)} todo=${String(preview.todoFontSizePx)}`,
     );
 
-    // Drive the actual workbench, not the webview DOM. The custom editor's
-    // Cmd/Ctrl+F binding invokes this native VS Code webview-find command; CDP
-    // cannot reliably deliver macOS menu accelerators to Electron.
-    const findDriver = await WorkbenchFindDriver.connectFromEnvironment();
-    try {
-      const instanceBeforeFind = preview.webviewInstanceId;
-      await api.__testing.executeCommand("editor.action.webvieweditor.showFind");
-      await findDriver.findUniqueText(bodyFindToken);
-      let afterFind = await waitForPlanPreviewDom(
-        api,
-        planPath,
-        (snapshot) => snapshot.bodyHasContent,
-      );
-      assert.equal(
-        afterFind.webviewInstanceId,
-        instanceBeforeFind,
-        "expected a body match not to rebuild the Plan webview",
-      );
+    // The custom webview Find exposes a deterministic "N of M" counter.
+    // Drive it through the existing host → webview DOM test channel; Electron
+    // cannot reliably inject the macOS Cmd+F accelerator with CDP.
+    const instanceBeforeFind = preview.webviewInstanceId;
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "setFindQuery",
+      query: sharedFindToken,
+    });
+    let afterFind = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) =>
+        snapshot.findVisible && snapshot.findCountText === "1 of 2",
+    );
+    assert.equal(
+      afterFind.webviewInstanceId,
+      instanceBeforeFind,
+      "expected opening Find and matching body/todo text not to rebuild the Plan webview",
+    );
 
-      await findDriver.findUniqueText(todoFindToken);
-      await api.__testing.executeCommand("editor.action.webvieweditor.hideFind");
-      afterFind = await waitForPlanPreviewDom(
-        api,
-        planPath,
-        (snapshot) => snapshot.bodyHasContent,
-      );
-      assert.equal(
-        afterFind.webviewInstanceId,
-        instanceBeforeFind,
-        "expected closing Find after a todo match not to rebuild the Plan webview",
-      );
-    } finally {
-      findDriver.close();
-    }
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "clickSelector",
+      selector: '[data-testid="plan-find-next"]',
+    });
+    afterFind = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.findCountText === "2 of 2",
+    );
+    assert.equal(
+      afterFind.webviewInstanceId,
+      instanceBeforeFind,
+      "expected navigating Find matches not to rebuild the Plan webview",
+    );
+
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "setFindQuery",
+      query: bodyFindToken,
+    });
+    afterFind = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.findCountText === "1 of 1",
+    );
+    assert.equal(
+      afterFind.webviewInstanceId,
+      instanceBeforeFind,
+      "expected a body-only Find match not to rebuild the Plan webview",
+    );
+
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "setFindQuery",
+      query: todoFindToken,
+    });
+    afterFind = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.findCountText === "1 of 1",
+    );
+    assert.equal(
+      afterFind.webviewInstanceId,
+      instanceBeforeFind,
+      "expected a todo-only Find match not to rebuild the Plan webview",
+    );
+
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "clickSelector",
+      selector: '[data-testid="plan-find-close"]',
+    });
+    afterFind = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => !snapshot.findVisible,
+    );
+    assert.equal(
+      afterFind.webviewInstanceId,
+      instanceBeforeFind,
+      "expected closing Find after a todo match not to rebuild the Plan webview",
+    );
 
     // The ```mermaid``` fence renders to an inline SVG diagram (lazy-loaded).
     const mermaid = await waitForPlanPreviewDom(

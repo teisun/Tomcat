@@ -1,7 +1,8 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
+  PlanPreviewDomAction,
   PlanPreviewIntent,
   PlanPreviewStateSnapshot,
   VsCodeApiLike,
@@ -67,6 +68,20 @@ function pushCaptureDomEvent(messageId = "dom-1"): void {
           channel: "event",
           content: { type: "__test.capture_dom" },
           messageId,
+        },
+      }),
+    );
+  });
+}
+
+function pushDomActionEvent(action: PlanPreviewDomAction): void {
+  act(() => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          channel: "event",
+          content: { action, type: "__test.dom_action" },
+          messageId: "dom-action-1",
         },
       }),
     );
@@ -170,7 +185,7 @@ describe("PlanPreviewApp", () => {
     expect(list.getAttribute("aria-labelledby")).toBe(heading.id);
   });
 
-  it("keeps only rendered body and todo copy in the native Find Widget search surface", () => {
+  it("keeps only rendered body and todo copy in the in-webview Find search surface", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);
     pushState(
@@ -420,5 +435,51 @@ describe("PlanPreviewApp", () => {
     pushCaptureSelectionEvent();
 
     expect(intentsOfType(api, "addSelectionToChat")).toHaveLength(0);
+  });
+
+  it("replaces native Find with an in-webview counter and cyclic navigation", async () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(
+      makeState({
+        bodyMarkdown: "Plan body match.\n\nAnother plan match.",
+        todos: [{ content: "PLAN todo match", id: "find-todo", status: "pending" }],
+      }),
+    );
+
+    fireEvent.keyDown(document, { ctrlKey: true, key: "f" });
+    const input = screen.getByTestId("plan-find-input");
+    fireEvent.change(input, { target: { value: "plan" } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("plan-find-count").textContent).toBe("1 of 3");
+    });
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByTestId("plan-find-count").textContent).toBe("2 of 3");
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(screen.getByTestId("plan-find-count").textContent).toBe("1 of 3");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("plan-find")).toBeNull();
+  });
+
+  it("drives the in-webview Find through the host E2E DOM action protocol", async () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(makeState({ bodyMarkdown: "Host PLAN_FIND_ACTION token" }));
+
+    pushDomActionEvent({ kind: "setFindQuery", query: "plan_find_action" });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("plan-find-count").textContent).toBe("1 of 1");
+    });
+    pushCaptureDomEvent("find-action-snapshot");
+
+    const reply = api.postMessage.mock.calls
+      .map((call) => call[0] as { data?: { findCountText?: string | null; findVisible?: boolean }; messageId?: string })
+      .find((message) => message.messageId === "find-action-snapshot");
+    expect(reply?.data?.findVisible).toBe(true);
+    expect(reply?.data?.findCountText).toBe("1 of 1");
   });
 });

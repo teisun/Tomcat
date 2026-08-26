@@ -5,7 +5,7 @@
 
 | 变量                             | 取值                   | 含义                                                             | 优先级        | 说人话              |
 | ------------------------------ | -------------------- | -------------------------------------------------------------- | ---------- | ---------------- |
-| `TOMCAT_AGENT_ACTIVE`          | `1`                  | 标记当前已在 agent 会话内，serve 子进程继承后拒绝嵌套变更类命令（复用既有门禁）                 | env（最高）    | 防止 agent 自己又开自己。 |
+| `TOMCAT_AGENT_ACTIVE`          | `1`                  | 标记当前已在 agent 会话内；拒绝嵌套变更类命令和 `serve --stdio/--ws`，但允许只导出 schema 后退出的 `serve --print-schema` | env（最高）    | 防止 agent 自己又开自己；纯类型生成不受影响。 |
 | `serve.transport`              | `stdio`/`ws`(Phase2) | serve 默认传输                                                     | config     | 默认走管道。           |
 | `serve.max_sessions`           | usize                | 单 serve 进程并发会话数上限（默认对齐 `MAX_CONCURRENT_AGENTS=16`，含子 Agent 占额） | config     | 一个进程最多开几个会话 tab。 |
 | `serve.session_idle_unload_ms` | u32                  | **预留字段，本期未接线**：未来空闲会话（无活跃 run/订阅）多久后回收 `ChatContext`，`0`=不回收（对标 codex 30min）    | config     | 先留配置名，本期还不会真的自动清。    |
@@ -139,7 +139,7 @@ stdin EOF / 管道关闭
 | 多会话单写者「快会话饿死慢会话」                  | 中           | writer 按 sessionId **round-robin 公平轮转**（修正 codex 全局队列 + openclaw 连接级 `bufferedAmount` 的公平缺口，见 §2.5.2）；每会话独立 pressure 计数                                                 | 别让一个刷屏会话把另一个会话的事件堵死。    |
 | 多会话误用进程级可变态（cwd/secret 等）         | 中           | 进程级只共享**只读/线程安全** `Arc<dyn …>`（`GlobalServices`）；会话级隔离 `ScopeServices/SessionRuntime`（per `ChatContext`）；规避 hermes 全局 `secret callback`/`completion_queue` 串台教训（§2.5.2） | 水电共用、房间各锁；别把某会话的私货塞进全局。 |
 | 协议演进两端漂移                          | 中           | `--print-schema` 生成 + fixture 快照测试锁定（对标 codex `schema_fixtures.rs`）                                                                                                     | 改协议时 CI 立刻报两边对不上。       |
-| 嵌套调用污染会话/全局态                      | 中           | 复用 `guard_nested_invocation` + `TOMCAT_AGENT_ACTIVE=1`，serve 子进程继承后拒绝变更类命令                                                                                              | 防 agent 自己开自己改坏状态。      |
+| 嵌套调用污染会话/全局态                      | 中           | 复用 `guard_nested_invocation` + `TOMCAT_AGENT_ACTIVE=1`，拦截变更类命令和 `serve --stdio/--ws`；`serve --print-schema` 只导出 schema 后退出，扩展构建显式定向到临时目录 | 防 agent 自己又开自己改坏状态，同时保住协议类型生成。 |
 | Phase 2 联网鉴权缺失                    | 高（仅 Phase2） | 默认 loopback 绑定 + token + origin 校验（对标 openclaw `auth.ts`/`origin-check.ts`）；非 loopback 必须显式开                                                                            | 真要联网默认只本机 + 要口令。        |
 | 中断时工具 Start/End 不配平               | 中           | interrupt 收口路径强制对已发 `tool_execution_start` 补 `tool_execution_end`（对齐现有 §状态机约束）                                                                                          | 急停也要把 UI 的「进行中」收干净。     |
 
