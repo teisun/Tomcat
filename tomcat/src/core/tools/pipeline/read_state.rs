@@ -24,8 +24,8 @@
 //!   （详见 `read.md` §4.4）。
 //! - **content_hash 仍计算并存储**：用于诊断 + 给 hashline_edit 复用，
 //!   但 dedup 路径**不**强制比对（避免每次 read 之前再读一遍文件计算 hash）。
-//! - **`(offset, limit)` 进 key**：同一文件的「前 50 行」与「100..150 行」
-//!   是不同窗口；window 不同视为不同 read，互不命中 dedup。
+//! - **行范围 + 渲染形态进 key**：同一文件的「前 50 行」与「100..150 行」是不同
+//!   请求；普通行号与 hashline 同样是不同模型输入，任一不同都不可命中 dedup。
 //!
 //! ## 并发模型
 //!
@@ -38,6 +38,30 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::RwLock;
+
+/// `read` 返回给模型的文本排版。
+///
+/// 它是 dedup 身份的一部分：同一段源文件，纯文本、普通行号和 hashline 的输出字节
+/// 不同；模型为 edit 索要 hashline 时，不能拿先前的普通行号结果冒充。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadRenderMode {
+    Plain,
+    LineNumbers,
+    Hashline,
+}
+
+impl ReadRenderMode {
+    /// 对齐 executor 的渲染优先级：`hashline` 覆盖 `line_numbers`。
+    pub const fn resolve(line_numbers: bool, hashline: bool) -> Self {
+        if hashline {
+            Self::Hashline
+        } else if line_numbers {
+            Self::LineNumbers
+        } else {
+            Self::Plain
+        }
+    }
+}
 
 /// 一条「上次成功 read 的指纹」。
 ///
@@ -58,6 +82,9 @@ pub struct ReadStamp {
     /// 上次 read 是否为分窗读（`true` ⇔ 至少有一个 `offset` / `limit` 被显式传入）。
     /// 影响 §3.2.3 的「partial view 不与 full read 互相命中」语义。
     pub is_partial_view: bool,
+    /// 上次 read 返回给模型的文本排版。排版不同即使源文件和行区间相同也不可 dedup：
+    /// 例如普通行号不能替代 edit 所需的 hashline 锚点。
+    pub render_mode: ReadRenderMode,
     /// 上次**实际**读回来的行区间（1-based 闭区间）。非文本结果为 `None`。
     ///
     /// 判定覆盖必须用实际读到的区间而不是请求的窗口：不带 `limit` 的整读同样会被
@@ -76,6 +103,7 @@ impl ReadStamp {
     /// 命中条件：
     /// - mtime + size 都未变（文件主体未被 touch / 改写）；
     /// - 请求区间**落在**上次实际读到的区间里。
+    /// - 请求与上次的渲染形态相同。
     ///
     /// 用「区间包含」而不是「(offset, limit) 完全相等」：读过 L1684-1733 之后再要
     /// L1684-1703，内容明明就在上下文里，按精确匹配却会判成全新读、白读一遍。
@@ -88,8 +116,9 @@ impl ReadStamp {
         current_size: u64,
         offset: Option<u64>,
         limit: Option<u64>,
+        render_mode: ReadRenderMode,
     ) -> bool {
-        self.covers(current_mtime_ms, current_size, offset, limit)
+        self.covers(current_mtime_ms, current_size, offset, limit, render_mode)
             .is_some()
     }
 
@@ -100,8 +129,12 @@ impl ReadStamp {
         current_size: u64,
         offset: Option<u64>,
         limit: Option<u64>,
+        render_mode: ReadRenderMode,
     ) -> Option<(u64, u64)> {
-        if self.mtime_ms != current_mtime_ms || self.size != current_size {
+        if self.mtime_ms != current_mtime_ms
+            || self.size != current_size
+            || self.render_mode != render_mode
+        {
             return None;
         }
         let (covered_start, covered_end) = self.covered_lines?;

@@ -235,6 +235,8 @@ async fn read_one(
     let path = spec.path.as_str();
     let offset = spec.offset;
     let limit = spec.limit;
+    let render_mode =
+        crate::core::tools::pipeline::read_state::ReadRenderMode::resolve(line_numbers, hashline);
 
     let resolved = crate::infra::platform::normalize_path(path).unwrap_or_else(|_| path.into());
     let stub_short_circuit = ctx.read_file_state.and_then(|state| {
@@ -244,7 +246,7 @@ async fn read_one(
             return None;
         }
         let mtime = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
-        stamp.covers(mtime, meta.len(), offset, limit)
+        stamp.covers(mtime, meta.len(), offset, limit, render_mode)
     });
     if let Some((covered_start, covered_end)) = stub_short_circuit {
         // 写清覆盖关系，否则「和上次一样」对着一个更窄的窗口说，读的人无从确认。
@@ -256,7 +258,7 @@ async fn read_one(
                 "already covered by your earlier read of {coverage}"
             )),
             text: format!(
-                "{} (earlier read covered {coverage})",
+                "{} (earlier read covered {coverage}; to request another rendering, call read with line_numbers or hashline — do not modify the file)",
                 crate::core::tools::pipeline::read_state::FILE_UNCHANGED_STUB
             ),
             parts: Vec::new(),
@@ -300,6 +302,7 @@ async fn read_one(
                     offset,
                     limit,
                     is_partial_view: offset.is_some() || limit.is_some(),
+                    render_mode,
                     covered_lines,
                     reached_eof,
                     tool_call_id: Some(ctx.tool_call_id.to_string()),

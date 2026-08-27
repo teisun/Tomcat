@@ -690,9 +690,9 @@ fn code_review_is_stale(
     frontmatter: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
     newest_edit_mtime_ms: u128,
 ) -> bool {
-    !frontmatter
+    frontmatter
         .code_review_pass_at_ms
-        .is_some_and(|passed_at| passed_at >= newest_edit_mtime_ms)
+        .is_none_or(|passed_at| passed_at < newest_edit_mtime_ms)
 }
 
 fn acceptance_evidence_requirements() -> &'static str {

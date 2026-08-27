@@ -136,6 +136,7 @@ pub(super) fn refresh_read_stamp(
             offset: None,
             limit: None,
             is_partial_view: false,
+            render_mode: crate::core::tools::pipeline::read_state::ReadRenderMode::Plain,
             covered_lines: None,
             reached_eof: false,
             tool_call_id: Some(tool_call_id.to_string()),

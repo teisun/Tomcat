@@ -1,7 +1,17 @@
-use super::super::read_state::{hash_content, ReadFileState, ReadStamp};
+use super::super::read_state::{hash_content, ReadFileState, ReadRenderMode, ReadStamp};
 
 /// 一条「按请求窗口原样读到」的 stamp：分窗读覆盖请求区间，整读覆盖到文件末尾。
 fn stamp(mtime: i64, size: u64, off: Option<u64>, lim: Option<u64>) -> ReadStamp {
+    stamp_with_render_mode(mtime, size, off, lim, ReadRenderMode::Plain)
+}
+
+fn stamp_with_render_mode(
+    mtime: i64,
+    size: u64,
+    off: Option<u64>,
+    lim: Option<u64>,
+    render_mode: ReadRenderMode,
+) -> ReadStamp {
     let partial = off.is_some() || lim.is_some();
     let start = off.unwrap_or(1);
     let covered = match lim {
@@ -15,6 +25,7 @@ fn stamp(mtime: i64, size: u64, off: Option<u64>, lim: Option<u64>) -> ReadStamp
         offset: off,
         limit: lim,
         is_partial_view: partial,
+        render_mode,
         covered_lines: Some(covered),
         reached_eof: lim.is_none(),
         tool_call_id: None,
@@ -30,6 +41,7 @@ fn truncated_stamp(mtime: i64, size: u64, covered: (u64, u64)) -> ReadStamp {
         offset: Some(covered.0),
         limit: None,
         is_partial_view: true,
+        render_mode: ReadRenderMode::Plain,
         covered_lines: Some(covered),
         reached_eof: false,
         tool_call_id: None,
@@ -39,26 +51,26 @@ fn truncated_stamp(mtime: i64, size: u64, covered: (u64, u64)) -> ReadStamp {
 #[test]
 fn matches_request_dedup_hits_when_window_and_metadata_align() {
     let s = stamp(100, 1024, Some(1), Some(50));
-    assert!(s.matches_request(100, 1024, Some(1), Some(50)));
+    assert!(s.matches_request(100, 1024, Some(1), Some(50), ReadRenderMode::Plain));
 }
 
 #[test]
 fn matches_request_misses_when_mtime_changes() {
     let s = stamp(100, 1024, Some(1), Some(50));
-    assert!(!s.matches_request(101, 1024, Some(1), Some(50)));
+    assert!(!s.matches_request(101, 1024, Some(1), Some(50), ReadRenderMode::Plain));
 }
 
 #[test]
 fn matches_request_misses_when_size_changes() {
     let s = stamp(100, 1024, None, None);
-    assert!(!s.matches_request(100, 1025, None, None));
+    assert!(!s.matches_request(100, 1025, None, None, ReadRenderMode::Plain));
 }
 
 #[test]
 fn matches_request_misses_when_window_differs() {
     let s = stamp(100, 1024, Some(1), Some(50));
-    assert!(!s.matches_request(100, 1024, Some(1), Some(60)));
-    assert!(!s.matches_request(100, 1024, Some(2), Some(50)));
+    assert!(!s.matches_request(100, 1024, Some(1), Some(60), ReadRenderMode::Plain));
+    assert!(!s.matches_request(100, 1024, Some(2), Some(50), ReadRenderMode::Plain));
 }
 
 #[test]
@@ -66,29 +78,69 @@ fn matches_request_hits_when_earlier_read_contains_the_window() {
     // 读过 L1684-1733（50 行）之后再要 L1684-1703：内容就在上下文里，不该再读一遍。
     let s = stamp(100, 1024, Some(1684), Some(50));
     assert_eq!(
-        s.covers(100, 1024, Some(1684), Some(20)),
+        s.covers(100, 1024, Some(1684), Some(20), ReadRenderMode::Plain),
         Some((1684, 1733))
     );
     // 整读且读到了末尾，任何子窗口都被覆盖。
     let full = stamp(100, 1024, None, None);
-    assert!(full.matches_request(100, 1024, Some(1), Some(50)));
+    assert!(full.matches_request(100, 1024, Some(1), Some(50), ReadRenderMode::Plain));
 }
 
 #[test]
 fn matches_request_misses_on_partial_overlap_or_unbounded_request() {
     let s = stamp(100, 1024, Some(1684), Some(50));
     // 起点在已读区间之前：前半段没读过。
-    assert!(!s.matches_request(100, 1024, Some(1600), Some(200)));
+    assert!(!s.matches_request(100, 1024, Some(1600), Some(200), ReadRenderMode::Plain));
     // 终点越过已读区间：后半段没读过。
-    assert!(!s.matches_request(100, 1024, Some(1700), Some(100)));
+    assert!(!s.matches_request(100, 1024, Some(1700), Some(100), ReadRenderMode::Plain));
     // 上次没读到末尾，这次又不给上界：无从判断够不够。
     let truncated = truncated_stamp(100, 1024, (1, 2000));
-    assert!(!truncated.matches_request(100, 1024, Some(1), None));
-    assert!(truncated.matches_request(100, 1024, Some(1), Some(2000)));
+    assert!(!truncated.matches_request(100, 1024, Some(1), None, ReadRenderMode::Plain));
+    assert!(truncated.matches_request(100, 1024, Some(1), Some(2000), ReadRenderMode::Plain));
     // 非文本结果没有行区间，一律重读。
     let mut imageish = stamp(100, 1024, None, None);
     imageish.covered_lines = None;
-    assert!(!imageish.matches_request(100, 1024, None, None));
+    assert!(!imageish.matches_request(100, 1024, None, None, ReadRenderMode::Plain));
+}
+
+#[test]
+fn matches_request_misses_when_render_mode_differs() {
+    let line_numbers =
+        stamp_with_render_mode(100, 1024, Some(1), Some(50), ReadRenderMode::LineNumbers);
+    assert!(
+        !line_numbers.matches_request(100, 1024, Some(1), Some(50), ReadRenderMode::Hashline),
+        "line-number text cannot satisfy a hashline request"
+    );
+
+    let hashline = stamp_with_render_mode(100, 1024, Some(1), Some(50), ReadRenderMode::Hashline);
+    assert!(
+        !hashline.matches_request(100, 1024, Some(1), Some(50), ReadRenderMode::LineNumbers),
+        "hashline text cannot satisfy a line-number request"
+    );
+}
+
+#[test]
+fn resolve_prefers_hashline_and_normalizes_ignored_line_numbers_flag() {
+    assert_eq!(
+        ReadRenderMode::resolve(true, true),
+        ReadRenderMode::Hashline
+    );
+    assert_eq!(
+        ReadRenderMode::resolve(false, true),
+        ReadRenderMode::Hashline
+    );
+
+    let stamp = stamp_with_render_mode(100, 1024, Some(1), Some(50), ReadRenderMode::Hashline);
+    assert!(
+        stamp.matches_request(
+            100,
+            1024,
+            Some(1),
+            Some(50),
+            ReadRenderMode::resolve(false, true)
+        ),
+        "two requests that both render as hashline must dedup"
+    );
 }
 
 #[test]

@@ -129,6 +129,86 @@ async fn tool_exec_read_second_call_returns_unchanged_stub() {
         second.contains("earlier read covered L1-2"),
         "命中要写清是被哪一段覆盖的，否则窄窗口请求无从确认: {second:?}"
     );
+    assert!(
+        second.contains("call read with line_numbers or hashline"),
+        "dedup stub should explain how to request another rendering without mutating the file: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn tool_exec_read_line_numbers_then_hashline_refetches_for_edit_anchors() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("render-mode.txt");
+    std::fs::write(&file, b"alpha\nbeta\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let line_numbers = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (first, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &line_numbers).await;
+    assert!(!first_error, "{first}");
+    assert!(
+        first.contains("\talpha"),
+        "first read must use cat-n line numbers: {first:?}"
+    );
+
+    let hashline = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":false,"hashline":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (second, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &hashline).await;
+    assert!(!second_error, "{second}");
+    assert!(
+        second.contains("#") && second.contains(":alpha"),
+        "a hashline request after line numbers must refetch hash anchors: {second:?}"
+    );
+    assert!(
+        !second.contains(FILE_UNCHANGED_STUB),
+        "a different render mode cannot be short-circuited: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn tool_exec_read_hashline_then_line_numbers_refetches_for_plain_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("reverse-render-mode.txt");
+    std::fs::write(&file, b"alpha\nbeta\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let hashline = make_tc(&format!(
+        r#"{{"path":{:?},"hashline":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (first, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &hashline).await;
+    assert!(!first_error, "{first}");
+    assert!(
+        first.contains("#") && first.contains(":alpha"),
+        "first read must use hashline rendering: {first:?}"
+    );
+
+    let line_numbers = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (second, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &line_numbers).await;
+    assert!(!second_error, "{second}");
+    assert!(
+        second.contains("\talpha"),
+        "a line-number request after hashline must refetch cat-n text: {second:?}"
+    );
+    assert!(
+        !second.contains(FILE_UNCHANGED_STUB),
+        "a different render mode cannot be short-circuited: {second:?}"
+    );
 }
 
 #[tokio::test]

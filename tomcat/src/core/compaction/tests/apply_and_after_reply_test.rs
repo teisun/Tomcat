@@ -3,16 +3,22 @@ use super::super::apply::{
 };
 use super::super::layer0_persist_large_results;
 use super::mocks::*;
+use crate::core::agent_loop::{execute_tool_for_cross_module_test, ToolCallInfo};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessageRole, MessageKind};
+use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::session::manager::compound_turn_id;
 use crate::core::session::transcript::{
     append_entry, read_header, write_header, BranchSummaryEntry, SessionHeader, TranscriptEntry,
 };
 use crate::core::tools::pipeline::read_state::{ReadFileState, ReadStamp};
+use crate::core::tools::primitive::{DefaultPrimitiveExecutor, PrimitiveExecutor};
+use crate::core::AllowAllConfirmation;
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
-use crate::infra::{wire, DefaultEventBus, EventBus, EventContext};
+use crate::infra::{
+    wire, DefaultEventBus, EventBus, EventContext, PrimitiveConfig, TracingAuditRecorder,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -28,6 +34,28 @@ fn boundary_env<'a>(
         session_id: "s-apply-test",
         read_file_state,
     }
+}
+
+fn make_read_executor(dir: &Path) -> Arc<dyn PrimitiveExecutor> {
+    let gate: Arc<dyn PermissionGate> = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: dir.to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    Arc::new(DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        gate,
+    ))
 }
 
 fn l0_test_config() -> ContextConfig {
@@ -82,6 +110,7 @@ fn install_read_stamp(state: &ReadFileState, path: &str, tool_call_id: &str) {
             offset: None,
             limit: None,
             is_partial_view: false,
+            render_mode: crate::core::tools::pipeline::read_state::ReadRenderMode::Plain,
             covered_lines: Some((1, 1)),
             reached_eof: true,
             tool_call_id: Some(tool_call_id.to_string()),
@@ -346,6 +375,67 @@ fn successful_boundary_runs_both_layer0_steps_invalidates_read_stamps_and_emits_
         layer0_events.load(Ordering::SeqCst),
         1,
         "the successful boundary emits one aggregate L0 release event"
+    );
+}
+
+#[tokio::test]
+async fn boundary_eviction_forces_a_real_reread_instead_of_an_unchanged_stub() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("evicted-read.txt");
+    std::fs::write(&file, "alpha\nbeta\n").unwrap();
+    let primitive = make_read_executor(dir.path());
+    let read_file_state = Arc::new(ReadFileState::new());
+
+    // First read creates a stamp owned by the same tool result that Layer 0 will evict below.
+    let first_call = ToolCallInfo {
+        id: "old-tool-call".to_string(),
+        name: "read".to_string(),
+        arguments: serde_json::json!({
+            "path": file.to_string_lossy(),
+            "line_numbers": false
+        })
+        .to_string(),
+    };
+    let (first, first_error, _) =
+        execute_tool_for_cross_module_test(&primitive, &read_file_state, &first_call).await;
+    assert!(!first_error, "{first}");
+    assert_eq!(read_file_state.len(), 1, "first read must create a stamp");
+
+    // This exercises the production apply -> Layer 0 cleanup path rather than calling
+    // invalidate_tool_call directly. l0_test_state makes "old-tool-call" a compactable result.
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let emitter = crate::infra::ScopedEventEmitter::new(bus, "s-reread-after-eviction");
+    let config = l0_test_config();
+    let env = boundary_env(&config, dir.path(), read_file_state.as_ref());
+    let mut state = l0_test_state();
+    assert!(apply_and_emit_boundary(
+        &mut state,
+        l0_test_result(),
+        0.85,
+        false,
+        &emitter,
+        &env,
+    ));
+    assert!(
+        read_file_state.is_empty(),
+        "evicting the visible tool result must also invalidate its read stamp"
+    );
+
+    let reread_call = ToolCallInfo {
+        id: "reread-after-eviction".to_string(),
+        name: "read".to_string(),
+        arguments: serde_json::json!({
+            "path": file.to_string_lossy(),
+            "line_numbers": false
+        })
+        .to_string(),
+    };
+    let (reread, reread_error, _) =
+        execute_tool_for_cross_module_test(&primitive, &read_file_state, &reread_call).await;
+    assert!(!reread_error, "{reread}");
+    assert!(
+        reread.contains("alpha") && !reread.contains("File unchanged"),
+        "an evicted read must be fetched again, not replaced with a dangling stub: {reread}"
     );
 }
 

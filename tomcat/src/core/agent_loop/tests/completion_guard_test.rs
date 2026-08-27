@@ -187,6 +187,7 @@ fn read_stamp(tool_call_id: &str) -> ReadStamp {
         offset: None,
         limit: None,
         is_partial_view: false,
+        render_mode: crate::core::tools::pipeline::read_state::ReadRenderMode::Plain,
         covered_lines: Some((1, 1)),
         reached_eof: true,
         tool_call_id: Some(tool_call_id.to_string()),

@@ -144,6 +144,18 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+/// Narrow cross-module test seam for verifying that context compaction invalidates
+/// `read` stamps before the next real tool invocation. It is test-only so production
+/// callers still go through the agent loop.
+#[cfg(test)]
+pub(crate) async fn execute_tool_for_cross_module_test(
+    primitive: &std::sync::Arc<dyn crate::core::tools::primitive::PrimitiveExecutor>,
+    read_file_state: &std::sync::Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
+    tool_call: &types::ToolCallInfo,
+) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
+    tool_exec::execute_tool(primitive, &None, &None, Some(read_file_state), tool_call).await
+}
+
 pub use config_backend::{ConfigBackend, SharedConfigBackend};
 pub use current_tail_guard::{build_collapse_summary_artifacts_for_test, CollapseSummaryArtifacts};
 pub use types::{

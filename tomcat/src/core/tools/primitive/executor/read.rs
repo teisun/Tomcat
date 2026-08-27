@@ -11,6 +11,7 @@
 
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::DefaultPrimitiveExecutor;
+use crate::core::tools::pipeline::read_state::ReadRenderMode;
 use crate::core::tools::primitive::{
     DirEntry, PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult,
 };
@@ -53,24 +54,17 @@ fn metadata_with_project_root_hint(
     })
 }
 
-fn rendered_prefix_len(line_no: u64, line_numbers: bool, hashline: bool) -> usize {
+fn rendered_prefix_len(line_no: u64, render_mode: ReadRenderMode) -> usize {
     let width = std::cmp::max(6, line_no.to_string().len());
-    if hashline {
-        width + 4 // "#{2-char}:"
-    } else if line_numbers {
-        width + 1 // "\t"
-    } else {
-        0
+    match render_mode {
+        ReadRenderMode::Plain => 0,
+        ReadRenderMode::LineNumbers => width + 1, // "\t"
+        ReadRenderMode::Hashline => width + 4,    // "#{2-char}:"
     }
 }
 
-fn rendered_line_len(
-    line_no: u64,
-    raw_line_bytes: usize,
-    line_numbers: bool,
-    hashline: bool,
-) -> usize {
-    rendered_prefix_len(line_no, line_numbers, hashline) + raw_line_bytes
+fn rendered_line_len(line_no: u64, raw_line_bytes: usize, render_mode: ReadRenderMode) -> usize {
+    rendered_prefix_len(line_no, render_mode) + raw_line_bytes
 }
 
 /// PR-RJ（T3-b）`read` 工具的 mime 路由：扩展名 + 头几字节 magic 双重校验。
@@ -272,8 +266,7 @@ fn read_window_blocking(
     path: &Path,
     start_line: u64,
     limit_lines: u64,
-    line_numbers: bool,
-    hashline: bool,
+    render_mode: ReadRenderMode,
     output_budget_bytes: usize,
 ) -> Result<ReadWindowOutcome, AppError> {
     use std::io::Read;
@@ -330,7 +323,7 @@ fn read_window_blocking(
             if within_window {
                 let raw_line_bytes = leftover.len() + line_slice.len();
                 let rendered_line_bytes =
-                    rendered_line_len(current_line, raw_line_bytes, line_numbers, hashline);
+                    rendered_line_len(current_line, raw_line_bytes, render_mode);
                 if window_lines == 0 && rendered_line_bytes > output_budget_bytes {
                     return Ok(ReadWindowOutcome::FirstLineTooLong {
                         line_no: current_line,
@@ -383,7 +376,7 @@ fn read_window_blocking(
             leftover.extend_from_slice(tail);
             if window_lines == 0 {
                 let rendered_line_bytes =
-                    rendered_line_len(current_line, leftover.len(), line_numbers, hashline);
+                    rendered_line_len(current_line, leftover.len(), render_mode);
                 if rendered_line_bytes > output_budget_bytes {
                     return Ok(ReadWindowOutcome::FirstLineTooLong {
                         line_no: current_line,
@@ -400,8 +393,7 @@ fn read_window_blocking(
         && current_line >= start_line
         && current_line < end_line_exclusive
     {
-        let rendered_line_bytes =
-            rendered_line_len(current_line, leftover.len(), line_numbers, hashline);
+        let rendered_line_bytes = rendered_line_len(current_line, leftover.len(), render_mode);
         if window_lines == 0 && rendered_line_bytes > output_budget_bytes {
             return Ok(ReadWindowOutcome::FirstLineTooLong {
                 line_no: current_line,
@@ -564,6 +556,9 @@ pub(super) async fn read_impl(
 
     let start_line = offset.unwrap_or(1).max(1);
     let limit_lines = limit.unwrap_or(READ_DEFAULT_LIMIT_LINES).max(1);
+    // One source of truth for both byte-budget accounting and final rendering. The same
+    // normalized value is stored by tool_exec in ReadStamp before dedup is evaluated.
+    let render_mode = ReadRenderMode::resolve(line_numbers, hashline);
 
     let path_clone = path_buf.clone();
     let read_outcome = tokio::task::spawn_blocking(move || {
@@ -571,8 +566,7 @@ pub(super) async fn read_impl(
             &path_clone,
             start_line,
             limit_lines,
-            line_numbers,
-            hashline,
+            render_mode,
             READ_POST_OUTPUT_BUDGET_BYTES,
         )
     })
@@ -592,13 +586,10 @@ pub(super) async fn read_impl(
                     path_buf.display()
                 ))
             })?;
-            // PR-RM：hashline 优先于 line_numbers（与 spec §3.1 一致）。
-            let mut s = if hashline {
-                format_with_hashlines(start_line, &body)
-            } else if line_numbers {
-                format_with_line_numbers(start_line, &body)
-            } else {
-                body
+            let mut s = match render_mode {
+                ReadRenderMode::Plain => body,
+                ReadRenderMode::LineNumbers => format_with_line_numbers(start_line, &body),
+                ReadRenderMode::Hashline => format_with_hashlines(start_line, &body),
             };
             let (truncated, remaining_lines) = match truncation {
                 Some(ReadWindowTruncation::Limit {
