@@ -53,7 +53,7 @@ export function selectActiveTodoSource(input: {
   planTodos: WebviewTodo[];
   sessionTodos: WebviewTodo[];
 }): WebviewTodo[] | null {
-  const planStates: WebviewPlanFileState[] = ["planning", "executing", "pending", "completed"];
+  const planStates: WebviewPlanFileState[] = ["planning", "executing", "pending"];
   if (input.planState && planStates.includes(input.planState)) {
     return input.planTodos;
   }

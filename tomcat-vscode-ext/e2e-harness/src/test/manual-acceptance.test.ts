@@ -120,6 +120,22 @@ function requireEnv(name: string): string {
 async function pause(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
+/**
+ * Runs a narrow-layout check without letting the test-only root width leak into
+ * later screenshots when an assertion or wait fails.
+ */
+async function withRootWidth<T>(
+  api: TomcatApi,
+  widthPx: number,
+  work: () => Promise<T>,
+): Promise<T> {
+  await api.__testing.sendWebviewDomAction({ kind: "setRootWidth", widthPx });
+  try {
+    return await work();
+  } finally {
+    await api.__testing.sendWebviewDomAction({ kind: "setRootWidth", widthPx: null });
+  }
+}
 
 async function captureScreenshot(name: string): Promise<string> {
   const screenshotsDir = requireEnv("TOMCAT_ACCEPT_SCREENSHOTS_DIR");
@@ -423,22 +439,15 @@ suite("Tomcat manual acceptance", () => {
     );
     screenshots.push(await captureScreenshot("07-live-tool-expanded.png"));
 
-    await sendDomAction(api, {
-      kind: "setRootWidth",
-      widthPx: 480,
-    });
-    await pause(300);
-    const narrow = await api.__testing.captureWebviewDom();
-    if (narrow.composerRowCount !== 1) {
-      limitations.push(
-        `At the synthetic narrow width, the composer rendered in ${narrow.composerRowCount} visual rows in the real VSCode host. The screenshot and DOM metrics were still captured for review instead of failing the entire acceptance run on platform-specific layout variance.`,
-      );
-    }
-    screenshots.push(await captureScreenshot("08-composer-narrow.png"));
-
-    await sendDomAction(api, {
-      kind: "setRootWidth",
-      widthPx: null,
+    await withRootWidth(api, 480, async () => {
+      await pause(300);
+      const narrow = await api.__testing.captureWebviewDom();
+      if (narrow.composerRowCount !== 1) {
+        limitations.push(
+          `At the synthetic narrow width, the composer rendered in ${narrow.composerRowCount} visual rows in the real VSCode host. The screenshot and DOM metrics were still captured for review instead of failing the entire acceptance run on platform-specific layout variance.`,
+        );
+      }
+      screenshots.push(await captureScreenshot("08-composer-narrow.png"));
     });
     const wide = await waitForDom(api, (snapshot) => snapshot, 1_000);
     if (wide.composerRowCount !== 1) {
@@ -677,20 +686,19 @@ suite("Tomcat manual acceptance", () => {
       messageId: "manual-acceptance-attach-ten-images",
       type: "attachFiles",
     });
-    await sendDomAction(api, {
-      kind: "setRootWidth",
-      widthPx: 320,
+    const narrowImageDraft = await withRootWidth(api, 320, async () => {
+      const draft = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.pendingAttachmentThumbCount === 11 &&
+          snapshot.pendingAttachmentStripOverflowing
+            ? snapshot
+            : undefined,
+        10_000,
+      );
+      screenshots.push(await captureScreenshot("18-image-composer-11-narrow.png"));
+      return draft;
     });
-    const narrowImageDraft = await waitForDom(
-      api,
-      (snapshot) =>
-        snapshot.pendingAttachmentThumbCount === 11 &&
-        snapshot.pendingAttachmentStripOverflowing
-          ? snapshot
-          : undefined,
-      10_000,
-    );
-    screenshots.push(await captureScreenshot("18-image-composer-11-narrow.png"));
 
     await sendDomAction(api, {
       index: 1,
@@ -722,10 +730,6 @@ suite("Tomcat manual acceptance", () => {
 
     await api.__testing.executeCommand("workbench.action.closeActiveEditor");
     await api.__testing.focusWebview();
-    await sendDomAction(api, {
-      kind: "setRootWidth",
-      widthPx: null,
-    });
     api.__testing.clearObservedEvents();
     await api.__testing.sendWebviewIntent({
       data: {

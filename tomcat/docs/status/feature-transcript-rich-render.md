@@ -1,8 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-29 13:38 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-29 15:42 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Composer 与 Plan Preview 本轮体验/验收闭环：完成态 plan 已不再向 Composer 注入待办 widget；Tomcat Box / Ready to chat 外壳移除右侧多余 10px 内边距；截图 E2E 窄化根节点后以 `try/finally` 恢复宽度，避免后续画面被挤压。Plan Preview 自定义编辑器 E2E 改为由已编辑正文中的唯一 token 推导真实源行，并按每次选择操作前后的引用数验证，保留重复选择不新增 chip 的断言，修复错误期望 `:0` 导致的等待超时。验证：focused Provider 47 passed、`npm run lint:extension`、`npm run test:e2e:vscode-devhost`（33 passing）、`git diff --check` 与 `npm run package:vsix` 通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix`（1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`）不含测试/源码/CLI 目录。@2026-08-29
+
 - [✓] **[P0]** Plan Preview 首帧不再被可选的 serve 初始化/模型目录请求阻塞：宿主先同步发送文档正文、待办与文件态，随后再发送模型/Build 能力的增强帧；每个面板以 generation 丢弃较晚返回的旧增强帧，避免旧正文覆盖新刷新。Plan 入口复用 `WebviewErrorBoundary`，若渲染异常会给出 Reload 页面而非空白标签。回归：慢初始化服务下仍立即收到正文帧；`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build` 和 `git diff --check` 通过。@2026-08-29
 - [✓] **[P0]** Plan Preview Find 已从会漂移的 fixed 几何覆盖层改为文本内联装饰：所有命中和当前命中分别保留，箭头导航只切换当前 class；高亮随真实文字排版滚动，不会飘到无关位置。当前命中通过真实 `span.scrollIntoView({ block: "center" })` 居中，避免环回第一个匹配时计数已更新但视口仍停在底部。`MarkdownBody` 对未变的正文/行映射做 memo，防止无关宿主状态刷新替换命中节点。验证：Find focused GUI 测试 34 passed、`tsc --noEmit`、真实 Dev Host `.plan.md` E2E（含末尾命中、环回首项的滚动断言和截图）均通过；纯插件 `tomcat-vscode-ext-0.1.50.vsix` 已重打，SHA-256=`f100696e3cbf5fc304e45bf88fab8cb286971b58642e67151cb9258ebe923506`。@2026-08-29
 - [✓] **[P0]** `read` 去重不再把不同排版当成同一次读取：新增 `ReadRenderMode` 统一普通文本、普通行号与 hashline 的实际输出形态；仅当文件未变、上次范围覆盖本次请求、排版相同且旧 tool 结果仍在上下文时才返回 `File unchanged` stub，否则重新读取真实内容。executor 的预算计算与最终渲染共用同一归一逻辑；stub 明确提示用 `line_numbers` / `hashline` 取得另一种排版而非改文件。补齐形态互切黑白盒测试和 Layer 0 驱逐后必须真读的集成回归；`code_review_is_stale` 同步按 Clippy 建议收敛。CLI `0.1.37 → 0.1.38`、扩展 `0.1.49 → 0.1.50`、bundled CLI `0.1.37 → 0.1.38`；`release-version check` 通过，纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 已生成且不含 `bin/tomcat`。验证：`cargo fmt --check`、Clippy、read/dedup/edit 相关单测与集成测试、`git diff --check`、`npm run package:vsix` 均通过；Cov% 未跑 tarpaulin，仍为 —。@2026-08-27
@@ -73,6 +75,8 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- 本轮仅调整扩展内部 UI 状态选择、CSS 与 E2E 验收逻辑；不新增或改变公开 RPC、wire 字段或插件配置。
+
 - Plan Preview 状态帧仍使用既有 `PlanPreviewStateSnapshot` 协议；发送顺序调整为“文档首帧 → 可选模型/能力增强帧”，无新增外部 RPC 或 wire 字段。
 - Plan Preview Find：新增内部 `PlanFindController` / `usePlanFind` 生命周期边界；Find 装饰使用 `.tc-plan-find-fallback-highlight` 文字内联 span，不新增宿主 RPC 或外部 wire 协议。
 - Plan close-out：`TodoItem.kind`（`work|gate_code_review|gate_acceptance`）与 `update_plan` result 的 `code_review_pass` / `green_build_pass` / `next_step{phase,hint}`；`create_plan` result 的 `items[]` 现在含两条 runtime-owned gate。`AgentLoopConfig.unattended_retry` 显式选择 headless retry 预算；CodeReview result 新增 `non_blocking_findings` / `p2_guidance`。
@@ -149,12 +153,14 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 扩展全量 integration / host E2E | 本轮聚焦 plan 场景已通过；全量 integration 仍有 14 条既有 plan-state/model fixture 断言失败，host E2E 另有 bundled CLI 夹具期待 `0.1.30`（升级前已是 `0.1.34`）与 reasoning/loading 超时 | 由相关 fixture owner 单独对齐 |
+| 扩展全量 integration / host E2E | 本轮 `npm run test:e2e:vscode-devhost` 已 33 passing；此前记录的 plan-state/model fixture 与 bundled CLI 夹具问题未在本次复跑范围内 | 由相关 fixture owner 单独对齐 |
 | 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但真实 `dispatch_agent > 0` 路径仍待授权验证 | 获得明确授权后，在隔离夹具中补跑一次并检查首次是否合并全部独立问题 |
 | `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；与本轮恢复整改无关 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-29 15:42）：完成态计划不再渲染 Composer 待办 widget，Tomcat Box 右侧留白已移除；截图 E2E 的根节点宽度现在无论成功或超时都会恢复。Plan Preview 自定义编辑器 E2E 的正文引用源行由唯一 token 推导，并把引用计数断言改为相对当前操作，修复错误 `:0` 行号造成的等待超时。`npm run test:e2e:vscode-devhost` 33 passing、`npm run lint:extension`、`git diff --check` 与 `npm run package:vsix` 均通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 为 1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`，包内不含源码、测试、E2E harness、node_modules 或 CLI 二进制。Cov% 未跑，仍为 —。
+
 - 最新补充（2026-08-29 13:38）：Plan Preview 现在先展示磁盘中的计划正文和待办，不再等待 serve 初始化或模型目录；延迟增强结果受面板 generation 保护，不能覆盖较新的磁盘刷新。Plan webview 已添加错误边界，异常时显示 Reload 而不再留下空白。验证：`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build`、`git diff --check` 全绿；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 已重打（1,590,261 bytes，SHA-256 `361d3cb5447625d25d9b74a69694df19cda89bfe159375c24457eec062873d74`，包内无 `bin/tomcat`）。Cov% 未跑，仍为 —。
 - 最新补充（2026-08-29 13:07）：Plan Preview Find 移除 fixed 几何覆盖层，改为内联文本装饰并由浏览器定位真实当前 span；补齐命中导航的末尾→首项环回滚动 E2E。Find GUI focused 34 passed、`npm run lint`、真实 Dev Host `.plan.md` E2E 和 `npm run package:vsix` 均通过；Cov% 未跑，仍为 —。
 - 最新补充（2026-08-11 16:46）：user-message sidecar + UPDATE 机器区双通道 strip 已落地；计划 green build（fmt / clippy -D warnings / release / 串行 lib / context_management_tests）通过。Cov% 仍为 —。

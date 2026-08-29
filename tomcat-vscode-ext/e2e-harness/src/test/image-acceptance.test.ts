@@ -164,6 +164,22 @@ function requireEnv(name: string): string {
 async function pause(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
+/**
+ * Runs a narrow-layout check without letting the test-only root width leak into
+ * later screenshots when an assertion or wait fails.
+ */
+async function withRootWidth<T>(
+  api: TomcatExtensionApi,
+  widthPx: number,
+  work: () => Promise<T>,
+): Promise<T> {
+  await api.__testing.sendWebviewDomAction({ kind: "setRootWidth", widthPx });
+  try {
+    return await work();
+  } finally {
+    await api.__testing.sendWebviewDomAction({ kind: "setRootWidth", widthPx: null });
+  }
+}
 
 /**
  * Bounds of the test VS Code window, as `x,y,w,h` for `screencapture -R`.
@@ -594,56 +610,45 @@ suite("Tomcat image attachment visual acceptance", () => {
         messageId: "image-acceptance-attach-rest",
         type: "attachFiles",
       });
-      // Narrower than the sidebar itself, so the overflow this is testing stays inside the
-      // window and is visible in the screenshot rather than running off the edge of it.
-      await sendDomAction(api, { kind: "setRootWidth", widthPx: 180 });
+      const { narrowDraft, skeletonDraft } = await withRootWidth(api, 180, async () => {
+        // Thumbnails are generated one at a time, so for a moment the strip is a mix of
+        // finished images and placeholders. Worth a screenshot: this is the state a user
+        // sees right after dropping a folder of photos, and the placeholders are exactly
+        // the size of the thumbnails that replace them, so nothing shifts.
+        // Caught as early as placeholders exist at all. Thumbnails are generated left to
+        // right, so the leftmost squares — the only ones a narrow sidebar shows — are the
+        // first to be replaced; waiting for all eleven attachments to land first would leave
+        // nothing of this state visible in the screenshot.
+        const skeletonDraft = await pollDom(
+          api,
+          (snapshot) => snapshot.attachmentSkeletonCount >= 3,
+          8_000,
+        );
+        if (skeletonDraft.attachmentSkeletonCount > 0) {
+          // Scroll to the *last* placeholder. The leftmost squares are replaced within a
+          // second of arriving, so by the time a screenshot is taken they are finished
+          // images; the far end of the strip is still waiting and is what this shot is for.
+          await sendDomAction(api, {
+            index: -1,
+            kind: "scrollIntoView",
+            scrollBlock: "nearest",
+            testId: "attachment-skeleton",
+          });
+          screenshots.push(await captureScreenshot("19-composer-thumbnail-skeleton.png"));
+        }
 
-      // Thumbnails are generated one at a time, so for a moment the strip is a mix of
-      // finished images and placeholders. Worth a screenshot: this is the state a user
-      // sees right after dropping a folder of photos, and the placeholders are exactly
-      // the size of the thumbnails that replace them, so nothing shifts.
-      // Caught as early as placeholders exist at all. Thumbnails are generated left to
-      // right, so the leftmost squares — the only ones a narrow sidebar shows — are the
-      // first to be replaced; waiting for all eleven attachments to land first would leave
-      // nothing of this state visible in the screenshot.
-      const skeletonDraft = await pollDom(
-        api,
-        (snapshot) => snapshot.attachmentSkeletonCount >= 3,
-        8_000,
-      );
-      if (skeletonDraft.attachmentSkeletonCount > 0) {
-        // Scroll to the *last* placeholder. The leftmost squares are replaced within a
-        // second of arriving, so by the time a screenshot is taken they are finished
-        // images; the far end of the strip is still waiting and is what this shot is for.
-        await sendDomAction(api, {
-          index: -1,
-          kind: "scrollIntoView",
-          scrollBlock: "nearest",
-          testId: "attachment-skeleton",
-        });
-        screenshots.push(await captureScreenshot("19-composer-thumbnail-skeleton.png"));
-      }
-
-      const narrowDraft = await waitForDom(
-        api,
-        (snapshot) =>
-          snapshot.pendingAttachmentThumbCount === 11 &&
-          snapshot.pendingAttachmentStripOverflowing
-            ? snapshot
-            : undefined,
-        60_000,
-      );
-      screenshots.push(await captureScreenshot("02-composer-11-images-narrow.png"));
-
-      // ── The number this redesign is about ──────────────────────────────────────────
-      // Measured from what Chromium actually decoded, with all eleven 4000x3000 images
-      // in the strip. Two samples, because there are two separate wins to show:
-      //
-      //   lazyStrip    — straight after the paste. Offscreen thumbnails have not been
-      //                  decoded at all, so `naturalWidth` is still 0 for them.
-      //   loadedStrip  — after scrolling every thumbnail into view, forcing all eleven
-      //                  decodes. This is the worst case, and the number worth quoting.
-      await sendDomAction(api, { kind: "setRootWidth", widthPx: null });
+        const narrowDraft = await waitForDom(
+          api,
+          (snapshot) =>
+            snapshot.pendingAttachmentThumbCount === 11 &&
+            snapshot.pendingAttachmentStripOverflowing
+              ? snapshot
+              : undefined,
+          60_000,
+        );
+        screenshots.push(await captureScreenshot("02-composer-11-images-narrow.png"));
+        return { narrowDraft, skeletonDraft };
+      });
       // What the resource protocol actually served, so a broken image cannot pass as a
       // rendered one: this is the single check that keeps the whole asWebviewUri path
       // honest.

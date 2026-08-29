@@ -45,6 +45,19 @@ describe("TodoListWidget", () => {
     expect(container.innerHTML).toBe("");
   });
 
+  it("stays hidden when the plan is completed", () => {
+    const { container } = render(
+      <TodoListWidget
+        busy
+        planState="completed"
+        planTodos={[{ content: "All done", id: "1", status: "completed" }]}
+        sessionTodos={[]}
+      />,
+    );
+
+    expect(container.innerHTML).toBe("");
+  });
+
   it("stays hidden when the session is idle", () => {
     const { container } = render(
       <TodoListWidget

@@ -26,6 +26,19 @@ describe("useActiveTodoProgress", () => {
     });
   });
 
+  it("returns null when the plan is completed", () => {
+    const { result } = renderHook(() =>
+      useActiveTodoProgress({
+        busy: true,
+        planState: "completed",
+        planTodos: [{ content: "Done", id: "1", status: "completed" }],
+        sessionTodos: [],
+      }),
+    );
+
+    expect(result.current).toBeNull();
+  });
+
   it("uses sessionTodos in chat when in_progress exists", () => {
     const { result } = renderHook(() =>
       useActiveTodoProgress({
