@@ -1,4 +1,5 @@
 import * as os from "node:os";
+import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 
@@ -15,6 +16,24 @@ export interface HostE2eFixture {
 export interface HostE2eFixtureOptions {
   requireInit?: boolean;
 }
+
+const FALLBACK_SERVER_VERSION = "0.1.30";
+
+function readBundledCliVersion(): string {
+  try {
+    const metadata = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { tomcat?: { bundledCliVersion?: unknown } };
+    const version = metadata.tomcat?.bundledCliVersion;
+    return typeof version === "string" && version.trim().length > 0
+      ? version.trim()
+      : FALLBACK_SERVER_VERSION;
+  } catch {
+    return FALLBACK_SERVER_VERSION;
+  }
+}
+
+const BUNDLED_CLI_VERSION = readBundledCliVersion();
 
 const CHAT_E2E_SETTINGS = {
   "chat.allowAnonymousAccess": true,
@@ -184,7 +203,7 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.30";
+const serverVersion = ${JSON.stringify(BUNDLED_CLI_VERSION)};
 function persistPendingApproval() {
   if (!pendingApproval || pendingApproval.kind !== "answer-card") {
     try {

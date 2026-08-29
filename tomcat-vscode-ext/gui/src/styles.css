@@ -4463,6 +4463,14 @@ span.tc-attachment-strip__file-chip {
   width: 100%;
 }
 
+/* At scrollTop=0 there is no upward room to reveal a first-line match. Reserve
+ * the floating widget's full footprint while Find is open so that content is
+ * genuinely readable below it, then restore the normal compact top inset. */
+.tc-plan-preview--find-open .tc-plan-preview__content {
+  padding-top: 48px;
+  scroll-padding-top: 48px;
+}
+
 .tc-plan-preview__body {
   font-size: var(--tc-plan-reading-font-size);
   line-height: 1.6;
@@ -4706,16 +4714,17 @@ span.tc-attachment-strip__file-chip {
   cursor: default;
 }
 
-/* Custom Highlight keeps plan DOM untouched: React, Mermaid, links and source
- * mapping retain their structure while every match gets a theme-aware color. */
-::highlight(tc-plan-find) {
-  background: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 184, 55, 0.35));
-  color: var(--vscode-editor-findMatchHighlightForeground, inherit);
+/* VS Code's bundled stylesheet parser rejects ::highlight(...), so Find uses
+ * inline spans. They participate in normal text layout and therefore stay
+ * exactly over their matching glyphs while the Plan scrolls. */
+.tc-plan-find-fallback-highlight {
+  background: rgba(215, 186, 75, 0.28);
+  border-radius: 2px;
+  color: inherit;
 }
 
-::highlight(tc-plan-find-active) {
-  background: var(--vscode-editor-findMatchBackground, rgba(234, 184, 55, 0.65));
-  color: var(--vscode-editor-findMatchHighlightForeground, inherit);
+.tc-plan-find-fallback-highlight--active {
+  background: rgba(230, 187, 50, 0.46);
 }
 
 /* Browser zoom reduces the CSS viewport width. This keeps the reading column and

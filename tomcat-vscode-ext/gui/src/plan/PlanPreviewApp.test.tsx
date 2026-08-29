@@ -440,15 +440,19 @@ describe("PlanPreviewApp", () => {
   it("replaces native Find with an in-webview counter and cyclic navigation", async () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);
-    pushState(
-      makeState({
-        bodyMarkdown: "Plan body match.\n\nAnother plan match.",
-        todos: [{ content: "PLAN todo match", id: "find-todo", status: "pending" }],
-      }),
-    );
-
+    const findState = makeState({
+      bodyMarkdown: "Plan body match.\n\nAnother plan match.",
+      todos: [{ content: "PLAN todo match", id: "find-todo", status: "pending" }],
+    });
+    pushState(findState);
     fireEvent.keyDown(document, { ctrlKey: true, key: "f" });
     const input = screen.getByTestId("plan-find-input");
+    expect(
+      screen
+        .getByTestId("plan-content")
+        .closest(".tc-plan-preview")
+        ?.classList.contains("tc-plan-preview--find-open"),
+    ).toBe(true);
     fireEvent.change(input, { target: { value: "plan" } });
 
     await waitFor(() => {
@@ -457,11 +461,64 @@ describe("PlanPreviewApp", () => {
 
     fireEvent.keyDown(input, { key: "Enter" });
     expect(screen.getByTestId("plan-find-count").textContent).toBe("2 of 3");
+    const activeHighlightBeforeHostUpdate = document.querySelector(
+      ".tc-plan-find-fallback-highlight--active",
+    );
+    expect(activeHighlightBeforeHostUpdate).not.toBeNull();
+
+    // A toolbar/model capability update recreates the host state object but
+    // leaves searchable copy untouched; Find must retain its active result.
+    pushState({ ...findState, canBuild: false });
+    expect(screen.getByTestId("plan-find-count").textContent).toBe("2 of 3");
+    expect(document.querySelector(".tc-plan-find-fallback-highlight--active")).toBe(
+      activeHighlightBeforeHostUpdate,
+    );
+
+    // Todo status is represented by non-searchable assistive text only, so it
+    // must not re-search or reset the active Find result either.
+    pushState({
+      ...findState,
+      canBuild: false,
+      todos: [{ content: "PLAN todo match", id: "find-todo", status: "completed" }],
+    });    expect(screen.getByTestId("plan-find-count").textContent).toBe("2 of 3");
+
+
     fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
     expect(screen.getByTestId("plan-find-count").textContent).toBe("1 of 3");
 
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByTestId("plan-find")).toBeNull();
+  });
+
+  it("re-searches after an asynchronous rendered-content mutation", async () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(makeState({ bodyMarkdown: "Dynamic plan" }));
+
+    fireEvent.keyDown(document, { ctrlKey: true, key: "f" });
+    const input = screen.getByTestId("plan-find-input");
+    expect(
+      screen
+        .getByTestId("plan-content")
+        .closest(".tc-plan-preview")
+        ?.classList.contains("tc-plan-preview--find-open"),
+    ).toBe(true);
+    fireEvent.change(input, { target: { value: "dynamic" } });
+    await waitFor(() => {
+      expect(screen.getByTestId("plan-find-count").textContent).toBe("1 of 1");
+    });
+
+    const renderedText = document.querySelector(
+      ".tc-plan-find-fallback-highlight",
+    )?.firstChild;
+    if (!(renderedText instanceof Text)) {
+      throw new Error("Expected Find's decorated text node.");
+    }
+    renderedText.data = "Replaced copy";
+
+    await waitFor(() => {
+      expect(screen.getByTestId("plan-find-count").textContent).toBe("No results");
+    });
   });
 
   it("drives the in-webview Find through the host E2E DOM action protocol", async () => {

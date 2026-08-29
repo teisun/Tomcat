@@ -18,6 +18,7 @@ import type {
   WebviewIntent,
 } from "../../../extension";
 import type { SettingsIntent } from "../../../shared/settingsProtocol";
+import { WorkbenchFindDriver } from "./workbenchFindDriver";
 
 let dummyLanguageModelRegistration: vscode.Disposable | undefined;
 type LanguageModelRegistry = {
@@ -4571,8 +4572,8 @@ function tryResolveVsCodeWindowWithTitle(
       args.push("--title", titleHint);
     }
     const raw = execFileSync("swift", args, {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     return raw ? (JSON.parse(raw) as MacWindowInfo) : null;
   } catch {
@@ -4606,16 +4607,27 @@ function captureTranscriptVisual(
     | "todo-expanded"
     | "transcript-current-attempt"
     | "tool-icons"
-    | "tool-icons-bottom",
+    | "tool-icons-bottom"
+    | "plan-find-multi"
+    | "plan-find-nav"
+    | "plan-find-cross-node"
+    | "plan-find-no-results",
   region: CaptureRegion = "window",
   titleHint?: string,
 ): void {
   try {
     const appName = vscode.env.appName || "Visual Studio Code";
-    execFileSync("open", ["-a", appName], {
-      stdio: "ignore",
-      timeout: 2_000,
-    });
+    // Foregrounding is a convenience only. On a busy Dev Host, macOS can time
+    // out while activating an already-running application; the title-qualified
+    // window lookup below remains sufficient to select the correct window.
+    try {
+      execFileSync("open", ["-a", appName], {
+        stdio: "ignore",
+        timeout: 2_000,
+      });
+    } catch {
+      /* Continue with deterministic title-based window resolution. */
+    }
     execSync("sleep 0.35");
     const targetPath = transcriptVisualArtifactPath(
       `tomcat-vsix-visual-${name}.png`,
@@ -4646,6 +4658,26 @@ function captureTranscriptVisual(
       throw new Error(`Visual capture requested but failed: ${detail}`);
     }
     /* Visual capture is optional unless the dedicated acceptance flag is set. */
+  }
+}
+
+async function capturePlanFindVisual(
+  name:
+    | "plan-find-multi"
+    | "plan-find-nav"
+    | "plan-find-cross-node"
+    | "plan-find-no-results",
+): Promise<void> {
+  const targetPath = transcriptVisualArtifactPath(`tomcat-vsix-visual-${name}.png`);
+  const driver = await WorkbenchFindDriver.connectFromEnvironment();
+  try {
+    // The Plan webview has already published its asserted state. Let Chromium
+    // composite one frame before taking a CDP screenshot of this Dev Host.
+    await pause(250);
+    const imageBase64 = await driver.captureScreenshot();
+    await fs.writeFile(targetPath, imageBase64, "base64");
+  } finally {
+    driver.close();
   }
 }
 
@@ -5627,6 +5659,8 @@ export async function assertPlanPreviewCustomEditorFlow(
   const bodyFindToken = `PLAN_BODY_FIND_${planId}`;
   const todoFindToken = `PLAN_TODO_FIND_${planId}`;
   const sharedFindToken = `PLAN_SHARED_FIND_${planId}`;
+  const crossNodeFindToken = `PLAN_CROSS_NODE_FIND_${planId}`;
+  const noResultsFindToken = `PLAN_NO_RESULTS_${planId}`;
   const fillerParagraphs = Array.from(
     { length: 24 },
     (_, index) => `Scroll filler paragraph ${index + 1}.`,
@@ -5651,7 +5685,7 @@ export async function assertPlanPreviewCustomEditorFlow(
     "",
     "# E2E heading",
     "",
-    `Body paragraph for the preview. ${bodyFindToken} ${sharedFindToken} with \`inline-code\`.`,
+    `Body paragraph for the preview. ${bodyFindToken} ${sharedFindToken} with \`inline-code\`. Cross-node ${crossNodeFindToken.slice(0, 11)}**${crossNodeFindToken.slice(11)}** match.`,
     "",
     "- First markdown selection",
     "- Second markdown selection",
@@ -5795,6 +5829,10 @@ export async function assertPlanPreviewCustomEditorFlow(
       instanceBeforeFind,
       "expected opening Find and matching body/todo text not to rebuild the Plan webview",
     );
+    const firstFindScrollTop = afterFind.contentScrollTop;
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      await capturePlanFindVisual("plan-find-multi");
+    }
 
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
       kind: "clickSelector",
@@ -5810,6 +5848,70 @@ export async function assertPlanPreviewCustomEditorFlow(
       instanceBeforeFind,
       "expected navigating Find matches not to rebuild the Plan webview",
     );
+    assert.ok(
+      afterFind.contentScrollTop !== null &&
+        firstFindScrollTop !== null &&
+        afterFind.contentScrollTop > firstFindScrollTop + 100,
+      `expected Next to centre the lower match, first=${String(firstFindScrollTop)} next=${String(afterFind.contentScrollTop)}`,
+    );
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      await capturePlanFindVisual("plan-find-nav");
+    }
+
+    // Wrapping from the lower todo back to the first body result must also
+    // recenter it. This previously left "1 of N" at the bottom while its
+    // highlighted first result was off-screen.
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "clickSelector",
+      selector: '[data-testid="plan-find-next"]',
+    });
+    afterFind = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) =>
+        snapshot.findCountText === "1 of 2" &&
+        snapshot.contentScrollTop !== null &&
+        firstFindScrollTop !== null &&
+        snapshot.contentScrollTop <= firstFindScrollTop + 32,
+    );
+    assert.ok(
+      afterFind.contentScrollTop !== null &&
+        firstFindScrollTop !== null &&
+        afterFind.contentScrollTop <= firstFindScrollTop + 32,
+      `expected wrapping to the first match to restore its centred viewport, initial=${String(firstFindScrollTop)} wrapped=${String(afterFind.contentScrollTop)}`,
+    );
+
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "setFindQuery",
+      query: crossNodeFindToken,
+    });
+    afterFind = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.findCountText === "1 of 1",
+    );
+    assert.equal(
+      afterFind.webviewInstanceId,
+      instanceBeforeFind,
+      "expected a split inline Find match not to rebuild the Plan webview",
+    );
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      await capturePlanFindVisual("plan-find-cross-node");
+    }
+
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "setFindQuery",
+      query: noResultsFindToken,
+    });
+    afterFind = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.findCountText === "No results",
+    );
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      await capturePlanFindVisual("plan-find-no-results");
+    }
+
 
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
       kind: "setFindQuery",
@@ -5855,6 +5957,13 @@ export async function assertPlanPreviewCustomEditorFlow(
       instanceBeforeFind,
       "expected closing Find after a todo match not to rebuild the Plan webview",
     );
+
+    // The screenshot acceptance only needs the four Find states above. Keep it
+    // isolated from the unrelated, lazy Mermaid integration path, which can
+    // transiently make the Extension Host unresponsive on macOS.
+    if (process.env.TOMCAT_E2E_PLAN_FIND_CAPTURE_ONLY === "1") {
+      return;
+    }
 
     // The ```mermaid``` fence renders to an inline SVG diagram (lazy-loaded).
     const mermaid = await waitForPlanPreviewDom(

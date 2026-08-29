@@ -99,6 +99,16 @@ export function ModelPicker({
   const configModel =
     models.find((model) => model.id === configModelId) ?? null;
 
+  useEffect(() => {
+    if (!open || !selectedModelId) {
+      return;
+    }
+    const selectedOption = optionRefs.current[selectedModelId];
+    if (typeof selectedOption?.scrollIntoView === "function") {
+      selectedOption.scrollIntoView({ block: "nearest" });
+    }
+  }, [open, selectedModelId]);
+
   const clearCloseTimer = () => {
     if (closeConfigTimer.current !== null) {
       window.clearTimeout(closeConfigTimer.current);

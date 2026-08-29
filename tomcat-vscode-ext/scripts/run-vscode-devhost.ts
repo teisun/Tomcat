@@ -35,7 +35,11 @@ async function main(): Promise<void> {
   );
   const fixture = await createHostE2eFixture();
   const extensionTestsEnv = { ...fixture.env };
-  for (const name of ["TOMCAT_E2E_SCREENSHOT", "TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR"]) {
+  for (const name of [
+    "TOMCAT_E2E_SCREENSHOT",
+    "TOMCAT_E2E_PLAN_FIND_CAPTURE_ONLY",
+    "TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR",
+  ]) {
     const value = process.env[name];
     if (value) {
       extensionTestsEnv[name] = value;

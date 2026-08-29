@@ -45,7 +45,13 @@ suite("Tomcat host E2E", () => {
     await assertWebviewCompletedPlanStaysInChat(api);
   });
 
-  test("renders the .plan.md custom editor (hybrid default), mode switch, hot reload, and selection-to-chat", async () => {
+  test("renders the .plan.md custom editor (hybrid default), mode switch, hot reload, and selection-to-chat", async function () {
+    // Visual acceptance deliberately records four real window frames in this
+    // already broad flow. Keep the regular timeout unchanged, but give that
+    // explicitly requested I/O work enough room when screenshot mode is on.
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      this.timeout(90_000);
+    }
     const api = await getTomcatExtensionApi();
     await assertPlanPreviewCustomEditorFlow(api);
   });

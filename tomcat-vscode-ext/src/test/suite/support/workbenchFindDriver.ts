@@ -277,6 +277,17 @@ export class WorkbenchFindDriver {
     );
   }
 
+  async captureScreenshot(): Promise<string> {
+    const result = await this.cdp.send("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+    }) as { data?: unknown };
+    if (typeof result.data !== "string" || result.data.length === 0) {
+      throw new Error("CDP did not return a PNG screenshot");
+    }
+    return result.data;
+  }
+
   close(): void {
     this.cdp.close();
   }

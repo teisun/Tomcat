@@ -2,122 +2,202 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PlanFindMatch } from "./planFindEngine";
 import {
+  centerPlanFindMatch,
   clearPlanFindHighlights,
   paintPlanFindHighlights,
-  scrollPlanFindMatchIntoView,
+  setPlanFindActiveHighlight,
 } from "./planFindHighlight";
 
-function makeMatch(text = "A plan match", start = 2, end = 6): PlanFindMatch {
-  return { end, node: document.createTextNode(text), start };
+function makeMatch(
+  text = "A plan match",
+  start = 2,
+  end = 6,
+  parent: Node = document.body,
+): PlanFindMatch {
+  const node = document.createTextNode(text);
+  parent.appendChild(node);
+  return { segments: [{ end, node, start }] };
 }
 
-const originalCss = globalThis.CSS;
-const originalHighlight = (globalThis as typeof globalThis & {
-  Highlight?: unknown;
-}).Highlight;
+function makeSplitMatch(parent: Node = document.body): PlanFindMatch {
+  const first = document.createTextNode("up");
+  const second = document.createTextNode("date");
+  parent.appendChild(first);
+  parent.appendChild(second);
+  return {
+    segments: [
+      { end: 2, node: first, start: 0 },
+      { end: 4, node: second, start: 0 },
+    ],
+  };
+}
+
+function rect(top: number, bottom: number): DOMRect {
+  return {
+    bottom,
+    height: bottom - top,
+    left: 0,
+    right: 100,
+    toJSON: () => ({}),
+    top,
+    width: 100,
+    x: 0,
+    y: top,
+  } as DOMRect;
+}
+
+const rangeRectDescriptor = Object.getOwnPropertyDescriptor(
+  Range.prototype,
+  "getBoundingClientRect",
+);
 
 afterEach(() => {
-  Object.defineProperty(globalThis, "CSS", {
-    configurable: true,
-    value: originalCss,
-    writable: true,
-  });
-  Object.defineProperty(globalThis, "Highlight", {
-    configurable: true,
-    value: originalHighlight,
-    writable: true,
-  });
+  clearPlanFindHighlights();
+  vi.restoreAllMocks();
+  if (rangeRectDescriptor) {
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", rangeRectDescriptor);
+  } else {
+    delete (Range.prototype as unknown as { getBoundingClientRect?: unknown })
+      .getBoundingClientRect;
+  }
   document.body.replaceChildren();
 });
 
 describe("Plan find highlights", () => {
-  it("does nothing when CSS Custom Highlight is unavailable", () => {
-    Object.defineProperty(globalThis, "CSS", {
-      configurable: true,
-      value: undefined,
-      writable: true,
-    });
-    Object.defineProperty(globalThis, "Highlight", {
-      configurable: true,
-      value: undefined,
-      writable: true,
-    });
-
-    expect(() => paintPlanFindHighlights([makeMatch()], 0)).not.toThrow();
-    expect(() => clearPlanFindHighlights()).not.toThrow();
-  });
-
-  it("registers all matches and the active match separately", () => {
-    const registry = new Map<string, unknown>();
-    const Highlight = vi.fn(function (...ranges: Range[]) {
-      return { ranges };
-    });
-    Object.defineProperty(globalThis, "CSS", {
-      configurable: true,
-      value: { highlights: registry },
-      writable: true,
-    });
-    Object.defineProperty(globalThis, "Highlight", {
-      configurable: true,
-      value: Highlight,
-      writable: true,
-    });
-
-    const first = makeMatch("first plan", 6, 10);
-    const second = makeMatch("second plan", 7, 11);
-    paintPlanFindHighlights([first, second], 1);
-
-    expect(registry.get("tc-plan-find")).toEqual({
-      ranges: expect.arrayContaining([expect.any(Range)]),
-    });
-    expect((registry.get("tc-plan-find") as { ranges: Range[] }).ranges).toHaveLength(2);
-    expect((registry.get("tc-plan-find-active") as { ranges: Range[] }).ranges).toHaveLength(1);
-    expect(Highlight).toHaveBeenCalledTimes(2);
-
-    clearPlanFindHighlights();
-    expect(registry.has("tc-plan-find")).toBe(false);
-    expect(registry.has("tc-plan-find-active")).toBe(false);
-  });
-
-  it("centres the active match in the content scroller", () => {
+  it("uses inline spans that stay attached to the matching text while the plan scrolls", () => {
     const container = document.createElement("main");
-    const text = document.createTextNode("plan");
-    container.append(text);
     document.body.append(container);
-    const match = { end: 4, node: text, start: 0 };
-    Object.defineProperty(container, "clientHeight", { value: 200 });
-    vi.spyOn(container, "getBoundingClientRect").mockReturnValue({
-      bottom: 200,
-      height: 200,
-      left: 0,
-      right: 0,
-      toJSON: () => ({}),
-      top: 0,
-      width: 0,
-      x: 0,
-      y: 0,
-    });
-    const rangePrototype = Range.prototype as Range & {
-      getBoundingClientRect?: () => DOMRect;
-    };
-    Object.defineProperty(rangePrototype, "getBoundingClientRect", {
+    const match = makeMatch("plan", 0, 4, container);
+
+    paintPlanFindHighlights([match], 0);
+    const highlight = container.querySelector<HTMLElement>(
+      ".tc-plan-find-fallback-highlight",
+    );
+    expect(highlight).not.toBeNull();
+    expect(highlight?.textContent).toBe("plan");
+    expect(highlight?.classList.contains("tc-plan-find-fallback-highlight--active")).toBe(
+      true,
+    );
+
+    container.scrollTop = 48;
+    container.dispatchEvent(new Event("scroll"));
+
+    // Find deliberately has no scroll listener or geometry layer. Browser text
+    // layout moves the same inline span with its glyphs.
+    expect(container.querySelector(".tc-plan-find-fallback-highlight")).toBe(highlight);
+    expect(highlight?.style.position).toBe("");
+  });
+
+  it("keeps all candidates mounted and only changes the current candidate on navigation", () => {
+    const first = makeMatch("first plan", 6, 10);
+    const second = makeSplitMatch();
+
+    paintPlanFindHighlights([first, second], 1);
+    const candidates = Array.from(
+      document.querySelectorAll<HTMLElement>(".tc-plan-find-fallback-highlight"),
+    );
+    expect(candidates).toHaveLength(3);
+    expect(
+      document.querySelectorAll(".tc-plan-find-fallback-highlight--active"),
+    ).toHaveLength(2);
+
+    setPlanFindActiveHighlight([first, second], 0);
+
+    expect(
+      Array.from(document.querySelectorAll(".tc-plan-find-fallback-highlight")),
+    ).toEqual(candidates);
+    expect(
+      document.querySelectorAll(".tc-plan-find-fallback-highlight--active"),
+    ).toHaveLength(1);
+    expect(candidates[0].classList.contains("tc-plan-find-fallback-highlight--active")).toBe(
+      true,
+    );
+  });
+
+  it("restores the untouched source text when Find closes or the query changes", () => {
+    const container = document.createElement("main");
+    document.body.append(container);
+    const match = makeMatch("plan", 0, 4, container);
+
+    paintPlanFindHighlights([match], 0);
+    clearPlanFindHighlights();
+
+    expect(container.textContent).toBe("plan");
+    expect(container.querySelector(".tc-plan-find-fallback-highlight")).toBeNull();
+  });
+
+  it("centres an explicitly selected match even when it is already visible", () => {
+    const container = document.createElement("main");
+    document.body.append(container);
+    const match = makeMatch("plan", 0, 4, container);
+    Object.defineProperty(container, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(container, "scrollHeight", { configurable: true, value: 1000 });
+    container.scrollTop = 75;
+    vi.spyOn(container, "getBoundingClientRect").mockReturnValue(rect(0, 200));
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
       configurable: true,
-      value: () => ({
-        bottom: 130,
-        height: 20,
-        left: 0,
-        right: 0,
-        toJSON: () => ({}),
-        top: 110,
-        width: 10,
-        x: 0,
-        y: 110,
-      }),
+      value: () => rect(100, 120),
       writable: true,
     });
 
-    scrollPlanFindMatchIntoView(match, container);
+    centerPlanFindMatch(match, container);
 
-    expect(container.scrollTop).toBe(20);
+    // Match centre 110px moves to the 100px viewport centre.
+    expect(container.scrollTop).toBe(85);
+  });
+
+  it("navigates with the actual decorated element instead of a stale source range", () => {
+    const container = document.createElement("main");
+    document.body.append(container);
+    const match = makeMatch("plan", 0, 4, container);
+    Object.defineProperty(container, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(container, "scrollHeight", { configurable: true, value: 1000 });
+    container.scrollTop = 100;
+    vi.spyOn(container, "getBoundingClientRect").mockReturnValue(rect(0, 200));
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => rect(-500, -480),
+      writable: true,
+    });
+
+    paintPlanFindHighlights([match], 0);
+    const highlight = container.querySelector<HTMLElement>(
+      ".tc-plan-find-fallback-highlight",
+    );
+    vi.spyOn(highlight!, "getBoundingClientRect").mockReturnValue(rect(150, 170));
+
+    centerPlanFindMatch(match, container);
+
+    expect(container.scrollTop).toBe(160);
+  });
+
+  it("centres the selection in the readable area below fixed Find chrome", () => {
+    const container = document.createElement("main");
+    const find = document.createElement("section");
+    find.className = "tc-plan-find";
+    document.body.append(container, find);
+    const match = makeMatch("plan", 0, 4, container);
+    Object.defineProperty(container, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(container, "scrollHeight", { configurable: true, value: 1000 });
+    container.scrollTop = 100;
+    vi.spyOn(container, "getBoundingClientRect").mockReturnValue(rect(0, 200));
+    vi.spyOn(find, "getBoundingClientRect").mockReturnValue(rect(0, 40));
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => rect(20, 40),
+      writable: true,
+    });
+
+    centerPlanFindMatch(match, container);
+
+    // Readable area is 40–200px; the 30px match centre moves to its 120px centre.
+    expect(container.scrollTop).toBe(10);
+  });
+
+  it("safely skips centring when range geometry is unavailable", () => {
+    const container = document.createElement("main");
+    document.body.append(container);
+
+    expect(() => centerPlanFindMatch(makeMatch("plan", 0, 4, container), container)).not.toThrow();
   });
 });

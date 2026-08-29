@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-27 21:24 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-29 13:07 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Plan Preview Find 已从会漂移的 fixed 几何覆盖层改为文本内联装饰：所有命中和当前命中分别保留，箭头导航只切换当前 class；高亮随真实文字排版滚动，不会飘到无关位置。当前命中通过真实 `span.scrollIntoView({ block: "center" })` 居中，避免环回第一个匹配时计数已更新但视口仍停在底部。`MarkdownBody` 对未变的正文/行映射做 memo，防止无关宿主状态刷新替换命中节点。验证：Find focused GUI 测试 34 passed、`tsc --noEmit`、真实 Dev Host `.plan.md` E2E（含末尾命中、环回首项的滚动断言和截图）均通过；纯插件 `tomcat-vscode-ext-0.1.50.vsix` 已重打，SHA-256=`f100696e3cbf5fc304e45bf88fab8cb286971b58642e67151cb9258ebe923506`。@2026-08-29
 - [✓] **[P0]** `read` 去重不再把不同排版当成同一次读取：新增 `ReadRenderMode` 统一普通文本、普通行号与 hashline 的实际输出形态；仅当文件未变、上次范围覆盖本次请求、排版相同且旧 tool 结果仍在上下文时才返回 `File unchanged` stub，否则重新读取真实内容。executor 的预算计算与最终渲染共用同一归一逻辑；stub 明确提示用 `line_numbers` / `hashline` 取得另一种排版而非改文件。补齐形态互切黑白盒测试和 Layer 0 驱逐后必须真读的集成回归；`code_review_is_stale` 同步按 Clippy 建议收敛。CLI `0.1.37 → 0.1.38`、扩展 `0.1.49 → 0.1.50`、bundled CLI `0.1.37 → 0.1.38`；`release-version check` 通过，纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 已生成且不含 `bin/tomcat`。验证：`cargo fmt --check`、Clippy、read/dedup/edit 相关单测与集成测试、`git diff --check`、`npm run package:vsix` 均通过；Cov% 未跑 tarpaulin，仍为 —。@2026-08-27
 - [✓] **(版本发布)** CLI `0.1.36 → 0.1.37`、扩展 `0.1.48 → 0.1.49`、bundled CLI `0.1.36 → 0.1.37`：使用 `node scripts/release-version.mjs bump --all patch` 统一更新权威版本清单与 Cargo/npm 镜像，随后 `node scripts/release-version.mjs check` 通过；Cov% 未跑 tarpaulin，仍为 —。@2026-08-26
 - [✓] **[P0]** Plan 收口显式化与效率整改：`create_plan` 现在追加 runtime-owned `[gate] review` / `[gate] Acceptance`（`TodoKind` 区分 work 与 gate）；`update_plan` 用可见 gate 驱动 code review → acceptance，返回 `code_review_pass` / `green_build_pass` / 四相 `next_step`，并在代码编辑后同时使两个 gate 失效。非代码 diff 自动跳过两个 gate；验收证据仍要求真实后台任务、exit 0 与编辑后新鲜度。executor/planner/verification prompt 与通用 verify skill 同步明确 focused 检查和最终验收的分工。另完成子 Agent unattended retry 解耦、seed brief transcript 审计落盘、reviewer 相对路径/cwd 纠偏与不存在路径的真实根回显；删除已废弃的隐式收口状态机并补齐 acceptance 拒绝分支与同源文案测试。验证：`cargo build -p tomcat`、`cargo test -p tomcat --lib`（2670 passed, 1 ignored）、`plan_e2e_with_mock_llm_tests`（15 passed）、`cargo fmt --check`、`git diff --check` 均通过；Cov% 未跑 tarpaulin，仍为 —。@2026-08-26
@@ -71,6 +72,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- Plan Preview Find：新增内部 `PlanFindController` / `usePlanFind` 生命周期边界；Find 装饰使用 `.tc-plan-find-fallback-highlight` 文字内联 span，不新增宿主 RPC 或外部 wire 协议。
 - Plan close-out：`TodoItem.kind`（`work|gate_code_review|gate_acceptance`）与 `update_plan` result 的 `code_review_pass` / `green_build_pass` / `next_step{phase,hint}`；`create_plan` result 的 `items[]` 现在含两条 runtime-owned gate。`AgentLoopConfig.unattended_retry` 显式选择 headless retry 预算；CodeReview result 新增 `non_blocking_findings` / `p2_guidance`。
 - 压缩：新增 session 派生侧车 `<session_id>.user_messages.jsonl`（与 transcript 同目录）；`ensure_user_message_sidecar` / `ensure_user_message_sidecar_current`；`machine_block::render_with_sidecar`；`SummaryRequestOptions.transcript_path`；verbatim 候选收紧为 `kind.is_normal()`；UPDATE 时 `messages_to_text` 对 `CompactionSummary` 先 `machine_block::strip`。
 - Session：枚举/附件引用只认主 transcript（排除 `*.user_messages.jsonl`）；`delete_session` 同步删除侧车。
@@ -151,6 +153,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-29 13:07）：Plan Preview Find 移除 fixed 几何覆盖层，改为内联文本装饰并由浏览器定位真实当前 span；补齐命中导航的末尾→首项环回滚动 E2E。Find GUI focused 34 passed、`npm run lint`、真实 Dev Host `.plan.md` E2E 和 `npm run package:vsix` 均通过；Cov% 未跑，仍为 —。
 - 最新补充（2026-08-11 16:46）：user-message sidecar + UPDATE 机器区双通道 strip 已落地；计划 green build（fmt / clippy -D warnings / release / 串行 lib / context_management_tests）通过。Cov% 仍为 —。
 - 最新补充（2026-08-10 23:10）：Composer 撤销不再冒泡到 VS Code workbench；GUI Composer 定向单测与只读计划预览 undo 守卫 E2E 通过；`npm run lint` 绿；版本已升 CLI `0.1.36` / 扩展 `0.1.48` / bundled CLI `0.1.36`；本机纯插件 `tomcat-vscode-ext-0.1.48.vsix`。Cov% 仍为 —。
 - 最新补充（2026-08-10 21:11）：计划预览已改成只读自定义编辑器，磁盘成为唯一权威；watcher/serve 两路刷新均只读磁盘，手改仅走原生 Markdown 编辑器。Provider 46、GUI 19、serve plan event 与聚焦 devhost `.plan.md` E2E 通过；全量扩展集成/host E2E 的既有 fixture 失败详见 BLOCKED。版本已升 CLI `0.1.35` / 扩展 `0.1.47` / bundled CLI `0.1.35`；Cov% 仍为 —。

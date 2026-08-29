@@ -1,27 +1,61 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+
 import { buildDecoratedHtml, flashCopyButton } from "./markdown/markdownDecorators";
 import { renderMermaidBlocks } from "./markdown/markdownRuntime";
 import type { PathResolution } from "../types";
 
-/**
- * Render the plan body markdown as sanitized HTML. Links never navigate the
- * webview directly — clicks are intercepted and forwarded to the host via
- * `onOpenLink`, matching the strict CSP (no inline scripts, no navigation).
- */
-export function MarkdownBody({
-  markdown,
-  onOpenFile,
-  onOpenLink,
-  resolvePaths,
-  sourceLineMap,
-}: {
+interface MarkdownBodyProps {
   markdown: string;
   onOpenFile?(path: string, line?: number): void;
   onOpenLink(href: string): void;
   resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   /** 1-based source file line for each line of `markdown` (see planDocument). */
   sourceLineMap?: number[];
-}) {
+}
+
+function sameSourceLineMap(
+  previous: readonly number[] | undefined,
+  next: readonly number[] | undefined,
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (!previous || !next || previous.length !== next.length) {
+    return false;
+  }
+  return previous.every((line, index) => line === next[index]);
+}
+
+/**
+ * Find decorations are real inline nodes. Unrelated host-state updates must not
+ * ask React to reset MarkdownBody's `dangerouslySetInnerHTML`, because doing so
+ * detaches those nodes between a Find navigation click and its reveal call.
+ */
+function areMarkdownBodyPropsEqual(
+  previous: Readonly<MarkdownBodyProps>,
+  next: Readonly<MarkdownBodyProps>,
+): boolean {
+  return (
+    previous.markdown === next.markdown &&
+    previous.onOpenFile === next.onOpenFile &&
+    previous.onOpenLink === next.onOpenLink &&
+    previous.resolvePaths === next.resolvePaths &&
+    sameSourceLineMap(previous.sourceLineMap, next.sourceLineMap)
+  );
+}
+
+/**
+ * Render the plan body markdown as sanitized HTML. Links never navigate the
+ * webview directly — clicks are intercepted and forwarded to the host via
+ * `onOpenLink`, matching the strict CSP (no inline scripts, no navigation).
+ */
+export const MarkdownBody = memo(function MarkdownBody({
+  markdown,
+  onOpenFile,
+  onOpenLink,
+  resolvePaths,
+  sourceLineMap,
+}: MarkdownBodyProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pathResolutions, setPathResolutions] = useState<ReadonlyMap<string, PathResolution>>(
     () => new Map(),
@@ -128,4 +162,4 @@ export function MarkdownBody({
       ref={containerRef}
     />
   );
-}
+}, areMarkdownBodyPropsEqual);

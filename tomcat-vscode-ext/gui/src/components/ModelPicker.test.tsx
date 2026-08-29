@@ -101,7 +101,32 @@ describe("ModelPicker", () => {
     expect(screen.queryByText("plain-model")).toBeNull();
   });
 
+  it("scrolls the selected model into view when the dropdown opens", () => {
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      renderPicker();
+      fireEvent.click(screen.getByTestId("model-select"));
+
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+
+      fireEvent.change(screen.getByLabelText("Search models"), {
+        target: { value: "5.6 terra" },
+      });
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    } finally {
+      if (originalScrollIntoView === undefined) {
+        delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+      } else {
+        HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+      }
+    }
+  });
+
   it("keeps the independent configuration portal open while Context and Effort options are clicked", () => {
+
     const { onSelectContextWindow, onSelectThinkingLevel } = renderPicker();
     fireEvent.click(screen.getByTestId("model-select"));
     const selectedOption = modelOption("fcodex/gpt-5.6-terra");

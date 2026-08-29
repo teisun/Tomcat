@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { collectPlanFindMatches } from "./planFindEngine";
 
@@ -26,13 +26,17 @@ describe("collectPlanFindMatches", () => {
     const matches = collectPlanFindMatches(root, "update");
 
     expect(matches).toHaveLength(4);
-    expect(matches.map((match) => [match.start, match.end])).toEqual([
-      [0, 6],
-      [7, 13],
-      [14, 20],
-      [22, 28],
+    expect(
+      matches.map((match) =>
+        match.segments.map((segment) => [segment.start, segment.end]),
+      ),
+    ).toEqual([
+      [[0, 6]],
+      [[7, 13]],
+      [[14, 20]],
+      [[22, 28]],
     ]);
-    expect(matches.map((match) => match.node.data)).toEqual([
+    expect(matches.map((match) => match.segments[0].node.data)).toEqual([
       "Update update UPDATES update",
       "Update update UPDATES update",
       "Update update UPDATES update",
@@ -40,7 +44,7 @@ describe("collectPlanFindMatches", () => {
     ]);
   });
 
-  it("finds matches in separate rendered text nodes in document order", () => {
+  it("finds matches in separate rendered blocks in document order", () => {
     const root = createRoot(
       '<div data-testid="plan-markdown-body"><p>First PLAN match</p></div><ul data-testid="plan-todo-list"><li>Second plan match</li></ul>',
     );
@@ -48,11 +52,11 @@ describe("collectPlanFindMatches", () => {
     const matches = collectPlanFindMatches(root, "plan");
 
     expect(matches).toHaveLength(2);
-    expect(matches.map((match) => match.node.parentElement?.textContent)).toEqual([
+    expect(matches.map((match) => match.segments[0].node.parentElement?.textContent)).toEqual([
       "First PLAN match",
       "Second plan match",
     ]);
-    expect(matches.map((match) => match.start)).toEqual([6, 7]);
+    expect(matches.map((match) => match.segments[0].start)).toEqual([6, 7]);
   });
 
   it("skips text that is not visible plan copy", () => {
@@ -63,12 +67,36 @@ describe("collectPlanFindMatches", () => {
     const matches = collectPlanFindMatches(root, "plan");
 
     expect(matches).toHaveLength(1);
-    expect(matches[0].node.parentElement?.textContent).toBe("Visible plan text");
+    expect(matches[0].segments[0].node.parentElement?.textContent).toBe("Visible plan text");
   });
 
-  it("does not join text across inline formatting boundaries", () => {
+  it("joins adjacent inline formatting nodes and maps one match back to both ranges", () => {
     const root = createRoot("<p><strong>up</strong>date</p>");
 
-    expect(collectPlanFindMatches(root, "update")).toEqual([]);
+    const matches = collectPlanFindMatches(root, "update");
+
+    expect(matches).toHaveLength(1);
+    expect(matches[0].segments.map((segment) => [segment.node.data, segment.start, segment.end])).toEqual([
+      ["up", 0, 2],
+      ["date", 0, 4],
+    ]);
+  });
+
+  it("does not join text across rendered block boundaries", () => {
+    for (const html of [
+      "<p>up</p><p>date</p>",
+      "<div>up</div><div>date</div>",
+      "<section>up</section><section>date</section>",
+      "<div>up<p>unrelated</p>date</div>",
+      "<div>up<p></p>date</div>",
+    ]) {
+      expect(collectPlanFindMatches(createRoot(html), "update")).toEqual([]);
+    }
+  });
+
+  it("stops collecting at the supplied match limit", () => {
+    const root = createRoot("<p>plan plan plan</p>");
+
+    expect(collectPlanFindMatches(root, "plan", 2)).toHaveLength(2);
   });
 });
