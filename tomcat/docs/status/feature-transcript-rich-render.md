@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-29 13:33 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-29 13:38 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** Plan Preview 首帧不再被可选的 serve 初始化/模型目录请求阻塞：宿主先同步发送文档正文、待办与文件态，随后再发送模型/Build 能力的增强帧；每个面板以 generation 丢弃较晚返回的旧增强帧，避免旧正文覆盖新刷新。Plan 入口复用 `WebviewErrorBoundary`，若渲染异常会给出 Reload 页面而非空白标签。回归：慢初始化服务下仍立即收到正文帧；`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build` 和 `git diff --check` 通过。@2026-08-29
@@ -155,7 +155,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
-- 最新补充（2026-08-29 13:33）：Plan Preview 现在先展示磁盘中的计划正文和待办，不再等待 serve 初始化或模型目录；延迟增强结果受面板 generation 保护，不能覆盖较新的磁盘刷新。Plan webview 已添加错误边界，异常时显示 Reload 而不再留下空白。验证：`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build`、`git diff --check` 全绿；尚未重打 VSIX，待用户确认。Cov% 未跑，仍为 —。
+- 最新补充（2026-08-29 13:38）：Plan Preview 现在先展示磁盘中的计划正文和待办，不再等待 serve 初始化或模型目录；延迟增强结果受面板 generation 保护，不能覆盖较新的磁盘刷新。Plan webview 已添加错误边界，异常时显示 Reload 而不再留下空白。验证：`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build`、`git diff --check` 全绿；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 已重打（1,590,261 bytes，SHA-256 `361d3cb5447625d25d9b74a69694df19cda89bfe159375c24457eec062873d74`，包内无 `bin/tomcat`）。Cov% 未跑，仍为 —。
 - 最新补充（2026-08-29 13:07）：Plan Preview Find 移除 fixed 几何覆盖层，改为内联文本装饰并由浏览器定位真实当前 span；补齐命中导航的末尾→首项环回滚动 E2E。Find GUI focused 34 passed、`npm run lint`、真实 Dev Host `.plan.md` E2E 和 `npm run package:vsix` 均通过；Cov% 未跑，仍为 —。
 - 最新补充（2026-08-11 16:46）：user-message sidecar + UPDATE 机器区双通道 strip 已落地；计划 green build（fmt / clippy -D warnings / release / 串行 lib / context_management_tests）通过。Cov% 仍为 —。
 - 最新补充（2026-08-10 23:10）：Composer 撤销不再冒泡到 VS Code workbench；GUI Composer 定向单测与只读计划预览 undo 守卫 E2E 通过；`npm run lint` 绿；版本已升 CLI `0.1.36` / 扩展 `0.1.48` / bundled CLI `0.1.36`；本机纯插件 `tomcat-vscode-ext-0.1.48.vsix`。Cov% 仍为 —。
