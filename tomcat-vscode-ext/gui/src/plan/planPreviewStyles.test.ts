@@ -36,8 +36,9 @@ describe("Plan preview reading CSS contract", () => {
     expect(css).toContain("stroke: CanvasText");
     expect(css).toContain("fill: Highlight");
   });
-  it("defines a theme-aware fixed Find widget and separate all/current match highlights", () => {
-    expect(rule(".tc-plan-find")).toContain("position: fixed");    expect(rule(".tc-plan-preview--find-open .tc-plan-preview__content")).toContain(
+  it("defines a theme-aware fixed Find widget and inline normal/current highlights", () => {
+    expect(rule(".tc-plan-find")).toContain("position: fixed");
+    expect(rule(".tc-plan-preview--find-open .tc-plan-preview__content")).toContain(
       "padding-top: 48px",
     );
 
@@ -46,12 +47,14 @@ describe("Plan preview reading CSS contract", () => {
     expect(rule(".tc-plan-find__count--empty")).toContain(
       "var(--vscode-inputValidation-errorForeground",
     );
-    expect(rule("::highlight(tc-plan-find)")).toContain(
-      "var(--vscode-editor-findMatchHighlightBackground",
-    );
-    expect(rule("::highlight(tc-plan-find-active)")).toContain(
-      "var(--vscode-editor-findMatchBackground",
-    );
+
+    const normalMatch = rule(".tc-plan-find-fallback-highlight");
+    const activeMatch = rule(".tc-plan-find-fallback-highlight--active");
+    expect(normalMatch).toContain("rgba(215, 186, 75, 0.28)");
+    expect(activeMatch).toContain("rgba(230, 187, 50, 0.46)");
+    expect(normalMatch).not.toContain("text-decoration");
+    expect(activeMatch).not.toContain("text-decoration");
+    expect(css).not.toContain("::highlight(tc-plan-find)");
   });
 
 });

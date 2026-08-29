@@ -686,6 +686,28 @@ describe("PlanPreviewEditorProvider active-panel + native controls", () => {
   });
 });
 
+  it("posts the document before a slow model service has initialized", async () => {
+    const provider = new PlanPreviewEditorProvider(
+      makeDeps({
+        ensureInitialized: vi.fn().mockImplementation(
+          () => new Promise<InitializeResult>(() => undefined),
+        ),
+      }),
+    );
+
+    const { panel } = await resolveEditor(
+      provider,
+      PLAN_TEXT,
+      "/workspace/plans/slow-service.plan.md",
+    );
+
+    expect(panel.webview.lastState()).toMatchObject({
+      availableModels: [],
+      bodyMarkdown: expect.stringContaining("Body paragraph."),
+      canBuild: false,
+    });
+  });
+
 describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
   it("opens an opaque readonly document with no text buffer or save capability", () => {
     const provider = new PlanPreviewEditorProvider(makeDeps());
@@ -823,12 +845,16 @@ describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
     ).postSnapshot(planPath, PLAN_TEXT, { toolbarStyle: "hybrid" });
 
     expect(hostRefreshCounters(provider).hostStatePostAttempts).toBe(before.hostStatePostAttempts + 1);
-    expect(hostRefreshCounters(provider).hostStatePostDeliveries).toBe(before.hostStatePostDeliveries);
+    await flush();
+    expect(hostRefreshCounters(provider).hostStatePostDeliveries).toBe(
+      before.hostStatePostDeliveries + 1,
+    );
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Body paragraph.");
 
     resolveSnapshot(initialSnapshot!);
     await postSnapshot;
     expect(hostRefreshCounters(provider).hostStatePostDeliveries).toBe(
-      before.hostStatePostDeliveries + 1,
+      before.hostStatePostDeliveries + 2,
     );
   });
 

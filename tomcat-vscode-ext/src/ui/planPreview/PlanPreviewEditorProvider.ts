@@ -147,6 +147,8 @@ interface PlanPanelEntry {
   canonicalPath: string;
   getText(): string;
   panel: vscode.WebviewPanel;
+  /** Increments for every refresh so a slow enrichment cannot overwrite newer text. */
+  snapshotGeneration: number;
   watcher: vscode.FileSystemWatcher;
   watcherSubscriptions: vscode.Disposable[];
 }
@@ -238,6 +240,7 @@ export class PlanPreviewEditorProvider
       canonicalPath: normalizePlanPath(fsPath),
       getText: () => fs.readFileSync(fsPath, "utf8"),
       panel: webviewPanel,
+      snapshotGeneration: 0,
       watcher,
       watcherSubscriptions,
     });
@@ -445,11 +448,31 @@ export class PlanPreviewEditorProvider
     if (!entry) {
       return;
     }
-    // Count before snapshot construction: a stalled model/capability lookup is
-    // itself the diagnostic result, distinct from a missing panel or delivery
-    // failure.
+    // The document is the primary artifact. Do not leave its webview blank
+    // while an optional serve initialization/model request is still pending.
+    const generation = ++entry.snapshotGeneration;
     this.hostStatePostAttempts += 1;
-    const snapshot = await this.buildState(text, path, ui);
+    await this.deliverSnapshot(
+      path,
+      entry,
+      this.buildImmediateState(text, path, ui),
+    );
+
+    const enriched = await this.buildState(text, path, ui);
+    if (
+      this.panels.get(path) !== entry ||
+      entry.snapshotGeneration !== generation
+    ) {
+      return;
+    }
+    await this.deliverSnapshot(path, entry, enriched);
+  }
+
+  private async deliverSnapshot(
+    path: string,
+    entry: PlanPanelEntry,
+    snapshot: PlanPreviewStateSnapshot,
+  ): Promise<void> {
     this.panelCanBuild.set(path, snapshot.canBuild);
     this.panelPlanId.set(path, snapshot.planId);
     const frame: PlanPreviewHostFrame = {
@@ -531,6 +554,35 @@ export class PlanPreviewEditorProvider
       throw new Error(`No plan preview panel is open for ${planPath}`);
     }
     return entry.panel;
+  }
+
+  /**
+   * Synchronous document-only frame. Optional model/capability enrichment is
+   * posted afterward so an unavailable or slow serve never hides Plan text.
+   */
+  private buildImmediateState(
+    text: string,
+    planPath: string,
+    ui: { stateHint?: PlanFileState | null; toolbarStyle: PlanToolbarStyle },
+  ): PlanPreviewStateSnapshot {
+    const parsed = parsePlanDocument(text);
+    return {
+      availableModels: [],
+      availableModelDetails: {},
+      bodyLineMap: parsed.bodyLineMap,
+      bodyMarkdown: parsed.bodyMarkdown,
+      buildModel: "",
+      canBuild: false,
+      overview: parsed.overview,
+      path: planPath,
+      planId: parsed.planId,
+      raw: parsed.raw,
+      sessionModel: this.deps.getSessionModel(),
+      state: ui.stateHint ?? parsed.state,
+      title: parsed.title,
+      todos: parsed.todos,
+      toolbarStyle: ui.toolbarStyle,
+    };
   }
 
   /** Pure-ish: text + path (+ host UI state) → the snapshot the webview renders. */
