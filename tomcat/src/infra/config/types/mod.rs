@@ -1,5 +1,6 @@
 //! 配置类型目录模块：拆分原 `types.rs`，保持对外导出面不变。
 
+mod connector;
 mod context;
 mod core;
 mod llm;
@@ -8,6 +9,7 @@ mod runtime;
 mod skills;
 mod tools;
 
+pub use connector::*;
 pub use context::*;
 pub use core::*;
 pub use llm::*;
@@ -49,6 +51,9 @@ pub struct AppConfig {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Optional integrations that expose external capabilities as Agent tools.
+    #[serde(default)]
+    pub connector: ConnectorConfig,
     /// PLAN 模式运行时全局参数（T2-P1-002 PR-PLA/PLB）。
     #[serde(default)]
     pub plan: PlanConfig,

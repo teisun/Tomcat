@@ -64,6 +64,8 @@ pub(crate) fn run_init() -> Result<(), AppError> {
 
     ensure_work_dir_structure(&cfg)?;
     println!("  ✓ 目录结构就绪");
+    let mcp_config_path = crate::core::connector::mcp::builtin::materialize_default_mcp_json(&cfg)?;
+    println!("  ✓ 默认 MCP 配置已就绪: {}", mcp_config_path.display());
     let sessions_path = resolve_sessions_dir(&cfg)?.join("sessions.json");
     let store = load_store(&sessions_path)?;
     if store.is_empty() {

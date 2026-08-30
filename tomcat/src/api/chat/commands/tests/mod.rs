@@ -6,6 +6,7 @@
 //! [`RUST_FILE_LINES_SPEC`]: ../../../../../docs/openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md
 
 mod cmd_compact_test;
+mod cmd_connector_test;
 mod cmd_context_test;
 mod cmd_effort_test;
 mod cmd_help_test;

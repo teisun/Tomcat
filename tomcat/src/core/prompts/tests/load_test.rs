@@ -44,6 +44,15 @@ fn verification_prompt_requires_separating_regressions_from_pre_existing_failure
 }
 
 #[test]
+fn verification_prompt_points_ui_changes_to_verify_skill() {
+    let s = load(PromptKey::SystemVerification);
+    assert!(s.contains("frontend, or VS Code webview changes"));
+    assert!(s.contains("verify\nskill's UI acceptance guidance"));
+    assert!(s.contains("PNG plus ARIA snapshot"));
+    assert!(s.contains("green-build evidence"));
+}
+
+#[test]
 fn verification_and_planner_prompts_keep_focused_and_acceptance_roles_separate() {
     let verification = load(PromptKey::SystemVerification);
     let planner = load(PromptKey::PlannerReminder);

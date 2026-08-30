@@ -16,9 +16,13 @@
 //!   `ExtensionEvent::ToolCall/ToolResult`、cancel select、push `ChatMessage::tool`、
 //!   `on_message_appended` 计费、steering break。
 
+use base64::Engine;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::llm::{ChatMessage, ContinuityMetadata, ReasoningContinuation, TokenUsage};
+use crate::core::llm::{
+    openai_files::{upload_decision_by_size, FilePurpose, OpenAiFilesRuntime, UploadDecision},
+    ChatMessage, ChatMessageContentPart, ContinuityMetadata, ReasoningContinuation, TokenUsage,
+};
 use crate::core::session::manager::INTERRUPTED_TOOL_RESULT_TEXT;
 use crate::infra::error::AppError;
 use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput};
@@ -29,14 +33,109 @@ use super::tool_summary_update;
 use super::turn_summary;
 use super::types::{AgentLoop, DispatchOutcome, LoopError, ToolCallInfo};
 
-fn plugin_tool_model_text(result: &serde_json::Value) -> String {
-    result
-        .get("content")
-        .cloned()
-        .unwrap_or_else(|| result.clone())
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| serde_json::to_string(result).unwrap_or_else(|_| String::from("{}")))
+async fn extract_tool_result_media(
+    result: &serde_json::Value,
+    files_runtime: Option<&std::sync::Arc<OpenAiFilesRuntime>>,
+) -> tool_exec::ToolExecOutcome {
+    let outer_content = result.get("content").unwrap_or(result);
+    // Plugin tools historically return a string directly. MCP's CallToolResult
+    // is wrapped by DefaultToolRegistry as { content: { content: [...] } }, so
+    // unwrap exactly one nested content field without changing text-only plugins.
+    let content = outer_content.get("content").unwrap_or(outer_content);
+    let mut text = Vec::new();
+    let mut follow_up_parts = Vec::new();
+
+    match content {
+        serde_json::Value::String(value) => text.push(value.clone()),
+        serde_json::Value::Array(blocks) => {
+            for block in blocks {
+                match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("text") => {
+                        if let Some(value) = block.get("text").and_then(serde_json::Value::as_str) {
+                            text.push(value.to_string());
+                        }
+                    }
+                    Some("image") => match mcp_image_part(block, files_runtime).await {
+                        Ok(part) => {
+                            follow_up_parts.push(part);
+                            text.push(
+                                "[Image returned; see the following user message.]".to_string(),
+                            );
+                        }
+                        Err(error) => text.push(format!("[MCP image omitted: {error}]")),
+                    },
+                    Some(kind) => text.push(format!(
+                        "[Unsupported MCP content block '{kind}': {}]",
+                        serde_json::to_string(block).unwrap_or_else(|_| "{}".to_string())
+                    )),
+                    None => {
+                        text.push(serde_json::to_string(block).unwrap_or_else(|_| "{}".to_string()))
+                    }
+                }
+            }
+        }
+        other => text.push(serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string())),
+    }
+
+    tool_exec::ToolExecOutcome {
+        model_text: text.join("\n"),
+        is_error: outer_content
+            .get("isError")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        follow_up_parts,
+        display: None,
+    }
+}
+
+async fn mcp_image_part(
+    block: &serde_json::Value,
+    files_runtime: Option<&std::sync::Arc<OpenAiFilesRuntime>>,
+) -> Result<ChatMessageContentPart, String> {
+    let mime_type = block
+        .get("mimeType")
+        .or_else(|| block.get("mime_type"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "image block is missing mimeType".to_string())?;
+    let data = block
+        .get("data")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "image block is missing base64 data".to_string())?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| format!("invalid base64: {error}"))?;
+    let decision = upload_decision_by_size(decoded.len() as u64);
+
+    if !matches!(decision, UploadDecision::InlinePreferred) {
+        if let Some(runtime) = files_runtime {
+            let file = tempfile::NamedTempFile::new()
+                .map_err(|error| format!("create temporary image: {error}"))?;
+            std::fs::write(file.path(), &decoded)
+                .map_err(|error| format!("write temporary image: {error}"))?;
+            match runtime
+                .resolve_or_upload_path(file.path(), mime_type, "mcp-image", FilePurpose::Vision)
+                .await
+            {
+                Ok(meta) => {
+                    return ChatMessageContentPart::image_file_id(meta.id)
+                        .map_err(|error| error.to_string());
+                }
+                Err(error) if matches!(decision, UploadDecision::UploadRequired) => {
+                    return Err(format!("Files API upload required but failed: {error}"));
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "MCP image upload preferred but failed; falling back to inline");
+                }
+            }
+        } else if matches!(decision, UploadDecision::UploadRequired) {
+            return Err(
+                "image is too large to inline and the current provider has no Files API runtime"
+                    .to_string(),
+            );
+        }
+    }
+
+    ChatMessageContentPart::image_base64_data(mime_type, data).map_err(|error| error.to_string())
 }
 
 fn tool_parallelism_event(
@@ -68,6 +167,45 @@ mod parallelism_metric_tests {
                 "steered": false,
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_result_media_tests {
+    use super::extract_tool_result_media;
+    use crate::core::llm::ChatMessageContentPart;
+
+    const TINY_PNG_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9p8qAAAAAASUVORK5CYII=";
+
+    #[tokio::test]
+    async fn mcp_image_block_becomes_input_image() {
+        let result = serde_json::json!({
+            "content": {
+                "content": [
+                    { "type": "text", "text": "captured" },
+                    { "type": "image", "mimeType": "image/png", "data": TINY_PNG_B64 }
+                ]
+            }
+        });
+        let outcome = extract_tool_result_media(&result, None).await;
+
+        assert!(outcome.model_text.contains("captured"));
+        assert_eq!(outcome.follow_up_parts.len(), 1);
+        assert!(matches!(
+            outcome.follow_up_parts.first(),
+            Some(ChatMessageContentPart::InputImage { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn text_only_plugin_result_preserves_prior_empty_follow_up_parts_behavior() {
+        let result = serde_json::json!({ "content": "plugin text" });
+        let outcome = extract_tool_result_media(&result, None).await;
+
+        assert_eq!(outcome.model_text, "plugin text");
+        assert!(outcome.follow_up_parts.is_empty());
+        assert!(!outcome.is_error);
     }
 }
 
@@ -310,12 +448,10 @@ pub(super) async fn run_tool_calls_with_usage(
                             return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
                         }
                         result = exec => match result {
-                            Ok(result) => tool_exec::ToolExecOutcome {
-                                model_text: plugin_tool_model_text(&result),
-                                is_error: false,
-                                follow_up_parts: Vec::new(),
-                                display: None,
-                            },
+                            Ok(result) => extract_tool_result_media(
+                                &result,
+                                agent.config.openai_files_runtime.as_ref(),
+                            ).await,
                             Err(err) => tool_exec::ToolExecOutcome::err(err.to_string()),
                         },
                     }

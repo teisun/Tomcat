@@ -77,6 +77,7 @@ pub(crate) async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json:
 }
 
 async fn observe_tool_surface(ctx: &ChatContext) -> ToolSurface {
+    ctx.spawn_connector_startup_if_needed().await;
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
     let plugin_tools = match ctx.global_services.tool_registry.list_tools(None).await {

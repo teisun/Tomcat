@@ -8,6 +8,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::BackgroundCompletionRoutes;
+use crate::core::connector::ConnectorRegistry;
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::SharedModelCatalog;
 use crate::core::plan_runtime;
@@ -34,6 +35,7 @@ pub struct GlobalServices {
     pub web_search_runtime: Arc<WebSearchRuntime>,
     pub plugin_manager: Option<Arc<PluginManager>>,
     pub plugin_function_invoker: Option<Arc<PluginFunctionInvoker>>,
+    pub connector_registry: Option<Arc<ConnectorRegistry>>,
 }
 
 pub struct ScopeContainer {
@@ -42,6 +44,7 @@ pub struct ScopeContainer {
     pub function_registry: Arc<FunctionRegistry>,
     pub plugin_manager: Option<Arc<PluginManager>>,
     pub plugin_function_invoker: Option<Arc<PluginFunctionInvoker>>,
+    pub connector_registry: Option<Arc<ConnectorRegistry>>,
     pub dispatcher: Arc<HostApiDispatcher>,
     pub skill_set: Arc<RwLock<crate::core::skill::SkillSet>>,
     pub skill_discovery_handle:

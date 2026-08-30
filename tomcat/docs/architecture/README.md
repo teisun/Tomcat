@@ -72,6 +72,7 @@
 - [`tools/`](./tools/)
 - [`skill-system.md`](./skill-system.md)
 - [`package-manager.md`](./package-manager.md)
+- [`mcp-client.md`](./mcp-client.md)：连接器(Connector)模块——连接类型 MCP/CLI/A2A（本期实现 MCP/stdio 连接器，CLI/A2A 预留）；把外部能力工具以 `mcp__{server}__{tool}` 接入工具面、结果图片复用 `follow_up_parts`/`InputImage` 回流、Chat+serve 增删查管连接器；为前端 UI 验收 Phase 2 的 `@playwright/mcp` 提供底座。
 
 ### LLM 与模型集成
 

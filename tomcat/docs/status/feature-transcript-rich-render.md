@@ -1,8 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-29 15:42 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-30 13:58 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [ ] **[P0]** 通用 UI 验收与 MCP 连接器主体已落地，待按 `connector_mcp_rectification_68b6b688` 收口验收债：`verify` managed skill 改为多文件资产并增加 UI 验收说明、Playwright bootstrap/shot 三件套（PNG/ARIA/console）及 macOS 13 系统 Chrome 回退；CSS/HTML 纳入代码门禁，主 agent 可将 shot 的成功后台任务作为绿构建证据。新增通用 `Connector` 框架，本期实现 MCP/stdio：`rmcp` 子进程传输、`mcp.json` user/workspace 配置、命令指纹信任、后台预连、Ready 后 ToolRegistry 注册、图片结果回流 `InputImage`、Chat `/connector` 与 serve 管理命令。真实 vision-LLM 的 Phase 1、Phase 2 和串联路径已作为 opt-in ignored E2E 落地；当前 review 发现浮动版本告警、连接器富状态/serve 工具查询，以及完整 P0/P1 集成测试仍待整改，故不标记分支完成。@2026-08-30
+
 - [✓] **[P0]** Composer 与 Plan Preview 本轮体验/验收闭环：完成态 plan 已不再向 Composer 注入待办 widget；Tomcat Box / Ready to chat 外壳移除右侧多余 10px 内边距；截图 E2E 窄化根节点后以 `try/finally` 恢复宽度，避免后续画面被挤压。Plan Preview 自定义编辑器 E2E 改为由已编辑正文中的唯一 token 推导真实源行，并按每次选择操作前后的引用数验证，保留重复选择不新增 chip 的断言，修复错误期望 `:0` 导致的等待超时。验证：focused Provider 47 passed、`npm run lint:extension`、`npm run test:e2e:vscode-devhost`（33 passing）、`git diff --check` 与 `npm run package:vsix` 通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix`（1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`）不含测试/源码/CLI 目录。@2026-08-29
 
 - [✓] **[P0]** Plan Preview 首帧不再被可选的 serve 初始化/模型目录请求阻塞：宿主先同步发送文档正文、待办与文件态，随后再发送模型/Build 能力的增强帧；每个面板以 generation 丢弃较晚返回的旧增强帧，避免旧正文覆盖新刷新。Plan 入口复用 `WebviewErrorBoundary`，若渲染异常会给出 Reload 页面而非空白标签。回归：慢初始化服务下仍立即收到正文帧；`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build` 和 `git diff --check` 通过。@2026-08-29
@@ -75,6 +77,8 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- Connector：新增主配置 `[connector] enabled` / `disabled` 与 `~/.tomcat/mcp.json`、`<workspace>/.tomcat/mcp.json` 的 `mcpServers` 配置面；新增 Chat `/connector {list,add,trust,deny,test,tools,remove,reload}`，以及 serve `list_connectors`、`add_connector`、`remove_connector`、`set_connector_trust`、`test_connector`、`reload_connector`、`set_connector_tool_filter` capabilities。MCP 工具在 Ready 后以 `mcp__{server}__{tool}` 注册入既有 ToolRegistry，MCP 图片结果可作为 `InputImage` 回流。
+- Verify：内置 skill 来源从单文件 `builtin_verify.md` 迁至 `assets/skills/verify/**`，由 `materialize_builtin_skills` 释放；新增 `scripts/bootstrap.mjs` / `shot.mjs` 等受管验收资产。
 - 本轮仅调整扩展内部 UI 状态选择、CSS 与 E2E 验收逻辑；不新增或改变公开 RPC、wire 字段或插件配置。
 
 - Plan Preview 状态帧仍使用既有 `PlanPreviewStateSnapshot` 协议；发送顺序调整为“文档首帧 → 可选模型/能力增强帧”，无新增外部 RPC 或 wire 字段。
@@ -83,7 +87,7 @@
 - 压缩：新增 session 派生侧车 `<session_id>.user_messages.jsonl`（与 transcript 同目录）；`ensure_user_message_sidecar` / `ensure_user_message_sidecar_current`；`machine_block::render_with_sidecar`；`SummaryRequestOptions.transcript_path`；verbatim 候选收紧为 `kind.is_normal()`；UPDATE 时 `messages_to_text` 对 `CompactionSummary` 先 `machine_block::strip`。
 - Session：枚举/附件引用只认主 transcript（排除 `*.user_messages.jsonl`）；`delete_session` 同步删除侧车。
 - Plan 收口：`update_plan` 完成态要求持久化 `code_review_pass` 与带证据的 `green_build_pass`；新增 `dispute_findings`；配置 `max_completion_gate_cycles`（默认 3）；`max_code_review_rounds` 默认改为 4。
-- 内置 skill：`materialize_builtin_skills` / `builtin_verify.md`（verify）。
+- 内置 skill：`materialize_builtin_skills` / `assets/skills/verify/SKILL.md`（verify）。
 - `edit` 工具入参收敛为 `{path, edits[]}`；`update_plan` 描述允许多至 3 个 `in_progress` todo（运行时 `MAX_IN_PROGRESS_TODOS=3`）。
 - LLM：无人值守重试尊重 `Retry-After`；Anthropic/OpenAI Responses 解析路径补齐。
 - `web_search`：对外请求使用 catalog `model_name`；hosted 失败可自动回退。
@@ -153,6 +157,7 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
+| MCP/UI 验收整改 | 代码 review 已确认主体可用，但 R7 浮动版本告警、R11 富连接器状态/serve 工具查询，以及 manager 生命周期、命令面和集成级测试尚未实现；详细范围见 `connector_mcp_rectification_68b6b688` 计划。 | 下一轮按整改计划收口 |
 | 扩展全量 integration / host E2E | 本轮 `npm run test:e2e:vscode-devhost` 已 33 passing；此前记录的 plan-state/model fixture 与 bundled CLI 夹具问题未在本次复跑范围内 | 由相关 fixture owner 单独对齐 |
 | 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但真实 `dispatch_agent > 0` 路径仍待授权验证 | 获得明确授权后，在隔离夹具中补跑一次并检查首次是否合并全部独立问题 |
 | `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；与本轮恢复整改无关 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |

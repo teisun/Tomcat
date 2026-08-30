@@ -145,7 +145,7 @@ update_plan
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 |------|------|------|------|----------|---------------|--------|
 | G1 收口范围 | 哪些完成需要代码门禁？ | **采用** 已绑定 workspace root 的 Git 路径与扩展名过滤；**拒绝** todo 分类或模型自述。 | Tomcat `plan_runtime/code_reviewer.rs::{collect_code_diff_context,is_code_path}`；cc-fork-01 `verificationAgent.ts` 接收 changed files。 | 设计：识别 tracked/untracked 代码路径并取最新 mtime。理由：工作树是可复核事实，非代码交付不应被无关构建阻塞。 | **未入选**：旧 `TodoKind`/research evidence。**拒因**：当前 `TodoItem` 没有这些字段，且它们不能说明是否改过代码。 | 用 Git 判断要不要验，不猜 todo 的意图。 |
-| G2 绿构建 | 如何证明当前代码真正验过？ | **采用** managed `verify` skill + `BashTaskRegistry` 硬核验；**拒绝**文本 PASS 和固定 `cargo check`。 | Tomcat `skill/builtin_verify.md`、`update_plan.rs::require_green_build_pass`；cc-fork-01 `verificationAgent.ts` Command/Output 契约。 | 设计：skill 发现项目命令，后台任务提供 command/task/status/time，runtime 保存核验后快照。理由：既适配多语言/项目脚本，又不信模型自述。 | **未入选**：自动 cargo/tsc 检查或旧 `VerifySummary` 放行。**拒因**：前者不覆盖项目验收，后者不在当前收口链路。 | 项目自己决定怎么测，运行时决定测没测真。 |
+| G2 绿构建 | 如何证明当前代码真正验过？ | **采用** managed `verify` skill + `BashTaskRegistry` 硬核验；**拒绝**文本 PASS 和固定 `cargo check`。 | Tomcat `assets/skills/verify/SKILL.md`、`skill/builtin.rs::materialize_builtin_skills`、`update_plan.rs::require_green_build_pass`；cc-fork-01 `verificationAgent.ts` Command/Output 契约。 | 设计：skill 发现项目命令，后台任务提供 command/task/status/time，runtime 保存核验后快照。理由：既适配多语言/项目脚本，又不信模型自述。 | **未入选**：自动 cargo/tsc 检查或旧 `VerifySummary` 放行。**拒因**：前者不覆盖项目验收，后者不在当前收口链路。 | 项目自己决定怎么测，运行时决定测没测真。 |
 | G3 review 与争议 | 什么问题阻塞、合理取舍怎样表达？ | **采用** P0/P1 阻塞，P1 可 `wontfix` 申辩；**拒绝**仅看 reviewer verdict。 | Tomcat `review.rs::Finding::tier`、`update_plan.rs::{blocking_findings,prepare_disputes}`；cc-fork-01 `verificationAgent.ts` 的有意行为复核要求。 | 设计：运行时按 severity 做最终判断，把接受的 P1 取舍注入下一轮审查。理由：避免 “pass + P1” 矛盾，也不让已确认取舍无限重报。 | **未入选**：所有 finding 阻塞或所有 finding advisory。**拒因**：前者会被 P2 死锁，后者漏掉交付风险。 | 大问题要修；小问题不挡；P1 必须留下接受理由。 |
 | G4 终止循环 | 重验反复失效时如何停？ | **采用** 持久化重验周期上限；**拒绝**无限重跑或把上限当新证据。 | Tomcat `file_store.rs::completion_gate_cycles`、`update_plan.rs::prior_gate_cycles_exhausted`、`runtime.rs::PlanConfig`；cc-fork-01 `verificationAgent.ts` 强调实际检查而非叙述。 | 设计：默认最多 3 个重新 review→build 周期；到顶 `completed + warning`。理由：显式结束空转，同时保留“本轮没有新绿构建”的事实。 | **未入选**：不设上限或自动重置所有凭据。**拒因**：前者不可终止，后者伪造 freshness。 | 到顶可以结束，但必须明说这是带警告的取舍。 |
 
@@ -155,7 +155,7 @@ update_plan
 |--------|----------------------|--------------------------|------------------|--------|
 | P1 diff 与 freshness | 代码路径筛选、mtime、持久化 pass/evidence/cycle 字段。 | `plan_runtime/code_reviewer.rs`、`plan_runtime/file_store.rs`、`update_plan.rs`。 | `green_build_gate_blocks_completion_until_pass`；mtime/cycle 边界：PENDING。 | 每份绿灯都对应一份具体代码。 |
 | P2 code review | read-only reviewer、P0/P1 判定、P1 申辩与 handoff。 | `plan_runtime/{code_reviewer.rs,review.rs}`、`update_plan.rs`。 | `only_p0_p1_block_completion_even_when_reviewer_says_pass`；`code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back`。 | 审查能真挡住大问题。 |
-| P3 verify 证据 | 内置 skill 物化、后台命令与账本准入。 | `skill/{builtin.rs,builtin_verify.md}`、`tools/primitive`、`update_plan.rs`。 | `green_build_gate_blocks_completion_until_pass`。 | skill 会找检查，账本会验收据。 |
+| P3 verify 证据 | 内置 skill 物化、后台命令与账本准入。 | `skill/builtin.rs` + `assets/skills/verify/**`、`tools/primitive`、`update_plan.rs`。 | `green_build_gate_blocks_completion_until_pass`。 | skill 会找检查，账本会验收据。 |
 | P4 收束防逃避 | 纯文本结束时的继续指令、review/build 不完整时保持 EXEC。 | `agent_loop/turn_finalize.rs::completion_guard_instruction`。 | `agent_loop/tests/completion_guard_test.rs` 的计划未收口 guard 覆盖。 | 没验完不能只写一句“完成了”。 |
 
 ---
@@ -196,7 +196,7 @@ update_plan.rs
         ├──► code_reviewer.rs + review.rs
         │      └─ Git diff、mtime、read-only P0/P1 findings
         │
-        └──► builtin_verify.md
+        └──► assets/skills/verify/SKILL.md
                └─ 发现项目检查 → 后台 bash → task_id
 
 turn_finalize.rs

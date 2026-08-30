@@ -166,7 +166,7 @@ tools/plan_tool/update_plan.rs::execute_for_tool
 |--------|----------------------|--------------------------|------------------|--------|
 | P1 代码范围与持久化门禁 | 代码路径筛选、mtime 新鲜度、PlanFile gate 字段与重验周期。 | `plan_runtime/code_reviewer.rs::{collect_code_diff_context,is_code_path}`；`plan_runtime/file_store.rs::{PlanFileFrontmatter,GreenBuildEvidence}`；`tools/plan_tool/update_plan.rs::{code_gates_are_fresh,invalidate_code_gates}`。 | `code_review_pass_completes_without_verifier`；`green_build_gate_blocks_completion_until_pass`。 | 每次最后收口都比较当前代码和已存凭据。 |
 | P2 P0/P1 review 门禁 | read-only code review、finding 机器分级、P1 申辩、结果/事件回传。 | `plan_runtime/code_reviewer.rs`；`plan_runtime/review.rs::Finding`；`tools/plan_tool/update_plan.rs::{blocking_findings,prepare_disputes}`。 | `only_p0_p1_block_completion_even_when_reviewer_says_pass`；`code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back`。 | 审查发现严重问题就留在 EXEC，修完再审。 |
-| P3 受管 verify skill | 启动后物化 `verify/SKILL.md`；P0–P5 发现顺序；只允许 bash 与后台任务工具。 | `skill/builtin.rs::materialize_builtin_skills`；`skill/builtin_verify.md`。 | `plan_runtime::tests::verifier_can_expose_load_skill_when_config_enabled`（skill 暴露策略）；收口入口由 P1/P4 锁定。 | 不把命令写死在 Rust；skill 教模型按项目事实找检查。 |
+| P3 受管 verify skill | 启动后物化 `verify/SKILL.md`；P0–P5 发现顺序；只允许 bash 与后台任务工具。 | `skill/builtin.rs::materialize_builtin_skills`；`assets/skills/verify/SKILL.md`。 | `plan_runtime::tests::verifier_can_expose_load_skill_when_config_enabled`（skill 暴露策略）；收口入口由 P1/P4 锁定。 | 不把命令写死在 Rust；skill 教模型按项目事实找检查。 |
 | P4 账本证据准入 | 精确命令、唯一 task ID、完成零退出码、开始时间新鲜度；合格快照写入 plan。 | `tools/plan_tool/update_plan.rs::require_green_build_pass`；`tools/primitive::BashTaskRegistry`。 | `green_build_gate_blocks_completion_until_pass`。 | 后台任务的真实记录才是绿构建凭据。 |
 | P5 收束与循环上限 | 文本收束 guard、review 预算、基础设施重试、重验周期上限和 warning。 | `agent_loop/turn_finalize.rs::completion_guard_instruction`；`infra/config/types/runtime.rs::PlanConfig`；`tools/plan_tool/update_plan.rs::prior_gate_cycles_exhausted`。 | `code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back`；周期上限直接测试：PENDING。 | 不让模型在未验收时只写总结离开，也不让它无限重跑。 |
 
@@ -242,7 +242,7 @@ tomcat/src/core/
 │                   │
 │       ┌───────────┴─────────────┐
 │       ▼                         ▼
-├─ plan_runtime/code_reviewer.rs  ├─ skill/builtin.rs + builtin_verify.md
+├─ plan_runtime/code_reviewer.rs  ├─ skill/builtin.rs + assets/skills/verify/**
 │    ├─ collect_code_diff_context │    └─ 物化受管 verify skill；指导发现/后台验收
 │    └─ build_code_review_prompt  │
 │       │                         ▼

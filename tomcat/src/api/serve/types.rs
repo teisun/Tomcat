@@ -366,6 +366,53 @@ pub enum ServeCommand {
         id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    ListConnectors {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    AddConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        command: String,
+        args: Vec<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoveConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetConnectorTrust {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        trusted: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    TestConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ReloadConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetConnectorToolFilter {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        #[serde(default)]
+        include: Vec<String>,
+        #[serde(default)]
+        exclude: Vec<String>,
+    },
+    #[serde(rename_all = "camelCase")]
     NewSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -581,6 +628,13 @@ impl ServeCommand {
             | Self::RemoveModel { id, .. }
             | Self::SetProviderKey { id, .. }
             | Self::ListProviderKeys { id, .. }
+            | Self::ListConnectors { id, .. }
+            | Self::AddConnector { id, .. }
+            | Self::RemoveConnector { id, .. }
+            | Self::SetConnectorTrust { id, .. }
+            | Self::TestConnector { id, .. }
+            | Self::ReloadConnector { id, .. }
+            | Self::SetConnectorToolFilter { id, .. }
             | Self::NewSession { id, .. }
             | Self::SwitchSession { id, .. }
             | Self::GetMessages { id, .. }
@@ -629,6 +683,13 @@ impl ServeCommand {
             | Self::RemoveModel { .. }
             | Self::SetProviderKey { .. }
             | Self::ListProviderKeys { .. }
+            | Self::ListConnectors { .. }
+            | Self::AddConnector { .. }
+            | Self::RemoveConnector { .. }
+            | Self::SetConnectorTrust { .. }
+            | Self::TestConnector { .. }
+            | Self::ReloadConnector { .. }
+            | Self::SetConnectorToolFilter { .. }
             | Self::ListSessions { .. } => None,
         }
     }
@@ -669,6 +730,13 @@ impl ServeCommand {
             Self::RemoveModel { .. } => "remove_model",
             Self::SetProviderKey { .. } => "set_provider_key",
             Self::ListProviderKeys { .. } => "list_provider_keys",
+            Self::ListConnectors { .. } => "list_connectors",
+            Self::AddConnector { .. } => "add_connector",
+            Self::RemoveConnector { .. } => "remove_connector",
+            Self::SetConnectorTrust { .. } => "set_connector_trust",
+            Self::TestConnector { .. } => "test_connector",
+            Self::ReloadConnector { .. } => "reload_connector",
+            Self::SetConnectorToolFilter { .. } => "set_connector_tool_filter",
             Self::NewSession { .. } => "new_session",
             Self::SwitchSession { .. } => "switch_session",
             Self::GetMessages { .. } => "get_messages",

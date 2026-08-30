@@ -6,6 +6,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::core::connector::{CompositeToolExecutor, ConnectorRegistry};
 use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::ext::plugin::{PluginCatalog, PluginSource};
@@ -246,14 +247,27 @@ fn scope_runtime_for(
         bash_task_registry,
         session,
     };
+    let connector_registry = config
+        .connector
+        .enabled
+        .then(|| ConnectorRegistry::new(config, &key))
+        .transpose()?;
     let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
-        build_plugin_runtime(config, &key, deps)?;
+        build_plugin_runtime(
+            config,
+            &key,
+            deps,
+            connector_registry
+                .as_ref()
+                .map(|registry| registry.mcp_executor()),
+        )?;
     let shared = Arc::new(ScopeContainer {
         event_bus,
         tool_registry,
         function_registry,
         plugin_manager,
         plugin_function_invoker,
+        connector_registry,
         dispatcher,
         skill_set: Arc::new(RwLock::new(crate::core::skill::SkillSet::default())),
         skill_discovery_handle: Arc::new(tokio::sync::Mutex::new(None)),
@@ -788,6 +802,7 @@ impl ChatContext {
             web_search_runtime: web_search_runtime.clone(),
             plugin_manager,
             plugin_function_invoker,
+            connector_registry: shared_scope_runtime.connector_registry.clone(),
         };
         let scope_services = ScopeServices {
             scope_container: shared_scope_runtime.clone(),
@@ -905,6 +920,15 @@ impl ChatContext {
 
     pub(crate) fn skill_set_snapshot(&self) -> crate::core::skill::SkillSet {
         self.scope_services.skill_set.read().clone()
+    }
+
+    pub(crate) async fn spawn_connector_startup_if_needed(&self) {
+        let Some(connectors) = self.global_services.connector_registry.as_ref() else {
+            return;
+        };
+        connectors
+            .spawn_connect_all(Arc::downgrade(&self.global_services.tool_registry))
+            .await;
     }
 
     pub(crate) async fn spawn_skill_discovery_if_needed(&self) {
@@ -1274,6 +1298,7 @@ fn build_plugin_runtime(
     config: &AppConfig,
     agent_workspace_dir: &std::path::Path,
     deps: PluginRuntimeDeps,
+    mcp_executor: Option<Arc<dyn ToolExecutor>>,
 ) -> Result<PluginRuntimeParts, AppError> {
     let PluginRuntimeDeps {
         audit,
@@ -1286,7 +1311,11 @@ fn build_plugin_runtime(
     } = deps;
     if plugin_runtime_disabled_via_env() {
         warn!("PI_PLUGIN_DISABLE enabled; skipping plugin runtime initialization");
-        let executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
+        let plugin_executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
+        let executor: Arc<dyn ToolExecutor> = match mcp_executor {
+            Some(mcp_executor) => CompositeToolExecutor::new(plugin_executor, mcp_executor),
+            None => plugin_executor,
+        };
         let tool_registry: Arc<dyn ToolRegistry> =
             Arc::new(DefaultToolRegistry::new(executor, audit.clone()));
         let function_registry = Arc::new(FunctionRegistry::new());
@@ -1325,7 +1354,11 @@ fn build_plugin_runtime(
     inner.set_event_channel_capacity(config.plugin.event_channel_capacity);
     inner.set_confirm_permissions(Arc::new(|_| Ok(true)));
 
-    let executor = PluginToolExecutor::new(Arc::downgrade(&plugin_manager));
+    let plugin_executor = PluginToolExecutor::new(Arc::downgrade(&plugin_manager));
+    let executor: Arc<dyn ToolExecutor> = match mcp_executor {
+        Some(mcp_executor) => CompositeToolExecutor::new(plugin_executor.clone(), mcp_executor),
+        None => plugin_executor.clone(),
+    };
     let function_registry = Arc::new(FunctionRegistry::new());
     let default_tool_registry = Arc::new(DefaultToolRegistry::new(executor.clone(), audit.clone()));
     let tool_registry: Arc<dyn ToolRegistry> = default_tool_registry.clone();
@@ -1371,7 +1404,7 @@ fn build_plugin_runtime(
             .with_audit(audit),
     );
     let function_invoker = PluginFunctionInvoker::new(Arc::downgrade(&plugin_manager));
-    executor.attach_dispatcher(Arc::downgrade(&dispatcher));
+    plugin_executor.attach_dispatcher(Arc::downgrade(&dispatcher));
     function_invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
     plugin_manager.set_tool_registry(tool_registry.clone());
     plugin_manager.set_function_registry(function_registry.clone());

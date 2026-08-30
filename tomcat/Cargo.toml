@@ -62,6 +62,7 @@ getrandom = "0.4.2"
 uuid = { version = "1.23.3", features = ["v4"] }
 aes-gcm = "0.10.3"
 ed25519-dalek = "2.2.0"
+rmcp = { version = "3.1.4", default-features = false, features = ["client", "transport-child-process"] }
 
 # Unix-only：bash 工具超时时按整组 SIGKILL 杀掉 sh 派生的子进程
 # （仅 sh -c 的复合命令会派生子 shell，单 PID kill 不到 sleep 等被遗弃的孙子进程）。

@@ -12,6 +12,12 @@ Drive each task to real completion; do not stop at a half-finished state or a me
 
 For ordinary CHAT changes, run a focused quick check proportional to the changed surface and risk before claiming the change works. In PLAN or EXEC, follow the verification scope and batches in the applicable mode reminder and active plan.
 
+For user-visible web, frontend, or VS Code webview changes, load the verify
+skill's UI acceptance guidance. Render the page, capture a PNG plus ARIA snapshot
+and browser console report, read the artifacts, and submit the successful shot
+task as green-build evidence. Do not treat a passing build, lint, or DOM-only test
+as visual acceptance.
+
 - Mid-work (including EXEC before final close-out): focused checks
   (one test / one package / one target) proportional to the edit.
 - Final acceptance: broader project checks once, when finishing the change

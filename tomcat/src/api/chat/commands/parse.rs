@@ -17,10 +17,11 @@ use std::path::PathBuf;
 use crate::api::chat::ChatContext;
 
 use super::{
-    cmd_ckpt, cmd_compact, cmd_context, cmd_effort, cmd_help, cmd_install, cmd_model, cmd_path,
-    cmd_plan, cmd_restore, cmd_skill, cmd_thinking,
+    cmd_ckpt, cmd_compact, cmd_connector, cmd_context, cmd_effort, cmd_help, cmd_install,
+    cmd_model, cmd_path, cmd_plan, cmd_restore, cmd_skill, cmd_thinking,
 };
 
+pub use cmd_connector::ConnectorCommand;
 pub use cmd_install::InstallCommand;
 pub use cmd_model::ModelCommand;
 pub use cmd_plan::PlanCommand;
@@ -76,6 +77,8 @@ pub enum ChatCommand {
     Install(InstallCommand),
     /// `/skill` 子命令族：列出 / 重载 / 显式注入技能正文。
     Skill(SkillCommand),
+    /// `/connector` 子命令族：管理 MCP server。
+    Connector(ConnectorCommand),
     /// Recognized command with invalid arguments.
     UsageError {
         message: String,
@@ -114,6 +117,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
             | "/plan"
             | "/install"
             | "/skill"
+            | "/connector"
     ) {
         return ChatCommand::NotACommand(line.to_string());
     }
@@ -140,6 +144,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/plan" => cmd_plan::parse_args(tokens),
         "/install" => cmd_install::parse_args(tokens),
         "/skill" => cmd_skill::parse_args(tokens),
+        "/connector" => cmd_connector::parse_args(tokens),
         _ => ChatCommand::NotACommand(line.to_string()),
     }
 }
@@ -182,6 +187,7 @@ pub(crate) async fn dispatch_chat_command(
         ChatCommand::Plan(plan_cmd) => cmd_plan::run(ctx, plan_cmd),
         ChatCommand::Install(install_cmd) => cmd_install::run(ctx, install_cmd).await,
         ChatCommand::Skill(skill_cmd) => cmd_skill::run(ctx, skill_cmd).await,
+        ChatCommand::Connector(connector_cmd) => cmd_connector::run(ctx, connector_cmd).await,
     }
 }
 

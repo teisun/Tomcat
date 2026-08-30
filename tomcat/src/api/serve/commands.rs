@@ -16,6 +16,10 @@ use serde_json::json;
 use crate::api::chat::commands::{
     checkpoint_kind_label, compact_session, restore_core, RestoreCoreReport,
 };
+use crate::core::connector::mcp::config::{
+    remove_global_server, set_global_tool_filter, upsert_global_server, McpServerConfig, ToolFilter,
+};
+use crate::core::connector::mcp::manager::ServerState;
 use crate::core::llm::{
     list_model_views_with_prefs, list_provider_keys, remove_user_model, set_provider_key,
     upsert_user_model, ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind,
@@ -1291,6 +1295,235 @@ pub(crate) async fn handle_command(
                 ),
             )))?;
         }
+        ServeCommand::ListConnectors { id } => {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let servers = connector
+                .mcp_manager()
+                .statuses()
+                .into_iter()
+                .map(|status| {
+                    json!({
+                        "name": status.name,
+                        "source": status.source.as_str(),
+                        "state": connector_state_name(&status.state),
+                        "toolCount": status.tool_count,
+                        "resourceCount": status.resource_count,
+                    })
+                })
+                .collect::<Vec<_>>();
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "connectors": servers })),
+            )))?;
+        }
+        ServeCommand::AddConnector {
+            id,
+            name,
+            command,
+            args,
+        } => {
+            let config = McpServerConfig {
+                command,
+                args,
+                env: Default::default(),
+                cwd: None,
+                trusted: false,
+                integrity: None,
+                startup_timeout_ms: 30_000,
+                call_timeout_ms: 120_000,
+                tool_filter: ToolFilter::default(),
+            };
+            if let Err(error) = upsert_global_server(&state.cfg, name.clone(), config) {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            if let Ok(connector) = resolve_connector_registry(&state) {
+                if let Err(error) = connector.reload().await {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name })),
+            )))?;
+        }
+        ServeCommand::RemoveConnector { id, name } => {
+            let removed = match remove_global_server(&state.cfg, &name) {
+                Ok(removed) => removed,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            if let Ok(connector) = resolve_connector_registry(&state) {
+                if let Err(error) = connector.reload().await {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name, "removed": removed })),
+            )))?;
+        }
+        ServeCommand::SetConnectorTrust { id, name, trusted } => {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let result = if trusted {
+                connector.approve_and_connect(&name).await
+            } else {
+                connector.deny(&name)
+            };
+            if let Err(error) = result {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name, "trusted": trusted })),
+            )))?;
+        }
+        ServeCommand::TestConnector { id, name } => {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            if let Err(error) = connector.mcp_manager().reconnect_server(&name).await {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name, "connected": true })),
+            )))?;
+        }
+        ServeCommand::ReloadConnector { id } => {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            if let Err(error) = connector.reload().await {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "reloaded": true })),
+            )))?;
+        }
+        ServeCommand::SetConnectorToolFilter {
+            id,
+            name,
+            include,
+            exclude,
+        } => {
+            if let Err(error) =
+                set_global_tool_filter(&state.cfg, &name, ToolFilter { include, exclude })
+            {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            if let Ok(connector) = resolve_connector_registry(&state) {
+                if let Err(error) = connector.reload().await {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name, "updated": true })),
+            )))?;
+        }
         ServeCommand::DiscardDetachedSession { id, session_id } => {
             if state.registry.get(&session_id).is_some() {
                 send_error(&state, id, Some(session_id), "session_is_live")?;
@@ -1374,6 +1607,29 @@ fn resolve_active_slot(state: &ServeState) -> Result<Arc<super::registry::Sessio
         .into_iter()
         .find_map(|summary| state.registry.get(&summary.session_id))
         .ok_or_else(|| AppError::Config("unknown_session".to_string()))
+}
+
+fn resolve_connector_registry(
+    state: &ServeState,
+) -> Result<Arc<crate::core::connector::ConnectorRegistry>, AppError> {
+    resolve_active_slot(state)?
+        .ctx
+        .global_services
+        .connector_registry
+        .clone()
+        .ok_or_else(|| AppError::Config("connector_disabled".to_string()))
+}
+
+fn connector_state_name(state: &ServerState) -> &'static str {
+    match state {
+        ServerState::Pending => "pending",
+        ServerState::Connecting => "connecting",
+        ServerState::Ready => "ready",
+        ServerState::Disconnected => "disconnected",
+        ServerState::NeedsConfirmation => "needs_confirmation",
+        ServerState::Blocked => "blocked",
+        ServerState::Failed(_) => "failed",
+    }
 }
 
 fn resolve_model_catalog_snapshot(

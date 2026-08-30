@@ -2,6 +2,7 @@
 
 mod cmd_ckpt;
 mod cmd_compact;
+mod cmd_connector;
 mod cmd_context;
 mod cmd_effort;
 mod cmd_help;
@@ -25,7 +26,7 @@ mod tests;
 
 pub use cmd_path::render_path_menu;
 pub(super) use parse::{dispatch_chat_command, ChatCommandOutcome};
-pub use parse::{parse_chat_command, ChatCommand, ModelCommand, SkillCommand};
+pub use parse::{parse_chat_command, ChatCommand, ConnectorCommand, ModelCommand, SkillCommand};
 
 /// Public façade returning the local-command help banner shown by `/help`.
 ///

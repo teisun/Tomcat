@@ -6,6 +6,7 @@ pub mod agent_loop;
 pub mod agent_registry;
 pub mod checkpoint;
 pub mod compaction;
+pub mod connector;
 pub mod llm;
 pub mod package;
 pub mod permission;

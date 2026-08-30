@@ -379,6 +379,10 @@ fn is_code_path(path: &str) -> bool {
                     | "sql"
                     | "vue"
                     | "svelte"
+                    | "css"
+                    | "scss"
+                    | "less"
+                    | "html"
             )
         })
 }
@@ -408,4 +412,29 @@ async fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<S
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_code_path;
+
+    #[test]
+    fn user_visible_markup_and_styles_trigger_code_review() {
+        for path in [
+            "gui/src/styles.css",
+            "web/app.scss",
+            "web/theme.less",
+            "web/index.html",
+            "WEB/COMPONENT.CSS",
+        ] {
+            assert!(is_code_path(path), "{path} must trigger the code gate");
+        }
+    }
+
+    #[test]
+    fn non_code_assets_do_not_trigger_code_review() {
+        for path in ["README.md", "docs/guide.txt", "assets/logo.png"] {
+            assert!(!is_code_path(path), "{path} must not trigger the code gate");
+        }
+    }
 }
