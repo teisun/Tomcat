@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-30 19:10 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-08-30 20:10 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 打包后用 Cursor/VS Code 同款 `yauzl` 真读 VSIX 每一段；目录对不上或解压失败则删包并让 `package:vsix` 失败，避免再把坏 zip 交给安装器。CLI `0.1.38 → 0.1.39`、扩展 `0.1.50 → 0.1.51`、bundled CLI 同步；`release-version check` 通过。本机纯插件 `tomcat-vscode-ext-0.1.51.vsix`（1.52 MB，SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`）不含 `bin/tomcat`。验证：VSIX 解压门禁单测、完整 `npm run package:vsix`。@2026-08-30
 - [✓] **[P0]** 完成 `connector_mcp_rectification_68b6b688`：MCP 浮动 npm 版本会告警但不阻断；`/connector list` 与 serve 摘要均含安全信任状态（command/args/cwd 快照，env 值永不落盘或回传）；新增按需 `list_connector_tools`，避免摘要携带全量工具。`shot.mjs` 支持默认 `.tomcat/shots/` 输出并在缺依赖时指向 bootstrap。补齐 manager 断线/超时/重连、启动注册撤销、Chat/serve 命令、Cursor 配置兼容和图片回流测试，并让技术方案与 UI 验收计划贴合代码。@2026-08-30
 
 - [✓] **[P0]** Composer 与 Plan Preview 本轮体验/验收闭环：完成态 plan 已不再向 Composer 注入待办 widget；Tomcat Box / Ready to chat 外壳移除右侧多余 10px 内边距；截图 E2E 窄化根节点后以 `try/finally` 恢复宽度，避免后续画面被挤压。Plan Preview 自定义编辑器 E2E 改为由已编辑正文中的唯一 token 推导真实源行，并按每次选择操作前后的引用数验证，保留重复选择不新增 chip 的断言，修复错误期望 `:0` 导致的等待超时。验证：focused Provider 47 passed、`npm run lint:extension`、`npm run test:e2e:vscode-devhost`（33 passing）、`git diff --check` 与 `npm run package:vsix` 通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix`（1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`）不含测试/源码/CLI 目录。@2026-08-29
@@ -77,7 +78,9 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
-- Connector：新增主配置 `[connector] enabled` / `disabled` 与 `~/.tomcat/mcp.json`、`<workspace>/.tomcat/mcp.json` 的 `mcpServers` 配置面；新增 Chat `/connector {list,add,trust,deny,test,tools,remove,reload}`，以及 serve `list_connectors`、`list_connector_tools`、`add_connector`、`remove_connector`、`set_connector_trust`、`test_connector`、`reload_connector`、`set_connector_tool_filter` capabilities。MCP 工具在 Ready 后以 `mcp__{server}__{tool}` 注册入既有 ToolRegistry，MCP 图片结果可作为 `InputImage` 回流。
+- 发布版本：CLI `0.1.39`、扩展 `0.1.51`、`bundledCliVersion=0.1.39`。
+- 打包：`package:vsix` 在 vsce 成功后必须用 `yauzl`（与 Cursor/VS Code `extract` 同款）读完每个条目；失败删除产物。扩展显式依赖 `yauzl`。
+- Connector：新增主配置 `[connector] enabled` / `disabled` 与 `~/.tomcat/mcp.json`、`<workspace>/.tomcat/mcp.json` 的 `mcpServers` 配置面；新增 Chat `/connector {list,add,trust,deny,test,tools,remove,reload}`，以及 serve `list_connectors`、`list_connector_tools`、`add_connector`、`remove_connector`、`set_connector_trust`、`test_connector`、`reload_connector`、`set_connector_tool_filter` capabilities。MCP 工具在 Ready 后以 `mcp__{server}__{tool}` 注册入既有 ToolRegistry，MCP 图片结果可作为 `InputImage` 回流。`wire.d.ts` 已生成对应 serve 命令类型。
 - Verify：内置 skill 来源从单文件 `builtin_verify.md` 迁至 `assets/skills/verify/**`，由 `materialize_builtin_skills` 释放；新增 `scripts/bootstrap.mjs` / `shot.mjs` 等受管验收资产。
 - 本轮仅调整扩展内部 UI 状态选择、CSS 与 E2E 验收逻辑；不新增或改变公开 RPC、wire 字段或插件配置。
 
@@ -164,6 +167,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-08-30 20:10）：CLI `0.1.39` / 扩展 `0.1.51` / bundled CLI `0.1.39`；`package:vsix` 增加 yauzl 解压门禁。验证：`release-version check`、VSIX 解压单测、完整打包流程；本机纯插件 `tomcat-vscode-ext-0.1.51.vsix` SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`。Cov% 未跑，仍为 —。
 - 最新补充（2026-08-29 15:42）：完成态计划不再渲染 Composer 待办 widget，Tomcat Box 右侧留白已移除；截图 E2E 的根节点宽度现在无论成功或超时都会恢复。Plan Preview 自定义编辑器 E2E 的正文引用源行由唯一 token 推导，并把引用计数断言改为相对当前操作，修复错误 `:0` 行号造成的等待超时。`npm run test:e2e:vscode-devhost` 33 passing、`npm run lint:extension`、`git diff --check` 与 `npm run package:vsix` 均通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 为 1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`，包内不含源码、测试、E2E harness、node_modules 或 CLI 二进制。Cov% 未跑，仍为 —。
 
 - 最新补充（2026-08-29 13:38）：Plan Preview 现在先展示磁盘中的计划正文和待办，不再等待 serve 初始化或模型目录；延迟增强结果受面板 generation 保护，不能覆盖较新的磁盘刷新。Plan webview 已添加错误边界，异常时显示 Reload 而不再留下空白。验证：`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build`、`git diff --check` 全绿；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 已重打（1,590,261 bytes，SHA-256 `361d3cb5447625d25d9b74a69694df19cda89bfe159375c24457eec062873d74`，包内无 `bin/tomcat`）。Cov% 未跑，仍为 —。

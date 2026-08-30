@@ -4,9 +4,12 @@ import * as path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { crc32 } from "node:zlib";
+
 import {
   assertPrebuiltArtifactsFresh,
   assertPublishableFiles,
+  assertVsixExtractable,
   buildVscePackageArgs,
   buildVsixOutPath,
   bundledExecutableRelativePath,
@@ -15,6 +18,70 @@ import {
   packageVsixOrReuse,
   preparePublishDirectory,
 } from "../scripts/package-vsix";
+import { extractVsixLikeCursor } from "../scripts/vsix-extractable";
+
+function writeU16(value: number): Buffer {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16LE(value);
+  return buffer;
+}
+
+function writeU32(value: number): Buffer {
+  const buffer = Buffer.alloc(4);
+  buffer.writeUInt32LE(value);
+  return buffer;
+}
+
+function makeStoredZip(fileName: string, content: Buffer): Buffer {
+  const name = Buffer.from(fileName);
+  const crc = crc32(content) >>> 0;
+  const local = Buffer.concat([
+    Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+    writeU16(20),
+    writeU16(0),
+    writeU16(0),
+    writeU16(0),
+    writeU16(0),
+    writeU32(crc),
+    writeU32(content.length),
+    writeU32(content.length),
+    writeU16(name.length),
+    writeU16(0),
+    name,
+    content,
+  ]);
+  const central = Buffer.concat([
+    Buffer.from([0x50, 0x4b, 0x01, 0x02]),
+    writeU16(0x031e),
+    writeU16(20),
+    writeU16(0),
+    writeU16(0),
+    writeU16(0),
+    writeU16(0),
+    writeU32(crc),
+    writeU32(content.length),
+    writeU32(content.length),
+    writeU16(name.length),
+    writeU16(0),
+    writeU16(0),
+    writeU16(0),
+    writeU16(0),
+    writeU32(0),
+    writeU32(0),
+    name,
+  ]);
+  const eocd = Buffer.concat([
+    Buffer.from([0x50, 0x4b, 0x05, 0x06]),
+    writeU16(0),
+    writeU16(0),
+    writeU16(1),
+    writeU16(1),
+    writeU32(central.length),
+    writeU32(local.length),
+    writeU16(0),
+  ]);
+  return Buffer.concat([local, central, eocd]);
+}
 
 describe("VSIX packaging", () => {
   it(
@@ -42,6 +109,7 @@ describe("VSIX packaging", () => {
 
         const stat = await fs.stat(packaged);
         expect(stat.isFile()).toBe(true);
+        expect(() => assertVsixExtractable(packaged)).not.toThrow();
       } finally {
         if (publishRoot) {
           await fs.rm(publishRoot, { force: true, recursive: true });
@@ -144,6 +212,31 @@ describe("VSIX packaging", () => {
       expect(() => assertPrebuiltArtifactsFresh(root)).toThrow(
         "source gui/src/App.tsx is newer than artifact gui/dist/index.js",
       );
+    } finally {
+      await fs.rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a VSIX that Cursor's unzipper cannot extract", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-vsix-integrity-"));
+    const intactPath = path.join(root, "intact.vsix");
+    const mismatchPath = path.join(root, "mismatch.vsix");
+    const truncatedPath = path.join(root, "truncated.vsix");
+
+    try {
+      const intact = makeStoredZip("hello.txt", Buffer.from("hi\n"));
+      await fs.writeFile(intactPath, intact);
+      await expect(extractVsixLikeCursor(intactPath)).resolves.toBeUndefined();
+
+      const mismatch = Buffer.from(intact);
+      mismatch.writeUInt32LE(0xdeadbeef, 0);
+      await fs.writeFile(mismatchPath, mismatch);
+      await expect(extractVsixLikeCursor(mismatchPath)).rejects.toThrow(
+        /invalid local file header signature/,
+      );
+
+      await fs.writeFile(truncatedPath, intact.subarray(0, intact.length - 10));
+      await expect(extractVsixLikeCursor(truncatedPath)).rejects.toThrow();
     } finally {
       await fs.rm(root, { force: true, recursive: true });
     }

@@ -133,13 +133,17 @@ export function assertPrebuiltArtifactsFresh(extensionRoot: string): void {
   }
 }
 
-function resolveVsceBinary(extensionRoot: string): string {
+function resolveLocalBin(extensionRoot: string, name: string): string {
   return path.join(
     extensionRoot,
     "node_modules",
     ".bin",
-    process.platform === "win32" ? "vsce.cmd" : "vsce",
+    process.platform === "win32" ? `${name}.cmd` : name,
   );
+}
+
+function resolveVsceBinary(extensionRoot: string): string {
+  return resolveLocalBin(extensionRoot, "vsce");
 }
 
 function runVsce(
@@ -288,6 +292,30 @@ export function listPublishableFiles(
     .filter((line) => line.length > 0);
 }
 
+/**
+ * Ask the same unzipper Cursor/VS Code uses. vsce can print DONE on a bad zip;
+ * we refuse to keep that file. Do not reimplement zip parsing here.
+ */
+export function assertVsixExtractable(vsixPath: string): void {
+  const extensionRoot = path.resolve(__dirname, "..");
+  const archivePath = path.resolve(vsixPath);
+  try {
+    execFileSync(
+      resolveLocalBin(extensionRoot, "tsx"),
+      [path.join(__dirname, "vsix-extractable.ts"), archivePath],
+      { cwd: extensionRoot, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] },
+    );
+  } catch (error) {
+    const stderr =
+      error && typeof error === "object" && "stderr" in error
+        ? String((error as { stderr: unknown }).stderr).trim()
+        : "";
+    throw new Error(
+      `VSIX is not extractable by Cursor/VS Code: ${stderr || archivePath}`,
+    );
+  }
+}
+
 export function assertPublishableFiles(
   fileList: readonly string[],
   options: Pick<PackageVsixOptions, "bundleBinaryPath" | "target"> = {},
@@ -337,6 +365,12 @@ export function packageVsix(options: PackageVsixOptions = {}): string {
       publishRoot,
       extensionRoot,
     );
+    try {
+      assertVsixExtractable(outPath);
+    } catch (error) {
+      fs.rmSync(outPath, { force: true });
+      throw error;
+    }
     return outPath;
   } finally {
     fs.rmSync(publishRoot, { force: true, recursive: true });
@@ -352,6 +386,7 @@ export function resolvePrebuiltVsixPath(env: NodeJS.ProcessEnv = process.env): s
   if (!fs.existsSync(resolved)) {
     throw new Error(`${PREBUILT_VSIX_ENV} points to a missing file: ${resolved}`);
   }
+  assertVsixExtractable(resolved);
   return resolved;
 }
 
