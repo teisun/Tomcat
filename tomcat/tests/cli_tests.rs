@@ -2650,6 +2650,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     let contract_ok = stderr.contains("[tool] read")
         && (stderr_lower.contains("no such file")
             || stderr_lower.contains("not found")
+            || stderr_lower.contains("does not exist")
             || stderr_lower.contains("os error 2")
             || stderr.contains("不存在"))
         && !stderr.contains("✗ failed");
@@ -2672,6 +2673,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     assert!(
         stderr_lower.contains("no such file")
             || stderr_lower.contains("not found")
+            || stderr_lower.contains("does not exist")
             || stderr_lower.contains("os error 2")
             || stderr.contains("不存在"),
         "stderr 应包含路径不存在语义，实际: {}",
@@ -6736,7 +6738,9 @@ web_search = true
         trunc(tool_text, 400)
     );
     assert!(
-        tool_text.contains("openai_unavailable") && tool_text.contains("fallback=auto"),
+        (tool_text.contains("openai_unavailable")
+            || tool_text.contains("backend_unavailable:openai"))
+            && tool_text.contains("fallback=auto"),
         "tool result 应记录 hosted 失败后回落 auto，实际: {}",
         trunc(tool_text, 400)
     );

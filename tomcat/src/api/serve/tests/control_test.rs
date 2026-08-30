@@ -124,6 +124,7 @@ async fn serve_initialize_control_request_sets_ready_state() {
         "set_provider_key",
         "list_provider_keys",
         "list_connectors",
+        "list_connector_tools",
         "add_connector",
         "remove_connector",
         "set_connector_trust",
@@ -147,6 +148,140 @@ async fn serve_initialize_control_request_sets_ready_state() {
             "missing capability {expected:?} in {capability_names:?}"
         );
     }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_connector_commands_keep_list_light_and_tools_on_demand() {
+    const CONNECTOR_TEST_API_KEY_ENV: &str = "TOMCAT_SERVE_CONNECTOR_TEST_API_KEY";
+
+    let _api_key = EnvGuard::set(CONNECTOR_TEST_API_KEY_ENV, "test-key");
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.connector.enabled = true;
+    fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"[[models]]
+id = "gpt-5.4"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "serve-connector-test"
+api_key_env = "{CONNECTOR_TEST_API_KEY_ENV}"
+base_url = "http://127.0.0.1:1"
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+"#
+        ),
+    )
+    .expect("write isolated connector test model");
+    let (state, buffer, _temp, _slot) = build_initialized_state_with_config(temp, cfg).await;
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mcp/fake_stdio_server.mjs");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::AddConnector {
+            id: Some("add-connector".to_string()),
+            name: "fake".to_string(),
+            command: "node".to_string(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+        },
+    )
+    .await
+    .expect("add connector");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("add-connector")
+    })
+    .await;
+    assert!(lines.iter().any(|line| line["success"] == true));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListConnectors {
+            id: Some("list-connectors".to_string()),
+        },
+    )
+    .await
+    .expect("list connectors");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-connectors")
+    })
+    .await;
+    let listed = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("list-connectors"))
+        .expect("list response");
+    let summary = &listed["payload"]["connectors"][0];
+    assert_eq!(summary["name"], "fake");
+    assert_eq!(summary["state"], "connected");
+    assert_eq!(summary["trust"]["state"], "trusted");
+    assert_eq!(summary["toolCount"], 2);
+    assert!(
+        summary.get("tools").is_none(),
+        "connector summaries must not contain the full tool list"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListConnectorTools {
+            id: Some("list-tools".to_string()),
+            name: "fake".to_string(),
+        },
+    )
+    .await
+    .expect("list connector tools");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-tools")
+    })
+    .await;
+    let tools = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("list-tools"))
+        .expect("tools response")["payload"]["tools"]
+        .as_array()
+        .expect("tools array");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0]["rawName"], "capture");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetConnectorToolFilter {
+            id: Some("filter-tools".to_string()),
+            name: "fake".to_string(),
+            include: vec!["capture".to_string()],
+            exclude: vec![],
+        },
+    )
+    .await
+    .expect("set connector tool filter");
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("filter-tools")
+    })
+    .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListConnectorTools {
+            id: Some("list-filtered-tools".to_string()),
+            name: "fake".to_string(),
+        },
+    )
+    .await
+    .expect("list filtered connector tools");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-filtered-tools")
+    })
+    .await;
+    let tools = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-filtered-tools")
+        })
+        .expect("filtered tools response")["payload"]["tools"]
+        .as_array()
+        .expect("filtered tools array");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["rawName"], "capture");
 }
 
 #[tokio::test]

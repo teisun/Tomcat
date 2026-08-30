@@ -254,6 +254,35 @@ mod tests {
         }
     }
 
+    fn fake_mcp_config(fixture_args: Vec<String>) -> serde_json::Value {
+        serde_json::json!({
+            "mcpServers": {
+                "fake": { "command": "node", "args": fixture_args }
+            }
+        })
+    }
+
+    fn fake_fixture_args(extra: &[&str]) -> Vec<String> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mcp/fake_stdio_server.mjs");
+        std::iter::once(fixture.to_string_lossy().into_owned())
+            .chain(extra.iter().map(|argument| (*argument).to_string()))
+            .collect()
+    }
+
+    async fn wait_for_tool(registry: &DefaultToolRegistry, tool_name: &str, present: bool) {
+        for _ in 0..50 {
+            if registry.get_tool(tool_name).await.is_ok() == present {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "tool '{tool_name}' did not become {}",
+            if present { "available" } else { "unavailable" }
+        );
+    }
+
     #[tokio::test]
     async fn composite_routes_by_plugin_id() {
         let executor = CompositeToolExecutor::new(
@@ -283,16 +312,9 @@ mod tests {
         let config_path = get_work_dir(&cfg).expect("work dir").join("mcp.json");
         std::fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("config directory");
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/mcp/fake_stdio_server.mjs");
         std::fs::write(
             config_path,
-            serde_json::json!({
-                "mcpServers": {
-                    "fake": { "command": "node", "args": [fixture] }
-                }
-            })
-            .to_string(),
+            fake_mcp_config(fake_fixture_args(&[])).to_string(),
         )
         .expect("write MCP config");
 
@@ -309,13 +331,82 @@ mod tests {
         connectors
             .spawn_connect_all(Arc::downgrade(&registry))
             .await;
+        wait_for_tool(&registry_impl, "mcp__fake__capture", true).await;
 
-        for _ in 0..50 {
-            if registry_impl.get_tool("mcp__fake__capture").await.is_ok() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("ready MCP tool was not registered into ToolRegistry");
+        connectors.deny("fake").expect("deny MCP server");
+        wait_for_tool(&registry_impl, "mcp__fake__capture", false).await;
+    }
+
+    #[tokio::test]
+    async fn connector_disabled_master_switch_does_not_connect_or_register_tools() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut cfg = AppConfig::default();
+        cfg.connector.enabled = false;
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let config_path = get_work_dir(&cfg).expect("work dir").join("mcp.json");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("config directory");
+        std::fs::write(
+            config_path,
+            fake_mcp_config(fake_fixture_args(&[])).to_string(),
+        )
+        .expect("write MCP config");
+
+        let connectors = ConnectorRegistry::new(&cfg, &workspace).expect("connector registry");
+        let registry_impl = Arc::new(DefaultToolRegistry::new(
+            connectors.mcp_executor(),
+            Arc::new(TracingAuditRecorder),
+        ));
+        let registry: Arc<dyn ToolRegistry> = registry_impl.clone();
+        connectors
+            .spawn_connect_all(Arc::downgrade(&registry))
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(registry_impl.get_tool("mcp__fake__capture").await.is_err());
+        assert!(matches!(
+            connectors
+                .mcp_manager()
+                .statuses()
+                .pop()
+                .expect("configured status")
+                .state,
+            crate::core::connector::mcp::manager::ServerState::Pending
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_connect_is_non_blocking() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut cfg = AppConfig::default();
+        cfg.connector.enabled = true;
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let config_path = get_work_dir(&cfg).expect("work dir").join("mcp.json");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("config directory");
+        std::fs::write(
+            config_path,
+            fake_mcp_config(fake_fixture_args(&["--hang-startup"])).to_string(),
+        )
+        .expect("write MCP config");
+
+        let connectors = ConnectorRegistry::new(&cfg, &workspace).expect("connector registry");
+        let registry_impl = Arc::new(DefaultToolRegistry::new(
+            connectors.mcp_executor(),
+            Arc::new(TracingAuditRecorder),
+        ));
+        let registry: Arc<dyn ToolRegistry> = registry_impl.clone();
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            connectors.spawn_connect_all(Arc::downgrade(&registry)),
+        )
+        .await
+        .expect("startup must return before a server finishes connecting");
+        assert!(registry_impl.get_tool("mcp__fake__capture").await.is_err());
     }
 }

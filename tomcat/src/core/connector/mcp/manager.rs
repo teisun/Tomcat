@@ -9,7 +9,7 @@ use tracing::warn;
 use crate::core::connector::mcp::config::{load_servers, ConfiguredMcpServer, McpConfigSource};
 use crate::core::connector::mcp::naming::to_model_name;
 use crate::core::connector::mcp::transport::{McpClient, McpTransport, StdioTransport};
-use crate::core::connector::mcp::trust::{TrustDecision, TrustStore};
+use crate::core::connector::mcp::trust::{TrustDecision, TrustStatus, TrustStore};
 use crate::infra::error::AppError;
 use crate::AppConfig;
 
@@ -24,11 +24,38 @@ pub enum ServerState {
     Failed(String),
 }
 
+impl ServerState {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Connecting => "connecting",
+            Self::Ready => "connected",
+            Self::Disconnected => "disconnected",
+            Self::NeedsConfirmation => "needs_confirmation",
+            Self::Blocked => "blocked",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            Self::Pending => "等待连接",
+            Self::Connecting => "连接中",
+            Self::Ready => "已连接",
+            Self::Disconnected => "已断开",
+            Self::NeedsConfirmation => "待确认",
+            Self::Blocked => "已阻止",
+            Self::Failed(_) => "失败",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerStatus {
     pub name: String,
     pub source: McpConfigSource,
     pub state: ServerState,
+    pub trust: TrustStatus,
     pub tool_count: usize,
     pub resource_count: usize,
 }
@@ -82,20 +109,10 @@ impl McpManager {
                 Vec::new()
             }
         };
+        let trust = TrustStore::open(cfg)?;
         let states = servers
             .iter()
-            .map(|server| {
-                (
-                    server.name.clone(),
-                    ServerStatus {
-                        name: server.name.clone(),
-                        source: server.source,
-                        state: ServerState::Pending,
-                        tool_count: 0,
-                        resource_count: 0,
-                    },
-                )
-            })
+            .map(|server| (server.name.clone(), initial_server_status(server, &trust)))
             .collect();
         let (lifecycle_events, _) = broadcast::channel(32);
         Ok(Arc::new(Self {
@@ -107,7 +124,7 @@ impl McpManager {
             ),
             states: RwLock::new(states),
             connections: RwLock::new(BTreeMap::new()),
-            trust: TrustStore::open(cfg)?,
+            trust,
             lifecycle_events,
             workspace_root: workspace_root.to_path_buf(),
         }))
@@ -137,7 +154,9 @@ impl McpManager {
         let server = self
             .configured_server(server_name)
             .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {server_name}")))?;
-        self.trust.approve(&server)
+        self.trust.approve(&server)?;
+        self.refresh_trust_status(server_name, &server);
+        Ok(())
     }
 
     pub fn deny(&self, server_name: &str) -> Result<(), AppError> {
@@ -145,6 +164,7 @@ impl McpManager {
             .configured_server(server_name)
             .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {server_name}")))?;
         self.trust.deny(&server)?;
+        self.refresh_trust_status(server_name, &server);
         self.connections.write().remove(server_name);
         self.update_state(server_name, ServerState::Blocked, 0);
         let _ = self.lifecycle_events.send(ServerLifecycleEvent::NotReady {
@@ -172,13 +192,7 @@ impl McpManager {
             .map(|server| {
                 (
                     server.name.clone(),
-                    ServerStatus {
-                        name: server.name.clone(),
-                        source: server.source,
-                        state: ServerState::Pending,
-                        tool_count: 0,
-                        resource_count: 0,
-                    },
+                    initial_server_status(server, &self.trust),
                 )
             })
             .collect();
@@ -203,6 +217,7 @@ impl McpManager {
                 return Ok(());
             }
         }
+        self.refresh_trust_status(server_name, &server);
 
         self.update_state(server_name, ServerState::Connecting, 0);
         let startup_timeout = Duration::from_millis(server.config.startup_timeout_ms);
@@ -325,12 +340,46 @@ impl McpManager {
         }
     }
 
+    fn refresh_trust_status(&self, server_name: &str, server: &ConfiguredMcpServer) {
+        match self.trust.inspect(server) {
+            Ok(trust) => {
+                if let Some(status) = self.states.write().get_mut(server_name) {
+                    status.trust = trust;
+                }
+            }
+            Err(error) => warn!(
+                server = %server_name,
+                error = %error,
+                "failed to inspect MCP server trust status"
+            ),
+        }
+    }
+
     fn mark_disconnected(&self, server_name: &str) {
         self.connections.write().remove(server_name);
         self.update_state(server_name, ServerState::Disconnected, 0);
         let _ = self.lifecycle_events.send(ServerLifecycleEvent::NotReady {
             server: server_name.to_string(),
         });
+    }
+}
+
+fn initial_server_status(server: &ConfiguredMcpServer, trust: &TrustStore) -> ServerStatus {
+    let trust = trust.inspect(server).unwrap_or_else(|error| {
+        warn!(
+            server = %server.name,
+            error = %error,
+            "failed to inspect MCP server trust status"
+        );
+        TrustStatus::Blocked
+    });
+    ServerStatus {
+        name: server.name.clone(),
+        source: server.source,
+        state: ServerState::Pending,
+        trust,
+        tool_count: 0,
+        resource_count: 0,
     }
 }
 
@@ -493,12 +542,16 @@ fn build_glob_set(patterns: &[String]) -> Result<globset::GlobSet, AppError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{McpManager, ServerState};
     use crate::infra::config::get_work_dir;
     use crate::AppConfig;
 
-    #[tokio::test]
-    async fn fake_stdio_server_lists_and_calls_tools() {
+    fn manager_with_fake_server(
+        args: Vec<String>,
+        call_timeout_ms: u64,
+    ) -> (tempfile::TempDir, Arc<McpManager>) {
         let temp = tempfile::tempdir().expect("temporary directory");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -507,31 +560,47 @@ mod tests {
         let config_path = get_work_dir(&cfg).expect("work dir").join("mcp.json");
         std::fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("config directory");
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/mcp/fake_stdio_server.mjs");
         std::fs::write(
             config_path,
             serde_json::json!({
                 "mcpServers": {
                     "fake": {
                         "command": "node",
-                        "args": [fixture],
+                        "args": args,
+                        "callTimeoutMs": call_timeout_ms,
                     }
                 }
             })
             .to_string(),
         )
         .expect("write MCP config");
-
         let manager = McpManager::new(&cfg, &workspace).expect("construct MCP manager");
+        (temp, manager)
+    }
+
+    fn fake_server_args(extra: &[String]) -> Vec<String> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mcp/fake_stdio_server.mjs");
+        std::iter::once(fixture.to_string_lossy().into_owned())
+            .chain(extra.iter().cloned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn fake_stdio_server_lists_and_calls_tools() {
+        let (_temp, manager) = manager_with_fake_server(fake_server_args(&[]), 120_000);
         manager
             .connect_server("fake")
             .await
             .expect("connect fake server");
         let status = manager.statuses().pop().expect("server status");
         assert_eq!(status.state, ServerState::Ready);
-        assert_eq!(status.tool_count, 1);
-        let tool = manager.tool_defs("fake").pop().expect("discovered tool");
+        assert_eq!(status.tool_count, 2);
+        let tool = manager
+            .tool_defs("fake")
+            .into_iter()
+            .find(|tool| tool.raw_name == "capture")
+            .expect("capture tool");
         assert_eq!(tool.model_name, "mcp__fake__capture");
         let result = manager
             .call_tool("fake", &tool.model_name, serde_json::json!({}))
@@ -539,5 +608,96 @@ mod tests {
             .expect("call fake tool");
         assert_eq!(result["content"][0]["text"], "fake capture complete");
         assert_eq!(result["content"][1]["type"], "image");
+    }
+
+    #[tokio::test]
+    async fn call_tool_timeout_returns_error_and_marks_server_disconnected() {
+        let (_temp, manager) =
+            manager_with_fake_server(fake_server_args(&["--hang".to_string()]), 25);
+        manager
+            .connect_server("fake")
+            .await
+            .expect("connect fake server");
+        let tool = manager.tool_defs("fake").pop().expect("discovered tool");
+
+        let error = manager
+            .call_tool("fake", &tool.model_name, serde_json::json!({}))
+            .await
+            .expect_err("hanging MCP tool should time out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(matches!(
+            manager.statuses().pop().expect("server status").state,
+            ServerState::Disconnected
+        ));
+    }
+
+    #[tokio::test]
+    async fn transport_drop_marks_disconnected_without_replaying_call() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let call_log = temp.path().join("calls.log");
+        let (_manager_temp, manager) = manager_with_fake_server(
+            fake_server_args(&[
+                "--die-midcall".to_string(),
+                "--record".to_string(),
+                call_log.to_string_lossy().into_owned(),
+            ]),
+            1_000,
+        );
+        manager
+            .connect_server("fake")
+            .await
+            .expect("connect fake server");
+        let tool = manager.tool_defs("fake").pop().expect("discovered tool");
+
+        manager
+            .call_tool("fake", &tool.model_name, serde_json::json!({}))
+            .await
+            .expect_err("connection drop should fail the in-flight call");
+
+        let methods = std::fs::read_to_string(&call_log).expect("read call log");
+        assert_eq!(
+            methods
+                .lines()
+                .filter(|method| *method == "tools/call")
+                .count(),
+            1,
+            "the in-flight call must not be replayed"
+        );
+        assert!(matches!(
+            manager.statuses().pop().expect("server status").state,
+            ServerState::Disconnected
+        ));
+    }
+
+    #[tokio::test]
+    async fn reconnect_refetches_tools_without_a_persistent_cache() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let request_log = temp.path().join("requests.log");
+        let (_manager_temp, manager) = manager_with_fake_server(
+            fake_server_args(&[
+                "--record".to_string(),
+                request_log.to_string_lossy().into_owned(),
+            ]),
+            1_000,
+        );
+        manager
+            .connect_server("fake")
+            .await
+            .expect("initial connection");
+        manager
+            .reconnect_server("fake")
+            .await
+            .expect("reconnection");
+
+        let methods = std::fs::read_to_string(&request_log).expect("read request log");
+        assert_eq!(
+            methods
+                .lines()
+                .filter(|method| *method == "tools/list")
+                .count(),
+            2,
+            "each connection must refresh its tool catalog"
+        );
     }
 }

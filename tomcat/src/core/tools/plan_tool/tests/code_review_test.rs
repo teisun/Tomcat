@@ -1478,6 +1478,64 @@ async fn green_build_evidence_rejects_task_started_before_latest_code_edit() {
 }
 
 #[tokio::test]
+async fn shot_command_satisfies_green_build_gate() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let workspace = git_workspace_with_code("tomcat_shot_green_gate_");
+    let registry = std::sync::Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
+        workspace.path().join(".task-logs"),
+    ));
+    let reviewer =
+        std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![passing_code_review()]));
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+    rt.attach_bash_task_registry(registry.clone());
+    rt.attach_code_reviewer(reviewer);
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    let scripts_dir = workspace
+        .path()
+        .join(".tomcat")
+        .join("skills")
+        .join("verify")
+        .join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+    let shot_script = scripts_dir.join("shot.mjs");
+    std::fs::write(&shot_script, "process.exit(0);\n").unwrap();
+    let output_dir = workspace.path().join(".tomcat").join("shots");
+    let command = format!(
+        "node {} http://127.0.0.1:3000 --out {}",
+        shot_script.display(),
+        output_dir.display()
+    );
+    let task = registry
+        .spawn(command.clone(), None, Some(workspace.path().to_path_buf()))
+        .await
+        .unwrap();
+    registry.wait_for_finish(&task.task_id).await.unwrap();
+
+    let out = update_plan::execute(
+        &rt,
+        complete_all_args(
+            &plan_id,
+            Some(true),
+            vec![update_plan::GreenBuildEvidenceArg {
+                command,
+                task_id: task.task_id,
+            }],
+        ),
+    )
+    .await
+    .expect("a fresh successful shot command is valid green-build evidence");
+    assert_eq!(out["plan_state_after"], "completed");
+    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert!(persisted.frontmatter.green_build_pass);
+    cleanup_home(&home);
+}
+
+#[tokio::test]
 async fn persisted_fresh_review_skips_rerun_after_runtime_recreation() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();

@@ -52,6 +52,17 @@ mod tests {
             .as_str()
             .expect("pinned package")
             .starts_with("@playwright/mcp@"));
+        let expected_browser_path = temp
+            .path()
+            .join("work")
+            .join("cache")
+            .join("playwright")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            parsed["mcpServers"]["playwright"]["env"]["PLAYWRIGHT_BROWSERS_PATH"].as_str(),
+            Some(expected_browser_path.as_str())
+        );
 
         materialize_default_mcp_json(&cfg).expect("idempotent materialization");
         assert_eq!(

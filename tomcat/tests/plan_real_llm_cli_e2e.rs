@@ -42,7 +42,8 @@ use std::time::Duration;
 use serial_test::serial;
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
-    TodoItem, TodoStatus,
+    TodoItem, TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_CONTENT, GATE_ACCEPTANCE_TODO_ID,
+    GATE_CODE_REVIEW_TODO_CONTENT, GATE_CODE_REVIEW_TODO_ID,
 };
 use tomcat::{
     load_config_toml_file, normalize_path, resolve_sessions_dir, resolve_workspace_roots_paths,
@@ -522,6 +523,18 @@ fn seed_counter_planning_plan(fx: &CliFixture, goal: &str) -> common::CreatedPla
                     ),
                     status: TodoStatus::Pending,
                     kind: Default::default(),
+                },
+                TodoItem {
+                    id: GATE_CODE_REVIEW_TODO_ID.into(),
+                    content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
+                    status: TodoStatus::Pending,
+                    kind: TodoKind::GateCodeReview,
+                },
+                TodoItem {
+                    id: GATE_ACCEPTANCE_TODO_ID.into(),
+                    content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
+                    status: TodoStatus::Pending,
+                    kind: TodoKind::GateAcceptance,
                 },
             ],
             green_build_pass: false,

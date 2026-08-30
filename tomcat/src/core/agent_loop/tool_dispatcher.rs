@@ -207,6 +207,33 @@ mod tool_result_media_tests {
         assert!(outcome.follow_up_parts.is_empty());
         assert!(!outcome.is_error);
     }
+
+    #[tokio::test]
+    async fn text_block_becomes_model_text() {
+        let result = serde_json::json!({
+            "content": { "content": [{ "type": "text", "text": "MCP text result" }] }
+        });
+
+        let outcome = extract_tool_result_media(&result, None).await;
+
+        assert_eq!(outcome.model_text, "MCP text result");
+        assert!(outcome.follow_up_parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_block_becomes_a_text_summary() {
+        let result = serde_json::json!({
+            "content": { "content": [{ "type": "resource", "uri": "file:///report.txt" }] }
+        });
+
+        let outcome = extract_tool_result_media(&result, None).await;
+
+        assert!(outcome
+            .model_text
+            .contains("Unsupported MCP content block 'resource'"));
+        assert!(outcome.model_text.contains("file:///report.txt"));
+        assert!(outcome.follow_up_parts.is_empty());
+    }
 }
 
 fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: serde_json::Value) {

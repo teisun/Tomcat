@@ -117,20 +117,21 @@ fn bootstrap_then_shot_writes_three_artifacts_and_rejects_console_errors() {
     );
 
     let server = FixtureServer::start();
-    let output_dir = temp.path().join("shots");
+    let default_output_dir = temp.path().join(".tomcat").join("shots");
     let healthy_url = format!("{}/healthy.html", server.base_url);
     let healthy = Command::new("node")
         .args([
-            "shot.mjs",
+            scripts_dir
+                .join("shot.mjs")
+                .to_str()
+                .expect("UTF-8 shot script"),
             healthy_url.as_str(),
-            "--out",
-            output_dir.to_str().expect("UTF-8 output path"),
             "--name",
             "healthy",
             "--viewport",
             "390x844",
         ])
-        .current_dir(&scripts_dir)
+        .current_dir(temp.path())
         .env("PLAYWRIGHT_BROWSERS_PATH", &browser_path)
         .output()
         .expect("capture healthy fixture");
@@ -140,9 +141,12 @@ fn bootstrap_then_shot_writes_three_artifacts_and_rejects_console_errors() {
         String::from_utf8_lossy(&healthy.stderr)
     );
     for suffix in [".png", ".aria.txt", ".console.json"] {
-        assert!(output_dir.join(format!("healthy{suffix}")).is_file());
+        assert!(default_output_dir
+            .join(format!("healthy{suffix}"))
+            .is_file());
     }
 
+    let output_dir = temp.path().join("shots");
     let console_error_url = format!("{}/console-error.html", server.base_url);
     let console_error = Command::new("node")
         .args([
@@ -165,5 +169,29 @@ fn bootstrap_then_shot_writes_three_artifacts_and_rejects_console_errors() {
         std::fs::read_to_string(output_dir.join("console-error.console.json"))
             .expect("console report")
             .contains("intentional UI fixture error")
+    );
+
+    let node_modules = scripts_dir.join("node_modules");
+    let unavailable_modules = scripts_dir.join("node_modules-unavailable");
+    std::fs::rename(&node_modules, &unavailable_modules).expect("hide Playwright dependencies");
+    let missing_dependency = Command::new("node")
+        .args([
+            "shot.mjs",
+            healthy_url.as_str(),
+            "--out",
+            output_dir.to_str().expect("UTF-8 output path"),
+            "--name",
+            "missing-dependency",
+        ])
+        .current_dir(&scripts_dir)
+        .env("PLAYWRIGHT_BROWSERS_PATH", &browser_path)
+        .output()
+        .expect("run shot without Playwright dependency");
+    std::fs::rename(&unavailable_modules, &node_modules).expect("restore Playwright dependencies");
+    assert!(!missing_dependency.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_dependency.stderr).contains("bootstrap.mjs"),
+        "missing dependency must direct the user to bootstrap: {}",
+        String::from_utf8_lossy(&missing_dependency.stderr)
     );
 }

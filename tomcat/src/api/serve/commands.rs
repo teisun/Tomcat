@@ -19,7 +19,6 @@ use crate::api::chat::commands::{
 use crate::core::connector::mcp::config::{
     remove_global_server, set_global_tool_filter, upsert_global_server, McpServerConfig, ToolFilter,
 };
-use crate::core::connector::mcp::manager::ServerState;
 use crate::core::llm::{
     list_model_views_with_prefs, list_provider_keys, remove_user_model, set_provider_key,
     upsert_user_model, ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind,
@@ -1316,7 +1315,8 @@ pub(crate) async fn handle_command(
                     json!({
                         "name": status.name,
                         "source": status.source.as_str(),
-                        "state": connector_state_name(&status.state),
+                        "state": status.state.code(),
+                        "trust": status.trust,
                         "toolCount": status.tool_count,
                         "resourceCount": status.resource_count,
                     })
@@ -1326,6 +1326,40 @@ pub(crate) async fn handle_command(
                 id,
                 state.registry.active_session_id(),
                 Some(json!({ "connectors": servers })),
+            )))?;
+        }
+        ServeCommand::ListConnectorTools { id, name } => {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let tools = connector
+                .mcp_manager()
+                .tool_defs(&name)
+                .into_iter()
+                .map(|tool| {
+                    let label = tool.raw_name.clone();
+                    json!({
+                        "modelName": tool.model_name,
+                        "rawName": tool.raw_name,
+                        "label": label,
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema,
+                    })
+                })
+                .collect::<Vec<_>>();
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name, "tools": tools })),
             )))?;
         }
         ServeCommand::AddConnector {
@@ -1618,18 +1652,6 @@ fn resolve_connector_registry(
         .connector_registry
         .clone()
         .ok_or_else(|| AppError::Config("connector_disabled".to_string()))
-}
-
-fn connector_state_name(state: &ServerState) -> &'static str {
-    match state {
-        ServerState::Pending => "pending",
-        ServerState::Connecting => "connecting",
-        ServerState::Ready => "ready",
-        ServerState::Disconnected => "disconnected",
-        ServerState::NeedsConfirmation => "needs_confirmation",
-        ServerState::Blocked => "blocked",
-        ServerState::Failed(_) => "failed",
-    }
 }
 
 fn resolve_model_catalog_snapshot(

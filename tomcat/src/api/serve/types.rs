@@ -371,6 +371,12 @@ pub enum ServeCommand {
         id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    ListConnectorTools {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+    },
+    #[serde(rename_all = "camelCase")]
     AddConnector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -629,6 +635,7 @@ impl ServeCommand {
             | Self::SetProviderKey { id, .. }
             | Self::ListProviderKeys { id, .. }
             | Self::ListConnectors { id, .. }
+            | Self::ListConnectorTools { id, .. }
             | Self::AddConnector { id, .. }
             | Self::RemoveConnector { id, .. }
             | Self::SetConnectorTrust { id, .. }
@@ -684,6 +691,7 @@ impl ServeCommand {
             | Self::SetProviderKey { .. }
             | Self::ListProviderKeys { .. }
             | Self::ListConnectors { .. }
+            | Self::ListConnectorTools { .. }
             | Self::AddConnector { .. }
             | Self::RemoveConnector { .. }
             | Self::SetConnectorTrust { .. }
@@ -731,6 +739,7 @@ impl ServeCommand {
             Self::SetProviderKey { .. } => "set_provider_key",
             Self::ListProviderKeys { .. } => "list_provider_keys",
             Self::ListConnectors { .. } => "list_connectors",
+            Self::ListConnectorTools { .. } => "list_connector_tools",
             Self::AddConnector { .. } => "add_connector",
             Self::RemoveConnector { .. } => "remove_connector",
             Self::SetConnectorTrust { .. } => "set_connector_trust",

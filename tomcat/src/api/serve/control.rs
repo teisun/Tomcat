@@ -52,6 +52,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "set_provider_key",
                             "list_provider_keys",
                             "list_connectors",
+                            "list_connector_tools",
                             "add_connector",
                             "remove_connector",
                             "set_connector_trust",

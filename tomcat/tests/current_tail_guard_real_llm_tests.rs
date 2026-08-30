@@ -15,7 +15,8 @@ use tomcat::core::agent_loop::{
 use tomcat::core::llm::MessageKind;
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
-    TodoItem, TodoStatus, PLAN_FILE_SCHEMA_VERSION,
+    TodoItem, TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_ID,
+    PLAN_FILE_SCHEMA_VERSION,
 };
 use tomcat::core::plan_runtime::PlanRuntime;
 use tomcat::core::session::transcript::append_entry;
@@ -189,6 +190,18 @@ fn build_plan_fixture(label: &str) -> PlanFixture {
                     content: next_content.clone(),
                     status: TodoStatus::Pending,
                     kind: Default::default(),
+                },
+                TodoItem {
+                    id: GATE_CODE_REVIEW_TODO_ID.to_string(),
+                    content: "Review implementation changes".to_string(),
+                    status: TodoStatus::Pending,
+                    kind: TodoKind::GateCodeReview,
+                },
+                TodoItem {
+                    id: GATE_ACCEPTANCE_TODO_ID.to_string(),
+                    content: "Verify acceptance evidence".to_string(),
+                    status: TodoStatus::Pending,
+                    kind: TodoKind::GateAcceptance,
                 },
             ],
             green_build_pass: false,

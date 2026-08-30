@@ -151,6 +151,17 @@ fn build_model_prefs_store(config: &AppConfig) -> Result<Arc<ModelPrefsStore>, A
     )?))
 }
 
+fn connector_registry_for(
+    config: &AppConfig,
+    workspace_root: &std::path::Path,
+) -> Result<Option<Arc<ConnectorRegistry>>, AppError> {
+    config
+        .connector
+        .enabled
+        .then(|| ConnectorRegistry::new(config, workspace_root))
+        .transpose()
+}
+
 fn checkpoint_store_cache() -> &'static RwLock<
     std::collections::HashMap<
         std::path::PathBuf,
@@ -247,11 +258,7 @@ fn scope_runtime_for(
         bash_task_registry,
         session,
     };
-    let connector_registry = config
-        .connector
-        .enabled
-        .then(|| ConnectorRegistry::new(config, &key))
-        .transpose()?;
+    let connector_registry = connector_registry_for(config, &key)?;
     let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
         build_plugin_runtime(
             config,
@@ -1576,7 +1583,7 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::{resolve_bash_production_policy, ChatContext};
+    use super::{connector_registry_for, resolve_bash_production_policy, ChatContext};
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
     use crate::core::plan_runtime::prod_reviewer::resolve_subagent_runtime;
     use crate::{AppConfig, ModelPrefsStore, ThinkingLevel};
@@ -1604,6 +1611,23 @@ mod tests {
             crate::core::tools::primitive::BashTaskRegistry::new(policy.persist_dir.clone())
                 .with_foreground_wait_ms(policy.foreground_wait_ms);
         assert_eq!(registry.foreground_wait_ms(), 9_000);
+    }
+
+    #[test]
+    fn connector_registry_constructed_when_enabled() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut enabled = AppConfig::default();
+        enabled.connector.enabled = true;
+        enabled.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        assert!(connector_registry_for(&enabled, temp.path())
+            .expect("enabled connector registry")
+            .is_some());
+
+        let mut disabled = enabled.clone();
+        disabled.connector.enabled = false;
+        assert!(connector_registry_for(&disabled, temp.path())
+            .expect("disabled connector registry")
+            .is_none());
     }
     #[test]
     #[serial(env_lock)]

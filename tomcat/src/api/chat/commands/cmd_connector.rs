@@ -2,6 +2,9 @@ use crate::api::chat::ChatContext;
 use crate::core::connector::mcp::config::{
     remove_global_server, set_global_tool_filter, upsert_global_server, McpServerConfig, ToolFilter,
 };
+use crate::core::connector::mcp::trust::{
+    SafeLaunchSnapshot, TrustConfirmationReason, TrustStatus,
+};
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -125,15 +128,70 @@ fn list(ctx: &ChatContext) -> ChatCommandOutcome {
     println!("MCP servers:");
     for status in statuses {
         println!(
-            "  - {} [{}] {:?}; {} tool(s), {} resource(s)",
+            "  - {} [{}] {}; {} tool(s), {} resource(s); {}",
             status.name,
             status.source.as_str(),
-            status.state,
+            status.state.display_label(),
             status.tool_count,
             status.resource_count,
+            trust_summary(&status.trust),
         );
+        print_trust_details(&status.trust);
     }
     ChatCommandOutcome::Handled
+}
+
+fn trust_summary(trust: &TrustStatus) -> &'static str {
+    match trust {
+        TrustStatus::Trusted => "已信任",
+        TrustStatus::NeedsConfirmation { .. } => "待确认",
+        TrustStatus::Blocked => "已阻止",
+    }
+}
+
+fn print_trust_details(trust: &TrustStatus) {
+    let TrustStatus::NeedsConfirmation {
+        reason,
+        previous,
+        current,
+        environment_changed,
+        hidden_argument_changed,
+    } = trust
+    else {
+        return;
+    };
+    match reason {
+        TrustConfirmationReason::FirstSeen => println!("      原因：项目配置中的 MCP 首次出现。"),
+        TrustConfirmationReason::LaunchChanged => {
+            println!("      原因：已信任 MCP 的启动配置发生变化。")
+        }
+    }
+    if let Some(previous) = previous {
+        println!("      原来：{}", format_launch_snapshot(previous));
+    } else if matches!(reason, TrustConfirmationReason::LaunchChanged) {
+        println!("      原来：旧记录没有可安全展示的启动快照。");
+    }
+    println!("      现在：{}", format_launch_snapshot(current));
+    if *hidden_argument_changed {
+        println!("      提示：敏感启动参数已变化，值已隐藏。");
+    }
+    if *environment_changed {
+        println!("      提示：环境配置已变化，名称和值均已隐藏。");
+    }
+}
+
+fn format_launch_snapshot(snapshot: &SafeLaunchSnapshot) -> String {
+    let mut command = std::iter::once(snapshot.command.as_str())
+        .chain(snapshot.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(cwd) = &snapshot.cwd {
+        command.push_str(&format!(" (cwd: {})", cwd.display()));
+    }
+    if snapshot.has_redacted_arguments {
+        command.push_str(" (敏感参数已隐藏)");
+    }
+    command
 }
 
 async fn tools(

@@ -17,9 +17,43 @@ pub enum TrustDecision {
     Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustConfirmationReason {
+    FirstSeen,
+    LaunchChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeLaunchSnapshot {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub has_redacted_arguments: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TrustStatus {
+    Trusted,
+    NeedsConfirmation {
+        reason: TrustConfirmationReason,
+        previous: Option<SafeLaunchSnapshot>,
+        current: SafeLaunchSnapshot,
+        environment_changed: bool,
+        hidden_argument_changed: bool,
+    },
+    Blocked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TrustRecord {
     command_fingerprint: String,
+    #[serde(default)]
+    launch_snapshot: Option<SafeLaunchSnapshot>,
+    #[serde(default)]
+    command_args_cwd_fingerprint: Option<String>,
     #[serde(default)]
     denied: bool,
 }
@@ -56,67 +90,168 @@ impl TrustStore {
     }
 
     pub fn decide(&self, server: &ConfiguredMcpServer) -> Result<TrustDecision, AppError> {
-        if !optional_integrity_matches(server)? {
-            return Ok(TrustDecision::Blocked);
-        }
-        let fingerprint = command_fingerprint(server);
-        let mut state = self.state.lock();
-        match state.servers.get(&server.name) {
-            Some(record) if record.command_fingerprint == fingerprint && record.denied => {
-                Ok(TrustDecision::Blocked)
-            }
-            Some(record) if record.command_fingerprint == fingerprint => Ok(TrustDecision::Allowed),
-            Some(_) => Ok(TrustDecision::NeedsConfirmation),
-            None if server.source == McpConfigSource::Global || server.config.trusted => {
-                state.servers.insert(
-                    server.name.clone(),
-                    TrustRecord {
-                        command_fingerprint: fingerprint,
-                        denied: false,
-                    },
-                );
-                persist(&self.path, &state)?;
+        match self.inspect(server)? {
+            TrustStatus::Trusted => {
+                let mut state = self.state.lock();
+                if !state.servers.contains_key(&server.name) {
+                    state
+                        .servers
+                        .insert(server.name.clone(), trust_record(server, false));
+                    persist(&self.path, &state)?;
+                }
                 Ok(TrustDecision::Allowed)
             }
-            None => Ok(TrustDecision::NeedsConfirmation),
+            TrustStatus::NeedsConfirmation { .. } => Ok(TrustDecision::NeedsConfirmation),
+            TrustStatus::Blocked => Ok(TrustDecision::Blocked),
+        }
+    }
+
+    pub fn inspect(&self, server: &ConfiguredMcpServer) -> Result<TrustStatus, AppError> {
+        if !optional_integrity_matches(server)? {
+            return Ok(TrustStatus::Blocked);
+        }
+        let fingerprint = command_fingerprint(server);
+        let snapshot = safe_launch_snapshot(server);
+        let command_args_cwd_fingerprint = command_args_cwd_fingerprint(server);
+        let state = self.state.lock();
+        match state.servers.get(&server.name) {
+            Some(record) if record.command_fingerprint == fingerprint && record.denied => {
+                Ok(TrustStatus::Blocked)
+            }
+            Some(record) if record.command_fingerprint == fingerprint => Ok(TrustStatus::Trusted),
+            Some(record) => Ok(TrustStatus::NeedsConfirmation {
+                reason: TrustConfirmationReason::LaunchChanged,
+                previous: record.launch_snapshot.clone(),
+                environment_changed: record
+                    .command_args_cwd_fingerprint
+                    .as_deref()
+                    .is_some_and(|previous| previous == command_args_cwd_fingerprint.as_str()),
+                hidden_argument_changed: record
+                    .launch_snapshot
+                    .as_ref()
+                    .is_some_and(|previous| previous == &snapshot)
+                    && record
+                        .command_args_cwd_fingerprint
+                        .as_deref()
+                        .is_some_and(|previous| previous != command_args_cwd_fingerprint.as_str()),
+                current: snapshot,
+            }),
+            None if server.source == McpConfigSource::Global || server.config.trusted => {
+                Ok(TrustStatus::Trusted)
+            }
+            None => Ok(TrustStatus::NeedsConfirmation {
+                reason: TrustConfirmationReason::FirstSeen,
+                previous: None,
+                current: snapshot,
+                environment_changed: false,
+                hidden_argument_changed: false,
+            }),
         }
     }
 
     pub fn approve(&self, server: &ConfiguredMcpServer) -> Result<(), AppError> {
         let mut state = self.state.lock();
-        state.servers.insert(
-            server.name.clone(),
-            TrustRecord {
-                command_fingerprint: command_fingerprint(server),
-                denied: false,
-            },
-        );
+        state
+            .servers
+            .insert(server.name.clone(), trust_record(server, false));
         persist(&self.path, &state)
     }
 
     pub fn deny(&self, server: &ConfiguredMcpServer) -> Result<(), AppError> {
         let mut state = self.state.lock();
-        state.servers.insert(
-            server.name.clone(),
-            TrustRecord {
-                command_fingerprint: command_fingerprint(server),
-                denied: true,
-            },
-        );
+        state
+            .servers
+            .insert(server.name.clone(), trust_record(server, true));
         persist(&self.path, &state)
     }
 }
 
 pub fn command_fingerprint(server: &ConfiguredMcpServer) -> String {
-    let payload = serde_json::json!({
+    fingerprint_json(serde_json::json!({
         "command": server.config.command,
         "args": server.config.args,
         "env": server.config.env,
         "cwd": server.config.cwd,
-    });
+    }))
+}
+
+fn command_args_cwd_fingerprint(server: &ConfiguredMcpServer) -> String {
+    fingerprint_json(serde_json::json!({
+        "command": server.config.command,
+        "args": server.config.args,
+        "cwd": server.config.cwd,
+    }))
+}
+
+fn fingerprint_json(payload: serde_json::Value) -> String {
     let encoded = serde_json::to_vec(&payload).expect("command fingerprint JSON serialization");
     let digest = Sha256::digest(encoded);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn trust_record(server: &ConfiguredMcpServer, denied: bool) -> TrustRecord {
+    TrustRecord {
+        command_fingerprint: command_fingerprint(server),
+        launch_snapshot: Some(safe_launch_snapshot(server)),
+        command_args_cwd_fingerprint: Some(command_args_cwd_fingerprint(server)),
+        denied,
+    }
+}
+
+fn safe_launch_snapshot(server: &ConfiguredMcpServer) -> SafeLaunchSnapshot {
+    let (args, has_redacted_arguments) = redact_sensitive_arguments(&server.config.args);
+    SafeLaunchSnapshot {
+        command: server.config.command.clone(),
+        args,
+        cwd: server.config.cwd.clone(),
+        has_redacted_arguments,
+    }
+}
+
+fn redact_sensitive_arguments(args: &[String]) -> (Vec<String>, bool) {
+    let mut redact_next = false;
+    let mut redacted = false;
+    let args = args
+        .iter()
+        .map(|argument| {
+            if redact_next {
+                redact_next = false;
+                redacted = true;
+                return "<redacted>".to_string();
+            }
+            if let Some((key, _)) = argument.split_once('=') {
+                if is_sensitive_argument_key(key) {
+                    redacted = true;
+                    return format!("{key}=<redacted>");
+                }
+            }
+            if is_sensitive_argument_key(argument) {
+                redact_next = true;
+                return argument.clone();
+            }
+            argument.clone()
+        })
+        .collect();
+    (args, redacted)
+}
+
+fn is_sensitive_argument_key(argument: &str) -> bool {
+    let key = argument
+        .trim_start_matches('-')
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    [
+        "api-key",
+        "apikey",
+        "authorization",
+        "cookie",
+        "credential",
+        "password",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|marker| key.contains(marker))
 }
 
 fn optional_integrity_matches(server: &ConfiguredMcpServer) -> Result<bool, AppError> {
@@ -191,9 +326,9 @@ fn persist(path: &std::path::Path, state: &TrustFile) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TrustDecision, TrustStore};
+    use super::{TrustConfirmationReason, TrustDecision, TrustStatus, TrustStore};
     use crate::core::connector::mcp::config::{
-        ConfiguredMcpServer, McpConfigSource, McpServerConfig, ToolFilter,
+        is_floating_npm_version, ConfiguredMcpServer, McpConfigSource, McpServerConfig, ToolFilter,
     };
     use crate::AppConfig;
 
@@ -237,6 +372,121 @@ mod tests {
                 .expect("changed command"),
             TrustDecision::NeedsConfirmation
         );
+    }
+
+    #[test]
+    fn configured_curated_server_is_trusted_by_default() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let store = TrustStore::open(&cfg).expect("open trust store");
+        let mut configured = server(McpConfigSource::Project, "npx");
+        configured.config.trusted = true;
+
+        assert_eq!(
+            store.decide(&configured).expect("configured trust"),
+            TrustDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn user_floating_version_warns_not_blocks() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let store = TrustStore::open(&cfg).expect("open trust store");
+        let mut configured = server(McpConfigSource::Global, "npx");
+        configured.config.args[1] = "browser-mcp@latest".to_string();
+
+        assert!(is_floating_npm_version(&configured.config.args));
+        assert_eq!(
+            store
+                .decide(&configured)
+                .expect("floating versions remain allowed"),
+            TrustDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn command_change_surfaces_safe_diff_without_environment_values() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let store = TrustStore::open(&cfg).expect("open trust store");
+        let configured = server(McpConfigSource::Global, "npx");
+        store.decide(&configured).expect("record global trust");
+        let mut changed = configured.clone();
+        changed.config.command = "node".to_string();
+        changed
+            .config
+            .env
+            .insert("MCP_TOKEN".to_string(), "super-secret".to_string());
+
+        let status = store.inspect(&changed).expect("inspect changed command");
+        assert!(matches!(
+            status,
+            TrustStatus::NeedsConfirmation {
+                reason: TrustConfirmationReason::LaunchChanged,
+                environment_changed: false,
+                ..
+            }
+        ));
+        let serialized = serde_json::to_string(&status).expect("serialize trust status");
+        assert!(serialized.contains("\"command\":\"node\""));
+        assert!(!serialized.contains("super-secret"));
+        assert!(!serialized.contains("MCP_TOKEN"));
+    }
+
+    #[test]
+    fn environment_change_never_leaks_value() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let store = TrustStore::open(&cfg).expect("open trust store");
+        let mut configured = server(McpConfigSource::Global, "npx");
+        configured
+            .config
+            .env
+            .insert("MCP_TOKEN".to_string(), "old-secret".to_string());
+        store.decide(&configured).expect("record global trust");
+        configured
+            .config
+            .env
+            .insert("MCP_TOKEN".to_string(), "new-secret".to_string());
+
+        let status = store
+            .inspect(&configured)
+            .expect("inspect changed environment");
+        assert!(matches!(
+            status,
+            TrustStatus::NeedsConfirmation {
+                environment_changed: true,
+                hidden_argument_changed: false,
+                ..
+            }
+        ));
+        let serialized = serde_json::to_string(&status).expect("serialize trust status");
+        assert!(!serialized.contains("old-secret"));
+        assert!(!serialized.contains("new-secret"));
+        assert!(!serialized.contains("MCP_TOKEN"));
+    }
+
+    #[test]
+    fn sensitive_argument_values_are_redacted_in_trust_status() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let store = TrustStore::open(&cfg).expect("open trust store");
+        let mut configured = server(McpConfigSource::Project, "npx");
+        configured
+            .config
+            .args
+            .extend(["--api-key".to_string(), "secret-value".to_string()]);
+
+        let status = store.inspect(&configured).expect("inspect project server");
+        let serialized = serde_json::to_string(&status).expect("serialize trust status");
+        assert!(serialized.contains("<redacted>"));
+        assert!(!serialized.contains("secret-value"));
     }
 
     #[test]

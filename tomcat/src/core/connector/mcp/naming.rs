@@ -77,4 +77,12 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn underscore_in_server_and_tool_names_is_preserved() {
+        assert_eq!(
+            to_model_name("browser_tools", "take_screenshot"),
+            "mcp__browser_tools__take_screenshot"
+        );
+    }
 }

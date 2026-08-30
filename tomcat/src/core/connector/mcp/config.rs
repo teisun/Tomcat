@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::infra::config::get_work_dir;
 use crate::infra::error::AppError;
@@ -81,6 +82,52 @@ impl McpServerConfig {
     }
 }
 
+pub fn is_floating_npm_version(args: &[String]) -> bool {
+    let mut args = args.iter().peekable();
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "-y" | "--yes" | "--quiet" => continue,
+            "-p" | "--package" => {
+                let _ = args.next();
+                continue;
+            }
+            value if value.starts_with('-') => continue,
+            package => return !has_exact_npm_version(package),
+        }
+    }
+    false
+}
+
+fn has_exact_npm_version(package: &str) -> bool {
+    let Some((_, version)) = package.rsplit_once('@') else {
+        return false;
+    };
+    let mut components = version
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default()
+        .split('.');
+    matches!(
+        (
+            components.next(),
+            components.next(),
+            components.next(),
+            components.next(),
+        ),
+        (Some(major), Some(minor), Some(patch), None)
+            if [major, minor, patch]
+                .into_iter()
+                .all(|component| !component.is_empty()
+                    && component.chars().all(|character| character.is_ascii_digit()))
+    )
+}
+
+fn is_npx_command(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .is_some_and(|name| name == "npx")
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfiguredMcpServer {
     pub name: String,
@@ -144,6 +191,14 @@ pub fn load_servers(
         .map(|(name, mut server)| {
             server.config.validate(&name)?;
             server.name = name;
+            if is_npx_command(&server.config.command)
+                && is_floating_npm_version(&server.config.args)
+            {
+                warn!(
+                    server = %server.name,
+                    "MCP server uses a floating npx package version; pin an exact @x.y.z version"
+                );
+            }
             Ok(server)
         })
         .collect()
@@ -215,12 +270,12 @@ const fn default_call_timeout_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_servers, project_mcp_path, McpConfigSource};
+    use super::{is_floating_npm_version, load_servers, project_mcp_path, McpConfigSource};
     use crate::infra::config::get_work_dir;
     use crate::AppConfig;
 
     #[test]
-    fn parses_minimal_cursor_style_command_and_args() {
+    fn minimal_cursor_style_server_uses_optional_field_defaults() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -240,6 +295,14 @@ mod tests {
         assert_eq!(servers[0].config.command, "npx");
         assert_eq!(servers[0].config.args, ["-y", "browser-mcp@1.2.3"]);
         assert_eq!(servers[0].source, McpConfigSource::Global);
+        assert!(servers[0].config.env.is_empty());
+        assert!(servers[0].config.cwd.is_none());
+        assert!(!servers[0].config.trusted);
+        assert!(servers[0].config.integrity.is_none());
+        assert_eq!(servers[0].config.startup_timeout_ms, 30_000);
+        assert_eq!(servers[0].config.call_timeout_ms, 120_000);
+        assert!(servers[0].config.tool_filter.include.is_empty());
+        assert!(servers[0].config.tool_filter.exclude.is_empty());
     }
 
     #[test]
@@ -266,5 +329,26 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].config.command, "project");
         assert_eq!(servers[0].source, McpConfigSource::Project);
+    }
+
+    #[test]
+    fn identifies_floating_npx_package_versions() {
+        assert!(is_floating_npm_version(&[
+            "-y".to_string(),
+            "browser-mcp".to_string()
+        ]));
+        assert!(is_floating_npm_version(&[
+            "--yes".to_string(),
+            "@scope/browser-mcp@latest".to_string(),
+        ]));
+        assert!(is_floating_npm_version(&[
+            "-y".to_string(),
+            "browser-mcp@next".to_string(),
+        ]));
+        assert!(!is_floating_npm_version(&[
+            "-y".to_string(),
+            "@playwright/mcp@0.0.79".to_string(),
+            "--headless".to_string(),
+        ]));
     }
 }

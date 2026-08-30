@@ -423,8 +423,12 @@ pub async fn build_initialized_state_with_config(
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
     let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
+    let initial_session = NewSessionParams {
+        cwd: cfg.storage.work_dir.clone(),
+        ..NewSessionParams::default()
+    };
     let state = ServeState::new(cfg, writer, shared_model_prefs).expect("serve state");
-    let slot = create_session_slot(Arc::clone(&state), NewSessionParams::default(), false)
+    let slot = create_session_slot(Arc::clone(&state), initial_session, false)
         .await
         .expect("initial session");
     state

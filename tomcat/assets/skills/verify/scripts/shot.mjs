@@ -2,6 +2,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { resolveBrowserPath, resolveLaunchOptions } from "./browser-path.mjs";
 
@@ -14,7 +15,7 @@ function usage(message) {
     console.error(`shot.mjs: ${message}`);
   }
   console.error(
-    "Usage: node shot.mjs <url> --out <directory> [--name <name>] [--viewport <width>x<height>] [--wait <networkidle|selector>] [--timeout-ms <ms>]",
+    "Usage: node shot.mjs <url> [--out <directory>] [--name <name>] [--viewport <width>x<height>] [--wait <networkidle|selector>] [--timeout-ms <ms>]",
   );
   process.exitCode = 2;
 }
@@ -38,6 +39,7 @@ function parseArguments(argv) {
     viewport: DEFAULT_VIEWPORT,
     wait: "networkidle",
     timeoutMs: DEFAULT_TIMEOUT_MS,
+    out: path.resolve(".tomcat", "shots"),
   };
   const [url, ...rest] = argv;
   if (!url) {
@@ -78,10 +80,6 @@ function parseArguments(argv) {
     }
   }
 
-  if (!options.out) {
-    usage('Missing required "--out <directory>" option.');
-    return undefined;
-  }
   if (!SAFE_NAME.test(options.name)) {
     usage("--name may contain only letters, digits, dot, underscore, and hyphen.");
     return undefined;
@@ -100,6 +98,34 @@ function consoleLocation(message) {
     : undefined;
 }
 
+function bootstrapCommand() {
+  return `node ${fileURLToPath(new URL("./bootstrap.mjs", import.meta.url))}`;
+}
+
+async function loadChromium() {
+  try {
+    const { chromium } = await import("playwright");
+    return chromium;
+  } catch (error) {
+    throw new Error(
+      `Playwright dependencies are unavailable: ${error.message}\nRun ${bootstrapCommand()} first.`,
+    );
+  }
+}
+
+async function launchBrowser(chromium) {
+  try {
+    return await chromium.launch({
+      headless: true,
+      ...(await resolveLaunchOptions(import.meta.url)),
+    });
+  } catch (error) {
+    throw new Error(
+      `Playwright browser is unavailable: ${error.message}\nRun ${bootstrapCommand()} first.`,
+    );
+  }
+}
+
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   if (!options) return;
@@ -110,15 +136,12 @@ async function main() {
   const consolePath = path.join(options.out, `${options.name}.console.json`);
   const browserPath = resolveBrowserPath(import.meta.url);
   process.env.PLAYWRIGHT_BROWSERS_PATH = browserPath;
-  const { chromium } = await import("playwright");
+  const chromium = await loadChromium();
   const events = [];
 
   let browser;
   try {
-    browser = await chromium.launch({
-      headless: true,
-      ...(await resolveLaunchOptions(import.meta.url)),
-    });
+    browser = await launchBrowser(chromium);
     const context = await browser.newContext({ viewport: options.viewport });
     const page = await context.newPage();
     page.on("console", (message) => {

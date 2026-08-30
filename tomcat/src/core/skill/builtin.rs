@@ -207,6 +207,54 @@ mod tests {
     }
 
     #[test]
+    fn materialized_verify_skill_writes_all_script_files_without_touching_dependencies() {
+        let temp = tempfile::tempdir().expect("test temp directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+
+        let skill_path = materialize_builtin_skills(&cfg).expect("materialize verify skill");
+        let skill_root = skill_path.parent().expect("skill root");
+        for relative_path in [
+            "SKILL.md",
+            "references/ui-checklist.md",
+            "scripts/bootstrap.mjs",
+            "scripts/browser-path.mjs",
+            "scripts/shot.mjs",
+            "scripts/package.json",
+            "scripts/package-lock.json",
+        ] {
+            let materialized = skill_root.join(relative_path);
+            let embedded = VERIFY_SKILL_ASSETS
+                .get_file(relative_path)
+                .expect("embedded verify asset");
+            assert_eq!(
+                std::fs::read(&materialized).expect("read materialized asset"),
+                embedded.contents(),
+                "asset {relative_path} must be written byte-for-byte"
+            );
+        }
+
+        let node_modules_sentinel = skill_root.join("scripts/node_modules/sentinel");
+        let browser_cache_sentinel = temp.path().join("work/cache/playwright/sentinel");
+        assert!(!node_modules_sentinel.exists());
+        assert!(!browser_cache_sentinel.exists());
+        std::fs::create_dir_all(node_modules_sentinel.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(browser_cache_sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&node_modules_sentinel, "preserve dependency").unwrap();
+        std::fs::write(&browser_cache_sentinel, "preserve browser").unwrap();
+
+        materialize_builtin_skills(&cfg).expect("re-materialize verify skill");
+        assert_eq!(
+            std::fs::read_to_string(node_modules_sentinel).unwrap(),
+            "preserve dependency"
+        );
+        assert_eq!(
+            std::fs::read_to_string(browser_cache_sentinel).unwrap(),
+            "preserve browser"
+        );
+    }
+
+    #[test]
     fn project_and_agent_verify_skills_shadow_the_managed_copy() {
         let temp = tempfile::tempdir().expect("test temp directory");
         let workspace = temp.path().join("workspace");
