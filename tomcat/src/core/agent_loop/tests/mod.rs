@@ -44,3 +44,4 @@ mod submodules_test;
 mod tool_call_arguments_test;
 mod tool_exec_batch_test;
 mod tool_exec_dedup_test;
+mod tool_media_batch_test;

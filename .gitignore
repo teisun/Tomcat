@@ -37,6 +37,7 @@ build/
 /.cursor/rules/
 node_modules/
 test-stuff/
+.tomcat/shots/
 
 ### Env (API keys, do not commit) ###
 .env

@@ -2,13 +2,15 @@
 //!
 //! These intentionally exercise `tomcat serve --stdio`, never the interactive
 //! chat CLI. They require a vision-capable OpenAI-compatible model and are
-//! excluded from normal CI:
+//! excluded from default CI (`scripts/test-groups.sh` does not list this
+//! binary; each case is `#[ignore]` and also requires `TOMCAT_REAL_LLM_E2E=1`):
 //! `TOMCAT_REAL_LLM_E2E=1 cargo test --test ui_acceptance_real_llm_e2e -- --ignored`
 
 mod common;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,7 +44,7 @@ impl UiFixtureServer {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = stop.clone();
         let intermediate_token = format!(
-            "verify-{:08x}",
+            "verify{:08x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time")
@@ -117,6 +119,21 @@ struct RealLlmTarget {
     upstream_model: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaywrightMcpMode {
+    Disabled,
+    Headless,
+    Headed,
+}
+
+/// Opt-in headed E2E screenshots are deliberately retained for local inspection.
+fn headed_e2e_screenshot_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tomcat crate must be inside the repository")
+        .join(".tomcat/shots")
+}
+
 fn real_llm_target() -> RealLlmTarget {
     assert_eq!(
         std::env::var("TOMCAT_REAL_LLM_E2E").as_deref(),
@@ -141,14 +158,18 @@ fn real_llm_target() -> RealLlmTarget {
     }
 }
 
-fn configure_real_vision_agent(fixture: &ServeFixture, target: &RealLlmTarget, mcp: bool) {
+fn configure_real_vision_agent(
+    fixture: &ServeFixture,
+    target: &RealLlmTarget,
+    playwright_mcp: PlaywrightMcpMode,
+) {
     let config_path = fixture.home_path.join(".tomcat/tomcat.config.toml");
     let mut config = load_config_toml_file(&config_path).expect("load generated config");
     config.llm.default_model = target.model_id.clone();
     config.context.compaction_model = target.model_id.clone();
     config.llm.title_model = None;
     config.skills.enabled = true;
-    config.connector.enabled = mcp;
+    config.connector.enabled = playwright_mcp != PlaywrightMcpMode::Disabled;
     std::fs::write(
         &config_path,
         toml::to_string_pretty(&config).expect("serialize real LLM config"),
@@ -196,14 +217,25 @@ capabilities = {{ vision = true, files = false, tools = true, reasoning = true, 
         String::from_utf8_lossy(&bootstrap.stderr)
     );
 
-    if mcp {
+    if playwright_mcp != PlaywrightMcpMode::Disabled {
+        let mut args = vec!["-y".to_string(), "@playwright/mcp@0.0.79".to_string()];
+        if playwright_mcp == PlaywrightMcpMode::Headless {
+            args.push("--headless".to_string());
+        }
+        if playwright_mcp == PlaywrightMcpMode::Headed {
+            let output_dir = headed_e2e_screenshot_dir();
+            std::fs::create_dir_all(&output_dir)
+                .expect("create headed screenshot output directory");
+            args.push("--output-dir".to_string());
+            args.push(output_dir.to_string_lossy().to_string());
+        }
         std::fs::write(
             fixture.home_path.join(".tomcat/mcp.json"),
             json!({
                 "mcpServers": {
                     "playwright": {
                         "command": "npx",
-                        "args": ["-y", "@playwright/mcp@0.0.79", "--headless"],
+                        "args": args,
                         "env": {
                             "PLAYWRIGHT_BROWSERS_PATH":
                                 fixture.home_path.join(".tomcat/cache/playwright"),
@@ -257,6 +289,7 @@ fn rendered_agent_text(frames: &[Value]) -> String {
         .filter_map(|frame| {
             frame
                 .get("assistantMessageEvent")
+                .filter(|event| event.get("kind").and_then(Value::as_str) == Some("content_delta"))
                 .and_then(|event| event.get("delta"))
                 .and_then(Value::as_str)
         })
@@ -278,6 +311,36 @@ fn tool_names(frames: &[Value]) -> Vec<String> {
         .collect()
 }
 
+fn assert_playwright_navigate_click_screenshot(frames: &[Value]) {
+    let names = tool_names(frames);
+    let joined = names.join(", ");
+    let navigate_index = names
+        .iter()
+        .position(|name| name.contains("browser_navigate"))
+        .unwrap_or_else(|| panic!("agent must call browser_navigate; tools={joined}"));
+    let click_index = names
+        .iter()
+        .enumerate()
+        .skip(navigate_index + 1)
+        .find_map(|(index, name)| name.contains("browser_click").then_some(index))
+        .unwrap_or_else(|| {
+            panic!("agent must call browser_click after browser_navigate; tools={joined}")
+        });
+    let screenshot_index = names
+        .iter()
+        .enumerate()
+        .skip(click_index + 1)
+        .find_map(|(index, name)| name.contains("browser_take_screenshot").then_some(index))
+        .unwrap_or_else(|| {
+            panic!("agent must call browser_take_screenshot after browser_click; tools={joined}")
+        });
+
+    eprintln!(
+        "[real-llm-e2e] confirmed Playwright MCP sequence: {}",
+        names[navigate_index..=screenshot_index].join(" -> ")
+    );
+}
+
 fn screenshot_events(frames: &[Value]) -> Vec<Value> {
     frames
         .iter()
@@ -294,6 +357,7 @@ fn screenshot_events(frames: &[Value]) -> Vec<Value> {
 fn wait_for_playwright_ready(child: &mut ServeChild) {
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     let mut attempt = 0;
+    let mut last_payload = String::from("<no list_connectors response>");
     while std::time::Instant::now() < deadline {
         attempt += 1;
         let id = format!("playwright-status-{attempt}");
@@ -305,12 +369,13 @@ fn wait_for_playwright_ready(child: &mut ServeChild) {
             .iter()
             .find(|frame| frame.get("id").and_then(Value::as_str) == Some(id.as_str()))
             .expect("list_connectors response");
+        last_payload = response["payload"].to_string();
         let ready = response["payload"]["connectors"]
             .as_array()
             .is_some_and(|connectors| {
                 connectors.iter().any(|connector| {
                     connector["name"].as_str() == Some("playwright")
-                        && connector["state"].as_str() == Some("ready")
+                        && connector["state"].as_str() == Some("connected")
                 })
             });
         if ready {
@@ -319,7 +384,7 @@ fn wait_for_playwright_ready(child: &mut ServeChild) {
         std::thread::sleep(Duration::from_millis(500));
     }
     panic!(
-        "Playwright MCP did not become ready within 120 seconds; serve stderr={}",
+        "Playwright MCP did not become ready within 120 seconds; last list_connectors={last_payload}; serve stderr={}",
         child.stderr()
     );
 }
@@ -367,7 +432,7 @@ fn session_contains_input_image(child: &mut ServeChild, session_id: &str, id: &s
 fn e2e_1_real_llm_completes_phase_1_ui_acceptance() {
     let target = real_llm_target();
     let fixture = setup_serve_fixture(&target.base_url);
-    configure_real_vision_agent(&fixture, &target, false);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Disabled);
     let page = UiFixtureServer::start();
     let mut child = spawn_serve_child(&fixture);
     let session_id = initialize(&mut child);
@@ -406,7 +471,7 @@ fn e2e_1_real_llm_completes_phase_1_ui_acceptance() {
 fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
     let target = real_llm_target();
     let fixture = setup_serve_fixture(&target.base_url);
-    configure_real_vision_agent(&fixture, &target, true);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headless);
     let page = UiFixtureServer::start();
     let mut child = spawn_serve_child(&fixture);
     let session_id = initialize(&mut child);
@@ -422,7 +487,7 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
         &session_id,
         "phase2",
         format!(
-            "Load the verify skill, then use the configured Playwright MCP tools to open {}/interactive.html, click Show details, inspect the intermediate state, and report the exact opaque token that becomes visible. The token is intentionally not in this instruction: you must use MCP tools and screenshot evidence; do not guess. For browser_take_screenshot, omit filename and omit fullPage=true so its PNG returns to you as an MCP image.",
+            "Load the verify skill, then use the configured Playwright MCP tools to open {}/interactive.html. You must call browser_navigate, then browser_click on Show details, then browser_take_screenshot. Report the exact opaque token that becomes visible. The token is intentionally not in this instruction: you must use MCP tools and screenshot evidence; do not guess. For browser_take_screenshot, omit filename and omit fullPage=true so its PNG returns to you as an MCP image.",
             page.base_url,
         ),
     );
@@ -431,6 +496,7 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
         frames_contain(&frames, "mcp__playwright__"),
         "MCP tools were not used: {frames:?}"
     );
+    assert_playwright_navigate_click_screenshot(&frames);
     assert!(
         session_contains_input_image(&mut child, &session_id, "phase2-messages"),
         "MCP screenshot did not persist as an InputImage follow-up message; tools={:?}; screenshot_events={:?}; stderr={}",
@@ -450,7 +516,7 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
 fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required() {
     let target = real_llm_target();
     let fixture = setup_serve_fixture(&target.base_url);
-    configure_real_vision_agent(&fixture, &target, true);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headless);
     let page = UiFixtureServer::start();
     let mut child = spawn_serve_child(&fixture);
     let session_id = initialize(&mut child);
@@ -467,7 +533,7 @@ fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required(
         &session_id,
         "combined",
         format!(
-            "First use the verify skill's deterministic managed shot workflow on {}/interactive.html and read PNG/ARIA/console evidence from {}/shots. The final answer is an opaque token which is intentionally absent from this instruction and appears only after clicking Show details. You must then switch to the configured Playwright MCP persistent browser session, click it, take a screenshot, and report that exact token. For browser_take_screenshot, omit filename and omit fullPage=true so its PNG returns to you as an MCP image. Do not skip either phase or guess.",
+            "First use the verify skill's deterministic managed shot workflow on {}/interactive.html and read PNG/ARIA/console evidence from {}/shots. The final answer is an opaque token which is intentionally absent from this instruction and appears only after clicking Show details. You must then switch to the configured Playwright MCP persistent browser session, call browser_navigate, browser_click on Show details, and browser_take_screenshot, and report that exact token. For browser_take_screenshot, omit filename and omit fullPage=true so its PNG returns to you as an MCP image. Do not skip either phase or guess.",
             page.base_url,
             work_dir.display(),
         ),
@@ -481,12 +547,80 @@ fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required(
         frames_contain(&frames, "mcp__playwright__"),
         "Phase 2 was skipped: {frames:?}"
     );
+    assert_playwright_navigate_click_screenshot(&frames);
     assert!(
         session_contains_input_image(&mut child, &session_id, "combined-messages"),
         "Phase 2 screenshot did not persist as an InputImage follow-up message; tools={:?}; screenshot_events={:?}; stderr={}",
         tool_names(&frames),
         screenshot_events(&frames),
         child.stderr(),
+    );
+    assert!(
+        text.contains(&page.intermediate_token),
+        "agent verdict: {text}"
+    );
+}
+
+#[test]
+#[ignore = "requires a real vision LLM, API key, Node, and a visible headed Chrome browser"]
+#[serial]
+fn e2e_4_real_llm_directly_drives_a_headed_playwright_browser() {
+    let target = real_llm_target();
+    let fixture = setup_serve_fixture(&target.base_url);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headed);
+    let mcp_config = std::fs::read_to_string(fixture.home_path.join(".tomcat/mcp.json"))
+        .expect("read headed MCP config");
+    assert!(
+        !mcp_config.contains("--headless"),
+        "headed E2E must omit --headless: {mcp_config}"
+    );
+    let screenshot_path = headed_e2e_screenshot_dir().join("headed-interaction.png");
+    assert!(
+        mcp_config.contains(headed_e2e_screenshot_dir().to_string_lossy().as_ref()),
+        "headed E2E must configure the retained screenshot directory: {mcp_config}"
+    );
+
+    let page = UiFixtureServer::start();
+    let mut child = spawn_serve_child(&fixture);
+    let session_id = initialize(&mut child);
+    let _warmup = run_prompt(
+        &mut child,
+        &session_id,
+        "headed-mcp-warmup",
+        "Reply with READY. Do not use any tools.".to_string(),
+    );
+    wait_for_playwright_ready(&mut child);
+    let frames = run_prompt(
+        &mut child,
+        &session_id,
+        "headed-mcp",
+        format!(
+            "Use only the configured Playwright MCP tools. Do not load a skill, run bash, or use any managed shot script. In the visible browser window, call browser_navigate to open {}/interactive.html, then browser_click Show details, then browser_take_screenshot with filename {} and without fullPage=true. Report the exact opaque token that appears only after the click; do not guess.",
+            page.base_url,
+            screenshot_path.display(),
+        ),
+    );
+    let text = rendered_agent_text(&frames);
+    assert!(
+        !frames_contain(&frames, "load_skill")
+            && !frames_contain(&frames, "shot.mjs")
+            && !tool_names(&frames).iter().any(|name| name == "bash"),
+        "headed direct-MCP E2E must not use the verification workflow: {frames:?}"
+    );
+    assert_playwright_navigate_click_screenshot(&frames);
+    assert!(
+        screenshot_path.is_file(),
+        "headed MCP screenshot was not saved to {}; tools={:?}; screenshot_events={:?}; stderr={}",
+        screenshot_path.display(),
+        tool_names(&frames),
+        screenshot_events(&frames),
+        child.stderr(),
+    );
+    let screenshot = std::fs::read(&screenshot_path).expect("read headed screenshot");
+    assert!(
+        screenshot.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "headed screenshot is not a PNG: {}",
+        screenshot_path.display(),
     );
     assert!(
         text.contains(&page.intermediate_token),

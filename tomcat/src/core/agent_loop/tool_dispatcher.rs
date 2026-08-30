@@ -138,6 +138,77 @@ async fn mcp_image_part(
     ChatMessageContentPart::image_base64_data(mime_type, data).map_err(|error| error.to_string())
 }
 
+/// `InputImage` / `InputFile` 不按原始 base64 长度计入上下文。这里的固定估算与
+/// 既有 read 工具的 follow-up 记账契约保持一致。
+fn follow_up_parts_chars(parts: &[ChatMessageContentPart]) -> usize {
+    parts
+        .iter()
+        .map(|part| match part {
+            ChatMessageContentPart::InputText { text } => text.chars().count(),
+            ChatMessageContentPart::InputReference { reference } => {
+                reference.to_prompt_text().chars().count()
+            }
+            ChatMessageContentPart::InputImage { .. } => 3600,
+            ChatMessageContentPart::InputFile { .. } => 8000,
+        })
+        .sum()
+}
+
+const STEERED_TOOL_RESULT_TEXT: &str =
+    "[Tool call skipped because a steering message superseded the remaining tool batch.]";
+
+/// A provider may emit more than one tool call in an assistant message. If a steering message
+/// arrives after one has completed, the remaining calls must still receive terminal results before
+/// any user message is appended; otherwise the OpenAI tool-call chain is invalid.
+fn append_steered_tool_result(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    tc: &ToolCallInfo,
+    tool_results: &mut Vec<Message>,
+) -> Result<(), LoopError> {
+    let args = serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+    agent.emit_event(AgentEvent::ToolExecutionStart {
+        tool_call_id: tc.id.clone(),
+        tool_name: tc.name.clone(),
+        args: args.clone(),
+    });
+    agent.emit_extension_event(ExtensionEvent::ToolCall {
+        tool_name: tc.name.clone(),
+        tool_call_id: tc.id.clone(),
+        input: args.clone(),
+    });
+    agent.emit_extension_event(ExtensionEvent::ToolResult {
+        tool_name: tc.name.clone(),
+        tool_call_id: tc.id.clone(),
+        input: args,
+        content: vec![ContentBlock(
+            serde_json::json!({ "text": STEERED_TOOL_RESULT_TEXT }),
+        )],
+        details: None,
+        is_error: true,
+    });
+    agent.emit_event(AgentEvent::ToolExecutionEnd {
+        tool_call_id: tc.id.clone(),
+        tool_name: tc.name.clone(),
+        result: ToolOutput(serde_json::json!(STEERED_TOOL_RESULT_TEXT)),
+        display: None,
+        is_error: true,
+    });
+    if let Some(ref mut ctx_state) = agent.context_state {
+        ctx_state.on_message_appended(STEERED_TOOL_RESULT_TEXT.len());
+    }
+    agent
+        .push_message(
+            messages,
+            ChatMessage::tool(&tc.id, STEERED_TOOL_RESULT_TEXT),
+        )
+        .map_err(LoopError::Fatal)?;
+    tool_results.push(Message(
+        serde_json::json!({ "content": STEERED_TOOL_RESULT_TEXT }),
+    ));
+    Ok(())
+}
+
 fn tool_parallelism_event(
     tool_calls_per_turn: usize,
     tool_results_completed: usize,
@@ -291,10 +362,10 @@ fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: 
 /// ## Steering break
 ///
 /// 每个 tool 执行完毕后检查 `steering_queue`；非空则通过
-/// `inject_steering_messages(...)` 统一走「记账 + append/persist + push」通道，
-/// 然后 `steered = true; break;`。**当次** tool 的 result 已入 messages；余下
-/// tool_calls **不执行**。调用方应 `continue` reasoning loop 让下一次 LLM 请求
-/// 携带 steering 消息。
+/// `steered = true` 标记当前 batch；余下 tool_calls **不执行**，但先各自写入一个
+/// “skipped by steering” terminal tool result。等整个 tool batch 闭合后，才统一写入
+/// media follow-up 与 steering 消息。调用方随后 `continue` reasoning loop，让下一次
+/// LLM 请求携带 steering 消息。
 ///
 /// 这是不带 usage 的测试便利包装；生产路径统一调用
 /// [`run_tool_calls_with_usage`]，以便将 provider usage 透传到落盘事件。
@@ -408,6 +479,10 @@ pub(super) async fn run_tool_calls_with_usage(
 
     let mut tool_results: Vec<Message> = Vec::new();
     let mut steered = false;
+    // A user message is forbidden between tool results from one assistant tool-call batch.
+    // Keep media in provider order and append one user-with-parts message only after every
+    // requested call has a terminal tool result.
+    let mut deferred_follow_up_parts = Vec::new();
 
     // ── 3. block_tool_calls 短路 ──
     if agent.block_tool_calls {
@@ -434,7 +509,7 @@ pub(super) async fn run_tool_calls_with_usage(
 
     // ── 4. 顺序调度 ──
     let cancel: CancellationToken = agent.cancel_token.clone();
-    for tc in tool_calls {
+    for (tool_index, tc) in tool_calls.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
         }
@@ -601,39 +676,37 @@ pub(super) async fn run_tool_calls_with_usage(
             serde_json::json!({ "content": model_text.clone() }),
         ));
 
-        // PR-RJ T3-c：read 命中 image / pdf → tool 消息已经写了占位句，
-        // 这里紧接着 push 一条 user 消息把真正的 InputImage / InputFile 注入对话。
-        // 注意时序：必须**在** tool 消息之后、steering break 之前——
-        // 1) tool→user 顺序固定，OpenAI Responses 才能把 part 关联到上一条 tool；
-        // 2) 若 follow-up 之后被 steering break 跳过剩余 tool，下一轮 LLM
-        //    仍能看到完整的「占位句 + 实物」对，不丢图。
-        if !follow_up_parts.is_empty() {
-            let parts_chars: usize = follow_up_parts
-                .iter()
-                .map(|p| match p {
-                    crate::core::llm::ChatMessageContentPart::InputText { text } => {
-                        text.chars().count()
-                    }
-                    crate::core::llm::ChatMessageContentPart::InputReference { reference } => {
-                        reference.to_prompt_text().chars().count()
-                    }
-                    crate::core::llm::ChatMessageContentPart::InputImage { .. } => 3600,
-                    crate::core::llm::ChatMessageContentPart::InputFile { .. } => 8000,
-                })
-                .sum();
-            if let Some(ref mut ctx_state) = agent.context_state {
-                ctx_state.on_message_appended(parts_chars);
-            }
-            agent
-                .push_message(messages, ChatMessage::user_with_parts(follow_up_parts))
-                .map_err(LoopError::Fatal)?;
-        }
+        deferred_follow_up_parts.extend(follow_up_parts);
 
-        // Steering break：每个 tool 执行后检查 queue；非空则注入 + 跳过剩余。
-        if inject_steering_messages(agent, messages).map_err(LoopError::Fatal)? {
+        // Steering may preempt remaining work, never the tool-result protocol. Close the
+        // remaining calls with explicit skipped results, then inject steering after this loop.
+        if !agent.steering_queue.lock().is_empty() {
             steered = true;
+            for skipped_tc in &tool_calls[tool_index + 1..] {
+                append_steered_tool_result(agent, messages, skipped_tc, &mut tool_results)?;
+            }
             break;
         }
+    }
+
+    if !deferred_follow_up_parts.is_empty() {
+        if let Some(ref mut ctx_state) = agent.context_state {
+            ctx_state.on_message_appended(follow_up_parts_chars(&deferred_follow_up_parts));
+        }
+        agent
+            .push_message(
+                messages,
+                ChatMessage::user_with_parts(deferred_follow_up_parts),
+            )
+            .map_err(LoopError::Fatal)?;
+    }
+
+    if steered {
+        let injected = inject_steering_messages(agent, messages).map_err(LoopError::Fatal)?;
+        debug_assert!(
+            injected,
+            "steering queue was non-empty when the batch was preempted"
+        );
     }
 
     if let Some(plan_runtime) = agent.config.plan_runtime.as_ref() {
