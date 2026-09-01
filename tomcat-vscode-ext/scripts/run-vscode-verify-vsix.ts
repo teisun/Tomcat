@@ -95,12 +95,19 @@ async function main(): Promise<void> {
   const bundledHarnessTestsPath = path.resolve(harnessRoot, "out/test/index.js");
   const promptOnlyHarnessTestsPath = path.resolve(harnessRoot, "out/test/prompt-only.index.js");
   const setupRecoveryHarnessTestsPath = path.resolve(harnessRoot, "out/test/setup-recovery.index.js");
+  const transientRecoveryHarnessTestsPath = path.resolve(
+    harnessRoot,
+    "out/test/transient-recovery.index.js",
+  );
   // Artifacts live OUTSIDE installRoot so the finally cleanup retains them for
   // post-run inspection (Read cropped screenshots). Override via env if needed.
   const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR
     ?? path.join(os.tmpdir(), "tomcat-vsix-verify-artifacts");
   const bundledFixture = await createHostE2eFixture();
   const setupRequiredFixture = await createHostE2eFixture({ requireInit: true });
+  const transientFailureFixture = await createHostE2eFixture({
+    transientServeFailures: 1,
+  });
   const prebuiltVsixRoot = await fs.mkdtemp("/tmp/tvsi-prebuilt-vsix-");
   const {
     TOMCAT_VSCODE_TEST_PATH: _ignoredBundledTestPath,
@@ -110,6 +117,10 @@ async function main(): Promise<void> {
     TOMCAT_VSCODE_TEST_PATH: _ignoredSetupTestPath,
     ...setupRequiredBundledEnv
   } = setupRequiredFixture.env;
+  const {
+    TOMCAT_VSCODE_TEST_PATH: _ignoredTransientTestPath,
+    ...transientFailureBundledEnv
+  } = transientFailureFixture.env;
 
   await fs.mkdir(artifactsDir, { recursive: true });
   await clearVisualArtifacts(artifactsDir);
@@ -153,13 +164,21 @@ async function main(): Promise<void> {
       "shows the expected onboarding prompt when requested by the host fixture",
       "recovers from a setup-required startup when the test fixture auto-runs init",
     ].join("|"),
-    TOMCAT_EXPECT_PROMPT_ACTIONS: "Start Setup|View Guide",
-    TOMCAT_EXPECT_PROMPT_SEVERITY: "info",
-    TOMCAT_EXPECT_PROMPT_SUBSTRING: "Tomcat is installed, but it is not ready yet",
+    TOMCAT_EXPECT_PROMPT_ACTIONS: "Start Setup|Open Settings|View Guide|Retry|View Logs",
+    TOMCAT_EXPECT_PROMPT_DETAIL: "fake serve requires tomcat init first",
+    TOMCAT_EXPECT_PROMPT_SEVERITY: "warning",
+    TOMCAT_EXPECT_PROMPT_SUBSTRING: "Tomcat could not start after several attempts.",
     TOMCAT_EXPECT_RESOLVED_SOURCE: "bundled",
     TOMCAT_EXPECT_SETUP_RECOVERY: "1",
     TOMCAT_EXPECT_PROMPT_TRIGGER: "restart",
-    TOMCAT_VSCODE_TEST_INFO_ACTION: "Start Setup",
+    TOMCAT_VSCODE_TEST_WARNING_ACTION: "Start Setup",
+    TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+  };
+  const transientRecoveryEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...transientFailureBundledEnv,
+    PATH: process.platform === "win32" ? process.env.PATH : "/usr/bin:/bin",
+    TOMCAT_EXPECT_TRANSIENT_SERVE_RECOVERY: "1",
     TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
   };
 
@@ -204,12 +223,22 @@ async function main(): Promise<void> {
       vsixPath: reusableVsixPath,
       workspacePath: setupRequiredFixture.workspaceDir,
     });
+
+    await runInstalledScenario({
+      extensionRoot,
+      harnessRoot,
+      harnessTestsPath: transientRecoveryHarnessTestsPath,
+      testEnv: transientRecoveryEnv,
+      vsixPath: reusableVsixPath,
+      workspacePath: transientFailureFixture.workspaceDir,
+    });
   } finally {
     // Best-effort crop even if runTests rejected (partial screenshots may exist).
     await cropScreenshots(extensionRoot, artifactsDir);
     console.log(`\nverify:vsix artifacts (screenshots + crops): ${artifactsDir}`);
     await bundledFixture.cleanup();
     await setupRequiredFixture.cleanup();
+    await transientFailureFixture.cleanup();
     await fs.rm(prebuiltVsixRoot, { force: true, recursive: true });
     await fs.rm(pureExtWorkspacePath, { force: true, recursive: true });
   }

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { WebviewSessionTab } from "../types";
+import type {
+  WebviewConnectionStatus,
+  WebviewSessionTab,
+} from "../types";
 import { groupSessionsByDate, type SessionGroup } from "./sessionList/groupSessions";
 
 const CAP_PER_GROUP = 6;
@@ -22,6 +25,7 @@ function formatSessionLabel(session: WebviewSessionTab): string {
 export function SessionBar({
   activeSessionId,
   canCompact = false,
+  connectionStatus,
   creating = false,
   onCompact,
   onNewSession,
@@ -32,6 +36,7 @@ export function SessionBar({
 }: {
   activeSessionId: string | null;
   canCompact?: boolean;
+  connectionStatus?: WebviewConnectionStatus;
   creating?: boolean;
   onCompact?(): void;
   onNewSession(): void;
@@ -85,6 +90,14 @@ export function SessionBar({
     : sessions.length
       ? "Select session"
       : "No sessions";
+  const connectionLabel =
+    connectionStatus === "ready" || (!connectionStatus && ready)
+      ? "Connected"
+      : connectionStatus === "reconnecting"
+        ? "Reconnecting…"
+        : connectionStatus === "failed"
+          ? "Connection failed"
+          : "Connecting…";
 
   const toggleGroup = (label: string) => {
     setExpandedGroups((current) => {
@@ -106,17 +119,17 @@ export function SessionBar({
   return (
     <section className="tc-topbar" aria-label="Session bar" ref={wrapperRef}>
       <span
-        aria-label={ready ? "Connected" : "Connecting…"}
+        aria-label={connectionLabel}
         className={`tc-conn-light tc-conn-light--${ready ? "connected" : "connecting"}`}
         data-testid="connection-chip"
-        title={ready ? "Connected" : "Connecting…"}
+        title={connectionLabel}
       />
       <button
         aria-expanded={open}
         aria-label="Tomcat session"
         className="tc-topbar__trigger"
         data-testid="session-select"
-        disabled={creating}
+        disabled={!ready || creating}
         onClick={() => setOpen((value) => !value)}
         type="button"
       >
@@ -130,7 +143,7 @@ export function SessionBar({
         aria-label={creating ? "Creating new session" : "Create new session"}
         className="tc-icon-button tc-topbar__new"
         data-testid="new-session-button"
-        disabled={creating}
+        disabled={!ready || creating}
         onClick={onNewSession}
         type="button"
       >
@@ -140,7 +153,7 @@ export function SessionBar({
         aria-label="Compact conversation context"
         className="tc-icon-button tc-topbar__compact"
         data-testid="compact-context-button"
-        disabled={!canCompact || creating}
+        disabled={!ready || !canCompact || creating}
         onClick={onCompact}
         title="Compact context"
         type="button"

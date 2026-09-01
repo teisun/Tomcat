@@ -528,6 +528,30 @@ describe("Tomcat webview App", () => {
     expect(screen.queryByTestId("loading-state")).toBeNull();
   });
 
+  it("distinguishes an automatic reconnection from the first connection", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: null,
+        availableModels: [],
+        connectionStatus: "reconnecting",
+        ready: false,
+        sessions: [],
+        sessionViews: {},
+      },
+      messageId: "state-reconnecting",
+    });
+
+    expect(screen.getByTestId("loading-state").textContent).toContain(
+      "Reconnecting",
+    );
+    expect(
+      screen.getByTestId("connection-chip").getAttribute("aria-label"),
+    ).toContain("Reconnecting");
+  });
+
   it("renders a history-only approval inline without opening the sticky answer panel", async () => {
     mount();
     await emitState({

@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-01 15:53 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-01 20:43 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 扩展侧 `tomcat serve` 连接改由 `ServeConnectionSupervisor` 统一看护：首次握手限时 12 秒；瞬态失败按 300ms→800ms→2s→4s 有界退避（5 次/3 分钟）；已连接后异常退出自动回连；首次 `tomcat init` 保留独立 24×5s 等待预算。ENOENT 立即沿用可执行文件指引，连续两次相同 stderr 的快速退出提前终止；其它终态回显 serve 原始 stderr 并提供 Setup/Settings/Guide/Retry/Logs 动作，不再误称缺 API key。Webview 的 `ready` 现在严格表示 serve 已握手，重连期显示 `Reconnecting…` 且禁用会产生请求的控件。验证：`npm run lint`、`npm run test:unit`（core 383 + GUI 556）、定向 devhost 自愈 E2E、VSIX 安装版 transient/setup/error 场景和纯插件 `tomcat-vscode-ext-0.1.52.vsix` 均通过；Cov% 未跑，仍为 —。@2026-09-01
 - [✓] **[P0]** MCP 工具改为渐进式披露：具体 MCP schema 不再注册进 `ToolRegistry` 或进入 prompt 前缀；仅静态暴露 `tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 与 `connectors` skill 索引，运行态目录通过 `McpManager` 按需查询。`tool_call` / 代码 VM 复用 MCP trust、串行调用与图片回流，修复直连结果一层包装漏读 `isError:true` 的错误状态；L1 source 卡片优先用 MCP 握手元数据说明能力。CLI `0.1.39 → 0.1.40`、扩展 `0.1.51 → 0.1.52`、bundled CLI 同步。验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、完整 `cargo test`、MCP manager/media/端到端回归与 `release-version check` 全绿。Cov% 未跑，仍为 —。@2026-09-01
 - [✓] **[P0]** 打包后用 Cursor/VS Code 同款 `yauzl` 真读 VSIX 每一段；目录对不上或解压失败则删包并让 `package:vsix` 失败，避免再把坏 zip 交给安装器。CLI `0.1.38 → 0.1.39`、扩展 `0.1.50 → 0.1.51`、bundled CLI 同步；`release-version check` 通过。本机纯插件 `tomcat-vscode-ext-0.1.51.vsix`（1.52 MB，SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`）不含 `bin/tomcat`。验证：VSIX 解压门禁单测、完整 `npm run package:vsix`。@2026-08-30
 - [✓] **[P0]** 完成 `connector_mcp_rectification_68b6b688`：MCP 浮动 npm 版本会告警但不阻断；`/connector list` 与 serve 摘要均含安全信任状态（command/args/cwd 快照，env 值永不落盘或回传）；新增按需 `list_connector_tools`，避免摘要携带全量工具。`shot.mjs` 支持默认 `.tomcat/shots/` 输出并在缺依赖时指向 bootstrap。补齐 manager 断线/超时/重连、启动注册撤销、Chat/serve 命令、Cursor 配置兼容和图片回流测试，并让技术方案与 UI 验收计划贴合代码。@2026-08-30
@@ -81,6 +82,7 @@
 
 ### 🔌 INTERFACE (接口变更)
 - 发布版本：CLI `0.1.40`、扩展 `0.1.52`、`bundledCliVersion=0.1.40`。
+- Serve 连接监管：新增扩展内部 `ServeConnectionSupervisor` 状态机（`idle|starting|handshaking|backoff|ready|fatal`）和 webview 内部 `connectionStatus`（`connecting|reconnecting|ready|failed`）；不改变 Rust serve RPC、NDJSON wire 或用户配置格式。
 - 打包：`package:vsix` 在 vsce 成功后必须用 `yauzl`（与 Cursor/VS Code `extract` 同款）读完每个条目；失败删除产物。扩展显式依赖 `yauzl`。
 - Connector：新增主配置 `[connector] enabled` / `disabled` 与 `~/.tomcat/mcp.json`、`<workspace>/.tomcat/mcp.json` 的 `mcpServers` 配置面；新增 Chat `/connector {list,add,trust,deny,test,tools,remove,reload}`，以及 serve `list_connectors`、`list_connector_tools`、`add_connector`、`remove_connector`、`set_connector_trust`、`test_connector`、`reload_connector`、`set_connector_tool_filter` capabilities。MCP 具体工具仅以 canonical name `mcp__{server}__{tool}` 存在 `McpManager` 动态目录，通过内置 `tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 按需访问，不进入 ToolRegistry 或 prompt 前缀；MCP 图片结果可作为 `InputImage` 回流。`wire.d.ts` 已生成对应 serve 命令类型。
 - MCP media：同一 assistant tool batch 的所有 tool result 必须先闭合，才可追加含 `InputImage` / `InputFile` 的 user follow-up；steering 跳过的调用也产生 terminal tool result。属于内部对话协议不变量，无新增外部 wire 字段。
@@ -164,7 +166,7 @@
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
 | 全量 `cargo test -p tomcat` | 静态检查、连接器/serve/MCP 集成测试均通过；全量运行会偶发卡在需要真实上游模型服从多步工具调用的 CLI 用例。最近一次 `test_user_background_bash_autofeed_real_llm_cli` 失败、单独重跑通过，属于不稳定 E2E，不是连接器回归。 | 将真实 LLM 用例移至 opt-in 或以确定性 mock 覆盖同一协议后再要求全绿 |
-| 扩展全量 integration / host E2E | 本轮 `npm run test:e2e:vscode-devhost` 已 33 passing；此前记录的 plan-state/model fixture 与 bundled CLI 夹具问题未在本次复跑范围内 | 由相关 fixture owner 单独对齐 |
+| 扩展全量 integration / host E2E | 本轮全量安装版视觉 E2E 两次均因 VS Code extension host 无响应，导致既有 plan/transcript 场景超时；连接监管的定向 devhost 与安装包场景均通过 | 由相关 fixture owner 排查宿主无响应后再恢复全量门禁 |
 | 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但真实 `dispatch_agent > 0` 路径仍待授权验证 | 获得明确授权后，在隔离夹具中补跑一次并检查首次是否合并全部独立问题 |
 | `cargo test` 独立红测 1 例 | `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup` 稳定复现 `child did not exit within 30s`；与本轮恢复整改无关 | 需由 checkpoint/CLI owner 单独排查子进程退出卡住原因 |
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |

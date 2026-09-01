@@ -26,6 +26,7 @@ import type {
   WebviewApprovalCard,
   WebviewAttachmentView,
   WebviewBoundaryBlock,
+  WebviewConnectionStatus,
   WebviewMessageBlock,
   WebviewMessageSegment,
   WebviewPendingAttachment,
@@ -2452,6 +2453,7 @@ export class WebviewStateStore {
       availableModelReasoningLevels: {},
       availableModels: [],
       buildModel: "",
+      connectionStatus: "connecting",
       modelAdminSupported: false,
       ready: false,
       sessionViews: {},
@@ -2502,6 +2504,12 @@ export class WebviewStateStore {
 
   setReady(ready: boolean): void {
     this.state.ready = ready;
+    this.state.connectionStatus = ready ? "ready" : "connecting";
+  }
+
+  setConnectionStatus(status: WebviewConnectionStatus): void {
+    this.state.connectionStatus = status;
+    this.state.ready = status === "ready";
   }
 
   /**
@@ -2547,6 +2555,7 @@ export class WebviewStateStore {
       availableModelReasoningLevels: {},
       availableModels: [],
       buildModel: "",
+      connectionStatus: "connecting",
       modelAdminSupported: false,
       ready: false,
       sessionViews: {},

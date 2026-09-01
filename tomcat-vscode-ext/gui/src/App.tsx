@@ -55,6 +55,7 @@ const EMPTY_STATE: WebviewStateSnapshot = {
   availableModels: [],
   mediaRoots: [],
   modelAdminSupported: false,
+  connectionStatus: "connecting",
   ready: false,
   sessionViews: {},
   sessions: [],
@@ -1458,9 +1459,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const latestUserMessageId = userMessages.at(-1)?.id ?? null;
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
-  const canPrompt = !activeSession?.busy && !draftForkFeedback.pending;
-  const canInterrupt = true;
-  const canBuildPlan = !!activeSession && !activeSession.busy;
+  const canPrompt = state.ready && !activeSession?.busy && !draftForkFeedback.pending;
+  const canInterrupt = state.ready;
+  const canBuildPlan = state.ready && !!activeSession && !activeSession.busy;
   const modelAdminSupported = state.modelAdminSupported;
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
@@ -2456,6 +2457,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           postIntent(vscodeApi, "compact", { sessionId: activeSession.sessionId });
         }}
         onNewSession={handleNewSession}
+        connectionStatus={state.connectionStatus}
         ready={state.ready}
         onSwitchSession={(sessionId) => {
           if (draftForkFeedback.pending) return;
@@ -2497,7 +2499,18 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           {stickyUserMessageText ? (
             <StickyUserPrompt text={stickyUserMessageText} />
           ) : null}
-          {activeSession ? (
+          {!state.ready ? (
+            <div className="tc-empty-state tc-empty-state--loading" data-testid="loading-state">
+              <span className="tc-spinner" aria-hidden="true" />
+              <p>
+                {state.connectionStatus === "reconnecting"
+                  ? "Reconnecting…"
+                  : state.connectionStatus === "failed"
+                    ? "Unable to connect. Choose Retry in the notification."
+                    : "Connecting…"}
+              </p>
+            </div>
+          ) : activeSession ? (
             activeSession.timeline.length ||
             activeApprovalCount ||
             activeSession.historyLoading ||
@@ -2546,15 +2559,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 <p>Use the composer below to talk with Tomcat, switch models, or enter plan mode.</p>
               </div>
             )
-          ) : state.ready ? (
+          ) : (
             <div className="tc-empty-state">
               <h2>Ready to chat</h2>
               <p>Use the composer below to talk with Tomcat, switch models, or enter plan mode.</p>
-            </div>
-          ) : (
-            <div className="tc-empty-state tc-empty-state--loading" data-testid="loading-state">
-              <span className="tc-spinner" aria-hidden="true" />
-              <p>Connecting…</p>
             </div>
           )}
         </section>

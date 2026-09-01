@@ -40,6 +40,10 @@ import {
   type InitializeResult,
 } from "./serveClient/initialize";
 import {
+  ServeConnectionSupervisor,
+  type ServeConnectionFailure,
+} from "./serveClient/ServeConnectionSupervisor";
+import {
   SessionRouter,
   type SessionHistoryPayload,
   type SessionStatePayload,
@@ -89,7 +93,9 @@ const execFileAsync = promisify(execFile);
 const SETUP_TERMINAL_NAME = "Tomcat Setup";
 const START_SETUP_ACTION = "Start Setup";
 const RETRY_SETUP_ACTION = "I've Finished Setup";
+const RETRY_CONNECTION_ACTION = "Retry";
 const OPEN_GUIDE_ACTION = "View Guide";
+const VIEW_LOGS_ACTION = "View Logs";
 const OPEN_SETTINGS_ACTION = "Open Settings";
 const OPEN_TERMINAL_ACTION = "Open Terminal";
 
@@ -611,19 +617,12 @@ export async function activate(
   });
   const sessionRouter = new SessionRouter(messenger, getDefaultCwd);
 
-  let initializePromise: Promise<InitializeResult> | undefined;
-  let hasShownInitializationHint = false;
+  let webviewProvider!: TomcatWebviewViewProvider;
   let firstRunSetupInProgress = false;
-  let firstRunRetryAttemptsRemaining = 0;
-  let firstRunRetryTimer: NodeJS.Timeout | undefined;
+  let hasEstablishedConnection = false;
   let setupTerminal: vscode.Terminal | undefined;
-
-  const clearFirstRunRetryTimer = (): void => {
-    if (firstRunRetryTimer) {
-      clearTimeout(firstRunRetryTimer);
-      firstRunRetryTimer = undefined;
-    }
-  };
+  let supervisor!: ServeConnectionSupervisor;
+  let warnedExecutable: string | undefined;
 
   const openTomcatPathSettings = async (): Promise<void> => {
     await vscode.commands.executeCommand(
@@ -660,12 +659,15 @@ export async function activate(
           ]);
 
     if (selection === RETRY_SETUP_ACTION) {
-      const recovered = await retryInitializationAfterSetup(true);
-      if (!recovered) {
-        await maybeShowSetupRecoveryMessage(
-          "Tomcat is not ready yet. Finish the `tomcat init` prompts in the integrated terminal, then try again.",
-          "warning",
+      try {
+        const result = await supervisor.reconnect();
+        stopFirstRunSetup();
+        await showInformationMessage(
+          promptHistory,
+          `Tomcat setup finished. Active session: ${result.sessionId ?? "n/a"}`,
         );
+      } catch {
+        // The supervisor owns bounded retry and shows one evidence-based terminal prompt.
       }
       return;
     }
@@ -680,14 +682,17 @@ export async function activate(
 
   const stopFirstRunSetup = (): void => {
     firstRunSetupInProgress = false;
-    firstRunRetryAttemptsRemaining = 0;
-    clearFirstRunRetryTimer();
   };
 
   const maybeShowExecutableWarning = async (): Promise<void> => {
     if (resolvedExecutable.found) {
+      warnedExecutable = undefined;
       return;
     }
+    if (warnedExecutable === resolvedExecutable.executable) {
+      return;
+    }
+    warnedExecutable = resolvedExecutable.executable;
 
     const selection = await showPromptMessage(
       promptHistory,
@@ -704,108 +709,70 @@ export async function activate(
     }
   };
 
-  const retryInitializationAfterSetup = async (
-    showSuccessMessage: boolean,
-  ): Promise<boolean> => {
-    try {
-      await applyRuntimeConfiguration();
-      messenger.restart();
-      initializePromise = undefined;
-      sessionRouter.clearBootstrapSessionId();
-      const result = await ensureInitialized();
-      stopFirstRunSetup();
-      if (showSuccessMessage) {
-        await showInformationMessage(
-          promptHistory,
-          `Tomcat setup finished. Active session: ${result.sessionId ?? "n/a"}`,
-        );
-      }
-      return true;
-    } catch (error) {
-      appendOutput(
-        output,
-        "debug",
-        `setup retry still waiting: ${String(error)}`,
-      );
-      return false;
-    }
-  };
-
-  const scheduleFirstRunRetryLoop = (): void => {
-    clearFirstRunRetryTimer();
-    if (!firstRunSetupInProgress) {
-      return;
-    }
-
-    firstRunRetryAttemptsRemaining = 24;
-    const tick = async (): Promise<void> => {
-      if (!firstRunSetupInProgress) {
-        return;
-      }
-      if (firstRunRetryAttemptsRemaining <= 0) {
-        clearFirstRunRetryTimer();
-        void maybeShowSetupRecoveryMessage(
-          "Tomcat is still waiting for first-time setup. Finish `tomcat init` in the integrated terminal, then choose `I've Finished Setup` to reconnect.",
-          "warning",
-        );
-        return;
-      }
-
-      firstRunRetryAttemptsRemaining -= 1;
-      const recovered = await retryInitializationAfterSetup(false);
-      if (recovered || !firstRunSetupInProgress) {
-        return;
-      }
-      firstRunRetryTimer = setTimeout(() => {
-        void tick();
-      }, 5_000);
-    };
-
-    firstRunRetryTimer = setTimeout(() => {
-      void tick();
-    }, 5_000);
-  };
-
   const startFirstRunSetup = async (): Promise<void> => {
     firstRunSetupInProgress = true;
-    hasShownInitializationHint = true;
     const terminal = ensureSetupTerminal();
     const initCommand = buildInitCommand(resolvedExecutable.executable);
     terminal.show(true);
     terminal.sendText(initCommand, true);
     appendOutput(output, "info", `started first-run setup: ${initCommand}`);
-    scheduleFirstRunRetryLoop();
+    void supervisor.reconnect("setup").then(
+      async (result) => {
+        if (!firstRunSetupInProgress) {
+          return;
+        }
+        stopFirstRunSetup();
+        await showInformationMessage(
+          promptHistory,
+          `Tomcat setup finished. Active session: ${result.sessionId ?? "n/a"}`,
+        );
+      },
+      () => undefined,
+    );
     await maybeShowSetupRecoveryMessage(
       "Tomcat setup is running in the integrated terminal. Finish the prompts there, then choose `I've Finished Setup` if Tomcat does not reconnect automatically.",
     );
   };
 
-  const maybeShowInitializationHint = async (): Promise<void> => {
-    if (hasShownInitializationHint || firstRunSetupInProgress) {
+  const showConnectionFailure = async (
+    failure: ServeConnectionFailure,
+  ): Promise<void> => {
+    if (failure.kind === "executable_missing") {
+      await maybeShowExecutableWarning();
       return;
     }
-
-    hasShownInitializationHint = true;
+    const detail = (failure.stderr || failure.error.message).trim().slice(-1_500);
     const selection = await showPromptMessage(
       promptHistory,
-      "info",
-      "Tomcat is installed, but it is not ready yet (usually about 1 minute to finish setup): choose a default model, add your API key, and initialize the local runtime.",
-      [START_SETUP_ACTION, OPEN_GUIDE_ACTION],
+      "warning",
+      [
+        "Tomcat could not start after several attempts.",
+        detail ? `The local serve process reported:\n${detail}` : undefined,
+        "Check the error above, then retry or run setup if this is a new installation.",
+      ].filter((line): line is string => !!line).join("\n\n"),
+      [
+        START_SETUP_ACTION,
+        OPEN_SETTINGS_ACTION,
+        OPEN_GUIDE_ACTION,
+        RETRY_CONNECTION_ACTION,
+        VIEW_LOGS_ACTION,
+      ],
     );
     if (selection === START_SETUP_ACTION) {
       await startFirstRunSetup();
-      return;
-    }
-    if (selection === OPEN_GUIDE_ACTION) {
+    } else if (selection === OPEN_SETTINGS_ACTION) {
+      await openTomcatPathSettings();
+    } else if (selection === OPEN_GUIDE_ACTION) {
       await openExtensionGuide(context);
+    } else if (selection === RETRY_CONNECTION_ACTION) {
+      void supervisor.reconnect().catch(() => undefined);
+    } else if (selection === VIEW_LOGS_ACTION) {
+      output.show(true);
     }
   };
 
   const applyRuntimeConfiguration = async (): Promise<void> => {
     resolvedExecutable = await resolveExecutable(context);
-    if (!firstRunSetupInProgress) {
-      hasShownInitializationHint = false;
-    }
     messenger.updateOptions({
       cwd: getDefaultCwd(),
       executable: resolvedExecutable.executable,
@@ -821,33 +788,60 @@ export async function activate(
 
   await applyRuntimeConfiguration();
 
-  const ensureInitialized = async (): Promise<InitializeResult> => {
-    if (initializePromise) {
-      return initializePromise;
+  supervisor = new ServeConnectionSupervisor({
+    initialize: (timeoutMs) => initializeServe(messenger, timeoutMs),
+    isExecutableAvailable: () => resolvedExecutable.found,
+    messenger,
+  });
+  const supervisorStateSubscription = supervisor.onStateChange((state) => {
+    appendOutput(
+      output,
+      "debug",
+      `serve connection: ${state.phase} (attempt ${state.attempt})`,
+    );
+    if (state.status !== "ready") {
+      sessionRouter.clearBootstrapSessionId();
     }
-
-    initializePromise = (async () => {
-      messenger.start();
-      const result = await initializeServe(messenger);
-      hasShownInitializationHint = false;
-      if (result.sessionId) {
-        sessionRouter.setBootstrapSessionId(result.sessionId);
+    if (webviewProvider) {
+      void webviewProvider.setServeConnectionState(state.status);
+    }
+    if (state.phase === "ready" && state.result) {
+      if (state.result.sessionId) {
+        sessionRouter.setBootstrapSessionId(state.result.sessionId);
       }
-      return result;
-    })();
-
-    try {
-      return await initializePromise;
-    } catch (error) {
-      initializePromise = undefined;
-      appendOutput(output, "error", `initialize failed: ${String(error)}`);
-      if (resolvedExecutable.found) {
-        void maybeShowInitializationHint();
+      const reconnected = hasEstablishedConnection;
+      hasEstablishedConnection = true;
+      if (firstRunSetupInProgress) {
+        stopFirstRunSetup();
+      }
+      if (reconnected && webviewProvider) {
+        void webviewProvider.refreshAfterServeRestart();
+      }
+      return;
+    }
+    if (state.phase === "fatal" && state.failure) {
+      appendOutput(
+        output,
+        "error",
+        `serve connection failed: ${state.failure.error.message}`,
+      );
+      if (firstRunSetupInProgress) {
+        void maybeShowSetupRecoveryMessage(
+          "Tomcat is still waiting for first-time setup. Finish `tomcat init` in the integrated terminal, then choose `I've Finished Setup` to reconnect.",
+          "warning",
+        );
       } else {
-        void maybeShowExecutableWarning();
+        void showConnectionFailure(state.failure);
       }
-      throw error;
     }
+  });
+
+  const ensureInitialized = async (): Promise<InitializeResult> => {
+    const result = await supervisor.whenReady();
+    if (result.sessionId) {
+      sessionRouter.setBootstrapSessionId(result.sessionId);
+    }
+    return result;
   };
 
   let testOpenDialogHandler:
@@ -874,7 +868,7 @@ export async function activate(
     typeof extensionPackage.tomcat?.bundledCliVersion === "string"
       ? extensionPackage.tomcat.bundledCliVersion
       : null;
-  const webviewProvider = new TomcatWebviewViewProvider({
+  webviewProvider = new TomcatWebviewViewProvider({
     // Workspace-scoped: the attachment directory follows the tomcat data dir, which can
     // differ per workspace, and a wrong remembered path would grant the wrong root.
     attachmentRootMemento: context.workspaceState,
@@ -900,6 +894,7 @@ export async function activate(
     showOpenDialog: (options) =>
       testOpenDialogHandler?.(options) ?? vscode.window.showOpenDialog(options),
   });
+  void webviewProvider.setServeConnectionState(supervisor.currentState.status);
   settingsPanel = new SettingsPanel({
     ensureInitialized,
     expectedCliVersion,
@@ -1077,9 +1072,7 @@ export async function activate(
   const frameErrorSubscription = messenger.onFrameError((error) => {
     appendOutput(output, "frame", error.message);
   });
-  const exitSubscription = messenger.onExit((event) => {
-    initializePromise = undefined;
-    sessionRouter.clearBootstrapSessionId();
+  const exitLoggingSubscription = messenger.onExit((event) => {
     appendOutput(
       output,
       "exit",
@@ -1088,34 +1081,14 @@ export async function activate(
     if (event.error) {
       appendOutput(output, "error", event.error.message);
     }
-    if (shouldSuppressExitPrompt()) {
-      return;
-    }
-    if (!resolvedExecutable.found || event.error?.message.includes("ENOENT")) {
-      void maybeShowExecutableWarning();
-      return;
-    }
-    void showPromptMessage(
-      promptHistory,
-      "warning",
-      "Tomcat serve exited. Restart the bridge to continue chatting.",
-      ["Restart Tomcat"],
-    ).then((selection) => {
-        if (selection === "Restart Tomcat") {
-          void vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND);
-        }
-      });
   });
 
   const restartCommand = vscode.commands.registerCommand(
     TOMCAT_RESTART_COMMAND,
     async () => {
       await applyRuntimeConfiguration();
-      messenger.restart();
-      initializePromise = undefined;
       sessionRouter.clearBootstrapSessionId();
-      const result = await ensureInitialized();
-      await webviewProvider.refreshAfterServeRestart();
+      const result = await supervisor.reconnect();
       await showInformationMessage(
         promptHistory,
         `Tomcat serve restarted. Active session: ${result.sessionId ?? "n/a"}`,
@@ -1269,16 +1242,12 @@ export async function activate(
 
       void (async () => {
         await applyRuntimeConfiguration();
-        initializePromise = undefined;
         sessionRouter.clearBootstrapSessionId();
-        if (messenger.isRunning) {
-          messenger.restart();
-          await ensureInitialized();
-          await showInformationMessage(
-            promptHistory,
-            "Tomcat settings changed. Restarted Tomcat serve.",
-          );
-        }
+        await supervisor.reconnect();
+        await showInformationMessage(
+          promptHistory,
+          "Tomcat settings changed. Restarted Tomcat serve.",
+        );
       })().catch((error: unknown) => {
         appendOutput(output, "error", `config update failed: ${String(error)}`);
       });
@@ -1329,7 +1298,6 @@ export async function activate(
         if (selectionCodeLensTimer) {
           clearTimeout(selectionCodeLensTimer);
         }
-        clearFirstRunRetryTimer();
         setupTerminal?.dispose();
       },
     },
@@ -1337,20 +1305,20 @@ export async function activate(
   scheduleSelectionCodeLensRefresh();
 
   disposeRuntime = () => {
-    clearFirstRunRetryTimer();
     setupTerminal?.dispose();
     askQuestionHandler.dispose();
     observedEventSubscription.dispose();
     stderrSubscription.dispose();
     frameErrorSubscription.dispose();
-    exitSubscription.dispose();
+    exitLoggingSubscription.dispose();
+    supervisorStateSubscription.dispose();
     settingsPanel.dispose();
     for (const waiter of [...eventWaiters]) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error("Tomcat extension is shutting down"));
       eventWaiters.delete(waiter);
     }
-    messenger.dispose();
+    supervisor.dispose();
     webviewProvider.dispose();
     ide.dispose();
   };

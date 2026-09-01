@@ -15,6 +15,7 @@ export interface HostE2eFixture {
 
 export interface HostE2eFixtureOptions {
   requireInit?: boolean;
+  transientServeFailures?: number;
 }
 
 const FALLBACK_SERVER_VERSION = "0.1.30";
@@ -88,8 +89,18 @@ const requireInit =
   process.env.TOMCAT_VSCODE_TEST_REQUIRE_INIT === "1"
     ? true
     : ${JSON.stringify(Boolean(options.requireInit))};
+const transientServeFailures = Math.max(
+  0,
+  Number(
+    process.env.TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES
+      || ${JSON.stringify(options.transientServeFailures ?? 0)},
+  ),
+);
 const setupMarkerPath =
   process.env.TOMCAT_VSCODE_TEST_SETUP_MARKER || ${JSON.stringify(setupMarkerPath)};
+const transientFailureMarkerPath =
+  process.env.TOMCAT_VSCODE_TEST_TRANSIENT_FAILURE_MARKER
+  || ${JSON.stringify(`${setupMarkerPath}.transient-failures`)};
 // Attachment bytes live outside the extension, exactly as they do with a real backend,
 // so the host has to be told where they are and grant the webview access to that path.
 const ATTACHMENT_ROOT =
@@ -272,6 +283,21 @@ if (process.argv[2] !== "serve") {
 if (requireInit && !fs.existsSync(setupMarkerPath)) {
   process.stderr.write("fake serve requires tomcat init first\\n");
   process.exit(1);
+}
+
+if (transientServeFailures > 0) {
+  let failuresSoFar = 0;
+  try {
+    failuresSoFar = Number(fs.readFileSync(transientFailureMarkerPath, "utf8")) || 0;
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+  if (failuresSoFar < transientServeFailures) {
+    fs.mkdirSync(path.dirname(transientFailureMarkerPath), { recursive: true });
+    fs.writeFileSync(transientFailureMarkerPath, String(failuresSoFar + 1));
+    process.stderr.write("fake transient serve startup failure\\n");
+    process.exit(1);
+  }
 }
 
 function touchSession(session) {
@@ -2744,6 +2770,7 @@ export async function createHostE2eFixture(
   const fakeServePath = path.join(rootDir, "fake-tomcat.js");
   const editFilePath = path.join(rootDir, "edit-target.txt");
   const setupMarkerPath = path.join(rootDir, "setup", "ready");
+  const transientFailureMarkerPath = path.join(rootDir, "setup", "transient-failures");
   const attachmentRootDir = path.join(rootDir, "attachments");
 
   await mkdir(workspaceDir, { recursive: true });
@@ -2774,6 +2801,10 @@ export async function createHostE2eFixture(
       TOMCAT_VSCODE_TEST_REQUIRE_INIT: options.requireInit ? "1" : "0",
       TOMCAT_VSCODE_TEST_SETUP_MARKER: setupMarkerPath,
       TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+      TOMCAT_VSCODE_TEST_TRANSIENT_FAILURE_MARKER: transientFailureMarkerPath,
+      TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES: String(
+        options.transientServeFailures ?? 0,
+      ),
     },
     fakeServePath,
     rootDir,

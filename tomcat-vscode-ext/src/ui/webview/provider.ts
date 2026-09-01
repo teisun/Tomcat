@@ -13,6 +13,7 @@ import {
   SERVE_CAPABILITY_LIST_MODELS,
   type InitializeResult,
 } from "../../serveClient/initialize";
+import type { ServeConnectionStatus } from "../../serveClient/ServeConnectionSupervisor";
 import {
   normalizeAskQuestionResponse,
   type AskQuestionWireRequest,
@@ -586,6 +587,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }> = [];
   private initialized?: InitializeResult;
   private isReady = false;
+  private serveConnectionStatus: ServeConnectionStatus = "connecting";
   private lastContextSearchIntent: Extract<WebviewIntent, { type: "searchContext" }> | null = null;
   private openFileObserved = false;
   private contextSearchTokenSource?: vscode.CancellationTokenSource;
@@ -692,7 +694,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   async refreshAfterServeRestart(): Promise<void> {
     this.initialized = undefined;
     this.stateStore.resetForReload();
-    this.stateStore.setReady(this.isReady);
+    this.stateStore.setConnectionStatus(this.serveConnectionStatus);
     if (!this.isReady) {
       return;
     }
@@ -738,7 +740,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   resolveWebviewView(view: vscode.WebviewView): void | Thenable<void> {
     this.view = view;
     this.isReady = false;
-    this.stateStore.setReady(false);
+    this.stateStore.setConnectionStatus(this.serveConnectionStatus);
     // Attachment URLs are webview-scoped, so the mapping is only valid once there is a
     // webview to scope them to, and has to be replaced whenever this one is.
     this.stateStore.setAttachmentUriResolver(this.historyAttachmentResolver());
@@ -782,6 +784,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       const waiter = { reject, resolve, timeout };
       this.readyWaiters.add(waiter);
     });
+  }
+
+  /**
+   * The webview DOM being ready and the local serve process being ready are
+   * separate facts. The extension host owns the latter through the supervisor.
+   */
+  async setServeConnectionState(status: ServeConnectionStatus): Promise<void> {
+    this.serveConnectionStatus = status;
+    this.stateStore.setConnectionStatus(status);
+    if (this.isReady) {
+      await this.postState();
+    }
   }
 
   async captureDomSnapshot(): Promise<DomSnapshot> {
@@ -1409,13 +1423,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       case "ready":
         this.isReady = true;
-        this.stateStore.setReady(true);
         for (const waiter of [...this.readyWaiters]) {
           clearTimeout(waiter.timeout);
           waiter.resolve();
           this.readyWaiters.delete(waiter);
         }
         await this.bootstrap();
+        this.stateStore.setConnectionStatus(this.serveConnectionStatus);
+        await this.postState();
         // History/session refresh may rebuild a timeline while the host-local question is still live.
         // Re-project pending controls after every DOM-ready handshake; the pending map, not the
         // disposable webview DOM, owns their live lifecycle.
@@ -3278,7 +3293,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     // Changing local resource roots rebuilds the document. Mirror first-mount state so
     // nothing keeps talking to a document VS Code is about to throw away.
     this.isReady = false;
-    this.stateStore.setReady(false);
+    this.stateStore.setConnectionStatus(this.serveConnectionStatus);
     this.view.webview.options = this.webviewOptions();
   }
 

@@ -33,6 +33,10 @@ type ResolvedSourceApi = {
     getResolvedExecutable(): {
       source: string;
     };
+    getWebviewState(): {
+      connectionStatus?: string;
+      ready: boolean;
+    };
   };
 };
 
@@ -96,6 +100,22 @@ async function waitForPrompt(
   assert.fail(`Timed out waiting for prompt containing: ${expectedSubstring}`);
 }
 
+async function waitForServeReady(
+  api: ResolvedSourceApi,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (api.__testing.getWebviewState().ready) {
+      return;
+    }
+    await sleep(100);
+  }
+  assert.fail(
+    `Timed out waiting for serve to become ready: ${JSON.stringify(api.__testing.getWebviewState())}`,
+  );
+}
+
 async function waitForPackagedDom(
   api: PackagedWebviewApi,
   predicate: (snapshot: { html: string }) => boolean,
@@ -140,11 +160,18 @@ suite("Installed Tomcat extension", () => {
     const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
     await maybeTriggerOnboardingBootstrap();
     const prompt = await waitForPrompt(api, expectedSubstring, 15_000);
+    const expectedDetail = process.env.TOMCAT_EXPECT_PROMPT_DETAIL;
     if (expectedSeverity) {
       assert.equal(prompt.severity, expectedSeverity);
     }
     if (expectedActions.length > 0) {
       assert.deepEqual(prompt.actions, expectedActions);
+    }
+    if (expectedDetail) {
+      assert.ok(
+        prompt.message.includes(expectedDetail),
+        `expected onboarding prompt to include serve stderr: ${expectedDetail}`,
+      );
     }
   });
 
@@ -156,7 +183,7 @@ suite("Installed Tomcat extension", () => {
 
     const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
     await maybeTriggerOnboardingBootstrap();
-    await waitForPrompt(api, "Tomcat is installed, but it is not ready yet", 20_000);
+    await waitForPrompt(api, "Tomcat could not start after several attempts.", 20_000);
 
     const deadline = Date.now() + 20_000;
     let lastError: unknown;
@@ -173,6 +200,26 @@ suite("Installed Tomcat extension", () => {
     throw lastError instanceof Error
       ? lastError
       : new Error("Timed out waiting for setup-required recovery to succeed");
+  });
+
+  test("self-heals one transient serve startup failure without showing setup", async function () {
+    if (process.env.TOMCAT_EXPECT_TRANSIENT_SERVE_RECOVERY !== "1") {
+      this.skip();
+      return;
+    }
+
+    const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
+    await (api as unknown as PackagedWebviewApi).__testing.focusWebview();
+    await (api as unknown as PackagedWebviewApi).__testing.waitForWebviewReady();
+    await waitForServeReady(api);
+
+    assert.equal(api.__testing.getWebviewState().connectionStatus, "ready");
+    assert.ok(
+      !api.__testing
+        .getPromptHistory()
+        .some((entry) => entry.message.includes("Tomcat could not start after several attempts.")),
+      "a transient startup failure must recover silently instead of suggesting setup",
+    );
   });
 
   test("switches an executing plan back to chat in the webview", async () => {

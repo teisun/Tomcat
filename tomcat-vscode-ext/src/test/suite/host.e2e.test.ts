@@ -1,3 +1,5 @@
+import * as assert from "node:assert/strict";
+
 import {
   assertPlanPreviewCustomEditorFlow,
   assertWebviewCompletedPlanStaysInChat,
@@ -199,5 +201,28 @@ suite("Tomcat host E2E", () => {
   test("derives non-placeholder session titles from first webview prompt segments", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewSessionTitleFlow(api);
+  });
+
+  test("self-heals one transient serve startup failure without showing setup", async function () {
+    if (process.env.TOMCAT_EXPECT_TRANSIENT_SERVE_RECOVERY !== "1") {
+      this.skip();
+      return;
+    }
+
+    const api = await getTomcatExtensionApi();
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && !api.__testing.getWebviewState().ready) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    assert.equal(api.__testing.getWebviewState().connectionStatus, "ready");
+    assert.ok(
+      !api.__testing
+        .getPromptHistory()
+        .some((prompt) => prompt.message.includes("Tomcat could not start after several attempts.")),
+      "a transient startup failure must recover silently instead of suggesting setup",
+    );
   });
 });

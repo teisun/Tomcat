@@ -398,6 +398,12 @@ export interface WebviewModelInfo {
   supportedReasoningLevels: string[];
 }
 
+export type WebviewConnectionStatus =
+  | "connecting"
+  | "reconnecting"
+  | "ready"
+  | "failed";
+
 export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
@@ -405,6 +411,7 @@ export interface WebviewStateSnapshot {
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   buildModel?: string;
+  connectionStatus?: WebviewConnectionStatus;
   mediaRoots?: WebviewMediaRoot[];
   modelAdminSupported: boolean;
   ready: boolean;

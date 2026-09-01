@@ -57,13 +57,14 @@ export function hasAnyModelAdminCapability(
 
 export async function initializeServe(
   messenger: TomcatMessenger,
+  timeoutMs?: number,
 ): Promise<InitializeResult> {
   const frame = await messenger.requestControl({
     payload: null,
     requestId: `init-${randomUUID()}`,
     subtype: "initialize",
     type: "control_request",
-  });
+  }, timeoutMs);
 
   if (frame.type !== "control_response") {
     throw new Error(`initialize was cancelled for request ${frame.requestId}`);

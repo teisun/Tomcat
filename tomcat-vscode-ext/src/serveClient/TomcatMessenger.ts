@@ -210,6 +210,15 @@ export class TomcatMessenger {
     this.start();
   }
 
+  /**
+   * Stops the current child without immediately starting another one. Lifecycle
+   * recovery is owned by ServeConnectionSupervisor; callers should normally use
+   * that supervisor rather than calling this directly.
+   */
+  stop(): void {
+    this.shutdown("TomcatMessenger stopped");
+  }
+
   updateOptions(options: Partial<TomcatMessengerOptions>): void {
     if (options.cwd !== undefined) {
       this.options.cwd = options.cwd;

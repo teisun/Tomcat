@@ -2415,3 +2415,52 @@ describe("draft fork provider transaction", () => {
     },
   );
 });
+
+describe("serve connection readiness", () => {
+  function createProvider(initialize: () => Promise<unknown>) {
+    return new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: initialize as never,
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+  }
+
+  it("does not mark serve ready merely because the webview DOM announces ready", async () => {
+    const provider = createProvider(async () => {
+      throw new Error("serve handshake failed");
+    });
+
+    await expect(
+      provider.dispatchTestIntent({
+        messageId: "webview-ready-before-handshake",
+        type: "ready",
+      }),
+    ).rejects.toThrow("serve handshake failed");
+
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "connecting",
+      ready: false,
+    });
+    provider.dispose();
+  });
+
+  it("derives ready from the supervisor-owned serve connection state", async () => {
+    const provider = createProvider(async () => ({}));
+
+    await provider.setServeConnectionState("ready");
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "ready",
+      ready: true,
+    });
+
+    await provider.setServeConnectionState("reconnecting");
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "reconnecting",
+      ready: false,
+    });
+    provider.dispose();
+  });
+});
