@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WebviewToolCard } from "../types";
 import {
+  buildFlatLabel,
   clampTaskOutputBudget,
   commandBinaries,
   formatCountdown,
@@ -309,6 +310,174 @@ describe("ToolRow", () => {
     );
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
     expect(screen.getByText("Rust async book")).toBeTruthy();
+  });
+
+  it("shows a tool_search query in its label and expanded arguments", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: {
+            limit: 20,
+            offset: 0,
+            query: "browser Playwright navigate click screenshot",
+            source: null,
+          },
+          summary: '{"matches":[]}',
+          toolName: "tool_search",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      'Searched "browser Playwright navigate click screenshot"',
+    );
+    expect(screen.queryByTestId("tool-row-args")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-args").textContent).toContain(
+      '"query": "browser Playwright navigate click screenshot"',
+    );
+    expect(screen.getByTestId("tool-row-result").textContent).toContain(
+      '"matches":[]',
+    );
+  });
+
+  it("uses connector-specific labels for search, describe, call, and code", () => {
+    expect(
+      buildFlatLabel(buildTool({
+        args: { source: "playwright" },
+        toolName: "tool_search",
+      })),
+    ).toBe("Listed playwright tools");
+    expect(
+      buildFlatLabel(buildTool({
+        args: { names: ["mcp__playwright__browser_click"] },
+        toolName: "tool_describe",
+      })),
+    ).toBe("Described 1 tool");
+    expect(
+      buildFlatLabel(buildTool({
+        args: {
+          arguments: { selector: "#submit" },
+          name: "mcp__playwright__browser_click",
+        },
+        toolName: "tool_call",
+      })),
+    ).toBe("Called browser_click");
+    expect(buildFlatLabel(buildTool({ toolName: "tool_run_code" }))).toBe(
+      "Ran connector code",
+    );
+  });
+
+  it("shows only a tool_call's inner MCP arguments", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: {
+            arguments: { selector: "#submit" },
+            name: "mcp__playwright__browser_click",
+          },
+          summary: '{"ok":true}',
+          toolName: "tool_call",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    const args = screen.getByTestId("tool-row-args").textContent ?? "";
+    expect(args).toContain('"selector": "#submit"');
+    expect(args).not.toContain("mcp__playwright__browser_click");
+  });
+
+  it("shows arguments for an unrecognized tool", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { foo: "bar" },
+          summary: '{"ok":true}',
+          toolName: "mystery_tool",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "mystery tool",
+    );
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-args").textContent).toContain(
+      '"foo": "bar"',
+    );
+  });
+
+  it("shows running connector arguments before a result arrives", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: {
+            arguments: { selector: "#submit" },
+            name: "mcp__playwright__browser_click",
+          },
+          status: "running",
+          summary: undefined,
+          toolName: "tool_call",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-args").textContent).toContain(
+      '"selector": "#submit"',
+    );
+  });
+
+  it("bounds generic tool arguments to keep the transcript compact", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { query: "x".repeat(5_000) },
+          summary: '{"matches":[]}',
+          toolName: "tool_search",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    const args = screen.getByTestId("tool-row-args").textContent ?? "";
+    expect(args.length).toBeLessThanOrEqual(4_000);
+    expect(args).toContain("… (arguments truncated)");
+  });
+
+  it("keeps dedicated tool cards free of generic arguments", () => {
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/README.md" },
+          summary: "file contents",
+          toolName: "read",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.queryByTestId("tool-row-args")).toBeNull();
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/plan.plan.md", plan_id: "plan-1" },
+          summary: '{"applied":1}',
+          toolName: "update_plan",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.queryByTestId("tool-row-args")).toBeNull();
   });
 
   it("ask_question renders an always-visible answer card", () => {

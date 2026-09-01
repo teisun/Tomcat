@@ -741,22 +741,29 @@ export async function activate(
       await maybeShowExecutableWarning();
       return;
     }
+    const handshakeTimedOut = failure.kind === "handshake_timeout";
     const detail = (failure.stderr || failure.error.message).trim().slice(-1_500);
     const selection = await showPromptMessage(
       promptHistory,
       "warning",
       [
-        "Tomcat could not start after several attempts.",
+        handshakeTimedOut
+          ? "Tomcat did not complete its startup handshake in time."
+          : "Tomcat could not start after several attempts.",
         detail ? `The local serve process reported:\n${detail}` : undefined,
-        "Check the error above, then retry or run setup if this is a new installation.",
+        handshakeTimedOut
+          ? "The serve process did not answer initialize. View logs, then retry."
+          : "Check the error above, then retry or run setup if this is a new installation.",
       ].filter((line): line is string => !!line).join("\n\n"),
-      [
-        START_SETUP_ACTION,
-        OPEN_SETTINGS_ACTION,
-        OPEN_GUIDE_ACTION,
-        RETRY_CONNECTION_ACTION,
-        VIEW_LOGS_ACTION,
-      ],
+      handshakeTimedOut
+        ? [RETRY_CONNECTION_ACTION, VIEW_LOGS_ACTION]
+        : [
+          START_SETUP_ACTION,
+          OPEN_SETTINGS_ACTION,
+          OPEN_GUIDE_ACTION,
+          RETRY_CONNECTION_ACTION,
+          VIEW_LOGS_ACTION,
+        ],
     );
     if (selection === START_SETUP_ACTION) {
       await startFirstRunSetup();

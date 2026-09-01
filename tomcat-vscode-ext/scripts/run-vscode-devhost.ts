@@ -37,13 +37,22 @@ async function main(): Promise<void> {
     0,
     Number(process.env.TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES ?? "0") || 0,
   );
-  const fixture = await createHostE2eFixture({ transientServeFailures });
+  const handshakeDelayMs = Math.max(
+    0,
+    Number(process.env.TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS ?? "0") || 0,
+  );
+  const fixture = await createHostE2eFixture({
+    handshakeDelayMs,
+    transientServeFailures,
+  });
   const extensionTestsEnv = { ...fixture.env };
   for (const name of [
     "TOMCAT_E2E_GREP",
     "TOMCAT_E2E_SCREENSHOT",
     "TOMCAT_E2E_PLAN_FIND_CAPTURE_ONLY",
+    "TOMCAT_EXPECT_SLOW_HANDSHAKE",
     "TOMCAT_EXPECT_TRANSIENT_SERVE_RECOVERY",
+    "TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS",
     "TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES",
     "TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR",
   ]) {

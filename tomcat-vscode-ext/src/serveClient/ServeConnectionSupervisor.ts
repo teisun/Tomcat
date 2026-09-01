@@ -1,8 +1,15 @@
 import type { InitializeResult } from "./initialize";
 import type { DisposableLike } from "./protocol";
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "./TomcatMessenger";
 import type { TomcatMessenger, TomcatMessengerExit } from "./TomcatMessenger";
 
-const DEFAULT_HANDSHAKE_TIMEOUT_MS = 12_000;
+// Cold startup is the slowest serve operation. Keep its budget at least as
+// large as a regular control request so a healthy, still-initializing process
+// is not killed and restarted before it can answer.
+export const DEFAULT_HANDSHAKE_TIMEOUT_MS = Math.max(
+  60_000,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+);
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_RETRY_WINDOW_MS = 3 * 60_000;
 const DEFAULT_SETUP_MAX_ATTEMPTS = 24;
@@ -28,6 +35,7 @@ export type ServeConnectionStatus =
 export type ServeConnectionFailureKind =
   | "executable_missing"
   | "deterministic_startup"
+  | "handshake_timeout"
   | "retry_exhausted";
 
 export interface ServeConnectionFailure {
@@ -49,7 +57,13 @@ export type ServeConnectionRecoveryMode = "normal" | "setup";
 
 type SupervisedMessenger = Pick<
   TomcatMessenger,
-  "dispose" | "isRunning" | "onExit" | "restart" | "start" | "stop"
+  | "dispose"
+  | "isRunning"
+  | "onExit"
+  | "recentStderr"
+  | "restart"
+  | "start"
+  | "stop"
 >;
 
 type Attempt = {
@@ -300,6 +314,24 @@ export class ServeConnectionSupervisor {
       });
       this.resolveWaiters(result);
     } catch (error) {
+      if (
+        !attempt.failed &&
+        attempt.cycle === this.cycle &&
+        !this.disposed &&
+        this.options.messenger.isRunning
+      ) {
+        // The child did not crash. Restarting it would only discard its cold
+        // start work and repeat the same timeout; surface one actionable
+        // failure instead. An actual child exit is handled synchronously by
+        // handleUnexpectedExit and keeps its bounded retry behaviour.
+        this.enterFatal({
+          attempt: attempt.number,
+          error: asError(error),
+          kind: "handshake_timeout",
+          stderr: this.options.messenger.recentStderr.trim(),
+        });
+        return;
+      }
       this.handleAttemptFailure(attempt, asError(error));
     }
   }

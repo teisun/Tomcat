@@ -82,12 +82,22 @@ function humanizeToolName(toolName: string): string {
   return toolName.replace(/_/g, " ");
 }
 
+function connectorToolShortName(name: string): string {
+  if (!name.startsWith("mcp__")) {
+    return name;
+  }
+  const separatorIndex = name.indexOf("__", "mcp__".length);
+  return separatorIndex === -1 ? name : name.slice(separatorIndex + 2);
+}
+
 export type ToolCategory =
   "answer" | "command" | "context" | "edit" | "other" | "task";
 
 const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS = 5_000;
 const TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS = 5_000;
 const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS = 600_000;
+const GENERIC_TOOL_ARGS_MAX_CHARS = 4_000;
+const GENERIC_TOOL_ARGS_TRUNCATED_SUFFIX = "\n… (arguments truncated)";
 
 const EDIT_TOOLS = new Set(["edit", "hashline_edit", "write"]);
 const COMMAND_TOOLS = new Set(["bash", "execute_command", "shell"]);
@@ -111,6 +121,20 @@ const OTHER_TOOLS = new Set([
   "todos",
   "update_plan",
 ]);
+// These tools already have dedicated labels, icons, or expanded cards. Every
+// other tool uses the generic card so new connector tools cannot hide inputs.
+const DEDICATED_CARD_TOOLS = new Set([
+  ...EDIT_TOOLS,
+  ...COMMAND_TOOLS,
+  ...ANSWER_TOOLS,
+  ...TASK_TOOLS,
+  ...CONTEXT_TOOLS,
+  ...OTHER_TOOLS,
+]);
+
+function usesGenericToolCard(toolName: string): boolean {
+  return !DEDICATED_CARD_TOOLS.has(toolName);
+}
 
 function basename(filePath: string): string {
   const normalized = filePath.replace(/\\/g, "/");
@@ -168,6 +192,50 @@ function formatToolSummary(summary: string | undefined): string | undefined {
     return undefined;
   }
   return summary.trim() === "[interrupted]" ? "Interrupted" : summary;
+}
+
+function takeUnicodeSafePrefix(text: string, maxCodeUnits: number): string {
+  if (text.length <= maxCodeUnits) {
+    return text;
+  }
+  let end = maxCodeUnits;
+  const previous = text.charCodeAt(end - 1);
+  const next = text.charCodeAt(end);
+  if (
+    previous >= 0xd800 &&
+    previous <= 0xdbff &&
+    next >= 0xdc00 &&
+    next <= 0xdfff
+  ) {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
+function formatToolArgsForDisplay(item: WebviewToolCard): string | undefined {
+  if (!usesGenericToolCard(item.toolName)) {
+    return undefined;
+  }
+  const rawArgs =
+    item.toolName === "tool_call" ? item.args?.arguments : item.args;
+  if (
+    !isRecord(rawArgs) ||
+    Array.isArray(rawArgs) ||
+    Object.keys(rawArgs).length === 0
+  ) {
+    return undefined;
+  }
+  const serialized = JSON.stringify(rawArgs, null, 2);
+  if (!serialized) {
+    return undefined;
+  }
+  if (serialized.length <= GENERIC_TOOL_ARGS_MAX_CHARS) {
+    return serialized;
+  }
+  return `${takeUnicodeSafePrefix(
+    serialized,
+    GENERIC_TOOL_ARGS_MAX_CHARS - GENERIC_TOOL_ARGS_TRUNCATED_SUFFIX.length,
+  )}${GENERIC_TOOL_ARGS_TRUNCATED_SUFFIX}`;
 }
 
 export function toolCategory(toolName: string): ToolCategory {
@@ -268,6 +336,7 @@ export function toolIconClass(toolName: string): string {
       return "codicon-book";
     case "grep":
     case "search_files":
+    case "tool_search":
     case "web_search":
     case "search_workspace":
       return "codicon-search";
@@ -281,6 +350,12 @@ export function toolIconClass(toolName: string): string {
       return "codicon-debug-stop";
     case "task_list":
       return "codicon-tools";
+    case "tool_describe":
+      return "codicon-book";
+    case "tool_call":
+      return "codicon-plug";
+    case "tool_run_code":
+      return "codicon-code";
     case "web_fetch":
       return "codicon-globe";
     case "list_dir":
@@ -367,6 +442,31 @@ export function buildFlatLabel(item: WebviewToolCard): string {
       const query = asString(args.query) ?? "query";
       return running ? `Searching "${query}"` : `Searched "${query}"`;
     }
+    case "tool_search": {
+      const query = asString(args.query);
+      if (query) {
+        return running ? `Searching "${query}"` : `Searched "${query}"`;
+      }
+      const source = asString(args.source);
+      if (source) {
+        return running ? `Listing ${source} tools` : `Listed ${source} tools`;
+      }
+      return running ? "Listing connectors" : "Listed connectors";
+    }
+    case "tool_describe": {
+      const names = Array.isArray(args.names)
+        ? args.names.filter((name): name is string => typeof name === "string")
+        : [];
+      const target = names.length === 1 ? "1 tool" : `${names.length} tools`;
+      return running ? `Describing ${target}` : `Described ${target}`;
+    }
+    case "tool_call": {
+      const name = asString(args.name);
+      const target = name ? connectorToolShortName(name) : "connector tool";
+      return running ? `Calling ${target}` : `Called ${target}`;
+    }
+    case "tool_run_code":
+      return running ? "Running connector code" : "Ran connector code";
     case "search_workspace": {
       const query = asString(args.query) ?? asString(args.pattern);
       if (query) {
@@ -827,6 +927,14 @@ function renderPlainBody(item: WebviewToolCard): ReactNode {
   );
 }
 
+function renderToolArgsSection(args: string | undefined): ReactNode {
+  return args ? (
+    <pre aria-label="Tool arguments" data-testid="tool-row-args">
+      {args}
+    </pre>
+  ) : null;
+}
+
 function renderFlatContent(
   item: WebviewToolCard,
   onOpenFile: (path: string) => void,
@@ -958,7 +1066,10 @@ function renderFlatContent(
   }
 }
 
-function renderExpandedBody(item: WebviewToolCard): ReactNode {
+function renderExpandedBody(
+  item: WebviewToolCard,
+  genericArgs: string | undefined,
+): ReactNode {
   const category = toolCategory(item.toolName);
   if (category === "answer") {
     const questions = parseApprovalQuestions(item.args);
@@ -996,7 +1107,12 @@ function renderExpandedBody(item: WebviewToolCard): ReactNode {
     }
   }
 
-  return renderPlainBody(item);
+  return (
+    <>
+      {renderToolArgsSection(genericArgs)}
+      {renderPlainBody(item)}
+    </>
+  );
 }
 
 function fileEntryIconClass(
@@ -1216,8 +1332,11 @@ function ToolRowComponent({
       ? item.summary
       : (item.liveOutput ?? item.summary);
   const boundedTerminalText = limitTerminalOutput(terminalText);
+  const genericArgs = formatToolArgsForDisplay(item);
   const contentVisible =
-    hasMeaningfulContent(item) || Boolean(boundedTerminalText);
+    hasMeaningfulContent(item) ||
+    Boolean(boundedTerminalText) ||
+    Boolean(genericArgs);
   const alwaysVisibleBody = category === "answer" && contentVisible;
   const canToggle = contentVisible && !alwaysVisibleBody;
   const shouldExpandByDefault = shouldShowBodyByDefault(item, contentVisible);
@@ -1487,7 +1606,7 @@ function ToolRowComponent({
             </div>
             {collapsed || !contentVisible ? null : (
               <div className="tc-tool-row__body" data-testid="tool-row-body">
-                {renderExpandedBody(item)}
+                {renderExpandedBody(item, genericArgs)}
               </div>
             )}
           </>

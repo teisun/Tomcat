@@ -14,6 +14,7 @@ export interface HostE2eFixture {
 }
 
 export interface HostE2eFixtureOptions {
+  handshakeDelayMs?: number;
   requireInit?: boolean;
   transientServeFailures?: number;
 }
@@ -94,6 +95,13 @@ const transientServeFailures = Math.max(
   Number(
     process.env.TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES
       || ${JSON.stringify(options.transientServeFailures ?? 0)},
+  ),
+);
+const handshakeDelayMs = Math.max(
+  0,
+  Number(
+    process.env.TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS
+      || ${JSON.stringify(options.handshakeDelayMs ?? 0)},
   ),
 );
 const setupMarkerPath =
@@ -2235,41 +2243,42 @@ function handleCommand(frame) {
     case "control_request":
       if (frame.subtype === "initialize") {
         const sessionId = activeSessionId || createSession();
-        send({
-          payload: {
-            attachmentRoot: ATTACHMENT_ROOT,
-            capabilities: [
-              "prompt",
-              "ask_question",
-              "ingest_attachment",
-              "retain_attachment_leases",
-              "cache_attachment_thumbnail",
-              "discard_detached_session",
-              "new_session",
-              "switch_session",
-              "list_sessions",
-              "get_state",
-              "close_session",
-              "interrupt",
-              "follow_up",
-              "list_models",
-              "upsert_model",
-              "remove_model",
-              "set_provider_key",
-              "list_provider_keys",
-              "set_model",
-            "set_thinking_level",
-              "set_context_window",
-              "set_plan_mode",
-            ],
-            protocolVersion: 2,
-            serverVersion,
+        const respondToInitialize = () => {
+          send({
+            payload: {
+              attachmentRoot: ATTACHMENT_ROOT,
+              capabilities: [
+                "prompt",
+                "ask_question",
+                "ingest_attachment",
+                "retain_attachment_leases",
+                "cache_attachment_thumbnail",
+                "discard_detached_session",
+                "new_session",
+                "switch_session",
+                "list_sessions",
+                "get_state",
+                "close_session",
+                "interrupt",
+                "follow_up",
+                "list_models",
+                "upsert_model",
+                "remove_model",
+                "set_provider_key",
+                "list_provider_keys",
+                "set_model",
+                "set_thinking_level",
+                "set_context_window",
+                "set_plan_mode",
+              ],
+              protocolVersion: 2,
+              serverVersion,
+              sessionId,
+            },
+            requestId: frame.requestId,
             sessionId,
-          },
-          requestId: frame.requestId,
-          sessionId,
-          type: "control_response",
-        });
+            type: "control_response",
+          });
           if (pendingApproval && pendingApproval.kind === "answer-card") {
             const requestId = \`ask-resumed-\${pendingApproval.sessionId}-\${Date.now()}\`;
             const request = {
@@ -2289,6 +2298,12 @@ function handleCommand(frame) {
               });
             }, 0);
           }
+        };
+        if (handshakeDelayMs > 0) {
+          setTimeout(respondToInitialize, handshakeDelayMs);
+        } else {
+          respondToInitialize();
+        }
       }
       break;
     case "control_response":
@@ -2797,6 +2812,9 @@ export async function createHostE2eFixture(
       TOMCAT_VSCODE_TEST_ATTACHMENT_ROOT: attachmentRootDir,
       TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
       TOMCAT_VSCODE_TEST_EDIT_FILE: editFilePath,
+      TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS: String(
+        options.handshakeDelayMs ?? 0,
+      ),
       TOMCAT_VSCODE_TEST_PATH: fakeServePath,
       TOMCAT_VSCODE_TEST_REQUIRE_INIT: options.requireInit ? "1" : "0",
       TOMCAT_VSCODE_TEST_SETUP_MARKER: setupMarkerPath,

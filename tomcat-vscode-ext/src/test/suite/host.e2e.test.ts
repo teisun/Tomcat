@@ -225,4 +225,24 @@ suite("Tomcat host E2E", () => {
       "a transient startup failure must recover silently instead of suggesting setup",
     );
   });
+
+  test("connects when serve takes longer than the former handshake budget", async function () {
+    if (process.env.TOMCAT_EXPECT_SLOW_HANDSHAKE !== "1") {
+      this.skip();
+      return;
+    }
+
+    this.timeout(35_000);
+    const api = await getTomcatExtensionApi();
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady(25_000);
+
+    assert.equal(api.__testing.getWebviewState().connectionStatus, "ready");
+    assert.ok(
+      !api.__testing
+        .getPromptHistory()
+        .some((prompt) => prompt.message.includes("Tomcat could not start after several attempts.")),
+      "a slow but healthy handshake must not be treated as a startup crash",
+    );
+  });
 });

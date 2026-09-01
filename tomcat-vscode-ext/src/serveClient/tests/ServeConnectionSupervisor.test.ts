@@ -2,10 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { InitializeResult } from "../initialize";
 import {
+  DEFAULT_HANDSHAKE_TIMEOUT_MS,
   ServeConnectionSupervisor,
   type ServeConnectionState,
 } from "../ServeConnectionSupervisor";
-import type { TomcatMessengerExit } from "../TomcatMessenger";
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  type TomcatMessengerExit,
+} from "../TomcatMessenger";
 
 const READY_RESULT: InitializeResult = {
   attachmentRoot: null,
@@ -38,6 +42,7 @@ function exit(
 
 function createMessenger() {
   let running = false;
+  let recentStderr = "";
   let exitListener: ((event: TomcatMessengerExit) => void) | undefined;
   const messenger = {
     dispose: vi.fn(() => {
@@ -46,15 +51,20 @@ function createMessenger() {
     get isRunning() {
       return running;
     },
+    get recentStderr() {
+      return recentStderr;
+    },
     onExit: vi.fn((listener: (event: TomcatMessengerExit) => void) => {
       exitListener = listener;
       return { dispose: vi.fn() };
     }),
     restart: vi.fn(() => {
       running = true;
+      recentStderr = "";
     }),
     start: vi.fn(() => {
       running = true;
+      recentStderr = "";
     }),
     stop: vi.fn(() => {
       running = false;
@@ -63,6 +73,7 @@ function createMessenger() {
   return {
     emitExit(event: TomcatMessengerExit) {
       running = false;
+      recentStderr = event.stderr;
       exitListener?.(event);
     },
     messenger,
@@ -77,15 +88,18 @@ describe("ServeConnectionSupervisor", () => {
   it("auto-retries a transient startup failure and resolves initialize on a later attempt", async () => {
     vi.useFakeTimers();
     try {
-      const { messenger } = createMessenger();
+      const runtime = createMessenger();
       const initialize = vi
         .fn<() => Promise<InitializeResult>>()
-        .mockRejectedValueOnce(new Error("initialize timed out"))
+        .mockImplementationOnce(async () => {
+          runtime.emitExit(exit({ stderr: "temporary startup failure" }));
+          throw new Error("initialize timed out");
+        })
         .mockResolvedValueOnce(READY_RESULT);
       const supervisor = new ServeConnectionSupervisor({
         initialize,
         isExecutableAvailable: () => true,
-        messenger: messenger as never,
+        messenger: runtime.messenger as never,
         random: () => 0.5,
       });
 
@@ -94,7 +108,7 @@ describe("ServeConnectionSupervisor", () => {
 
       await expect(ready).resolves.toEqual(READY_RESULT);
       expect(initialize).toHaveBeenCalledTimes(2);
-      expect(initialize).toHaveBeenCalledWith(12_000);
+      expect(initialize).toHaveBeenCalledWith(DEFAULT_HANDSHAKE_TIMEOUT_MS);
       expect(supervisor.currentState).toMatchObject({ phase: "ready", status: "ready" });
       supervisor.dispose();
     } finally {
@@ -105,16 +119,19 @@ describe("ServeConnectionSupervisor", () => {
   it("keeps whenReady pending across transient startup retries", async () => {
     vi.useFakeTimers();
     try {
-      const { messenger } = createMessenger();
+      const runtime = createMessenger();
       const secondResult = deferred<InitializeResult>();
       const initialize = vi
         .fn<() => Promise<InitializeResult>>()
-        .mockRejectedValueOnce(new Error("temporary startup failure"))
+        .mockImplementationOnce(async () => {
+          runtime.emitExit(exit({ stderr: "temporary startup failure" }));
+          throw new Error("temporary startup failure");
+        })
         .mockReturnValueOnce(secondResult.promise);
       const supervisor = new ServeConnectionSupervisor({
         initialize,
         isExecutableAvailable: () => true,
-        messenger: messenger as never,
+        messenger: runtime.messenger as never,
         random: () => 0.5,
       });
       const settled = vi.fn();
@@ -192,19 +209,22 @@ describe("ServeConnectionSupervisor", () => {
   it("gives up after the bounded retry budget and preserves the last error", async () => {
     vi.useFakeTimers();
     try {
-      const { messenger } = createMessenger();
-      const initialize = vi
-        .fn<() => Promise<InitializeResult>>()
-        .mockRejectedValue(new Error("startup timeout"));
+      const runtime = createMessenger();
+      let failureNumber = 0;
+      const initialize = vi.fn<() => Promise<InitializeResult>>().mockImplementation(async () => {
+        failureNumber += 1;
+        runtime.emitExit(exit({ stderr: `transient failure ${failureNumber}` }));
+        throw new Error("startup timeout");
+      });
       const supervisor = new ServeConnectionSupervisor({
         initialize,
         isExecutableAvailable: () => true,
-        messenger: messenger as never,
+        messenger: runtime.messenger as never,
         random: () => 0.5,
       });
 
       const ready = supervisor.whenReady();
-      const rejected = expect(ready).rejects.toThrow("startup timeout");
+      const rejected = expect(ready).rejects.toThrow("tomcat serve exited");
       for (const delay of [300, 800, 2_000, 4_000]) {
         await vi.advanceTimersByTimeAsync(delay);
       }
@@ -212,11 +232,11 @@ describe("ServeConnectionSupervisor", () => {
       await rejected;
       expect(supervisor.currentState).toMatchObject({
         attempt: 5,
-        failure: { kind: "retry_exhausted", stderr: "" },
+        failure: { kind: "retry_exhausted", stderr: "transient failure 5" },
         phase: "fatal",
         status: "failed",
       });
-      expect(messenger.stop).toHaveBeenCalledTimes(1);
+      expect(runtime.messenger.stop).toHaveBeenCalledTimes(0);
       supervisor.dispose();
     } finally {
       vi.useRealTimers();
@@ -285,24 +305,25 @@ describe("ServeConnectionSupervisor", () => {
   it("allows manual reconnect after the retry budget is exhausted", async () => {
     vi.useFakeTimers();
     try {
-      const { messenger } = createMessenger();
-      const initialize = vi
-        .fn<() => Promise<InitializeResult>>()
-        .mockRejectedValueOnce(new Error("one"))
-        .mockRejectedValueOnce(new Error("two"))
-        .mockRejectedValueOnce(new Error("three"))
-        .mockRejectedValueOnce(new Error("four"))
-        .mockRejectedValueOnce(new Error("five"))
-        .mockResolvedValueOnce(READY_RESULT);
+      const runtime = createMessenger();
+      let failureNumber = 0;
+      const initialize = vi.fn<() => Promise<InitializeResult>>().mockImplementation(async () => {
+        if (failureNumber < 5) {
+          failureNumber += 1;
+          runtime.emitExit(exit({ stderr: `transient failure ${failureNumber}` }));
+          throw new Error(`failure ${failureNumber}`);
+        }
+        return READY_RESULT;
+      });
       const supervisor = new ServeConnectionSupervisor({
         initialize,
         isExecutableAvailable: () => true,
-        messenger: messenger as never,
+        messenger: runtime.messenger as never,
         random: () => 0.5,
       });
 
       const first = supervisor.whenReady();
-      const rejected = expect(first).rejects.toThrow("five");
+      const rejected = expect(first).rejects.toThrow("tomcat serve exited");
       for (const delay of [300, 800, 2_000, 4_000]) {
         await vi.advanceTimersByTimeAsync(delay);
       }
@@ -314,6 +335,46 @@ describe("ServeConnectionSupervisor", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("does not restart a live serve process after the initialize handshake times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = createMessenger();
+      const initialize = vi
+        .fn<() => Promise<InitializeResult>>()
+        .mockRejectedValue(
+          new Error("Timed out waiting for control response init-test"),
+        );
+      const supervisor = new ServeConnectionSupervisor({
+        initialize,
+        isExecutableAvailable: () => true,
+        messenger: runtime.messenger as never,
+      });
+
+      await expect(supervisor.whenReady()).rejects.toThrow(
+        "Timed out waiting for control response init-test",
+      );
+      expect(initialize).toHaveBeenCalledTimes(1);
+      expect(runtime.messenger.restart).not.toHaveBeenCalled();
+      expect(runtime.messenger.start).toHaveBeenCalledTimes(1);
+      expect(runtime.messenger.stop).toHaveBeenCalledTimes(1);
+      expect(supervisor.currentState).toMatchObject({
+        attempt: 1,
+        failure: { kind: "handshake_timeout" },
+        phase: "fatal",
+        status: "failed",
+      });
+      supervisor.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the handshake timeout at least as large as a regular request timeout", () => {
+    expect(DEFAULT_HANDSHAKE_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      DEFAULT_REQUEST_TIMEOUT_MS,
+    );
   });
 
   it("keeps polling setup without mistaking its expected repeated stderr for a fatal error", async () => {
@@ -354,15 +415,18 @@ describe("ServeConnectionSupervisor", () => {
   it("reports every transition to interested UI adapters", async () => {
     vi.useFakeTimers();
     try {
-      const { messenger } = createMessenger();
+      const runtime = createMessenger();
       const initialize = vi
         .fn<() => Promise<InitializeResult>>()
-        .mockRejectedValueOnce(new Error("retry"))
+        .mockImplementationOnce(async () => {
+          runtime.emitExit(exit({ stderr: "temporary startup failure" }));
+          throw new Error("retry");
+        })
         .mockResolvedValueOnce(READY_RESULT);
       const supervisor = new ServeConnectionSupervisor({
         initialize,
         isExecutableAvailable: () => true,
-        messenger: messenger as never,
+        messenger: runtime.messenger as never,
         random: () => 0.5,
       });
       const transitions: ServeConnectionState["phase"][] = [];

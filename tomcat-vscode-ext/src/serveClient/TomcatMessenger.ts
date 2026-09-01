@@ -32,6 +32,8 @@ import type {
   UpsertModelResponse,
 } from "./wire";
 
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
 export interface TomcatMessengerLogger {
   debug?(message: string): void;
   info?(message: string): void;
@@ -549,7 +551,7 @@ export class TomcatMessenger {
   }
 
   private timeoutMs(): number {
-    return this.options.requestTimeoutMs ?? 30_000;
+    return this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   private withCommandId(command: RequestCommand): RequestCommand & { id: string } {

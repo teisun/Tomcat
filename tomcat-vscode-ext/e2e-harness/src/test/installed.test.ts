@@ -222,6 +222,27 @@ suite("Installed Tomcat extension", () => {
     );
   });
 
+  test("connects when serve takes longer than the former handshake budget", async function () {
+    if (process.env.TOMCAT_EXPECT_SLOW_HANDSHAKE !== "1") {
+      this.skip();
+      return;
+    }
+
+    this.timeout(35_000);
+    const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
+    await (api as unknown as PackagedWebviewApi).__testing.focusWebview();
+    await (api as unknown as PackagedWebviewApi).__testing.waitForWebviewReady(25_000);
+    await waitForServeReady(api, 25_000);
+
+    assert.equal(api.__testing.getWebviewState().connectionStatus, "ready");
+    assert.ok(
+      !api.__testing
+        .getPromptHistory()
+        .some((entry) => entry.message.includes("Tomcat could not start after several attempts.")),
+      "a slow but healthy handshake must not be treated as a startup crash",
+    );
+  });
+
   test("switches an executing plan back to chat in the webview", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewPlanModeSwitchFlow(api);

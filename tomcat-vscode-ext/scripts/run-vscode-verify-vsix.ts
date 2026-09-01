@@ -99,6 +99,10 @@ async function main(): Promise<void> {
     harnessRoot,
     "out/test/transient-recovery.index.js",
   );
+  const slowHandshakeHarnessTestsPath = path.resolve(
+    harnessRoot,
+    "out/test/slow-handshake.index.js",
+  );
   // Artifacts live OUTSIDE installRoot so the finally cleanup retains them for
   // post-run inspection (Read cropped screenshots). Override via env if needed.
   const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR
@@ -107,6 +111,9 @@ async function main(): Promise<void> {
   const setupRequiredFixture = await createHostE2eFixture({ requireInit: true });
   const transientFailureFixture = await createHostE2eFixture({
     transientServeFailures: 1,
+  });
+  const slowHandshakeFixture = await createHostE2eFixture({
+    handshakeDelayMs: 15_000,
   });
   const prebuiltVsixRoot = await fs.mkdtemp("/tmp/tvsi-prebuilt-vsix-");
   const {
@@ -121,6 +128,10 @@ async function main(): Promise<void> {
     TOMCAT_VSCODE_TEST_PATH: _ignoredTransientTestPath,
     ...transientFailureBundledEnv
   } = transientFailureFixture.env;
+  const {
+    TOMCAT_VSCODE_TEST_PATH: _ignoredSlowHandshakeTestPath,
+    ...slowHandshakeBundledEnv
+  } = slowHandshakeFixture.env;
 
   await fs.mkdir(artifactsDir, { recursive: true });
   await clearVisualArtifacts(artifactsDir);
@@ -181,6 +192,13 @@ async function main(): Promise<void> {
     TOMCAT_EXPECT_TRANSIENT_SERVE_RECOVERY: "1",
     TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
   };
+  const slowHandshakeEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...slowHandshakeBundledEnv,
+    PATH: process.platform === "win32" ? process.env.PATH : "/usr/bin:/bin",
+    TOMCAT_EXPECT_SLOW_HANDSHAKE: "1",
+    TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+  };
 
   try {
     execFileSync("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], {
@@ -232,6 +250,15 @@ async function main(): Promise<void> {
       vsixPath: reusableVsixPath,
       workspacePath: transientFailureFixture.workspaceDir,
     });
+
+    await runInstalledScenario({
+      extensionRoot,
+      harnessRoot,
+      harnessTestsPath: slowHandshakeHarnessTestsPath,
+      testEnv: slowHandshakeEnv,
+      vsixPath: reusableVsixPath,
+      workspacePath: slowHandshakeFixture.workspaceDir,
+    });
   } finally {
     // Best-effort crop even if runTests rejected (partial screenshots may exist).
     await cropScreenshots(extensionRoot, artifactsDir);
@@ -239,6 +266,7 @@ async function main(): Promise<void> {
     await bundledFixture.cleanup();
     await setupRequiredFixture.cleanup();
     await transientFailureFixture.cleanup();
+    await slowHandshakeFixture.cleanup();
     await fs.rm(prebuiltVsixRoot, { force: true, recursive: true });
     await fs.rm(pureExtWorkspacePath, { force: true, recursive: true });
   }
