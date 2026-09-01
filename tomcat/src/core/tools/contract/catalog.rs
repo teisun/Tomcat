@@ -330,6 +330,66 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
+        name: "tool_search",
+        label: "Tool Search",
+        description: "Discover deferred tools from connected connectors (MCP now; CLI/A2A/plugins later) that are intentionally kept OUT of your tool set to keep the prompt small and cache-stable. When load_skill is available, before first use in a session you MUST load the \"connectors\" skill via load_skill(\"connectors\") — it teaches the full search -> describe -> call workflow and when to batch calls via code. Modes: tool_search() lists sources (name, type, description, tool_count); tool_search(source=\"…\") lists that source's tool names + short descriptions (no schema); tool_search(query=\"…\") keyword-searches across sources (add source= to scope). Then use tool_describe([names]) to fetch schemas and tool_call(name, arguments) to invoke. Output returns in the conversation, never in the prompt prefix.\n",
+        display_summary: Some("Discover deferred connector tools without expanding the prompt."),
+        parameters: tool_search_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("deferred connector MCP CLI A2A plugin tool search discover"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "tool_describe",
+        label: "Tool Describe",
+        description: "Fetch full input schemas for one or more deferred tools found via tool_search. Pass names (array; a single tool is [\"name\"]). Returns each tool's inputSchema + description in input order; unknown names are reported in errors without failing the rest. Batch related tools in one call to avoid repeated round trips, then tool_call to invoke.\n",
+        display_summary: Some("Fetch schemas for one or more deferred tools."),
+        parameters: tool_describe_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("deferred connector MCP tool schema describe batch"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "tool_call",
+        label: "Tool Call",
+        description: "Invoke one deferred tool found via tool_search/tool_describe. Pass name (e.g. mcp__<source>__<tool>) and arguments matching its inputSchema. Runs through the same trust/permission gate as native connector tools; image results stream back to you. To call one tool many times (fan-out) or filter large results, prefer writing code (see the connectors skill) over many tool_call rounds.\n",
+        display_summary: Some("Invoke a deferred connector tool through its stable name."),
+        parameters: tool_call_parameters,
+        scope: PermissionScope::Bash,
+        category: Some(ToolCategory::Exec),
+        read_only: false,
+        destructive: false,
+        search_hint: Some("deferred connector MCP CLI A2A plugin tool invoke call"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "tool_run_code",
+        label: "Tool Run Code",
+        description: "Run short JavaScript to call deferred connector tools repeatedly and return one compact final value. Before use, load the connectors skill for the allowed callTool(name, arguments) API and examples. Use this only for fan-out, filtering a large result, or aggregation; use tool_call for a short sequential workflow. The code runs in the existing plugin QuickJS VM with the configured heap, timeout, and interrupt limits. It has no host filesystem, shell, network, or arbitrary host API: callTool is its only host capability and uses the same connector trust path as tool_call. Return a JSON-compatible value. MCP image blocks are extracted for vision before final text is truncated.\n",
+        display_summary: Some("Run JS for deferred-tool fan-out and result reduction."),
+        parameters: tool_run_code_parameters,
+        scope: PermissionScope::Bash,
+        category: Some(ToolCategory::Exec),
+        read_only: false,
+        destructive: false,
+        search_hint: Some("deferred connector MCP JavaScript code fan-out aggregate filter"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
         name: "config_get",
         label: "Config Get",
         description: "Read the current value of an allowed tomcat configuration key. Non-sensitive fields (workspace.*, agent.id, primitive.*, llm.default_model, and similar) are readable; sensitive fields (llm.api_key*, security.*, storage.*) are denied. Missing dot-path keys return not_set.\n",
@@ -474,9 +534,26 @@ pub struct BuiltinToolSurface {
 }
 
 pub fn builtin_tool_surface_with_policy(allow_load_skill: bool) -> BuiltinToolSurface {
+    builtin_tool_surface_with_policies(allow_load_skill, false)
+}
+
+/// Builds the stable builtin surface from configuration-only policies. In
+/// particular, deferred connector tools must not appear/disappear with MCP's
+/// asynchronous Ready state, because this surface is part of the prompt prefix.
+pub fn builtin_tool_surface_with_policies(
+    allow_load_skill: bool,
+    allow_connector_tools: bool,
+) -> BuiltinToolSurface {
     let entries = BUILTIN_TOOL_CATALOG
         .iter()
         .filter(|entry| allow_load_skill || entry.name != "load_skill")
+        .filter(|entry| {
+            allow_connector_tools
+                || !matches!(
+                    entry.name,
+                    "tool_search" | "tool_describe" | "tool_call" | "tool_run_code"
+                )
+        })
         .collect::<Vec<_>>();
     BuiltinToolSurface {
         function_definitions: entries
@@ -721,6 +798,80 @@ fn load_skill_parameters() -> Value {
             }
         }),
         &["name"],
+    )
+}
+
+fn tool_search_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "query": {
+                "type": ["string", "null"],
+                "description": "Optional keywords for cross-source search. Omit together with source to list sources."
+            },
+            "source": {
+                "type": ["string", "null"],
+                "description": "Optional connector source name. Without query, lists this source's tool cards; with query, scopes search."
+            },
+            "limit": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": 100,
+                "description": "Maximum returned entries. Defaults to 20."
+            },
+            "offset": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Number of entries to skip. Defaults to 0."
+            }
+        }),
+        &[],
+    )
+}
+
+fn tool_describe_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "names": {
+                "type": "array",
+                "minItems": 1,
+                "description": "One or more canonical names returned by tool_search. Batch related tools to fetch schemas together.",
+                "items": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        }),
+        &["names"],
+    )
+}
+
+fn tool_call_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Canonical deferred tool name returned by tool_search."
+            },
+            "arguments": {
+                "type": "object",
+                "description": "Arguments matching the inputSchema returned by tool_describe."
+            }
+        }),
+        &["name", "arguments"],
+    )
+}
+
+fn tool_run_code_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "code": {
+                "type": "string",
+                "minLength": 1,
+                "description": "JavaScript function body. Use await callTool(name, arguments) and return one JSON-compatible final value."
+            }
+        }),
+        &["code"],
     )
 }
 

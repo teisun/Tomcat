@@ -11,7 +11,6 @@ use tomcat::api::chat::ChatContextOverrides;
 use tomcat::{
     init_context_state, run_chat_turn, AppConfig, AppError, Capabilities, ChatContext, ChatMessage,
     ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene, ResolvedCall, StreamEvent,
-    ToolRegistry,
 };
 
 struct EnvGuard {
@@ -53,11 +52,17 @@ fn write_mcp_config(path: &std::path::Path, source: serde_json::Value) {
 }
 
 fn fake_mcp_config(name: &str) -> serde_json::Value {
+    fake_mcp_config_with_args(name, &[])
+}
+
+fn fake_mcp_config_with_args(name: &str, extra_args: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "mcpServers": {
             name: {
                 "command": "node",
-                "args": [fixture_path()],
+                "args": std::iter::once(fixture_path())
+                    .chain(extra_args.iter().map(|arg| (*arg).to_string()))
+                    .collect::<Vec<_>>(),
             }
         }
     })
@@ -105,20 +110,29 @@ async fn start_connectors(ctx: &ChatContext) {
         .as_ref()
         .expect("connector module enabled")
         .clone();
-    connectors
-        .spawn_connect_all(Arc::downgrade(&ctx.global_services.tool_registry))
-        .await;
+    connectors.spawn_connect_all().await;
 }
 
-async fn wait_for_tool(registry: &Arc<dyn ToolRegistry>, name: &str, present: bool) {
+async fn wait_for_deferred_tool(ctx: &ChatContext, name: &str, present: bool) {
+    let manager = ctx
+        .global_services
+        .connector_registry
+        .as_ref()
+        .expect("connector module enabled")
+        .mcp_manager();
     for _ in 0..50 {
-        if registry.get_tool(name).await.is_ok() == present {
+        let found = manager
+            .list_servers()
+            .iter()
+            .flat_map(|source| manager.tool_defs(&source.name))
+            .any(|tool| tool.model_name == name);
+        if found == present {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     panic!(
-        "MCP tool '{name}' did not become {}",
+        "deferred MCP tool '{name}' did not become {}",
         if present { "available" } else { "unavailable" }
     );
 }
@@ -138,12 +152,7 @@ async fn pending_confirm_project_server_is_absent_until_confirmed() {
     let ctx = connector_context(&temp, workspace, API_KEY_ENV);
     start_connectors(&ctx).await;
 
-    wait_for_tool(
-        &ctx.global_services.tool_registry,
-        "mcp__project-fake__capture",
-        false,
-    )
-    .await;
+    wait_for_deferred_tool(&ctx, "mcp__project-fake__capture", false).await;
     let connectors = ctx
         .global_services
         .connector_registry
@@ -153,12 +162,15 @@ async fn pending_confirm_project_server_is_absent_until_confirmed() {
         .approve_and_connect("project-fake")
         .await
         .expect("approve project MCP server");
-    wait_for_tool(
-        &ctx.global_services.tool_registry,
-        "mcp__project-fake__capture",
-        true,
-    )
-    .await;
+    wait_for_deferred_tool(&ctx, "mcp__project-fake__capture", true).await;
+    assert!(
+        ctx.global_services
+            .tool_registry
+            .get_tool("mcp__project-fake__capture")
+            .await
+            .is_err(),
+        "ready MCP tools must remain deferred and outside ToolRegistry"
+    );
 }
 
 #[tokio::test]
@@ -176,12 +188,7 @@ async fn pasted_cursor_style_mcp_snippet_connects_without_translation() {
     let ctx = connector_context(&temp, workspace, API_KEY_ENV);
     start_connectors(&ctx).await;
 
-    wait_for_tool(
-        &ctx.global_services.tool_registry,
-        "mcp__pasted__capture",
-        true,
-    )
-    .await;
+    wait_for_deferred_tool(&ctx, "mcp__pasted__capture", true).await;
 }
 
 struct RecordingMockLlm {
@@ -269,20 +276,48 @@ async fn fake_stdio_server_end_to_end_image_reflow() {
     );
     let mut ctx = connector_context(&temp, workspace, API_KEY_ENV);
     start_connectors(&ctx).await;
-    wait_for_tool(
-        &ctx.global_services.tool_registry,
-        "mcp__fake__capture",
-        true,
-    )
-    .await;
+    wait_for_deferred_tool(&ctx, "mcp__fake__capture", true).await;
 
     let provider = Arc::new(RecordingMockLlm::new(vec![
         vec![
             Ok(StreamEvent::ToolCallDelta {
                 index: 0,
-                id: Some("capture-1".to_string()),
-                name: Some("mcp__fake__capture".to_string()),
+                id: Some("search-1".to_string()),
+                name: Some("tool_search".to_string()),
                 arguments_delta: Some("{}".to_string()),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".to_string(),
+            }),
+        ],
+        vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("describe-1".to_string()),
+                name: Some("tool_describe".to_string()),
+                arguments_delta: Some(
+                    serde_json::json!({
+                        "names": ["mcp__fake__capture"]
+                    })
+                    .to_string(),
+                ),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".to_string(),
+            }),
+        ],
+        vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("deferred-capture-1".to_string()),
+                name: Some("tool_call".to_string()),
+                arguments_delta: Some(
+                    serde_json::json!({
+                        "name": "mcp__fake__capture",
+                        "arguments": {}
+                    })
+                    .to_string(),
+                ),
             }),
             Ok(StreamEvent::FinishReason {
                 reason: "tool_calls".to_string(),
@@ -332,6 +367,106 @@ async fn fake_stdio_server_end_to_end_image_reflow() {
         });
     assert!(
         reflowed_image,
-        "MCP image result must become an InputImage in the next model request"
+        "deferred tool_call image result must become an InputImage in the next model request"
     );
+    let requests = requests.lock().expect("requests lock");
+    assert!(
+        requests.iter().all(|request| {
+            request.tools.as_ref().into_iter().flatten().all(|tool| {
+                !tool["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("mcp__")
+            })
+        }),
+        "the changing MCP catalog may appear in tool results but never in prompt-facing tools"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn deferred_tool_call_error_preserves_mcp_is_error() {
+    const API_KEY_ENV: &str = "TOMCAT_CONNECTOR_ERROR_TEST_KEY";
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let workspace = temp.path().join("workspace");
+    let _api_key = EnvGuard::set(API_KEY_ENV, "test-key");
+    write_mcp_config(
+        &temp.path().join("work").join("mcp.json"),
+        fake_mcp_config_with_args("fake", &["--error"]),
+    );
+    let mut ctx = connector_context(&temp, workspace, API_KEY_ENV);
+    start_connectors(&ctx).await;
+    wait_for_deferred_tool(&ctx, "mcp__fake__capture", true).await;
+
+    let tool_execution_events = Arc::new(Mutex::new(Vec::new()));
+    let recorded_events = tool_execution_events.clone();
+    ctx.global_services.event_bus.on(
+        "tool_execution_end",
+        Box::new(move |event| {
+            if event.payload["toolCallId"] == "deferred-error-1" {
+                recorded_events
+                    .lock()
+                    .expect("recorded events lock")
+                    .push(event.payload);
+            }
+            Ok(())
+        }),
+    );
+
+    let provider = Arc::new(RecordingMockLlm::new(vec![
+        vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("deferred-error-1".to_string()),
+                name: Some("tool_call".to_string()),
+                arguments_delta: Some(
+                    serde_json::json!({
+                        "name": "mcp__fake__capture",
+                        "arguments": {},
+                    })
+                    .to_string(),
+                ),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".to_string(),
+            }),
+        ],
+        vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "error received".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ],
+    ]));
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver { provider });
+
+    let system_prompt = "test system prompt";
+    let mut context_state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_prompt,
+    )
+    .expect("context state");
+    run_chat_turn(
+        &ctx,
+        "trigger a deferred MCP tool error",
+        system_prompt,
+        &mut context_state,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("tool turn");
+
+    let events = tool_execution_events.lock().expect("recorded events lock");
+    assert_eq!(
+        events.len(),
+        1,
+        "the deferred tool call must emit one end event"
+    );
+    assert_eq!(events[0]["toolName"], "tool_call");
+    assert_eq!(events[0]["isError"], true);
+    assert_eq!(events[0]["result"], "fake tool error");
 }

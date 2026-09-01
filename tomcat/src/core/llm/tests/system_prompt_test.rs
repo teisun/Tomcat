@@ -429,6 +429,82 @@ fn tool_surface_is_byte_stable_when_registry_observation_order_changes() {
     );
 }
 
+#[test]
+fn deferred_connector_surface_is_static_and_does_not_contain_mcp_schemas() {
+    let before_any_mcp_connects = ToolSurface::from_plugin_tools_with_policies(false, true, &[]);
+    let after_many_mcp_catalog_changes =
+        ToolSurface::from_plugin_tools_with_policies(false, true, &[]);
+    let disabled = ToolSurface::from_plugin_tools_with_policies(false, false, &[]);
+
+    assert_eq!(
+        before_any_mcp_connects.signature(),
+        after_many_mcp_catalog_changes.signature(),
+        "connection lifecycle never participates in the prompt-facing surface"
+    );
+    let deferred_names = before_any_mcp_connects
+        .function_definitions()
+        .iter()
+        .filter_map(|definition| definition["function"]["name"].as_str())
+        .filter(|name| name.starts_with("tool_"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deferred_names,
+        vec!["tool_call", "tool_describe", "tool_run_code", "tool_search"]
+    );
+    assert!(
+        !before_any_mcp_connects
+            .identity_tool_lines()
+            .contains("mcp__fake__capture"),
+        "no concrete MCP name or schema may reach the cache prefix; the constant canonical-name syntax is allowed"
+    );
+    assert!(
+        !disabled
+            .function_definitions()
+            .iter()
+            .any(|definition| definition["function"]["name"].as_str() == Some("tool_search")),
+        "the stable surface is gated by config, not connection state"
+    );
+}
+
+#[test]
+fn connectors_skill_index_is_static_in_the_prompt_cache_signature() {
+    let context = fixture_context();
+    let skills = fixture_skill_set();
+    let surface = ToolSurface::from_plugin_tools_with_policies(true, true, &[]);
+    let first = SystemPromptSnapshot::new(
+        &context,
+        &surface,
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    let after_connector_catalog_changes = SystemPromptSnapshot::new(
+        &context,
+        &surface,
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+
+    assert_eq!(
+        first.system_text(),
+        after_connector_catalog_changes.system_text(),
+        "the skill index remains static while tool_search carries live connector data"
+    );
+    assert_eq!(
+        first.signature(),
+        after_connector_catalog_changes.signature(),
+        "the prompt-cache signature must include a byte-stable connectors entry"
+    );
+    assert!(
+        first.system_text().contains(
+            "<skill name=\"connectors\">Discover and invoke deferred connector tools through tool_search, tool_describe, and tool_call; use code only for fan-out or local result reduction.</skill>"
+        ),
+        "connectors must contribute fixed metadata only, never a live MCP catalog"
+    );
+    assert!(!first.system_text().contains("mcp__playwright__"));
+}
+
 fn fixture_state() -> WorkspaceState {
     WorkspaceState {
         read_write: vec![
@@ -715,6 +791,23 @@ fn fixture_skill_set() -> SkillSet {
             source: SkillSource::Project,
             allowed_tools: None,
             disable_model_invocation: true,
+        },
+    );
+    by_name.insert(
+        "connectors".into(),
+        Skill {
+            name: "connectors".into(),
+            description: "Discover and invoke deferred connector tools through tool_search, tool_describe, and tool_call; use code only for fan-out or local result reduction.".into(),
+            file_path: PathBuf::from("/tmp/connectors/SKILL.md"),
+            base_dir: PathBuf::from("/tmp/connectors"),
+            source: SkillSource::Managed,
+            allowed_tools: Some(vec![
+                "tool_search".into(),
+                "tool_describe".into(),
+                "tool_call".into(),
+                "tool_run_code".into(),
+            ]),
+            disable_model_invocation: false,
         },
     );
     SkillSet {

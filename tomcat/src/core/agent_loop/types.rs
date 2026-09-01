@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::connector::ConnectorRegistry;
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::{ChatMessage, LlmProvider, ResolvedCall};
 use crate::core::session::manager::ContextState;
@@ -336,6 +337,12 @@ pub struct AgentLoop {
     pub(super) todos_runtime: Option<Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
     /// 插件工具共享注册表。未注入时 AgentLoop 仅支持内置工具。
     pub(super) tool_registry: Option<Arc<dyn ToolRegistry>>,
+    /// 连接器目录服务。仅供稳定内置元工具 `tool_search` / `tool_describe` /
+    /// `tool_call` 查询和调用 deferred 工具；MCP 工具本身绝不注册到 ToolRegistry。
+    pub(super) connector_registry: Option<Arc<ConnectorRegistry>>,
+    /// `tool_run_code` 复用插件 QuickJS VM 的同一资源预算；未注入时该工具返回
+    /// 明确错误，纯 AgentLoop 单测不必装配插件运行时。
+    pub(super) plugin_engine_config: Option<crate::ext::PluginEngineConfig>,
     pub(super) config: AgentLoopConfig,
     pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     /// P1：可由 `ChatContext` 通过 [`AgentLoop::with_shared_follow_up_queue`]

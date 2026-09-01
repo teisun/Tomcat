@@ -11,6 +11,8 @@ const mode = process.argv.includes("--hang")
   ? "hang"
   : process.argv.includes("--die-midcall")
     ? "die-midcall"
+    : process.argv.includes("--error")
+      ? "error"
     : "normal";
 const hangStartup = process.argv.includes("--hang-startup");
 const recordIndex = process.argv.indexOf("--record");
@@ -37,6 +39,7 @@ for await (const line of input) {
       protocolVersion: message.params.protocolVersion,
       capabilities: { tools: {} },
       serverInfo: { name: "tomcat-fake-mcp", version: "1.0.0" },
+      instructions: "Use fake tools for connector tests.",
     });
   } else if (message.method === "tools/list") {
     await record("tools/list");
@@ -61,6 +64,13 @@ for await (const line of input) {
     }
     if (mode === "hang") {
       await new Promise(() => {});
+    }
+    if (mode === "error") {
+      reply(message.id, {
+        content: [{ type: "text", text: "fake tool error" }],
+        isError: true,
+      });
+      continue;
     }
     reply(message.id, {
       content: [

@@ -432,7 +432,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan create planning goal draft todos reviewer`
 
-Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, writes frontmatter under an advisory lock, then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.
+Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, writes frontmatter under an advisory lock, then appends runtime-owned `[gate] review` and `[gate] Acceptance` todos to the end of the returned list. The gates are the visible close-out flow and must not be supplied by the caller. The runtime then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.
 
 Parameters:
 
@@ -587,7 +587,7 @@ Parameters:
                 "type": "string"
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required). `in_progress` only allowed when plan.state == executing.",
+                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
                 "enum": [
                   "pending",
                   "in_progress",
@@ -617,7 +617,7 @@ Parameters:
                 "type": "string"
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required). `in_progress` only allowed when plan.state == executing.",
+                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
                 "enum": [
                   "pending",
                   "in_progress",
@@ -1137,6 +1137,155 @@ Parameters:
   },
   "required": [
     "url"
+  ],
+  "type": "object"
+}
+```
+
+### `tool_search`
+
+- Label: Tool Search
+- Category: `exec`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `deferred connector MCP CLI A2A plugin tool search discover`
+
+Discover deferred tools from connected connectors (MCP now; CLI/A2A/plugins later) that are intentionally kept OUT of your tool set to keep the prompt small and cache-stable. When load_skill is available, before first use in a session you MUST load the "connectors" skill via load_skill("connectors") — it teaches the full search -> describe -> call workflow and when to batch calls via code. Modes: tool_search() lists sources (name, type, description, tool_count); tool_search(source="…") lists that source's tool names + short descriptions (no schema); tool_search(query="…") keyword-searches across sources (add source= to scope). Then use tool_describe([names]) to fetch schemas and tool_call(name, arguments) to invoke. Output returns in the conversation, never in the prompt prefix.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "limit": {
+      "description": "Maximum returned entries. Defaults to 20.",
+      "maximum": 100,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "offset": {
+      "description": "Number of entries to skip. Defaults to 0.",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "query": {
+      "description": "Optional keywords for cross-source search. Omit together with source to list sources.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "description": "Optional connector source name. Without query, lists this source's tool cards; with query, scopes search.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [],
+  "type": "object"
+}
+```
+
+### `tool_describe`
+
+- Label: Tool Describe
+- Category: `exec`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `deferred connector MCP tool schema describe batch`
+
+Fetch full input schemas for one or more deferred tools found via tool_search. Pass names (array; a single tool is ["name"]). Returns each tool's inputSchema + description in input order; unknown names are reported in errors without failing the rest. Batch related tools in one call to avoid repeated round trips, then tool_call to invoke.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "names": {
+      "description": "One or more canonical names returned by tool_search. Batch related tools to fetch schemas together.",
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "names"
+  ],
+  "type": "object"
+}
+```
+
+### `tool_call`
+
+- Label: Tool Call
+- Category: `exec`
+- Permission scope: `Bash`
+- Read only: `false`
+- Destructive: `false`
+- Search hint: `deferred connector MCP CLI A2A plugin tool invoke call`
+
+Invoke one deferred tool found via tool_search/tool_describe. Pass name (e.g. mcp__<source>__<tool>) and arguments matching its inputSchema. Runs through the same trust/permission gate as native connector tools; image results stream back to you. To call one tool many times (fan-out) or filter large results, prefer writing code (see the connectors skill) over many tool_call rounds.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "arguments": {
+      "description": "Arguments matching the inputSchema returned by tool_describe.",
+      "type": "object"
+    },
+    "name": {
+      "description": "Canonical deferred tool name returned by tool_search.",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "arguments"
+  ],
+  "type": "object"
+}
+```
+
+### `tool_run_code`
+
+- Label: Tool Run Code
+- Category: `exec`
+- Permission scope: `Bash`
+- Read only: `false`
+- Destructive: `false`
+- Search hint: `deferred connector MCP JavaScript code fan-out aggregate filter`
+
+Run short JavaScript to call deferred connector tools repeatedly and return one compact final value. Before use, load the connectors skill for the allowed callTool(name, arguments) API and examples. Use this only for fan-out, filtering a large result, or aggregation; use tool_call for a short sequential workflow. The code runs in the existing plugin QuickJS VM with the configured heap, timeout, and interrupt limits. It has no host filesystem, shell, network, or arbitrary host API: callTool is its only host capability and uses the same connector trust path as tool_call. Return a JSON-compatible value. MCP image blocks are extracted for vision before final text is truncated.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "code": {
+      "description": "JavaScript function body. Use await callTool(name, arguments) and return one JSON-compatible final value.",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "code"
   ],
   "type": "object"
 }

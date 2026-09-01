@@ -33,7 +33,7 @@
 use serde_json::Value;
 
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
-use crate::core::tools::contract::catalog::builtin_tool_surface_with_policy;
+use crate::core::tools::contract::catalog::builtin_tool_surface_with_policies;
 use crate::core::tools::contract::registry::{tool_to_function_definition, Tool};
 
 pub trait SystemPromptSection: Send + Sync {
@@ -68,7 +68,17 @@ pub struct ToolSurface {
 
 impl ToolSurface {
     pub fn from_plugin_tools(allow_load_skill: bool, plugin_tools: &[Tool]) -> Self {
-        let builtin = builtin_tool_surface_with_policy(allow_load_skill);
+        Self::from_plugin_tools_with_policies(allow_load_skill, false, plugin_tools)
+    }
+
+    /// The connector flag must be derived from static configuration only. MCP connection
+    /// lifecycle changes belong in `McpManager`, never in this prompt-facing surface.
+    pub fn from_plugin_tools_with_policies(
+        allow_load_skill: bool,
+        allow_connector_tools: bool,
+        plugin_tools: &[Tool],
+    ) -> Self {
+        let builtin = builtin_tool_surface_with_policies(allow_load_skill, allow_connector_tools);
         let mut plugin_tools = plugin_tools.iter().collect::<Vec<_>>();
         plugin_tools.sort_by(|left, right| {
             left.name

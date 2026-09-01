@@ -2,7 +2,8 @@
 //!
 //! 与 [`plan_e2e_with_mock_llm_tests.rs`](./plan_e2e_with_mock_llm_tests.rs) 互补：那个
 //! 测试把 "LLM 决策一次 tool_call" 用直接调 `tools::execute` 代替，本测试不做任何 mock，
-//! 真的让主 LLM 调 `create_plan` / `update_plan`、真的让 reviewer 子 Agent 跑一轮。
+//! 真的让主 LLM 调 `create_plan` / `update_plan`。临时工作目录无 reviewable Git diff 时，
+//! code review gate 会合法自动通过；有 diff 的 reviewer 路径由 mock E2E 覆盖。
 //! 对 Plan 模式真 LLM 验收来说，这里是 full completion / artifact / review /
 //! transcript 顺序的主验收锚点；CLI smoke 只保留 resume/build wiring。
 //!
@@ -22,9 +23,11 @@
 //! 2. 所有 `frontmatter.todos[].status == Completed`
 //! 3. workdir 中真实生成 `counter.py`，且 `python3 counter.py` 输出严格为 `0\n`
 //! 4. 会话 `AgentMode` 与计划文件生命周期相互独立
-//! 5. code review 通过后 `update_plan` 只把计划文件推进到 completed；会话仍是 Chat
+//! 5. code review 通过或由无 reviewable diff 的运行时合法跳过后，`update_plan`
+//!    只把计划文件推进到 completed；会话仍是 Chat
 //! 6. transcript 至少有一条 `plan.review` 自定义事件
-//! 7. transcript 至少有一条 `plan.code_review` 自定义事件
+//! 7. 有 reviewable Git diff 时 transcript 至少有一条 `plan.code_review` 自定义事件；
+//!    否则 `code_review_pass` 必须为 true 且 `code_review_pass_at_ms` 为 None
 //! 8. transcript 不应再出现 `plan.verify` 自定义事件（链路已掐断）
 //!
 //! ## 软断言（不强求）
@@ -787,8 +790,9 @@ async fn inprocess_full_plan_path_with_real_llm() {
         // 6) 完成计划只改变文件生命周期；会话模式在 build 时已回到 Chat。
         assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
 
-        // 7) transcript 软断言：至少一条 plan.review + plan.code_review，
-        //    且 verify 链路已被掐断，不应再出现 plan.verify。
+        // 7) transcript 必须有 plan.review。临时工作目录没有 reviewable Git diff 时，
+        //    code review gate 会被运行时合法自动通过；否则必须留下 code-review 事件。
+        //    verify 链路已被掐断，不应再出现 plan.verify。
         let transcript_path = ctx
             .session_runtime
             .session
@@ -806,9 +810,12 @@ async fn inprocess_full_plan_path_with_real_llm() {
             plan_review_idx.is_some(),
             "transcript 应含至少一条 plan.review 自定义事件，实际未发现"
         );
+        let review_auto_skipped = final_plan.frontmatter.code_review_pass
+            && final_plan.frontmatter.code_review_pass_at_ms.is_none();
         assert!(
-            plan_code_review_idx.is_some(),
-            "transcript 应含至少一条 plan.code_review 自定义事件，实际未发现"
+            plan_code_review_idx.is_some() || review_auto_skipped,
+            "有 reviewable Git diff 时 transcript 应含 plan.code_review；无 diff 时必须由运行时自动通过 code review gate。events={plan_code_review_idx:?}, plan={:?}",
+            final_plan.frontmatter
         );
         assert!(
             plan_verify_idx.is_none(),

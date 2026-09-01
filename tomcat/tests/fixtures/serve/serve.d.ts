@@ -384,6 +384,12 @@ export type ServeCommand = {
   sessionId?: null | string;
   type: "set_plan_mode";
 } | {
+  args: string[];
+  command: string;
+  id?: null | string;
+  name: string;
+  type: "add_connector";
+} | {
   attachment: IngestAttachmentInput;
   id?: null | string;
   sessionId?: null | string;
@@ -406,6 +412,12 @@ export type ServeCommand = {
   id?: null | string;
   type: "set_provider_key";
   value: string;
+} | {
+  exclude?: string[];
+  id?: null | string;
+  include?: string[];
+  name: string;
+  type: "set_connector_tool_filter";
 } | {
   id?: null | string;
   level: string;
@@ -430,6 +442,23 @@ export type ServeCommand = {
   id?: null | string;
   modelId: string;
   type: "remove_model";
+} | {
+  id?: null | string;
+  name: string;
+  trusted: boolean;
+  type: "set_connector_trust";
+} | {
+  id?: null | string;
+  name: string;
+  type: "list_connector_tools";
+} | {
+  id?: null | string;
+  name: string;
+  type: "remove_connector";
+} | {
+  id?: null | string;
+  name: string;
+  type: "test_connector";
 } | {
   id?: null | string;
   params: RetainAttachmentLeasesParams;
@@ -505,10 +534,16 @@ export type ServeCommand = {
   type: "resume";
 } | {
   id?: null | string;
+  type: "list_connectors";
+} | {
+  id?: null | string;
   type: "list_models";
 } | {
   id?: null | string;
   type: "list_provider_keys";
+} | {
+  id?: null | string;
+  type: "reload_connector";
 } | {
   payload?: any;
   requestId: string;

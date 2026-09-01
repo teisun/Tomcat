@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-08-30 22:35 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-01 15:53 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** MCP 工具改为渐进式披露：具体 MCP schema 不再注册进 `ToolRegistry` 或进入 prompt 前缀；仅静态暴露 `tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 与 `connectors` skill 索引，运行态目录通过 `McpManager` 按需查询。`tool_call` / 代码 VM 复用 MCP trust、串行调用与图片回流，修复直连结果一层包装漏读 `isError:true` 的错误状态；L1 source 卡片优先用 MCP 握手元数据说明能力。CLI `0.1.39 → 0.1.40`、扩展 `0.1.51 → 0.1.52`、bundled CLI 同步。验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、完整 `cargo test`、MCP manager/media/端到端回归与 `release-version check` 全绿。Cov% 未跑，仍为 —。@2026-09-01
 - [✓] **[P0]** 打包后用 Cursor/VS Code 同款 `yauzl` 真读 VSIX 每一段；目录对不上或解压失败则删包并让 `package:vsix` 失败，避免再把坏 zip 交给安装器。CLI `0.1.38 → 0.1.39`、扩展 `0.1.50 → 0.1.51`、bundled CLI 同步；`release-version check` 通过。本机纯插件 `tomcat-vscode-ext-0.1.51.vsix`（1.52 MB，SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`）不含 `bin/tomcat`。验证：VSIX 解压门禁单测、完整 `npm run package:vsix`。@2026-08-30
 - [✓] **[P0]** 完成 `connector_mcp_rectification_68b6b688`：MCP 浮动 npm 版本会告警但不阻断；`/connector list` 与 serve 摘要均含安全信任状态（command/args/cwd 快照，env 值永不落盘或回传）；新增按需 `list_connector_tools`，避免摘要携带全量工具。`shot.mjs` 支持默认 `.tomcat/shots/` 输出并在缺依赖时指向 bootstrap。补齐 manager 断线/超时/重连、启动注册撤销、Chat/serve 命令、Cursor 配置兼容和图片回流测试，并让技术方案与 UI 验收计划贴合代码。@2026-08-30
 - [✓] **[P0]** MCP 一轮多工具调用的图片回流改为先补齐全部 terminal tool result、再追加 `InputImage`，避免 OpenAI 拒绝不完整 tool-call 链；steering 打断的未执行调用也显式标记为 skipped。新增批次消息顺序回归，并补齐 opt-in 真实视觉 LLM E2E：headless 路径验证 PNG 回流，headed 路径经 MCP 真实 `navigate → click → screenshot`，把可检查的点击后 PNG 保留在仓库 `.tomcat/shots/headed-interaction.png`。真实 `fcodex/gpt-5.6-terra` headed 用例通过（88.97s）。@2026-08-30
@@ -79,9 +80,9 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
-- 发布版本：CLI `0.1.39`、扩展 `0.1.51`、`bundledCliVersion=0.1.39`。
+- 发布版本：CLI `0.1.40`、扩展 `0.1.52`、`bundledCliVersion=0.1.40`。
 - 打包：`package:vsix` 在 vsce 成功后必须用 `yauzl`（与 Cursor/VS Code `extract` 同款）读完每个条目；失败删除产物。扩展显式依赖 `yauzl`。
-- Connector：新增主配置 `[connector] enabled` / `disabled` 与 `~/.tomcat/mcp.json`、`<workspace>/.tomcat/mcp.json` 的 `mcpServers` 配置面；新增 Chat `/connector {list,add,trust,deny,test,tools,remove,reload}`，以及 serve `list_connectors`、`list_connector_tools`、`add_connector`、`remove_connector`、`set_connector_trust`、`test_connector`、`reload_connector`、`set_connector_tool_filter` capabilities。MCP 工具在 Ready 后以 `mcp__{server}__{tool}` 注册入既有 ToolRegistry，MCP 图片结果可作为 `InputImage` 回流。`wire.d.ts` 已生成对应 serve 命令类型。
+- Connector：新增主配置 `[connector] enabled` / `disabled` 与 `~/.tomcat/mcp.json`、`<workspace>/.tomcat/mcp.json` 的 `mcpServers` 配置面；新增 Chat `/connector {list,add,trust,deny,test,tools,remove,reload}`，以及 serve `list_connectors`、`list_connector_tools`、`add_connector`、`remove_connector`、`set_connector_trust`、`test_connector`、`reload_connector`、`set_connector_tool_filter` capabilities。MCP 具体工具仅以 canonical name `mcp__{server}__{tool}` 存在 `McpManager` 动态目录，通过内置 `tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 按需访问，不进入 ToolRegistry 或 prompt 前缀；MCP 图片结果可作为 `InputImage` 回流。`wire.d.ts` 已生成对应 serve 命令类型。
 - MCP media：同一 assistant tool batch 的所有 tool result 必须先闭合，才可追加含 `InputImage` / `InputFile` 的 user follow-up；steering 跳过的调用也产生 terminal tool result。属于内部对话协议不变量，无新增外部 wire 字段。
 - Verify：内置 skill 来源从单文件 `builtin_verify.md` 迁至 `assets/skills/verify/**`，由 `materialize_builtin_skills` 释放；新增 `scripts/bootstrap.mjs` / `shot.mjs` 等受管验收资产。
 - 本轮仅调整扩展内部 UI 状态选择、CSS 与 E2E 验收逻辑；不新增或改变公开 RPC、wire 字段或插件配置。

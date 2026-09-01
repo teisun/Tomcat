@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use tokio::sync::broadcast;
+use serde::Serialize;
 use tracing::warn;
 
 use crate::core::connector::mcp::config::{load_servers, ConfiguredMcpServer, McpConfigSource};
@@ -60,7 +60,7 @@ pub struct ServerStatus {
     pub resource_count: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct McpToolDef {
     pub server: String,
     pub raw_name: String,
@@ -69,15 +69,44 @@ pub struct McpToolDef {
     pub input_schema: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
-pub enum ServerLifecycleEvent {
-    Ready {
-        server: String,
-        tools: Vec<McpToolDef>,
-    },
-    NotReady {
-        server: String,
-    },
+/// 对外的「工具来源」摘要。`source` 是元工具的通用词；本期它等于 MCP server 名，
+/// 将来 CLI/A2A 等来源接入时不必改动 LLM 侧的 `tool_search` 参数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct McpToolSource {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub source_type: &'static str,
+    pub title: String,
+    pub description: String,
+    pub tool_count: usize,
+}
+
+/// schema 延迟披露前给模型看的最小工具卡片。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct McpToolSummary {
+    pub name: String,
+    pub description: String,
+}
+
+/// 关键词检索的命中项；`source` 保持元工具的通用术语。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct McpToolSearchMatch {
+    pub name: String,
+    pub source: String,
+    pub description: String,
+}
+
+/// `describe_many` 不因一个未知名字丢弃其余结果。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct McpToolDescribeMany {
+    pub tools: Vec<McpToolDef>,
+    pub errors: Vec<McpToolLookupError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct McpToolLookupError {
+    pub name: String,
+    pub message: String,
 }
 
 pub struct McpManager {
@@ -85,13 +114,14 @@ pub struct McpManager {
     states: RwLock<BTreeMap<String, ServerStatus>>,
     connections: RwLock<BTreeMap<String, Arc<ConnectedServer>>>,
     trust: TrustStore,
-    lifecycle_events: broadcast::Sender<ServerLifecycleEvent>,
     workspace_root: std::path::PathBuf,
 }
 
 struct ConnectedServer {
     client: McpClient,
     tools: BTreeMap<String, McpToolDef>,
+    title: Option<String>,
+    instructions: Option<String>,
     call_timeout: Duration,
     call_lock: tokio::sync::Mutex<()>,
     resource_count: usize,
@@ -114,7 +144,6 @@ impl McpManager {
             .iter()
             .map(|server| (server.name.clone(), initial_server_status(server, &trust)))
             .collect();
-        let (lifecycle_events, _) = broadcast::channel(32);
         Ok(Arc::new(Self {
             servers: RwLock::new(
                 servers
@@ -125,13 +154,8 @@ impl McpManager {
             states: RwLock::new(states),
             connections: RwLock::new(BTreeMap::new()),
             trust,
-            lifecycle_events,
             workspace_root: workspace_root.to_path_buf(),
         }))
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<ServerLifecycleEvent> {
-        self.lifecycle_events.subscribe()
     }
 
     pub fn statuses(&self) -> Vec<ServerStatus> {
@@ -142,12 +166,144 @@ impl McpManager {
         self.servers.read().get(server_name).cloned()
     }
 
+    /// `tool_*` 元工具的 surface gating 只依赖配置、绝不能依赖异步连接状态。
+    pub fn has_configured_servers(&self) -> bool {
+        !self.servers.read().is_empty()
+    }
+
     pub fn tool_defs(&self, server_name: &str) -> Vec<McpToolDef> {
         self.connections
             .read()
             .get(server_name)
             .map(|connection| connection.tools.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// L1：列出当前可调用的 MCP 来源。连接目录是唯一的运行时事实源，因此只返回
+    /// Ready 的 server；BTreeMap 保证顺序稳定。
+    pub fn list_servers(&self) -> Vec<McpToolSource> {
+        let servers = self.servers.read();
+        self.connections
+            .read()
+            .iter()
+            .map(|(name, connection)| {
+                let configured = servers.get(name);
+                let config_origin = configured
+                    .map(|server| server.source.as_str())
+                    .unwrap_or("Unknown");
+                McpToolSource {
+                    name: name.clone(),
+                    source_type: "mcp",
+                    title: connection.title.clone().unwrap_or_else(|| name.clone()),
+                    description: connection
+                        .instructions
+                        .clone()
+                        .or_else(|| tool_name_summary(&connection.tools))
+                        .unwrap_or_else(|| {
+                            format!("MCP connector configured from {config_origin} mcp.json.")
+                        }),
+                    tool_count: connection.tools.len(),
+                }
+            })
+            .collect()
+    }
+
+    /// L2：列出单个来源的工具卡片，不泄露 schema。
+    pub fn list_tools(&self, source: &str) -> Result<Vec<McpToolSummary>, AppError> {
+        let connection = self.connected_source(source)?;
+        Ok(connection
+            .tools
+            .values()
+            .map(|tool| McpToolSummary {
+                name: tool.model_name.clone(),
+                description: tool.description.clone(),
+            })
+            .collect())
+    }
+
+    /// 确定性、零依赖的 keyword search。排序规则：名称子串 > 任意字段子串 >
+    /// 名称 token 重叠 > 描述 token 重叠 > model_name 字典序。
+    pub fn search(
+        &self,
+        query: &str,
+        source: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<McpToolSearchMatch>, AppError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(AppError::Tool(
+                "tool search query cannot be empty".to_string(),
+            ));
+        }
+        if let Some(source) = source {
+            // 区分拼错 source 与「source 已配置但尚未 Ready」，给模型可行动的错误。
+            let _ = self.connected_source(source)?;
+        }
+
+        let normalized_query = query.to_lowercase();
+        let query_tokens = tokenize(query);
+        let connections = self.connections.read();
+        let mut matches = connections
+            .iter()
+            .filter(|(name, _)| source.is_none_or(|requested| requested == name.as_str()))
+            .flat_map(|(source_name, connection)| {
+                connection.tools.values().filter_map(|tool| {
+                    let score = tool_search_score(tool, &normalized_query, &query_tokens);
+                    (score > 0).then(|| {
+                        (
+                            score,
+                            McpToolSearchMatch {
+                                name: tool.model_name.clone(),
+                                source: source_name.clone(),
+                                description: tool.description.clone(),
+                            },
+                        )
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(matches
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, item)| item)
+            .collect())
+    }
+
+    /// 批量按调用方输入顺序返回 schema；单个未知工具不得使已知工具失效。
+    pub fn describe_many(&self, names: &[String]) -> McpToolDescribeMany {
+        let mut tools = Vec::new();
+        let mut errors = Vec::new();
+        for name in names {
+            match self.lookup_tool(name) {
+                Some(tool) => tools.push(tool),
+                None => errors.push(McpToolLookupError {
+                    name: name.clone(),
+                    message: format!("unknown or not-ready deferred tool: {name}"),
+                }),
+            }
+        }
+        McpToolDescribeMany { tools, errors }
+    }
+
+    /// 由模型可见的 canonical name 反查工具，不依赖也不污染 ToolRegistry。
+    pub async fn call_model_tool(
+        &self,
+        model_tool_name: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        let tool = self.lookup_tool(model_tool_name).ok_or_else(|| {
+            AppError::Tool(format!(
+                "unknown or not-ready deferred tool: {model_tool_name}"
+            ))
+        })?;
+        self.call_tool(&tool.server, &tool.model_name, params).await
     }
 
     pub fn approve(&self, server_name: &str) -> Result<(), AppError> {
@@ -167,21 +323,12 @@ impl McpManager {
         self.refresh_trust_status(server_name, &server);
         self.connections.write().remove(server_name);
         self.update_state(server_name, ServerState::Blocked, 0);
-        let _ = self.lifecycle_events.send(ServerLifecycleEvent::NotReady {
-            server: server_name.to_string(),
-        });
         Ok(())
     }
 
     pub fn reload_configuration(&self, cfg: &AppConfig) -> Result<Vec<String>, AppError> {
         let servers = load_servers(cfg, &self.workspace_root)?;
-        let previous_names = self.states.read().keys().cloned().collect::<Vec<_>>();
         self.connections.write().clear();
-        for server in previous_names {
-            let _ = self
-                .lifecycle_events
-                .send(ServerLifecycleEvent::NotReady { server });
-        }
         *self.servers.write() = servers
             .iter()
             .cloned()
@@ -230,9 +377,6 @@ impl McpManager {
             Ok(Ok(connection)) => Arc::new(connection),
             Ok(Err(error)) => {
                 self.update_state(server_name, ServerState::Failed(error.to_string()), 0);
-                let _ = self.lifecycle_events.send(ServerLifecycleEvent::NotReady {
-                    server: server_name.to_string(),
-                });
                 return Err(error);
             }
             Err(_) => {
@@ -241,25 +385,18 @@ impl McpManager {
                     server.config.startup_timeout_ms
                 ));
                 self.update_state(server_name, ServerState::Failed(error.to_string()), 0);
-                let _ = self.lifecycle_events.send(ServerLifecycleEvent::NotReady {
-                    server: server_name.to_string(),
-                });
                 return Err(error);
             }
         };
-        let tools = connected.tools.values().cloned().collect::<Vec<_>>();
+        let tool_count = connected.tools.len();
         let resource_count = connected.resource_count;
         self.connections
             .write()
             .insert(server_name.to_string(), connected);
-        self.update_state(server_name, ServerState::Ready, tools.len());
+        self.update_state(server_name, ServerState::Ready, tool_count);
         if let Some(status) = self.states.write().get_mut(server_name) {
             status.resource_count = resource_count;
         }
-        let _ = self.lifecycle_events.send(ServerLifecycleEvent::Ready {
-            server: server_name.to_string(),
-            tools,
-        });
         Ok(())
     }
 
@@ -316,9 +453,6 @@ impl McpManager {
     pub async fn reconnect_server(&self, server_name: &str) -> Result<(), AppError> {
         self.connections.write().remove(server_name);
         self.update_state(server_name, ServerState::Pending, 0);
-        let _ = self.lifecycle_events.send(ServerLifecycleEvent::NotReady {
-            server: server_name.to_string(),
-        });
         self.connect_server(server_name).await
     }
 
@@ -358,10 +492,72 @@ impl McpManager {
     fn mark_disconnected(&self, server_name: &str) {
         self.connections.write().remove(server_name);
         self.update_state(server_name, ServerState::Disconnected, 0);
-        let _ = self.lifecycle_events.send(ServerLifecycleEvent::NotReady {
-            server: server_name.to_string(),
-        });
     }
+
+    fn connected_source(&self, source: &str) -> Result<Arc<ConnectedServer>, AppError> {
+        if let Some(connection) = self.connections.read().get(source).cloned() {
+            return Ok(connection);
+        }
+        if self.servers.read().contains_key(source) {
+            return Err(AppError::Tool(format!(
+                "MCP source '{source}' is not ready; use /connector list for status"
+            )));
+        }
+        Err(AppError::Tool(format!("unknown MCP source: {source}")))
+    }
+
+    fn lookup_tool(&self, model_tool_name: &str) -> Option<McpToolDef> {
+        self.connections
+            .read()
+            .values()
+            .find_map(|connection| connection.tools.get(model_tool_name).cloned())
+    }
+}
+
+fn tokenize(value: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    let mut previous_was_lower_or_digit = false;
+    for character in value.chars() {
+        if character.is_alphanumeric() {
+            if character.is_uppercase() && previous_was_lower_or_digit && !current.is_empty() {
+                tokens.insert(std::mem::take(&mut current));
+            }
+            current.extend(character.to_lowercase());
+            previous_was_lower_or_digit = character.is_lowercase() || character.is_numeric();
+        } else {
+            if !current.is_empty() {
+                tokens.insert(std::mem::take(&mut current));
+            }
+            previous_was_lower_or_digit = false;
+        }
+    }
+    if !current.is_empty() {
+        tokens.insert(current);
+    }
+    tokens
+}
+
+fn tool_search_score(
+    tool: &McpToolDef,
+    normalized_query: &str,
+    query_tokens: &BTreeSet<String>,
+) -> usize {
+    let normalized_name = tool.model_name.to_lowercase();
+    let normalized_description = tool.description.to_lowercase();
+    let name_tokens = tokenize(&tool.model_name);
+    let description_tokens = tokenize(&tool.description);
+    let name_overlap = query_tokens.intersection(&name_tokens).count();
+    let description_overlap = query_tokens.intersection(&description_tokens).count();
+
+    let mut score = 0;
+    if normalized_name.contains(normalized_query) {
+        score += 16;
+    }
+    if normalized_description.contains(normalized_query) {
+        score += 8;
+    }
+    score + name_overlap * 4 + description_overlap * 2
 }
 
 fn initial_server_status(server: &ConfiguredMcpServer, trust: &TrustStore) -> ServerStatus {
@@ -392,10 +588,22 @@ impl ConnectedServer {
         let client = transport.connect(server).await?;
         let listed_value = list_all_tools(&client, &server.name).await?;
         let tools = parse_tools(&server.name, &server.config.tool_filter, &listed_value)?;
+        let (title, instructions) = client
+            .peer()
+            .peer_info()
+            .map(|info| {
+                (
+                    info.server_info.as_ref().map(|server| server.name.clone()),
+                    info.instructions.clone(),
+                )
+            })
+            .unwrap_or_default();
         let resource_count = list_resource_count(&client).await;
         Ok(Self {
             client,
             tools,
+            title,
+            instructions,
             call_timeout: Duration::from_millis(server.config.call_timeout_ms),
             call_lock: tokio::sync::Mutex::new(()),
             resource_count,
@@ -528,6 +736,24 @@ fn model_description(server: &str, raw_name: &str, description: &str) -> String 
     }
 }
 
+fn tool_name_summary(tools: &BTreeMap<String, McpToolDef>) -> Option<String> {
+    let names = tools
+        .values()
+        .map(|tool| tool.raw_name.as_str())
+        .take(3)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return None;
+    }
+    let remaining = tools.len().saturating_sub(names.len());
+    let suffix = (remaining > 0).then(|| format!(", and {remaining} more"));
+    Some(format!(
+        "Provides tools: {}{}.",
+        names.join(", "),
+        suffix.unwrap_or_default()
+    ))
+}
+
 fn build_glob_set(patterns: &[String]) -> Result<globset::GlobSet, AppError> {
     let mut builder = globset::GlobSetBuilder::new();
     for pattern in patterns {
@@ -544,7 +770,11 @@ fn build_glob_set(patterns: &[String]) -> Result<globset::GlobSet, AppError> {
 mod tests {
     use std::sync::Arc;
 
-    use super::{McpManager, ServerState};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{
+        tokenize, tool_name_summary, tool_search_score, McpManager, McpToolDef, ServerState,
+    };
     use crate::infra::config::get_work_dir;
     use crate::AppConfig;
 
@@ -574,6 +804,34 @@ mod tests {
             .to_string(),
         )
         .expect("write MCP config");
+        let manager = McpManager::new(&cfg, &workspace).expect("construct MCP manager");
+        (temp, manager)
+    }
+
+    fn manager_with_untrusted_project_server() -> (tempfile::TempDir, Arc<McpManager>) {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        let config_path = workspace.join(".tomcat/mcp.json");
+        std::fs::create_dir_all(config_path.parent().expect("project config parent"))
+            .expect("project config directory");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mcp/fake_stdio_server.mjs");
+        std::fs::write(
+            config_path,
+            serde_json::json!({
+                "mcpServers": {
+                    "project-fake": {
+                        "command": "node",
+                        "args": [fixture],
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write untrusted project MCP config");
+
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
         let manager = McpManager::new(&cfg, &workspace).expect("construct MCP manager");
         (temp, manager)
     }
@@ -608,6 +866,172 @@ mod tests {
             .expect("call fake tool");
         assert_eq!(result["content"][0]["text"], "fake capture complete");
         assert_eq!(result["content"][1]["type"], "image");
+    }
+
+    #[tokio::test]
+    async fn deferred_catalog_lists_searches_describes_and_calls_without_registry() {
+        let (_temp, manager) = manager_with_fake_server(fake_server_args(&[]), 120_000);
+        manager
+            .connect_server("fake")
+            .await
+            .expect("connect fake server");
+
+        assert_eq!(
+            manager.list_servers(),
+            vec![super::McpToolSource {
+                name: "fake".to_string(),
+                source_type: "mcp",
+                title: "tomcat-fake-mcp".to_string(),
+                description: "Use fake tools for connector tests.".to_string(),
+                tool_count: 2,
+            }]
+        );
+        assert_eq!(
+            manager
+                .list_tools("fake")
+                .expect("list ready source")
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>(),
+            vec![
+                "mcp__fake__capture".to_string(),
+                "mcp__fake__status".to_string()
+            ]
+        );
+
+        let matches = manager
+            .search("capture", Some("fake"), 20, 0)
+            .expect("search ready source");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "mcp__fake__capture");
+        assert_eq!(matches[0].source, "fake");
+        let second_page = manager
+            .search("fake", Some("fake"), 1, 1)
+            .expect("page through deterministic results");
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].name, "mcp__fake__capture");
+
+        let names = vec![
+            "mcp__fake__capture".to_string(),
+            "mcp__fake__missing".to_string(),
+            "mcp__fake__status".to_string(),
+        ];
+        let described = manager.describe_many(&names);
+        assert_eq!(
+            described
+                .tools
+                .iter()
+                .map(|tool| tool.model_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mcp__fake__capture", "mcp__fake__status"],
+            "known schemas preserve caller order while unknown names do not poison the batch"
+        );
+        assert_eq!(described.errors.len(), 1);
+        assert_eq!(described.errors[0].name, "mcp__fake__missing");
+
+        let result = manager
+            .call_model_tool("mcp__fake__capture", serde_json::json!({}))
+            .await
+            .expect("call canonical deferred name");
+        assert_eq!(result["content"][0]["text"], "fake capture complete");
+    }
+
+    #[tokio::test]
+    async fn deferred_catalog_reports_unknown_and_not_ready_sources() {
+        let (_temp, manager) = manager_with_fake_server(fake_server_args(&[]), 120_000);
+        assert!(manager.list_servers().is_empty());
+        assert!(manager
+            .list_tools("fake")
+            .expect_err("configured but not-ready source must be actionable")
+            .to_string()
+            .contains("not ready"));
+        assert!(manager
+            .list_tools("missing")
+            .expect_err("unknown source must not look like an empty source")
+            .to_string()
+            .contains("unknown MCP source"));
+        assert!(manager
+            .search("capture", Some("missing"), 20, 0)
+            .expect_err("scoped search validates source")
+            .to_string()
+            .contains("unknown MCP source"));
+    }
+
+    #[tokio::test]
+    async fn deferred_call_cannot_bypass_untrusted_project_connector() {
+        let (_temp, manager) = manager_with_untrusted_project_server();
+
+        manager
+            .connect_server("project-fake")
+            .await
+            .expect("untrusted source is recorded as awaiting confirmation, not connected");
+        assert!(matches!(
+            manager.statuses().pop().expect("source status").state,
+            ServerState::NeedsConfirmation
+        ));
+        assert!(manager.list_servers().is_empty());
+
+        let error = manager
+            .call_model_tool("mcp__project-fake__capture", serde_json::json!({}))
+            .await
+            .expect_err("tool_call must not bypass project connector confirmation");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown or not-ready deferred tool"),
+            "unapproved sources must not expose a callable deferred tool: {error}"
+        );
+    }
+
+    #[test]
+    fn search_scoring_is_deterministic_and_prefers_name_matches() {
+        let click = McpToolDef {
+            server: "fake".to_string(),
+            raw_name: "browser_click".to_string(),
+            model_name: "mcp__fake__browser_click".to_string(),
+            description: "Interact with page elements.".to_string(),
+            input_schema: serde_json::json!({}),
+        };
+        let narrative = McpToolDef {
+            server: "fake".to_string(),
+            raw_name: "inspect".to_string(),
+            model_name: "mcp__fake__inspect".to_string(),
+            description: "Return a narrative that says click many times.".to_string(),
+            input_schema: serde_json::json!({}),
+        };
+        let query = tokenize("click");
+        assert!(
+            tool_search_score(&click, "click", &query)
+                > tool_search_score(&narrative, "click", &query),
+            "canonical name matches rank ahead of description-only matches"
+        );
+        assert_eq!(
+            tokenize("BrowserClick browser_click"),
+            BTreeSet::from(["browser".to_string(), "click".to_string()])
+        );
+    }
+
+    #[test]
+    fn tool_name_summary_is_stable_and_bounded() {
+        let tool = |raw_name: &str| McpToolDef {
+            server: "fake".to_string(),
+            raw_name: raw_name.to_string(),
+            model_name: format!("mcp__fake__{raw_name}"),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        };
+        let tools = BTreeMap::from([
+            ("mcp__fake__alpha".to_string(), tool("alpha")),
+            ("mcp__fake__beta".to_string(), tool("beta")),
+            ("mcp__fake__gamma".to_string(), tool("gamma")),
+            ("mcp__fake__omega".to_string(), tool("omega")),
+        ]);
+
+        assert_eq!(
+            tool_name_summary(&tools).as_deref(),
+            Some("Provides tools: alpha, beta, gamma, and 1 more.")
+        );
+        assert_eq!(tool_name_summary(&BTreeMap::new()), None);
     }
 
     #[tokio::test]

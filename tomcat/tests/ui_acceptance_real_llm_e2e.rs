@@ -311,33 +311,67 @@ fn tool_names(frames: &[Value]) -> Vec<String> {
         .collect()
 }
 
-fn assert_playwright_navigate_click_screenshot(frames: &[Value]) {
+fn assert_deferred_playwright_navigate_click_screenshot(frames: &[Value]) {
     let names = tool_names(frames);
     let joined = names.join(", ");
-    let navigate_index = names
+    assert!(
+        names.iter().any(|name| name == "tool_search"),
+        "agent must discover the deferred connector catalog; tools={joined}"
+    );
+    assert!(
+        names.iter().any(|name| name == "tool_describe"),
+        "agent must fetch deferred schemas; tools={joined}"
+    );
+    assert!(
+        names.iter().any(|name| name == "tool_call"),
+        "agent must invoke deferred MCP tools; tools={joined}"
+    );
+    let connector_calls = frames
         .iter()
-        .position(|name| name.contains("browser_navigate"))
-        .unwrap_or_else(|| panic!("agent must call browser_navigate; tools={joined}"));
-    let click_index = names
+        .filter(|frame| {
+            frame.get("type").and_then(Value::as_str) == Some("tool_execution_start")
+                && frame.get("toolName").and_then(Value::as_str) == Some("tool_call")
+        })
+        .map(Value::to_string)
+        .collect::<Vec<_>>();
+    let calls = connector_calls.join("\n");
+    let navigate_index = connector_calls
+        .iter()
+        .position(|frame| frame.contains("browser_navigate"))
+        .unwrap_or_else(|| panic!("agent must call browser_navigate via tool_call; calls={calls}"));
+    let click_index = connector_calls
         .iter()
         .enumerate()
         .skip(navigate_index + 1)
-        .find_map(|(index, name)| name.contains("browser_click").then_some(index))
+        .find_map(|(index, frame)| frame.contains("browser_click").then_some(index))
         .unwrap_or_else(|| {
-            panic!("agent must call browser_click after browser_navigate; tools={joined}")
+            panic!("agent must call browser_click after browser_navigate; calls={calls}")
         });
-    let screenshot_index = names
+    let post_click_snapshot_index = connector_calls
         .iter()
         .enumerate()
         .skip(click_index + 1)
-        .find_map(|(index, name)| name.contains("browser_take_screenshot").then_some(index))
+        .find_map(|(index, frame)| {
+            (frame.contains("browser_snapshot") || frame.contains("browser_get_visible_text"))
+                .then_some(index)
+        })
         .unwrap_or_else(|| {
-            panic!("agent must call browser_take_screenshot after browser_click; tools={joined}")
+            panic!(
+                "agent must obtain textual evidence after browser_click before reporting an opaque token; calls={calls}"
+            )
+        });
+    let screenshot_index = connector_calls
+        .iter()
+        .enumerate()
+        .skip(post_click_snapshot_index + 1)
+        .find_map(|(index, frame)| frame.contains("browser_take_screenshot").then_some(index))
+        .unwrap_or_else(|| {
+            panic!("agent must call browser_take_screenshot after textual post-click evidence; calls={calls}")
         });
 
     eprintln!(
-        "[real-llm-e2e] confirmed Playwright MCP sequence: {}",
-        names[navigate_index..=screenshot_index].join(" -> ")
+        "[real-llm-e2e] confirmed deferred Playwright MCP sequence: {}",
+        connector_calls[navigate_index..=screenshot_index].join(" -> ")
     );
 }
 
@@ -426,6 +460,26 @@ fn session_contains_input_image(child: &mut ServeChild, session_id: &str, id: &s
         })
 }
 
+fn session_cache_read_tokens(child: &mut ServeChild, session_id: &str, id: &str) -> Vec<u64> {
+    child.send_value(&json!({
+        "type": "get_messages",
+        "id": id,
+        "sessionId": session_id,
+        "params": { "limit": 128 }
+    }));
+    let frames = child.recv_until(Duration::from_secs(15), |frame| {
+        frame.get("id").and_then(Value::as_str) == Some(id)
+    });
+    frames
+        .iter()
+        .find(|frame| frame.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|response| response["payload"]["messages"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["message"]["usage"]["cache_read_tokens"].as_u64())
+        .collect()
+}
+
 #[test]
 #[ignore = "requires a real vision LLM, API key, Node, and browser bootstrap"]
 #[serial]
@@ -475,11 +529,20 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
     let page = UiFixtureServer::start();
     let mut child = spawn_serve_child(&fixture);
     let session_id = initialize(&mut child);
-    let _warmup = run_prompt(
+    let cold_start = run_prompt(
         &mut child,
         &session_id,
-        "mcp-warmup",
-        "Reply with READY. Do not use any tools.".to_string(),
+        "mcp-cold-start",
+        "Immediately call tool_search with no parameters exactly once, then reply with \
+         COLD_START_CHECKED. Do not invoke a connector tool or wait for a connector to become \
+         ready. This is a cold-start discovery probe."
+            .to_string(),
+    );
+    assert!(
+        tool_names(&cold_start)
+            .iter()
+            .any(|name| name == "tool_search"),
+        "cold-start prompt must exercise the stable discovery entry; frames={cold_start:?}"
     );
     wait_for_playwright_ready(&mut child);
     let frames = run_prompt(
@@ -487,7 +550,7 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
         &session_id,
         "phase2",
         format!(
-            "Load the verify skill, then use the configured Playwright MCP tools to open {}/interactive.html. You must call browser_navigate, then browser_click on Show details, then browser_take_screenshot. Report the exact opaque token that becomes visible. The token is intentionally not in this instruction: you must use MCP tools and screenshot evidence; do not guess. For browser_take_screenshot, omit filename and omit fullPage=true so its PNG returns to you as an MCP image.",
+            "Load the verify skill and the connectors skill. Discover the configured Playwright connector through tool_search, fetch the needed schemas through tool_describe, then invoke it only through tool_call to open {}/interactive.html and click Show details. After the click, take a fresh browser_snapshot or browser_get_visible_text and copy the exact opaque token from that textual evidence; do not OCR or infer it from the screenshot. Then take a screenshot. The token is intentionally not in this instruction: you must use MCP tools and both textual and screenshot evidence; do not guess. For the screenshot call, omit filename and omit fullPage=true so its PNG returns to you as an MCP image.",
             page.base_url,
         ),
     );
@@ -496,7 +559,7 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
         frames_contain(&frames, "mcp__playwright__"),
         "MCP tools were not used: {frames:?}"
     );
-    assert_playwright_navigate_click_screenshot(&frames);
+    assert_deferred_playwright_navigate_click_screenshot(&frames);
     assert!(
         session_contains_input_image(&mut child, &session_id, "phase2-messages"),
         "MCP screenshot did not persist as an InputImage follow-up message; tools={:?}; screenshot_events={:?}; stderr={}",
@@ -507,6 +570,19 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
     assert!(
         text.contains(&page.intermediate_token),
         "agent verdict: {text}"
+    );
+    let cache_reads = session_cache_read_tokens(&mut child, &session_id, "headed-mcp-cache");
+    eprintln!("[real-llm-e2e] cache_read_tokens across turns: {cache_reads:?}");
+    assert!(
+        cache_reads.iter().any(|tokens| *tokens > 0),
+        "the cold-start + deferred MCP turn must reuse a prompt-cache prefix; cache_read_tokens={cache_reads:?}; stderr={}",
+        child.stderr()
+    );
+    assert!(
+        cache_reads.windows(2).any(|window| window[1] > window[0]),
+        "at least one later model round must read a larger cached prefix as the deferred \
+         workflow grows; cache_read_tokens={cache_reads:?}; stderr={}",
+        child.stderr()
     );
 }
 
@@ -533,7 +609,7 @@ fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required(
         &session_id,
         "combined",
         format!(
-            "First use the verify skill's deterministic managed shot workflow on {}/interactive.html and read PNG/ARIA/console evidence from {}/shots. The final answer is an opaque token which is intentionally absent from this instruction and appears only after clicking Show details. You must then switch to the configured Playwright MCP persistent browser session, call browser_navigate, browser_click on Show details, and browser_take_screenshot, and report that exact token. For browser_take_screenshot, omit filename and omit fullPage=true so its PNG returns to you as an MCP image. Do not skip either phase or guess.",
+            "First use the verify skill's deterministic managed shot workflow on {}/interactive.html and read PNG/ARIA/console evidence from {}/shots. The final answer is an opaque token which is intentionally absent from this instruction and appears only after clicking Show details. You must then load the connectors skill and use tool_search → tool_describe → tool_call to drive the configured Playwright persistent browser session: navigate, click Show details, then take a fresh browser_snapshot or browser_get_visible_text and copy the exact token from textual evidence before taking a screenshot. For the screenshot call, omit filename and omit fullPage=true so its PNG returns to you as an MCP image. Do not skip either phase, OCR, or guess.",
             page.base_url,
             work_dir.display(),
         ),
@@ -547,7 +623,7 @@ fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required(
         frames_contain(&frames, "mcp__playwright__"),
         "Phase 2 was skipped: {frames:?}"
     );
-    assert_playwright_navigate_click_screenshot(&frames);
+    assert_deferred_playwright_navigate_click_screenshot(&frames);
     assert!(
         session_contains_input_image(&mut child, &session_id, "combined-messages"),
         "Phase 2 screenshot did not persist as an InputImage follow-up message; tools={:?}; screenshot_events={:?}; stderr={}",
@@ -564,7 +640,7 @@ fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required(
 #[test]
 #[ignore = "requires a real vision LLM, API key, Node, and a visible headed Chrome browser"]
 #[serial]
-fn e2e_4_real_llm_directly_drives_a_headed_playwright_browser() {
+fn e2e_4_real_llm_drives_a_headed_playwright_browser_through_deferred_tools() {
     let target = real_llm_target();
     let fixture = setup_serve_fixture(&target.base_url);
     configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headed);
@@ -595,19 +671,19 @@ fn e2e_4_real_llm_directly_drives_a_headed_playwright_browser() {
         &session_id,
         "headed-mcp",
         format!(
-            "Use only the configured Playwright MCP tools. Do not load a skill, run bash, or use any managed shot script. In the visible browser window, call browser_navigate to open {}/interactive.html, then browser_click Show details, then browser_take_screenshot with filename {} and without fullPage=true. Report the exact opaque token that appears only after the click; do not guess.",
+            "Load the connectors skill, then use only the deferred connector workflow (tool_search → tool_describe → tool_call). Do not load verify, run bash, or use any managed shot script. In the visible browser window, use the configured Playwright source to open {}/interactive.html, click Show details, then obtain a fresh browser_snapshot or browser_get_visible_text and copy the exact opaque token from that textual evidence. Finally take a screenshot with filename {} and without fullPage=true. Do not OCR or guess the token.",
             page.base_url,
             screenshot_path.display(),
         ),
     );
     let text = rendered_agent_text(&frames);
     assert!(
-        !frames_contain(&frames, "load_skill")
+        frames_contain(&frames, "load_skill")
             && !frames_contain(&frames, "shot.mjs")
             && !tool_names(&frames).iter().any(|name| name == "bash"),
-        "headed direct-MCP E2E must not use the verification workflow: {frames:?}"
+        "headed deferred-MCP E2E must use connectors but not the verification workflow: {frames:?}"
     );
-    assert_playwright_navigate_click_screenshot(&frames);
+    assert_deferred_playwright_navigate_click_screenshot(&frames);
     assert!(
         screenshot_path.is_file(),
         "headed MCP screenshot was not saved to {}; tools={:?}; screenshot_events={:?}; stderr={}",

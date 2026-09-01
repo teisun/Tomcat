@@ -1,13 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::core::connector::mcp::executor::McpToolExecutor;
-use crate::core::connector::mcp::manager::{McpManager, McpToolDef, ServerLifecycleEvent};
-use crate::core::tools::contract::registry::{Tool, ToolExecutor, ToolRegistry};
+use crate::core::connector::mcp::manager::McpManager;
+use crate::core::tools::contract::registry::{Tool, ToolExecutor};
 use crate::infra::error::AppError;
 use crate::AppConfig;
 
@@ -69,9 +68,9 @@ impl ToolExecutor for CompositeToolExecutor {
     }
 }
 
-/// Owns connector configuration and lifecycle orchestration. MCP itself never
-/// owns a strong ToolRegistry reference: this coordinator holds only a Weak
-/// reference while the registry's CompositeToolExecutor owns the MCP executor.
+/// Owns connector configuration and lifecycle orchestration. MCP catalogs live
+/// exclusively in `McpManager`; they are queried through stable `tool_*`
+/// builtins and never registered into the prompt-facing ToolRegistry.
 pub struct ConnectorRegistry {
     enabled: bool,
     config: AppConfig,
@@ -97,14 +96,18 @@ impl ConnectorRegistry {
         McpToolExecutor::new(self.mcp.clone())
     }
 
+    /// Tool-surface gating must derive from config rather than asynchronous Ready state.
+    pub fn has_configured_mcp_servers(&self) -> bool {
+        self.enabled && self.mcp.has_configured_servers()
+    }
+
     /// Starts trusted configured MCP servers concurrently. This method only
     /// spawns tasks; it never waits for a server and therefore cannot delay a
     /// chat's first request or a serve handshake.
-    pub async fn spawn_connect_all(self: &Arc<Self>, tool_registry: Weak<dyn ToolRegistry>) {
+    pub async fn spawn_connect_all(self: &Arc<Self>) {
         if !self.enabled || self.started.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.spawn_lifecycle_coordinator(tool_registry);
         for status in self.mcp.statuses() {
             let manager = self.mcp.clone();
             tokio::spawn(async move {
@@ -131,52 +134,6 @@ impl ConnectorRegistry {
         }
         Ok(())
     }
-
-    fn spawn_lifecycle_coordinator(self: &Arc<Self>, tool_registry: Weak<dyn ToolRegistry>) {
-        let mut events = self.mcp.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match events.recv().await {
-                    Ok(ServerLifecycleEvent::Ready { server, tools }) => {
-                        let Some(registry) = tool_registry.upgrade() else {
-                            return;
-                        };
-                        registry.unregister_plugin_tools(&mcp_plugin_id(&server));
-                        for tool in tools {
-                            if let Err(error) = registry
-                                .register_tool(
-                                    tool_to_registry_tool(&tool),
-                                    &mcp_plugin_id(&server),
-                                )
-                                .await
-                            {
-                                warn!(
-                                    server = %server,
-                                    tool = %tool.model_name,
-                                    error = %error,
-                                    "register MCP tool failed"
-                                );
-                            }
-                        }
-                        info!(server = %server, "MCP tools registered");
-                    }
-                    Ok(ServerLifecycleEvent::NotReady { server }) => {
-                        let Some(registry) = tool_registry.upgrade() else {
-                            return;
-                        };
-                        registry.unregister_plugin_tools(&mcp_plugin_id(&server));
-                    }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        warn!(
-                            count,
-                            "MCP lifecycle event listener lagged; reconnect to refresh tools"
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
-                }
-            }
-        });
-    }
 }
 
 async fn connect_with_backoff(manager: Arc<McpManager>, server_name: String) {
@@ -194,22 +151,6 @@ async fn connect_with_backoff(manager: Arc<McpManager>, server_name: String) {
                 );
             }
         }
-    }
-}
-
-fn mcp_plugin_id(server: &str) -> String {
-    format!("mcp:{server}")
-}
-
-fn tool_to_registry_tool(tool: &McpToolDef) -> Tool {
-    Tool {
-        name: tool.model_name.clone(),
-        label: tool.raw_name.clone(),
-        description: tool.description.clone(),
-        parameters: tool.input_schema.clone(),
-        plugin_id: mcp_plugin_id(&tool.server),
-        is_enabled: true,
-        created_at: 0,
     }
 }
 
@@ -270,19 +211,6 @@ mod tests {
             .collect()
     }
 
-    async fn wait_for_tool(registry: &DefaultToolRegistry, tool_name: &str, present: bool) {
-        for _ in 0..50 {
-            if registry.get_tool(tool_name).await.is_ok() == present {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!(
-            "tool '{tool_name}' did not become {}",
-            if present { "available" } else { "unavailable" }
-        );
-    }
-
     #[tokio::test]
     async fn composite_routes_by_plugin_id() {
         let executor = CompositeToolExecutor::new(
@@ -302,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_mcp_tools_register_into_the_shared_tool_registry() {
+    async fn ready_mcp_tools_stay_in_manager_and_never_reach_shared_tool_registry() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -319,22 +247,28 @@ mod tests {
         .expect("write MCP config");
 
         let connectors = ConnectorRegistry::new(&cfg, &workspace).expect("connector registry");
-        let executor = CompositeToolExecutor::new(
-            Arc::new(MarkerExecutor("plugin")),
-            connectors.mcp_executor(),
-        );
         let registry_impl = Arc::new(DefaultToolRegistry::new(
-            executor,
+            Arc::new(MarkerExecutor("plugin")),
             Arc::new(TracingAuditRecorder),
         ));
-        let registry: Arc<dyn ToolRegistry> = registry_impl.clone();
-        connectors
-            .spawn_connect_all(Arc::downgrade(&registry))
-            .await;
-        wait_for_tool(&registry_impl, "mcp__fake__capture", true).await;
+        connectors.spawn_connect_all().await;
+        for _ in 0..50 {
+            if !connectors.mcp_manager().tool_defs("fake").is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !connectors.mcp_manager().tool_defs("fake").is_empty(),
+            "the deferred catalog should be populated after MCP connects"
+        );
+        assert!(
+            registry_impl.get_tool("mcp__fake__capture").await.is_err(),
+            "MCP tools must not enter the prompt-facing registry"
+        );
 
         connectors.deny("fake").expect("deny MCP server");
-        wait_for_tool(&registry_impl, "mcp__fake__capture", false).await;
+        assert!(connectors.mcp_manager().tool_defs("fake").is_empty());
     }
 
     #[tokio::test]
@@ -359,10 +293,7 @@ mod tests {
             connectors.mcp_executor(),
             Arc::new(TracingAuditRecorder),
         ));
-        let registry: Arc<dyn ToolRegistry> = registry_impl.clone();
-        connectors
-            .spawn_connect_all(Arc::downgrade(&registry))
-            .await;
+        connectors.spawn_connect_all().await;
 
         tokio::time::sleep(Duration::from_millis(75)).await;
         assert!(registry_impl.get_tool("mcp__fake__capture").await.is_err());
@@ -399,14 +330,9 @@ mod tests {
             connectors.mcp_executor(),
             Arc::new(TracingAuditRecorder),
         ));
-        let registry: Arc<dyn ToolRegistry> = registry_impl.clone();
-
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            connectors.spawn_connect_all(Arc::downgrade(&registry)),
-        )
-        .await
-        .expect("startup must return before a server finishes connecting");
+        tokio::time::timeout(Duration::from_millis(100), connectors.spawn_connect_all())
+            .await
+            .expect("startup must return before a server finishes connecting");
         assert!(registry_impl.get_tool("mcp__fake__capture").await.is_err());
     }
 }

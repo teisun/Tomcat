@@ -40,9 +40,11 @@ mod args;
 mod branches;
 mod edit_sim;
 mod guard;
+pub(super) mod media;
 
 use std::sync::Arc;
 
+use crate::core::connector::ConnectorRegistry;
 use crate::core::tools::primitive::{BashTaskRegistry, PrimitiveExecutor};
 #[cfg(test)]
 use crate::infra::error::AppError;
@@ -146,6 +148,8 @@ struct ToolExecCtx<'a> {
     todos_runtime: Option<&'a Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
     plan_runtime: Option<&'a Arc<crate::core::plan_runtime::PlanRuntime>>,
     skill_set: Option<&'a Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
+    connector_registry: Option<&'a Arc<ConnectorRegistry>>,
+    plugin_engine_config: Option<&'a crate::ext::PluginEngineConfig>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
     expose_skills_to_reviewer: bool,
     cancel: &'a tokio_util::sync::CancellationToken,
@@ -281,6 +285,54 @@ pub(super) async fn execute_tool_full_with_policy(
     event_emitter: Option<&ScopedEventEmitter>,
     completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> ToolExecOutcome {
+    execute_tool_full_with_policy_and_connectors(
+        primitive,
+        session_id,
+        config_backend,
+        bash_task_registry,
+        read_file_state,
+        openai_files_runtime,
+        web_fetch_runtime,
+        web_search_runtime,
+        todos_runtime,
+        plan_runtime,
+        skill_set,
+        None,
+        None,
+        subagent_type,
+        expose_skills_to_reviewer,
+        cancel,
+        tc,
+        event_emitter,
+        completion_routes,
+    )
+    .await
+}
+
+/// 与普通内置工具执行路径相同，但由聊天装配层额外注入连接器目录。保持这个
+/// 显式入口可让旧的纯内置工具测试不必构造 MCP 运行时。
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_tool_full_with_policy_and_connectors(
+    primitive: &Arc<dyn PrimitiveExecutor>,
+    session_id: &str,
+    config_backend: &Option<SharedConfigBackend>,
+    bash_task_registry: &Option<Arc<BashTaskRegistry>>,
+    read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
+    openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    web_fetch_runtime: Option<&Arc<crate::core::tools::web_fetch::WebFetchRuntime>>,
+    web_search_runtime: Option<&Arc<crate::core::tools::web_search::WebSearchRuntime>>,
+    todos_runtime: Option<&Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
+    plan_runtime: Option<&Arc<crate::core::plan_runtime::PlanRuntime>>,
+    skill_set: Option<&Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
+    connector_registry: Option<&Arc<ConnectorRegistry>>,
+    plugin_engine_config: Option<&crate::ext::PluginEngineConfig>,
+    subagent_type: crate::core::agent_loop::types::SubagentType,
+    expose_skills_to_reviewer: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+    tc: &ToolCallInfo,
+    event_emitter: Option<&ScopedEventEmitter>,
+    completion_routes: Option<&BackgroundCompletionRoutes>,
+) -> ToolExecOutcome {
     let mut display = None;
     let ctx = ToolExecCtx {
         primitive,
@@ -295,6 +347,8 @@ pub(super) async fn execute_tool_full_with_policy(
         todos_runtime,
         plan_runtime,
         skill_set,
+        connector_registry,
+        plugin_engine_config,
         subagent_type,
         expose_skills_to_reviewer,
         cancel,
@@ -427,6 +481,32 @@ async fn execute_tool_tuple_full(
     // 由 [`crate::core::agent_loop::tool_dispatcher`] 在拿到 follow_up_parts 后
     // 紧跟着 push 一条 `ChatMessage::user_with_parts(parts)`。其它工具一律 `vec![]`。
     let mut follow_up_parts: Vec<crate::core::llm::ChatMessageContentPart> = Vec::new();
+
+    // v2 deferred connector tools may produce an MCP image block. They therefore return the
+    // full outcome directly so media is extracted before the ordinary text-result path.
+    match tc.name.as_str() {
+        "tool_search" => {
+            return branches::handle_tool_search(ctx, &args)
+                .await
+                .into_legacy_tuple()
+        }
+        "tool_describe" => {
+            return branches::handle_tool_describe(ctx, &args)
+                .await
+                .into_legacy_tuple()
+        }
+        "tool_call" => {
+            return branches::handle_tool_call(ctx, &args)
+                .await
+                .into_legacy_tuple()
+        }
+        "tool_run_code" => {
+            return branches::handle_tool_run_code(ctx, &args)
+                .await
+                .into_legacy_tuple()
+        }
+        _ => {}
+    }
 
     let out = match tc.name.as_str() {
         "read" => match branches::handle_read(ctx, &args, display_out).await {

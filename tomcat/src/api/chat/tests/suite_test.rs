@@ -317,6 +317,115 @@ async fn tool_catalog_is_identical_across_all_mode_and_executing_combinations() 
 }
 
 #[tokio::test]
+#[serial(env_lock)]
+async fn mcp_lifecycle_never_changes_prompt_snapshot() {
+    const ENV_KEY: &str = "TOMCAT_MCP_PREFIX_STABILITY_TEST_KEY";
+    let _api_key = EnvGuard::set(ENV_KEY, "stub");
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace directory");
+
+    let mut cfg = AppConfig::default();
+    cfg.connector.enabled = true;
+    cfg.storage.work_dir = Some(dir.path().join("work").to_string_lossy().into_owned());
+    crate::test_support::write_models_override(
+        dir.path().join("work").as_path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)],
+    );
+    let mcp_config_path = dir.path().join("work").join("mcp.json");
+    fs::create_dir_all(mcp_config_path.parent().expect("MCP config parent"))
+        .expect("MCP config directory");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp/fake_stdio_server.mjs");
+    fs::write(
+        &mcp_config_path,
+        json!({
+            "mcpServers": {
+                "fake": {
+                    "command": "node",
+                    "args": [fixture],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write MCP config");
+
+    let ctx = ChatContext::from_config_with_overrides(
+        cfg,
+        crate::api::chat::ChatContextOverrides::default().with_session_cwd_override(workspace),
+    )
+    .expect("chat context");
+    let budget = crate::infra::config::compute_context_budget_chars(&ctx.config.context);
+    let connecting = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+    let connectors = ctx
+        .global_services
+        .connector_registry
+        .as_ref()
+        .expect("connector registry")
+        .clone();
+
+    let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < ready_deadline {
+        if !connectors.mcp_manager().list_servers().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !connectors.mcp_manager().list_servers().is_empty(),
+        "fake MCP must become ready to exercise the lifecycle transition; statuses={:?}",
+        connectors
+            .mcp_manager()
+            .statuses()
+            .into_iter()
+            .map(|status| format!("{}:{}", status.name, status.state.code()))
+            .collect::<Vec<_>>()
+    );
+    let ready = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+
+    connectors.deny("fake").expect("disconnect fake MCP");
+    assert!(
+        connectors.mcp_manager().list_servers().is_empty(),
+        "denied source must disappear from the live deferred catalog"
+    );
+    let disconnected = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+
+    for snapshot in [&ready, &disconnected] {
+        assert_eq!(
+            snapshot.system_text(),
+            connecting.system_text(),
+            "MCP lifecycle state may not change the system prompt prefix"
+        );
+        assert_eq!(
+            snapshot.tool_definitions(),
+            connecting.tool_definitions(),
+            "MCP lifecycle state may not change the function-definition prefix"
+        );
+        assert_eq!(
+            snapshot.signature(),
+            connecting.signature(),
+            "MCP lifecycle state may not change the cache signature"
+        );
+    }
+    assert!(
+        connecting
+            .tool_definitions()
+            .iter()
+            .any(|definition| definition["function"]["name"] == "tool_search"),
+        "the constant discovery entry remains available before connection"
+    );
+    assert!(
+        connecting.tool_definitions().iter().all(|definition| {
+            definition["function"]["name"]
+                .as_str()
+                .is_none_or(|name| name != "mcp__fake__capture")
+        }),
+        "the concrete MCP catalog must never enter the prompt-facing tool array"
+    );
+}
+
+#[tokio::test]
 async fn request_prefix_is_byte_identical_across_turns() {
     const ENV_KEY: &str = "TOMCAT_RUNTIME_TAIL_PREFIX_TEST_KEY";
     let (dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);

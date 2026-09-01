@@ -602,6 +602,7 @@
   // -- Expose internals needed by the async main loop injected in instance_wasmedge.rs --
   globalThis.__pi_build_ctx = __pi_build_ctx;
   globalThis.__pi_hostCall = hostCall;
+  globalThis.__pi_hostCallAsync = hostCallAsync;
   globalThis.__pi_functions = __pi_functions;
   globalThis.__pi_commands = __pi_commands;
 

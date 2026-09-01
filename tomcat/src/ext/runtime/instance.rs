@@ -172,6 +172,61 @@ impl PluginVmInstance {
         self.run_script_file(&script_path)
     }
 
+    /// Executes one short-lived agent-authored JS snippet through the same QuickJS runtime,
+    /// bridge, heap limit, wall timeout and interrupt budget used by plugins. The caller must
+    /// install a host binding that implements `connector.callTool`.
+    ///
+    /// The snippet body runs inside an async function, so agent code may use `await callTool`.
+    /// Its returned value is serialized as structured JSON rather than flattened into text;
+    /// this preserves MCP image blocks for the agent-loop media splitter.
+    pub fn run_agent_code(&mut self, code: &str) -> Result<serde_json::Value, AppError> {
+        let wrapped = format!(
+            r#"
+globalThis.callTool = async function (name, arguments_) {{
+  var response = await globalThis.__pi_hostCallAsync("connector", "callTool", {{
+    name: name,
+    arguments: arguments_ || {{}}
+  }});
+  if (!response || !response.ok) {{
+    throw new Error((response && response.error) || "connector callTool failed");
+  }}
+  return response.data;
+}};
+
+(async function () {{
+  try {{
+    var value = await (async function () {{
+{code}
+    }})();
+    globalThis.__tomcat_agent_code_result = JSON.stringify({{ ok: true, value: value }});
+  }} catch (error) {{
+    globalThis.__tomcat_agent_code_result = JSON.stringify({{
+      ok: false,
+      error: String((error && error.message) || error)
+    }});
+  }}
+}})();
+"#
+        );
+        let value = self.run_script(&wrapped)?;
+        let envelope = value.as_object().ok_or_else(|| {
+            AppError::QuickJS("agent code returned invalid result envelope".into())
+        })?;
+        if envelope.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(envelope
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
+        }
+        Err(AppError::QuickJS(
+            envelope
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("agent code failed without an error message")
+                .to_string(),
+        ))
+    }
+
     pub fn run_script_file(&mut self, path: &Path) -> Result<serde_json::Value, AppError> {
         if !path.exists() {
             return Err(AppError::Io(std::io::Error::new(
@@ -181,8 +236,7 @@ impl PluginVmInstance {
         }
 
         let combined = self.build_combined_script(path, false)?;
-        self.execute_script(&combined)?;
-        Ok(serde_json::Value::Null)
+        self.execute_script(&combined)
     }
 
     /// 长生命周期会话 VM：持续运行直到宿主 `cleanup_instance` 注入 `__shutdown`。
@@ -195,7 +249,7 @@ impl PluginVmInstance {
         }
 
         let combined = self.build_combined_script(path, true)?;
-        self.execute_script(&combined)
+        self.execute_script(&combined).map(|_| ())
     }
 
     pub fn register_host_binding(
@@ -240,7 +294,7 @@ impl PluginVmInstance {
 
     pub fn destroy(self) {}
 
-    fn execute_script(&self, code: &str) -> Result<(), AppError> {
+    fn execute_script(&self, code: &str) -> Result<serde_json::Value, AppError> {
         let bridge = HostBridge {
             plugin_id: self.plugin_id.clone(),
             host_invoke: self.host_invoke.clone(),
@@ -307,7 +361,23 @@ impl PluginVmInstance {
                 return Err(AppError::QuickJS(fatal_error));
             }
 
-            Ok(())
+            let agent_code_result = context
+                .with(|ctx| {
+                    ctx.globals()
+                        .get::<_, Option<String>>("__tomcat_agent_code_result")
+                })
+                .await
+                .map_err(to_app_js_error)?;
+            agent_code_result
+                .map(|result| {
+                    serde_json::from_str(&result).map_err(|error| {
+                        AppError::QuickJS(format!(
+                            "agent code result serialization failed: {error}"
+                        ))
+                    })
+                })
+                .transpose()
+                .map(|result| result.unwrap_or(serde_json::Value::Null))
         })
     }
 
@@ -522,6 +592,18 @@ mod tests {
     }
 
     #[test]
+    fn run_agent_code_returns_structured_final_value() {
+        let mut instance =
+            PluginVmInstance::new(PluginEngineConfig::default(), "agent-code".to_string())
+                .expect("create quickjs instance");
+        let result = instance
+            .run_agent_code("return { kept: [1, 2], discarded: null };")
+            .expect("agent code should return JSON");
+        assert_eq!(result["kept"], serde_json::json!([1, 2]));
+        assert!(result["discarded"].is_null());
+    }
+
+    #[test]
     fn build_combined_script_appends_main_loop_for_session_vm() {
         let instance =
             PluginVmInstance::new(PluginEngineConfig::default(), "combined-script".to_string())
@@ -658,7 +740,10 @@ globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
         let mut instance = PluginVmInstance::new(
             PluginEngineConfig {
                 quickjs_heap_mb: 8,
-                call_timeout_ms: 50,
+                // Four 100ms idle waits exceed this total budget, so the test still proves
+                // that each wait resets the timer. The per-tick headroom avoids scheduler
+                // jitter turning a timing-contract test into a flaky 50ms race.
+                call_timeout_ms: 200,
                 interrupt_budget: 0,
                 ..Default::default()
             },
@@ -670,7 +755,7 @@ globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
                 let request: serde_json::Value =
                     serde_json::from_str(request_json).expect("host request should be JSON");
                 if request["module"] == "__session" && request["method"] == "waitForEvent" {
-                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                     return Ok(
                         serde_json::json!({ "ok": true, "data": { "type": "__tick" } }).to_string(),
                     );
@@ -684,7 +769,7 @@ globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
 (async function () {
   globalThis.__idleBudgetSink = 0;
   for (var i = 0; i < 4; i += 1) {
-    await __pi_wait_for_event(30);
+    await __pi_wait_for_event(100);
     for (var j = 0; j < 5000; j += 1) {
       globalThis.__idleBudgetSink += j;
     }

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
-    TodoItem, TodoStatus,
+    TodoItem, TodoKind, TodoStatus,
 };
 use tomcat::core::plan_runtime::panels::{
     Answer, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination,
@@ -69,12 +69,26 @@ fn write_external_plan(path: &std::path::Path, plan_id: &str) {
         session_id: Some("orig-uuid".into()),
         created_at: "2026-05-19T00:00:00Z".into(),
         schema_version: 1,
-        todos: vec![TodoItem {
-            id: "t1".into(),
-            content: "ship it".into(),
-            status: TodoStatus::Pending,
-            kind: Default::default(),
-        }],
+        todos: vec![
+            TodoItem {
+                id: "t1".into(),
+                content: "ship it".into(),
+                status: TodoStatus::Pending,
+                kind: TodoKind::Work,
+            },
+            TodoItem {
+                id: "gate-review".into(),
+                content: "[gate] review".into(),
+                status: TodoStatus::Pending,
+                kind: TodoKind::GateCodeReview,
+            },
+            TodoItem {
+                id: "gate-acceptance".into(),
+                content: "[gate] Acceptance".into(),
+                status: TodoStatus::Pending,
+                kind: TodoKind::GateAcceptance,
+            },
+        ],
         green_build_pass: false,
         green_build_evidence: vec![],
         code_review_pass: false,
@@ -256,8 +270,8 @@ async fn full_plan_lifecycle_create_build_complete() {
         )
         .await
         .unwrap();
-        // 6) update_plan：b completed → 全 completed → 瞬时 Completed 后立即回 Chat(retain)
-        let out_final = update_plan::execute(
+        // 6) work todos 已全部完成，但 runtime-managed close-out gates 仍待显式启动。
+        let out_work_completed = update_plan::execute(
             &rt,
             update_plan::UpdatePlanArgs {
                 plan_id: Some(plan_id.clone()),
@@ -267,6 +281,29 @@ async fn full_plan_lifecycle_create_build_complete() {
                     id: "b".into(),
                     content: None,
                     status: TodoStatus::Completed,
+                }],
+                dispute_findings: vec![],
+                green_build_pass: None,
+                green_build_evidence: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out_work_completed["plan_state_after"], "executing");
+        assert_eq!(out_work_completed["next_step"]["phase"], "start_review");
+
+        // 7) 启动 [gate] review。无 Git workspace 时走 docs-only 快路径，两个 gate
+        //    都由 runtime 完成，计划回到 Chat。
+        let out_final = update_plan::execute(
+            &rt,
+            update_plan::UpdatePlanArgs {
+                plan_id: Some(plan_id.clone()),
+                path: None,
+                replace: false,
+                ops: vec![update_plan::UpdateOp::SetStatus {
+                    id: "gate-review".into(),
+                    content: None,
+                    status: TodoStatus::InProgress,
                 }],
                 dispute_findings: vec![],
                 green_build_pass: None,
@@ -355,7 +392,7 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
             Some("external_path_plan")
         );
 
-        let out_final = update_plan::execute(
+        let out_work_completed = update_plan::execute(
             &rt,
             update_plan::UpdatePlanArgs {
                 plan_id: None,
@@ -374,6 +411,31 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
         .await
         .unwrap();
         let expected_path_str = expected_path.to_string_lossy().to_string();
+        assert_eq!(
+            out_work_completed["path"].as_str(),
+            Some(expected_path_str.as_str())
+        );
+        assert_eq!(out_work_completed["plan_state_after"], "executing");
+        assert_eq!(out_work_completed["next_step"]["phase"], "start_review");
+
+        let out_final = update_plan::execute(
+            &rt,
+            update_plan::UpdatePlanArgs {
+                plan_id: None,
+                path: None,
+                replace: false,
+                ops: vec![update_plan::UpdateOp::SetStatus {
+                    id: "gate-review".into(),
+                    content: None,
+                    status: TodoStatus::InProgress,
+                }],
+                dispute_findings: vec![],
+                green_build_pass: None,
+                green_build_evidence: vec![],
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(out_final["path"].as_str(), Some(expected_path_str.as_str()));
 
         let final_plan = read_plan(&external_path).unwrap();

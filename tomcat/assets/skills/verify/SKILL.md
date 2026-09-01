@@ -9,6 +9,9 @@ allowed-tools:
   - task_output
   - task_list
   - task_stop
+  - tool_search
+  - tool_describe
+  - tool_call
   - update_plan
 ---
 
@@ -111,11 +114,15 @@ browser runtime errors.
 
 For a known fixed interaction sequence, encode it in a deterministic headless
 script. When the next interaction depends on what the previous page state looks
-like, use the configured Playwright MCP tools when available; retain screenshots
-and structural evidence from that interaction loop.
+like, discover configured Playwright tools through the deferred connector path:
+`tool_search(source="playwright")` → `tool_describe(names=[...])` →
+`tool_call(name="mcp__playwright__...", arguments={...})`. Retain screenshots
+and structural evidence from that interaction loop. Never assume Playwright is
+configured: if the source search is empty or reports an error, report that fact.
 
 For a visual screenshot that must return to the model through Playwright MCP,
-call `browser_take_screenshot` **without** `filename` and without `fullPage=true`.
-Current `@playwright/mcp` intentionally saves a filename/full-page capture to
-disk and returns only a Markdown file link; it omits the image content needed for
-the model vision loop. Use the default viewport screenshot for visual judgement.
+call `tool_call(name="mcp__playwright__browser_take_screenshot", arguments={...})`
+**without** `filename` and without `fullPage=true`. Current `@playwright/mcp`
+intentionally saves a filename/full-page capture to disk and returns only a
+Markdown file link; it omits the image content needed for the model vision loop.
+Use the default viewport screenshot for visual judgement.

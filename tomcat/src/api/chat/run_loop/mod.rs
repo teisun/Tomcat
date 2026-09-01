@@ -104,7 +104,16 @@ async fn observe_tool_surface(ctx: &ChatContext) -> ToolSurface {
         plugin_tools = %plugin_signature,
         visible_skills = %skill_signature,
     );
-    ToolSurface::from_plugin_tools(allow_load_skill, &plugin_tools)
+    let allow_connector_tools = ctx
+        .global_services
+        .connector_registry
+        .as_ref()
+        .is_some_and(|connectors| connectors.has_configured_mcp_servers());
+    ToolSurface::from_plugin_tools_with_policies(
+        allow_load_skill,
+        allow_connector_tools,
+        &plugin_tools,
+    )
 }
 
 fn workspace_context(ctx: &ChatContext) -> crate::core::llm::system_prompt::WorkspaceContext {
@@ -883,6 +892,15 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         turn_token,
     );
     agent_loop = agent_loop.with_tool_registry(ctx.global_services.tool_registry.clone());
+    if let Some(connectors) = ctx.global_services.connector_registry.clone() {
+        agent_loop = agent_loop.with_connector_registry(connectors);
+    }
+    agent_loop = agent_loop.with_plugin_engine_config(crate::ext::PluginEngineConfig {
+        quickjs_heap_mb: ctx.config.plugin.js_heap_mb,
+        call_timeout_ms: ctx.config.plugin.call_timeout_ms,
+        interrupt_budget: ctx.config.plugin.interrupt_budget,
+        idle_ttl_ms: ctx.config.plugin.idle_ttl_ms,
+    });
     if let Some(backend) = ctx.global_services.config_backend.clone() {
         agent_loop = agent_loop.with_config_backend(backend);
     }

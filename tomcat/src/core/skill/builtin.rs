@@ -11,10 +11,17 @@ use crate::infra::error::AppError;
 use crate::AppConfig;
 
 static VERIFY_SKILL_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/skills/verify");
+static CONNECTORS_SKILL_ASSETS: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/assets/skills/connectors");
 
 pub fn materialize_builtin_skills(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    let verify_root = get_work_dir(cfg)?.join("skills").join("verify");
+    let managed_skills_root = get_work_dir(cfg)?.join("skills");
+    let verify_root = managed_skills_root.join("verify");
     materialize_dir(&VERIFY_SKILL_ASSETS, &verify_root)?;
+    materialize_dir(
+        &CONNECTORS_SKILL_ASSETS,
+        &managed_skills_root.join("connectors"),
+    )?;
     Ok(verify_root.join("SKILL.md"))
 }
 
@@ -47,7 +54,7 @@ fn materialize_file(path: &Path, contents: &[u8]) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_builtin_skills, VERIFY_SKILL_ASSETS};
+    use super::{materialize_builtin_skills, CONNECTORS_SKILL_ASSETS, VERIFY_SKILL_ASSETS};
     use crate::core::skill::{discover, load_skill_payload, skill_roots, SkillSource};
     use crate::core::tools::primitive::PrimitiveExecutor;
     use crate::infra::error::AppError;
@@ -129,6 +136,36 @@ mod tests {
                 .is_some(),
             "the UI checklist must be available for progressive disclosure"
         );
+        let connectors = std::str::from_utf8(
+            CONNECTORS_SKILL_ASSETS
+                .get_file("SKILL.md")
+                .expect("embedded connectors SKILL.md")
+                .contents(),
+        )
+        .expect("embedded connectors SKILL.md is UTF-8");
+        assert!(connectors.contains("name: connectors"));
+        assert!(connectors.contains("tool_search"));
+        assert!(connectors.contains("tool_describe"));
+        assert!(connectors.contains("tool_call"));
+    }
+
+    #[test]
+    fn skill_core_does_not_depend_on_connector_runtime() {
+        // The static connectors skill is an asset like verify. Its loader must remain generic:
+        // live catalog data belongs to tool_search results, not `core::skill`.
+        for source in [
+            include_str!("mod.rs"),
+            include_str!("model.rs"),
+            include_str!("catalog.rs"),
+            include_str!("discovery.rs"),
+            include_str!("frontmatter.rs"),
+            include_str!("load.rs"),
+        ] {
+            assert!(
+                !source.contains("McpManager") && !source.contains("ConnectorRegistry"),
+                "core::skill must not import the connector runtime"
+            );
+        }
     }
 
     #[tokio::test]
@@ -174,6 +211,18 @@ mod tests {
         .expect("load UI checklist through the normal loader");
         assert!(checklist.contains("UI acceptance checklist"));
         assert!(checklist.contains("Capture structural, visual, and runtime evidence"));
+
+        let connectors = skills
+            .by_name
+            .get("connectors")
+            .expect("discovery should find materialized connectors skill");
+        assert_eq!(connectors.source, SkillSource::Managed);
+        let connector_payload =
+            load_skill_payload(&SkillFilePrimitive, "__test__", connectors, None)
+                .await
+                .expect("load materialized connectors skill through the normal loader");
+        assert!(connector_payload.contains("## Deferred connector workflow"));
+        assert!(connector_payload.contains("tool_search(source=\"<source>\")"));
     }
 
     #[test]

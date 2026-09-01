@@ -933,9 +933,7 @@ impl ChatContext {
         let Some(connectors) = self.global_services.connector_registry.as_ref() else {
             return;
         };
-        connectors
-            .spawn_connect_all(Arc::downgrade(&self.global_services.tool_registry))
-            .await;
+        connectors.spawn_connect_all().await;
     }
 
     pub(crate) async fn spawn_skill_discovery_if_needed(&self) {

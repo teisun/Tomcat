@@ -61,6 +61,8 @@ impl AgentLoop {
             web_search_runtime: None,
             todos_runtime: None,
             tool_registry: None,
+            connector_registry: None,
+            plugin_engine_config: None,
             config,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
@@ -94,6 +96,23 @@ impl AgentLoop {
         registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     ) -> Self {
         self.bash_task_registry = Some(registry);
+        self
+    }
+
+    /// 注入连接器目录；deferred MCP 工具只能经稳定的 `tool_*` 内置元工具触达，
+    /// 不再被逐个注册进 ToolRegistry / prompt 前缀。
+    pub fn with_connector_registry(
+        mut self,
+        registry: Arc<crate::core::connector::ConnectorRegistry>,
+    ) -> Self {
+        self.connector_registry = Some(registry);
+        self
+    }
+
+    /// `tool_run_code` uses the already-configured plugin VM resource limits rather than
+    /// inventing a second JavaScript runtime policy.
+    pub fn with_plugin_engine_config(mut self, config: crate::ext::PluginEngineConfig) -> Self {
+        self.plugin_engine_config = Some(config);
         self
     }
 
@@ -206,6 +225,8 @@ impl AgentLoop {
             web_search_runtime: None,
             todos_runtime: None,
             tool_registry: None,
+            connector_registry: None,
+            plugin_engine_config: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             completion_routes: None,

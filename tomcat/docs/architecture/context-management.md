@@ -34,6 +34,16 @@ prefix cache。稳定 tail 让 durable history 只追加；权限或计划状态
 
 反例与推翻条件：若全历史 replay 在跨模型切换时导致签名校验失败或成本不可接受，可恢复有语义边界的窗口；若两轮指纹一致而 Anthropic 仍无 cache read，应判为网关问题而不是继续改写 prompt。部分正文已产生时的截断 notice 不落盘：它是轻提示，真正无可见输出的失败由持久化 ErrorEntry 覆盖；只有出现需要审计截断正文的产品需求时才改变这一点。
 
+### MCP 工具的渐进式披露
+
+MCP 的完整 schema 是易变且可能很大的运行态目录；它不能随连接/断开进入
+`tools` 数组或 system 正文，否则会同时破坏前缀缓存并挤占上下文。稳定前缀只保留
+`tool_search` / `tool_describe` / `tool_call`（以及用于扇出聚合的 `tool_run_code`）
+这几个固定 builtin 和静态 `connectors` skill 索引。活目录只在调用后作为消息体结果
+按 `search → describe → call` 渐进披露，因此连接时序不影响
+`prompt_prefix_fingerprint`。设计、边界和测试矩阵见
+[`connector-mcp/v2-progressive-disclosure.md`](./connector-mcp/v2-progressive-disclosure.md)。
+
 ### Chat Completions 为什么仍保留 `ReplayWindow`
 
 OpenAI Responses 和 Chat Completions 不是同一种协议能力：
