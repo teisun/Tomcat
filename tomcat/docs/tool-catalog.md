@@ -174,7 +174,7 @@ Parameters:
 Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
 
 Guidelines:
-- Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.
+- Default file-edit workflow: read -> edit; prefer edit for prose and Markdown. For repeated short snippets or line-anchored code edits, use read(hashline=true) -> hashline_edit. hashline_edit may batch non-overlapping ranges from one original snapshot: every anchor is checked before a write, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Prefer continuous ranges for reliability. For distant ranges, prefer edit; if hashline_edit is necessary, take a fresh hashline read covering every target immediately before the call and never mix anchors from separate reads. To modify text created by the batch, read again first. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.
 - When copying from read output, never include display prefixes like `  N\t` or `N#XX:` in edit.old_content.
 - Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.
 
@@ -242,13 +242,13 @@ Parameters:
 - Destructive: `true`
 - Search hint: `hashline edit line anchor hash`
 
-Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns HashMismatch (no write). Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Use this when substring `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. A fresh read stamp is still required.
+Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns every invalid anchor (no write). Multiple non-overlapping segments use one original snapshot: all anchors validate before writing, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Prefer normal `edit` for prose and Markdown; use this for repeated short snippets or strong line-level consistency. Prefer continuous ranges; for distant ranges, use a fresh hashline read covering every target. To modify text created by this batch, read again first. A fresh read stamp is still required.
 
 Parameters:
 
 ```json
 {
-  "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current content before any write; mismatches return HashMismatch.",
+  "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current content before any write; invalid anchors are all reported and no write occurs.",
   "properties": {
     "edits": {
       "description": "Line-anchored operations applied against the CURRENT file content.",

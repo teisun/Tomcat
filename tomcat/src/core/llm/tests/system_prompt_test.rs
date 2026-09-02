@@ -118,6 +118,18 @@ fn build_system_prompt_contains_edit_workflow_guidance() {
         "system prompt 应包含 hashline_edit 工作流"
     );
     assert!(
+        prompt.contains("prefer edit for prose and Markdown"),
+        "system prompt 应引导 prose / Markdown 使用普通 edit"
+    );
+    assert!(
+        prompt.contains("never mix anchors from separate reads"),
+        "system prompt 应禁止混用多次 read 的 hashline 锚点"
+    );
+    assert!(
+        prompt.contains("line-count changes do not shift other batch anchors"),
+        "system prompt 应说明 hashline 批量编辑采用原快照语义"
+    );
+    assert!(
         prompt.contains("never include display prefixes"),
         "system prompt 应提醒不要把 read 展示前缀粘进 old_content"
     );

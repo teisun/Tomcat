@@ -121,7 +121,7 @@ pub fn summarize_tool_description(description: &str) -> String {
 }
 
 // ─── 跨工具规则常量（供多个工具共享同一字符串，聚合时按 byte 相等去重） ───
-const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.";
+const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; prefer edit for prose and Markdown. For repeated short snippets or line-anchored code edits, use read(hashline=true) -> hashline_edit. hashline_edit may batch non-overlapping ranges from one original snapshot: every anchor is checked before a write, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Prefer continuous ranges for reliability. For distant ranges, prefer edit; if hashline_edit is necessary, take a fresh hashline read covering every target immediately before the call and never mix anchors from separate reads. To modify text created by the batch, read again first. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.";
 const G_NO_DISPLAY_PREFIX: &str = "When copying from read output, never include display prefixes like `  N\\t` or `N#XX:` in edit.old_content.";
 const G_NO_FAKE_EDIT: &str = "Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.";
 const G_PATH_LINE: &str =
@@ -197,7 +197,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "hashline_edit",
         label: "Hashline Edit File",
-        description: "Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns HashMismatch (no write). Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Use this when substring `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. A fresh read stamp is still required.\n",
+        description: "Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns every invalid anchor (no write). Multiple non-overlapping segments use one original snapshot: all anchors validate before writing, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Prefer normal `edit` for prose and Markdown; use this for repeated short snippets or strong line-level consistency. Prefer continuous ranges; for distant ranges, use a fresh hashline read covering every target. To modify text created by this batch, read again first. A fresh read stamp is still required.\n",
         display_summary: Some("Line-number + content-hash anchored edits (companion to read hashline=true)."),
         parameters: hashline_edit_parameters,
         scope: PermissionScope::Write,
@@ -1011,7 +1011,7 @@ fn list_dir_parameters() -> Value {
 fn hashline_edit_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current content before any write; mismatches return HashMismatch.",
+        "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current content before any write; invalid anchors are all reported and no write occurs.",
         "properties": {
             "path": {
                 "type": "string",

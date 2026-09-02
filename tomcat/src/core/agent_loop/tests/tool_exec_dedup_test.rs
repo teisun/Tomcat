@@ -1030,7 +1030,7 @@ async fn hashline_edit_replace_matches_read_hashline() {
     prime_read_stamp(&primitive, &state, &f).await;
 
     // 取第 2 行（beta）的 2 字符 hash
-    let beta_hash = compute_line_hash("beta", 2);
+    let beta_hash = compute_line_hash("beta");
     let edit_args = format!(
         r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"BETA\n"}}]}}"#,
         f.to_string_lossy(),
@@ -1051,6 +1051,117 @@ async fn hashline_edit_replace_matches_read_hashline() {
 }
 
 #[tokio::test]
+async fn hashline_edit_batches_non_overlapping_original_ranges_despite_line_count_changes() {
+    use crate::core::tools::primitive::compute_line_hash;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("batched-original-snapshot.txt");
+    std::fs::write(&file, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    // 两段锚点都按原快照取：前一段插入两行后，原 L4 会成为 L6。
+    // 同一批中第二段仍须命中原 L4；实现将全部段先校验、再自下而上套用。
+    let tc = ToolCallInfo {
+        id: "hl-batched-original-snapshot".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[
+                {{"op":"insert","pos":"2#{}","lines":"intro-a\nintro-b\n"}},
+                {{"op":"replace","pos":"4#{}","lines":"FOUR\n"}}
+            ]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("two"),
+            compute_line_hash("four"),
+        ),
+    };
+    let (message, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
+
+    assert!(!is_error, "非重叠原快照批量编辑应成功：{message}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "one\nintro-a\nintro-b\ntwo\nthree\nFOUR\nfive\n",
+        "下方替换必须仍命中原 L4，而非被上方插入后的新行号"
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_cjk_anchor_is_stable_after_lines_are_inserted_above_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("cjk-anchor.txt");
+    let original = format!("{}#### 验收标准\ntrailer\n", "filler\n".repeat(367));
+    std::fs::write(&file, &original).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let first_read = make_tc(&format!(
+        r#"{{"path":{:?},"hashline":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (first_output, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &first_read).await;
+    assert!(!first_error, "{first_output}");
+    let first_cjk_tag = hashline_tag_at(&first_output, 368);
+
+    let insert = ToolCallInfo {
+        id: "cjk-anchor-insert".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"insert","pos":"1#{}","lines":"intro-1\nintro-2\nintro-3\n"}}]}}"#,
+            file.to_string_lossy(),
+            hashline_tag_at(&first_output, 1),
+        ),
+    };
+    let (insert_output, insert_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &insert).await;
+    assert!(!insert_error, "{insert_output}");
+
+    let second_read = ToolCallInfo {
+        id: "cjk-anchor-reread".into(),
+        name: "read".into(),
+        arguments: format!(r#"{{"path":{:?},"hashline":true}}"#, file.to_string_lossy()),
+    };
+    let (second_output, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second_read).await;
+    assert!(!second_error, "{second_output}");
+    let moved_cjk_tag = hashline_tag_at(&second_output, 371);
+    assert_eq!(
+        first_cjk_tag, moved_cjk_tag,
+        "同一 CJK 行内容在文件中平移后必须保有相同 hashline 指纹"
+    );
+
+    let replace = ToolCallInfo {
+        id: "cjk-anchor-replace".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#####"{{"path":{:?},"edits":[{{"op":"replace","pos":"371#{}","lines":"#### 已验收\n"}}]}}"#####,
+            file.to_string_lossy(),
+            moved_cjk_tag,
+        ),
+    };
+    let (replace_output, replace_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &replace).await;
+    assert!(!replace_error, "{replace_output}");
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("#### 已验收\n"));
+}
+
+fn hashline_tag_at(output: &str, line_no: u64) -> String {
+    let prefix = format!("{line_no:>6}#");
+    output
+        .lines()
+        .find_map(|line| {
+            let tagged = line.strip_prefix(&prefix)?;
+            tagged.split_once(':').map(|(tag, _)| tag.to_string())
+        })
+        .unwrap_or_else(|| panic!("expected hashline output for line {line_no}, got {output:?}"))
+}
+
+#[tokio::test]
 async fn hashline_edit_refreshes_read_stamp_so_a_second_edit_is_not_stale() {
     use crate::core::tools::primitive::compute_line_hash;
     let dir = tempfile::tempdir().unwrap();
@@ -1067,7 +1178,7 @@ async fn hashline_edit_refreshes_read_stamp_so_a_second_edit_is_not_stale() {
         arguments: format!(
             r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
             file.to_string_lossy(),
-            compute_line_hash("one", 2),
+            compute_line_hash("one"),
         ),
     };
     let (first_message, first_error, _) =
@@ -1080,7 +1191,7 @@ async fn hashline_edit_refreshes_read_stamp_so_a_second_edit_is_not_stale() {
         arguments: format!(
             r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"TWO\n"}}]}}"#,
             file.to_string_lossy(),
-            compute_line_hash("two", 2),
+            compute_line_hash("two"),
         ),
     };
     let (second_message, second_error, _) =
@@ -1110,7 +1221,7 @@ async fn hashline_edit_then_edit_completes_without_a_stale_recovery_round_trip()
         arguments: format!(
             r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
             file.to_string_lossy(),
-            compute_line_hash("one", 2),
+            compute_line_hash("one"),
         ),
     };
     let (first_message, first_error, _) =
@@ -1150,7 +1261,7 @@ async fn hashline_edit_refresh_switch_off_restores_stale_guard_behavior() {
         arguments: format!(
             r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
             file.to_string_lossy(),
-            compute_line_hash("one", 2),
+            compute_line_hash("one"),
         ),
     };
     let (_, first_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &first).await;
@@ -1162,7 +1273,7 @@ async fn hashline_edit_refresh_switch_off_restores_stale_guard_behavior() {
         arguments: format!(
             r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"TWO\n"}}]}}"#,
             file.to_string_lossy(),
-            compute_line_hash("two", 2),
+            compute_line_hash("two"),
         ),
     };
     let (second_message, second_error, _) =
@@ -1205,6 +1316,107 @@ async fn hashline_edit_rejects_hash_mismatch() {
         std::fs::read_to_string(&f).unwrap(),
         "a\nb\nc\n",
         "拒绝时磁盘必须未变"
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_reports_all_mismatched_anchors_without_writing() {
+    use crate::core::tools::primitive::compute_line_hash;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("all-mismatches.txt");
+    let original = "alpha\nbeta\ngamma\n";
+    std::fs::write(&file, original).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let tc = ToolCallInfo {
+        id: "hl-all-mismatches".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[
+                {{"op":"replace","pos":"1#!!","lines":"ALPHA\n"}},
+                {{"op":"replace","pos":"2#{}","end":"3#!!","lines":"BETA\nGAMMA\n"}},
+                {{"op":"replace","pos":"3#{}","lines":"GAMMA\n"}}
+            ]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("beta"),
+            compute_line_hash("gamma"),
+        ),
+    };
+    let (message, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
+
+    assert!(is_error, "陈旧 hashline 锚点必须拒绝：{message}");
+    assert!(
+        message.contains("HashlineValidationFailed: 2 个锚点无效"),
+        "应汇总错误锚点数量：{message}"
+    );
+    assert!(
+        message.contains("edits[0].pos: HashMismatch"),
+        "应报告第一个陈旧锚点：{message}"
+    );
+    assert!(
+        message.contains(&format!("最新锚点 `1#{}`", compute_line_hash("alpha"))),
+        "应给出可直接替换的第一个锚点：{message}"
+    );
+    assert!(
+        message.contains("edits[1].end: HashMismatch"),
+        "应报告第二个陈旧锚点：{message}"
+    );
+    assert!(
+        message.contains(&format!("最新锚点 `3#{}`", compute_line_hash("gamma"))),
+        "应给出可直接替换的第二个锚点：{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        original,
+        "任一锚点无效时文件必须字节级未变"
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_reports_mismatch_and_out_of_range_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("mixed-anchor-errors.txt");
+    let original = "alpha\nbeta\ngamma\n";
+    std::fs::write(&file, original).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let tc = ToolCallInfo {
+        id: "hl-mixed-errors".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[
+                {{"op":"replace","pos":"1#!!","lines":"ALPHA\n"}},
+                {{"op":"replace","pos":"4#ZZ","lines":"DELTA\n"}}
+            ]}}"#,
+            file.to_string_lossy(),
+        ),
+    };
+    let (message, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
+
+    assert!(is_error, "陈旧或越界锚点必须拒绝：{message}");
+    assert!(
+        message.contains("HashlineValidationFailed: 2 个锚点无效"),
+        "应汇总错误锚点数量：{message}"
+    );
+    assert!(
+        message.contains("edits[0].pos: HashMismatch"),
+        "应保留 mismatch 诊断：{message}"
+    );
+    assert!(
+        message.contains("edits[1].pos: OutOfRange: 锚点行号 4 超过文件总行数 3"),
+        "应在同一响应报告越界锚点：{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        original,
+        "任一锚点无效时文件必须字节级未变"
     );
 }
 

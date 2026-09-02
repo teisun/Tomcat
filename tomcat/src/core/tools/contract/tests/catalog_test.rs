@@ -141,6 +141,9 @@ fn tool_guidelines_aggregate_dedup_and_contain_key_anchors() {
     // 关键跨工具锚点（原 tool_instructions 内联，现从 guidelines 注入）。
     assert!(g.contains("Default file-edit workflow: read -> edit"));
     assert!(g.contains("read(hashline=true) -> hashline_edit"));
+    assert!(g.contains("prefer edit for prose and Markdown"));
+    assert!(g.contains("never mix anchors from separate reads"));
+    assert!(g.contains("line-count changes do not shift other batch anchors"));
     assert!(g.contains("never include display prefixes"));
     assert!(g.contains("prefer it over bash with grep/find/ls -R"));
     assert!(g.contains("Only claim you can access"));

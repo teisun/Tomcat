@@ -135,28 +135,25 @@ fn magic_matches(mime: &str, head: &[u8]) -> bool {
     }
 }
 
-/// PR-RM（T3 hashline）`pi_agent_rust::compute_line_hash` 25 行实现的等价 Rust 版。
+/// PR-RM（T3 hashline）行内容的短指纹。
 ///
-/// 算法（与 `pi_agent_rust/src/tools.rs` 5451–5466 一字对齐）：
+/// 算法：
 /// 1. `strip_suffix('\r')`：去 Windows 换行残留；
 /// 2. 移除所有空白（`char::is_whitespace`）得到 `significant`——「缩进改动**不影响 hash**」；
-/// 3. seed：含字母数字字符 → 0；纯标点 / 空行 → 行号（让空行也有唯一 hash）；
-/// 4. `xxh32(significant_bytes, seed) & 0xFF`；
-/// 5. 取低字节按 4-bit nibble 拆 → 字典 `b"ZPMQVRWSNKTXJBYH"` 映射为 2 字符
+/// 3. `xxh32(significant_bytes, 0) & 0xFF`；
+/// 4. 取低字节按 4-bit nibble 拆 → 字典 `b"ZPMQVRWSNKTXJBYH"` 映射为 2 字符
 ///    （字典刻意避开 `O / I / 0 / 1` 等易混字符，便于人眼粘贴 / 比对）。
+///
+/// 行号是 hashline 协议中用于定位的独立字段，不参与指纹。这样同一内容在文件
+/// 中平移后仍保有相同指纹；读时和改时在同一行号上传入行号 seed 不能增强校验，
+/// 却会让纯中文、纯符号和空白行的指纹随位置变化。
 ///
 /// hashline 与 cat-n 行号互斥：spec §3.1 规定「hashline 优先」，
 /// 调用方在 [`crate::core::agent_loop::tool_exec`] 入口已做去抖。
-pub(crate) fn compute_line_hash(line: &str, line_no: u64) -> String {
+pub(crate) fn compute_line_hash(line: &str) -> String {
     let trimmed = line.strip_suffix('\r').unwrap_or(line);
     let significant: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
-    let seed: u32 = if trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
-        0
-    } else {
-        // pi_agent_rust 用行号低 32 位作为 seed；这里同样 cast，避免大文件 wrap。
-        line_no as u32
-    };
-    let raw = xxhash_rust::xxh32::xxh32(significant.as_bytes(), seed);
+    let raw = xxhash_rust::xxh32::xxh32(significant.as_bytes(), 0);
     let low = (raw & 0xFF) as u8;
     const ALPHABET: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
     let high_nibble = ALPHABET[((low >> 4) & 0x0F) as usize] as char;
@@ -182,7 +179,7 @@ pub(crate) fn format_with_hashlines(start_line: u64, body: &str) -> String {
     let mut line_no = start_line;
     for line in body.split_inclusive('\n') {
         let bare = line.strip_suffix('\n').unwrap_or(line);
-        let tag = compute_line_hash(bare, line_no);
+        let tag = compute_line_hash(bare);
         out.push_str(&format!("{:>6}#{}:{}", line_no, tag, line));
         line_no = line_no.saturating_add(1);
     }

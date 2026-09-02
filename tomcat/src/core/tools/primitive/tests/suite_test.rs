@@ -392,9 +392,9 @@ async fn hashline_edit_with_cancel_skips_disk_write() {
     let segment = crate::core::tools::primitive::HashlineSegment {
         op: crate::core::tools::primitive::HashlineOp::Replace,
         start_line: 2,
-        start_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        start_hash: crate::core::tools::primitive::compute_line_hash("beta"),
         end_line: 2,
-        end_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        end_hash: crate::core::tools::primitive::compute_line_hash("beta"),
         lines: "changed\n".to_string(),
     };
     let result = exec
@@ -423,9 +423,9 @@ async fn hashline_edit_success_returns_line_diff_stat() {
     let segment = crate::core::tools::primitive::HashlineSegment {
         op: crate::core::tools::primitive::HashlineOp::Replace,
         start_line: 2,
-        start_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        start_hash: crate::core::tools::primitive::compute_line_hash("beta"),
         end_line: 2,
-        end_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        end_hash: crate::core::tools::primitive::compute_line_hash("beta"),
         lines: "changed\n".to_string(),
     };
     let result = exec
@@ -1893,9 +1893,9 @@ async fn edit_notfound_with_hashline_prefix_explains_remediation() {
         Arc::new(TracingAuditRecorder),
         make_gate(&dir),
     );
-    let h1 = crate::core::tools::primitive::compute_line_hash("alpha", 1);
-    let h2 = crate::core::tools::primitive::compute_line_hash("beta", 2);
-    let h3 = crate::core::tools::primitive::compute_line_hash("gamma", 3);
+    let h1 = crate::core::tools::primitive::compute_line_hash("alpha");
+    let h2 = crate::core::tools::primitive::compute_line_hash("beta");
+    let h3 = crate::core::tools::primitive::compute_line_hash("gamma");
     let prefixed_old = format!(
         "{:>6}#{}:alpha\n{:>6}#{}:beta\n{:>6}#{}:gamma\n",
         1, h1, 2, h2, 3, h3

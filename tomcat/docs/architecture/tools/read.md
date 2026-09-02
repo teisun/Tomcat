@@ -371,7 +371,7 @@ sequenceDiagram
 | **dedup（重复读短路）**        | 同一窗口、文件看起来没变，就不再塞全文                                        | [`read_state::ReadFileState`](../../../../src/core/tools/pipeline/read_state.rs) | 命中 → `ReadResult::FileUnchanged`（在 **tool_exec** 短路，不调 primitive）                                     | 没变就别再灌全文。 |
 | **staleness（陈旧）**       | 模型脑中的内容已不是磁盘最新                                             | 同上表中的 `ReadStamp`                                                       | **edit/write 入口**查表：指纹不一致 → 拒绝并要求先 `read`                                                             | 磁盘变了先逼你再 read。 |
 | **FILE_UNCHANGED stub** | 告诉模型「别读了，跟上一次一样」                                           | 常量 [`FILE_UNCHANGED_STUB`](../../../../src/core/tools/pipeline/read_state.rs)    | 非错误；模型应引用上一轮 read 结果                                                                                  | 短句告诉模型「跟上轮一样」。 |
-| **hashline**            | 行号 + 内容指纹前缀，供精细 edit 锚点                                    | executor 文本渲染分支                                                         | `hashline=true` 时覆盖 `line_numbers`；算法对齐 pi_agent_rust                                                 | 行尾带俩字指纹，给 edit 对齐。 |
+| **hashline**            | 行号 + 内容指纹前缀，供精细 edit 锚点                                    | executor 文本渲染分支                                                         | `hashline=true` 时覆盖 `line_numbers`；行号只定位、指纹只取内容                                               | 行号找位置，俩字指纹确认那行文字没变。 |
 | **「LLM 收到 tool 结果后」**   | 指 **`tool_exec` 已把 `ReadResult` 落成 chat 消息、即将进入下一轮模型推理之前** | —                                                                       | 与去重 / 注入时序讨论绑在此边界                                                                                     | tool 结果已进 transcript、下一轮推理还没开始。 |
 
 
@@ -404,7 +404,7 @@ sequenceDiagram
 | 来源 / 形态                | 分页与上限                  | 行号 / 锚点               | 重复读                   | 多模态                                 | 备注                      | 说人话 |
 | ---------------------- | ---------------------- | --------------------- | --------------------- | ----------------------------------- | ----------------------- | ------ |
 | **cc-fork 系**          | 大行数窗口 + 续读提示           | 常见 `cat -n`           | 软 stub 省 token        | 视产品而定                               | 工程上验证「窗口默认 ~2k 行」较稳     | 大行数窗口是业界共识。 |
-| **pi_agent_rust**      | 类似 Agent 读盘            | **hashline**（xxh 短指纹） | 可与 edit 对齐            | 依部署                                 | 本仓库 **hashline 算法对齐**   | 指纹行我们对齐生态。 |
+| **pi_agent_rust**      | 类似 Agent 读盘            | **hashline**（xxh 短指纹） | 可与 edit 对齐            | 依部署                                 | 本仓布局与双字符字典对齐；行号 seed 经本仓校验语义复核后不采纳 | 借显示格式，不把行号混进内容指纹。 |
 | **Claude / Cursor 内置** | 产品化分页策略                | 因产品而异                 | 通常由宿主去重               | 强多模态                                | 协议细节不公开处用「占位 + 侧信道」思路参照 | 产品侧做法作参照。 |
 | **本仓库 `read`**         | 默认 2000 行 + 25 MiB 裸读门 | `cat -n` 或 hashline   | `FILE_UNCHANGED` stub | OpenAI：**tool 占位 + 下一条 user Parts** | wasm 友好、单测锁行为           | 分页 + dedup + 图走 user。 |
 
@@ -485,7 +485,7 @@ sequenceDiagram
 | R5 重复读 | 合法重试 vs 烧 token | **采用** 已读范围覆盖 + `render_mode` 相同 + 文件未变且结果仍可见 → `FileUnchanged` stub。 | dedup stub 类产品实践 | 只有模型已有同一版输入才短路；否则重新读 | 硬拒绝误伤「再确认」；每次全文 → 烧 token | 真有同一版内容才别再灌。 |
 | R5 dedup 指纹 | 短路前是否再读全文 | **采用** dedup 命中 `mtime_ms+size`；`content_hash` 仅诊断/纵深。 | `read_state.rs` 头注释与 PR-RF | `mtime_ms + size` 快路径；`content_hash` 存表供诊断与 edit 纵深 | hash 参与 dedup 命中 → 短路前被迫再读全文 | 省读优先，hash 做纵深。 |
 | R6 图片策略 | 依赖与 wasm 体积 | **采用** metadata 限长、路径级不缩放（wasm 可控）。 | OpenAI inline 限制 | metadata 限长、路径级不缩放；对齐上限 | 在工具内解码缩放 → 依赖与编译膨胀 | wasm 可控，贴 OpenAI。 |
-| R4 hashline | 行级强锚点 | **采用** xxh32 + 双字符表 hashline（对齐 pi 生态）。 | **pi_agent_rust** hashline | xxh32 + 双字符表；与 edit 纵深一致 | 无行级指纹 → 精细 edit 难闭环 | 短指纹好对齐生态。 |
+| R4 hashline | 行级强锚点 | **采用** xxh32 + 双字符表；行号定位、指纹仅取内容。 | **pi_agent_rust** hashline（格式基准）；本仓 `hashline_edit` 校验语义 | 行号已在锚点中单独传递；把它再混入指纹不会增强读后校验，却会让内容平移时指纹变化 | 无行级指纹 → 精细 edit 难闭环；行号 seed → 中文/符号行平移时产生无意义 churn | 行号管位置，指纹管内容，各管一件事。 |
 | R6 图 / PDF 进模型 | OpenAI tool 能否带 binary | **采用** tool 占位 + 下条 `user` Parts 注入（单测锁住）。 | OpenAI API 约束 + PR-RJ T3-c | tool 占位 + **下一条** `user` Parts 注入 | 在 tool 消息内嵌图 → API 拒收 / 浪费 | 图走侧信道，单测锁住。 |
 
 ### 4.2 实施点（已闭环）
@@ -600,7 +600,7 @@ hashline 是两份不同的模型输入，不能互相冒充。
 #### 4.2.5 PR-RM：`hashline`（xxh32）
 
 - **依赖**：`xxhash-rust`（`xxh32`）。
-- **算法**：行内容经 whitespace-stripped 后做 xxh32，取 nibbles 映射为**双字符**指纹前缀；渲染 `{:>6}#XX:{content}`。
+- **算法**：行内容经 whitespace-stripped 后以固定 seed `0` 做 xxh32，取 nibbles 映射为**双字符**指纹前缀；渲染 `{:>6}#XX:{content}`。行号只用于定位，**不参与**内容指纹。
 - **优先级**：`hashline=true` 时 **覆盖** `line_numbers`（schema、system prompt、executor 分支一致）。
 
 ```text
@@ -608,7 +608,14 @@ hashline 是两份不同的模型输入，不能互相冒充。
   hashline=true（优先）                 →  "    42#Ab:code"
 ```
 
-**说人话**：要 edit 锚点就开 hashline，行里多俩字符指纹。
+```text
+同一行文字从 L368 移到 L371：
+  旧锚点  368#Ab:#### 验收标准
+  新锚点  371#Ab:#### 验收标准
+                 ^^ 内容指纹不变；行号必须由新的 read 更新
+```
+
+**说人话**：要 edit 锚点就开 hashline。行号负责找位置，俩字符只确认文字没变；文字挪了行，必须重新读到新行号，但同一文字不会再换一套指纹。
 
 #### 4.2.6 PR-RS：文档
 
@@ -816,7 +823,7 @@ ReadResult
 | 分页 / 尾注        | `read_window_test::read_offset_limit_returns_window`、`read_offset_beyond_eof_returns_empty`、`read_limit_truncates_with_resume_hint`、`read_with_offset_bypasses_max_bytes_check`                                                                                                                                                                                                              | ✅ 2026-05-05 | 窗、截断、续读提示、有窗绕过裸读门都锁住。 |
 | 后读预算护栏        | `read_window_test::read_applies_post_output_budget_guard_with_resume_hint`、`read_first_returned_line_over_budget_returns_structured_error`                                                                                                                                                                                                                                                     | ✅ 2026-05-30 | 单窗过胖会在工具层切页；首行自己就过胖时给可恢复错误。 |
 | 大文件 / 二进制 hint | `read_window_test::read_no_offset_large_file_rejected_with_hint`、`read_binary_returns_structured_hint`                                                                                                                                                                                                                                                                                       | ✅ 2026-05-05 | 巨文件无窗拒、二进制给结构化 hint。 |
-| 行号 / hashline  | `read_window_test::read_default_renders_cat_n_line_numbers`、`read_offset_window_uses_absolute_line_numbers`、`read_with_hashline_renders_hash_prefixed_lines`                                                                                                                                                                                                                                 | ✅ 2026-05-05 | 默认 cat-n、绝对行号、hashline 前缀。 |
+| 行号 / hashline  | `read_window_test::read_default_renders_cat_n_line_numbers`、`read_offset_window_uses_absolute_line_numbers`、`read_with_hashline_renders_hash_prefixed_lines`、`hashline_format_has_stable_content_hashes`                                                                                                                                                                                       | ✅ | 默认 cat-n、绝对行号、hashline 前缀；同一中文、符号或空白行内容不随行号改指纹。 |
 | 路由 Image/Pdf   | `read_window_test::read_routes_png_to_image_variant`、`read_routes_pdf_to_pdf_variant`、`read_unknown_extension_falls_back_to_text`、`read_oversize_image_rejected_at_metadata_stage`                                                                                                                                                                                                           | ✅ 2026-05-05 | 图/PDF 路由与 metadata 拒超大图。 |
 | 集成（黑盒）         | `tests/read_tool_tests.rs`：`read_text_offset_limit_window_with_line_numbers`、`read_large_window_is_cut_at_post_read_budget_with_resume_hint`、`read_first_returned_line_over_budget_returns_recoverable_error`、`read_binary_returns_structured_hint`、`read_hashline_renders_two_char_hash_prefix`、`read_png_routes_to_image_and_can_build_input_image_part`、`read_pdf_routes_to_pdf_and_can_build_input_file_part`、`read_oversize_image_rejected_before_loading_bytes` | ✅ 2026-05-30 | 端到端看分页、预算护栏、结构化错误和多模态路由都能一起站住。 |
 | tool_exec 参数   | `submodules_test::tool_exec_read_returns_content`、`tool_exec_legacy_read_file_returns_unknown_tool_error`、`tool_exec_read_offset_zero_returns_bound_error`、`tool_exec_read_limit_over_max_returns_bound_error`                                                                                                                                                                               | ✅ 2026-05-05 | 调度层参数与老名未知工具语义。 |
