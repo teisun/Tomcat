@@ -522,24 +522,14 @@ fn one_line_summary_handles_known_and_unknown_tools() {
 }
 
 #[test]
-fn one_line_summary_handles_bash_argv_and_script_preview() {
+fn one_line_summary_normalizes_single_command_preview() {
     assert_eq!(
-        one_line_summary(
-            "bash",
-            &json!({"command": "bash", "args": ["-lc", "echo hi && pwd"]})
-        ),
-        "command=bash -lc echo hi && pwd"
+        one_line_summary("bash", &json!({"command": "echo hi && pwd"})),
+        "command=echo hi && pwd"
     );
     assert_eq!(
-        one_line_summary(
-            "bash",
-            &json!({"command": "bash", "args": ["-lc", "\n\n  echo first\npwd"]})
-        ),
-        "command=bash -lc echo first pwd"
-    );
-    assert_eq!(
-        one_line_summary("bash", &json!({"command": "bash", "args": ["-lc"]})),
-        "command=bash -lc"
+        one_line_summary("bash", &json!({"command": "\n\n  echo first\npwd"})),
+        "command=echo first pwd"
     );
 }
 
@@ -547,8 +537,8 @@ fn one_line_summary_handles_bash_argv_and_script_preview() {
 fn one_line_summary_does_not_truncate_long_bash_command() {
     let long_path = "/Users/yankeben/.tomcat/temp/cli_real_llm_wwww-mi-com_2794_1779277773225413000/docs/screenshots";
     let script = format!("mkdir -p {long_path} && npm i -D tsx && node scripts/snapshot.ts");
-    let summary = one_line_summary("bash", &json!({"command": "bash", "args": ["-lc", script]}));
-    assert_eq!(summary, format!("command=bash -lc {script}"));
+    let summary = one_line_summary("bash", &json!({"command": script}));
+    assert_eq!(summary, format!("command={script}"));
     assert!(!summary.ends_with('…'));
 }
 

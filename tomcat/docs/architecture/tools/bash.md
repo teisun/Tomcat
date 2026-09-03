@@ -28,9 +28,8 @@ LLM 调用 bash
 
 主要入参：
 
-- `command`：必填命令；
+- `command`：必填的完整 shell 命令行，含可执行程序和全部参数；Unix 经 `sh -c`、Windows 经 `cmd /C` 执行，支持管道、重定向、条件执行和引号；
 - `cwd`：可选工作目录；
-- `args`：可选 argv，存在时不经 shell 字符串解析；
 - `run_in_background`：立即转为 tracked background task；
 - `foreground_wait_ms`：单次调用覆盖前台观察窗口，执行前统一 clamp 到 `8000..=16000`。
 

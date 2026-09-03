@@ -18,25 +18,13 @@ fn is_command_tool(tool_name: &str) -> bool {
     matches!(tool_name, "bash" | "shell" | "execute_command")
 }
 
-/// 从 tool args 里拼出用于生成"目的"的命令串（`command` + 可选 `args` 数组）。
+/// 从 tool args 里取得用于生成“目的”的完整 shell 命令字符串。
 fn command_for_summary(args: &serde_json::Value) -> String {
-    let command = args
-        .get("command")
+    args.get("command")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
-        .trim();
-    let argv: Vec<&str> = args
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect())
-        .unwrap_or_default();
-    if argv.is_empty() {
-        command.to_string()
-    } else if command.is_empty() {
-        argv.join(" ")
-    } else {
-        format!("{command} {}", argv.join(" "))
-    }
+        .trim()
+        .to_string()
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {

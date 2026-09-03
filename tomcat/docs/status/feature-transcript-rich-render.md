@@ -1,9 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-03 14:20 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-03 15:24 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
-- [ ] **[P0]** Bash/Edit/Plan review 收口实现已完成：bash LLM 契约收敛为单一完整 `command` 字符串，进程层统一经 `sh -c` / `cmd /C` 执行，删除 argv 双模以消除 `spawn ENOENT`；edit 成功后回传有界、带行号的当前磁盘视图，`NotFound` 时按 `old_content` 的唯一就近行回喂真相；code review 改为首轮全量、后续 mtime 增量审查，默认最多两轮，到界无条件进入 acceptance 并留下残余 finding，P1 计划不符必须引用计划原文。`cargo fmt --check` 已通过；按用户明确指令未等待 Clippy 和 `cargo test` 完成，验证待后续补跑。@2026-09-03
+- [✓] **[P0]** Bash/Edit/Plan review 收口及 argv 展示链清理已完成：bash LLM 契约和同步/异步摘要统一为单一完整 `command` 字符串，进程层统一经 `sh -c` / `cmd /C` 执行，删除 argv 双模以消除 `spawn ENOENT`；edit 成功后回传有界、带行号的当前磁盘视图，`NotFound` 时按 `old_content` 的唯一就近行回喂真相；code review 改为首轮全量、后续 mtime 增量审查，默认最多两轮，到界无条件进入 acceptance 并留下残余 finding，P1 计划不符必须引用计划原文。版本统一升为 CLI `0.1.43`、扩展 `0.1.57`、bundled CLI `0.1.43`。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets -- -D warnings`、`cargo test -p tomcat --lib one_line_summary`（5 passed）、`release-version check`、`git diff --check` 全绿；Cov% 未跑，仍为 —。@2026-09-03
 - [✓] **[P0]** `hashline_edit` 在中文、纯符号和空白行不再因行号平移而制造 `HashMismatch`：`compute_line_hash` 收敛为纯内容指纹，行号仅负责定位；一次调用可批量处理互不重叠的原始快照区间，全部锚点先校验、再自下向上套用，所以上方插入/删除不会改变同批下方锚点。无效锚点现在一次汇总 `HashMismatch` / `OutOfRange` 并保证不写盘；提示词与工具契约说明 prose/Markdown 优先 `edit`、新插入文本须重读后再改。验证：hashline 相关 19 项、prompt/catalog、派生工具文档、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 全绿。CLI `0.1.40 → 0.1.41`、扩展 `0.1.54 → 0.1.55`、bundled CLI `0.1.40 → 0.1.41`；纯插件包 `tomcat-vscode-ext-0.1.55.vsix`（1.52 MB，SHA-256 `4f9c9ff5adc8bdfc27ab6b89647da657287dc928512ef2e55d127b85175446e3`）不含 `bin/tomcat`。Cov% 未跑，仍为 —。@2026-09-02
 - [✓] **[P0]** Transcript 通用工具卡不再丢失连接器/未知工具的调用参数：`tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 有可读标签与图标，`tool_call` 只展示内层 MCP arguments；无专属卡片的当前和未来工具都会在展开区显示 JSON 参数（4,000 字符上限且不截断 Unicode）。同时纠正 `ServeConnectionSupervisor` 的冷启动回归：initialize 握手预算从错误的 12 秒恢复为 `max(60 秒, 常规请求 30 秒)`；进程仍存活却未握手时只终止一次并引导 View Logs/Retry，不再杀掉冷启动半成品形成重启活锁；真实进程退出继续走原有有界退避自动恢复。新增慢握手 fake serve 和开发态、纯 VSIX 安装态 E2E（延迟 15 秒仍 ready），另锁住握手超时单次失败和子进程崩溃重试的单测。扩展 `0.1.52 → 0.1.54`；验证：ToolRow focused GUI 测试、`npm run lint`、supervisor 12/12、devhost 慢握手 E2E、完整 `npm run verify:vsix` 与 VSIX 解压校验通过；Cov% 未跑，仍为 —。@2026-09-02
 - [✓] **[P0]** MCP 工具改为渐进式披露：具体 MCP schema 不再注册进 `ToolRegistry` 或进入 prompt 前缀；仅静态暴露 `tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 与 `connectors` skill 索引，运行态目录通过 `McpManager` 按需查询。`tool_call` / 代码 VM 复用 MCP trust、串行调用与图片回流，修复直连结果一层包装漏读 `isError:true` 的错误状态；L1 source 卡片优先用 MCP 握手元数据说明能力。CLI `0.1.39 → 0.1.40`、扩展 `0.1.51 → 0.1.52`、bundled CLI 同步。验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、完整 `cargo test`、MCP manager/media/端到端回归与 `release-version check` 全绿。Cov% 未跑，仍为 —。@2026-09-01
@@ -83,7 +83,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
-- 发布版本：CLI `0.1.41`、扩展 `0.1.55`、`bundledCliVersion=0.1.41`。
+- 发布版本：CLI `0.1.43`、扩展 `0.1.57`、`bundledCliVersion=0.1.43`。
 - `hashline_edit`：锚点指纹改为纯内容；同一调用的多段非重叠操作统一按原始快照校验并自下向上应用。无效锚点会返回聚合 `HashlineValidationFailed`，写入保持全有或全无。
 - Serve 连接监管：新增扩展内部 `ServeConnectionSupervisor` 状态机（`idle|starting|handshaking|backoff|ready|fatal`）和 webview 内部 `connectionStatus`（`connecting|reconnecting|ready|failed`）；不改变 Rust serve RPC、NDJSON wire 或用户配置格式。
 - 打包：`package:vsix` 在 vsce 成功后必须用 `yauzl`（与 Cursor/VS Code `extract` 同款）读完每个条目；失败删除产物。扩展显式依赖 `yauzl`。
