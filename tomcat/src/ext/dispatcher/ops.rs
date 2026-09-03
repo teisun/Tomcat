@@ -169,24 +169,11 @@ impl HostApiDispatcher {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AppError::Plugin("executeBash: missing command".to_string()))?;
         let cwd = params.get("cwd").and_then(|v| v.as_str()).map(String::from);
-        let argv_store: Option<Vec<String>> =
-            params.get("args").and_then(|v| v.as_array()).map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            });
-        let argv_ref = argv_store.as_deref();
         // T2-P0-016 PR-E.2：扩展 `executeBash` HostCall 参数，可选 `foreground_wait_ms`；
         // 与 `tool_exec` 同口径在 trait 层接受 `Option<u64>`，未提供则用 config 默认。
         let foreground_wait_ms = params.get("foreground_wait_ms").and_then(|v| v.as_u64());
         let result = p
-            .execute_bash(
-                command,
-                cwd.as_deref(),
-                plugin_id,
-                argv_ref,
-                foreground_wait_ms,
-            )
+            .execute_bash(command, cwd.as_deref(), plugin_id, foreground_wait_ms)
             .await?;
         Ok(HostResponse::ok(
             serde_json::to_value(result).map_err(AppError::Serialize)?,
@@ -587,7 +574,6 @@ mod tests {
         let ticket = registry
             .spawn(
                 "printf ext-host-tail".to_string(),
-                None,
                 Some(dir.path().to_path_buf()),
             )
             .await

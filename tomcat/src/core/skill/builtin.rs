@@ -100,7 +100,6 @@ mod tests {
             _command: &str,
             _cwd: Option<&str>,
             _plugin_id: &str,
-            _argv: Option<&[String]>,
             _foreground_wait_ms: Option<u64>,
         ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
             unreachable!("the built-in skill load test only reads a file")

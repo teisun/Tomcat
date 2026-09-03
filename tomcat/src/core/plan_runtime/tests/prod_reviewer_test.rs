@@ -127,6 +127,7 @@ fn review_prompt_uses_active_external_plan_path() {
                 green_build_evidence: Vec::new(),
                 code_review_pass: false,
                 code_review_pass_at_ms: None,
+                code_review_residual_findings: Vec::new(),
                 completion_gate_cycles: 0,
                 unknown: Default::default(),
             },

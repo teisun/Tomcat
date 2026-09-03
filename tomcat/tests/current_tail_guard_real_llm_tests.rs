@@ -208,6 +208,7 @@ fn build_plan_fixture(label: &str) -> PlanFixture {
             green_build_evidence: vec![],
             code_review_pass: false,
             code_review_pass_at_ms: None,
+            code_review_residual_findings: vec![],
             completion_gate_cycles: 0,
             unknown: Default::default(),
         },

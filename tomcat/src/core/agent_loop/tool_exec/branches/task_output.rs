@@ -341,7 +341,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
         let ticket = registry
-            .spawn("echo done; exit 0".to_string(), None, None)
+            .spawn("echo done; exit 0".to_string(), None)
             .await
             .expect("spawn");
 
@@ -379,7 +379,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
         let ticket = registry
-            .spawn("printf SNAPSHOT_TIMEOUT; sleep 3".to_string(), None, None)
+            .spawn("printf SNAPSHOT_TIMEOUT; sleep 3".to_string(), None)
             .await
             .expect("spawn");
 
@@ -417,7 +417,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
         let ticket = registry
-            .spawn("printf FINISHED_TIMEOUT".to_string(), None, None)
+            .spawn("printf FINISHED_TIMEOUT".to_string(), None)
             .await
             .expect("spawn");
 
@@ -449,7 +449,6 @@ mod tests {
         let ticket = registry
             .spawn(
                 "awk 'BEGIN{for(i=0;i<7000;i++) printf \"A\"}'; sleep 3".to_string(),
-                None,
                 None,
             )
             .await

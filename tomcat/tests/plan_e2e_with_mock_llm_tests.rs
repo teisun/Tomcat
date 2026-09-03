@@ -314,7 +314,6 @@ impl PrimitiveExecutor for UnusedPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
@@ -414,6 +413,7 @@ fn write_test_plan(plan_id: &str, body: &str) {
                 green_build_evidence: vec![],
                 code_review_pass: false,
                 code_review_pass_at_ms: None,
+                code_review_residual_findings: vec![],
                 completion_gate_cycles: 0,
                 unknown: Default::default(),
             },
@@ -698,10 +698,21 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    let init_status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(workspace.path())
+        .status()
+        .unwrap();
+    assert!(
+        init_status.success(),
+        "temporary workspace must be a Git repository"
+    );
     let task_dir = tempfile::tempdir().unwrap();
     let registry = Arc::new(BashTaskRegistry::new(task_dir.path().join("task-logs")));
-    rt.attach_workspace_root(workspace.clone());
+    rt.attach_workspace_root(workspace.path().to_path_buf());
     rt.attach_bash_task_registry(registry.clone());
     rt.set_max_code_review_rounds(2);
     rt.attach_code_reviewer(Arc::new(QueueCodeReviewer::new(vec![
@@ -791,12 +802,20 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
     assert_eq!(reviewed["next_step"]["phase"], "run_acceptance");
 
     let ticket = registry
-        .spawn("true".into(), None, Some(workspace))
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
         .await
         .unwrap();
     registry.wait_for_finish(&ticket.task_id).await.unwrap();
     let acceptance = start_close_out_gate(&rt, &plan_id, GATE_ACCEPTANCE_TODO_ID).await;
-    assert_eq!(acceptance["items"][3]["status"], "in_progress");
+    let acceptance_gate = acceptance["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"] == GATE_ACCEPTANCE_TODO_ID)
+        })
+        .expect("acceptance gate");
+    assert_eq!(acceptance_gate["status"], "in_progress");
     let done = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
@@ -1088,7 +1107,7 @@ async fn h8_code_review_pass_completes_without_verifier() {
 }
 
 #[tokio::test]
-async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_back() {
+async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances_to_acceptance() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
@@ -1192,15 +1211,17 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_hands_ba
     let second = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
     assert_eq!(second["code_review"], serde_json::Value::Null);
     assert!(second.get("verify").is_none());
-    // 复审说了 fail 却没列出 finding，轮次又用尽了 —— 这不是「没有已知问题」，
-    // 不能当成通过收口，只能保持 executing 并交还用户。
+    // 复审说了 fail 却没列出 finding，轮次又用尽了：review 门无条件放行，
+    // 后续仍须由 acceptance 的真实 green-build 证据决定能否完成。
     assert_eq!(second["plan_state_after"], "executing");
+    assert_eq!(second["code_review_pass"], true);
+    assert_eq!(second["next_step"]["phase"], "run_acceptance");
     assert!(second["warnings"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(serde_json::Value::as_str)
-        .any(|w| w.contains("轮次预算已用尽") && w.contains("交还用户决定")));
+        .any(|w| w.contains("轮次预算已用尽") && w.contains("无条件通过 review gate")));
     assert_eq!(
         reviewer
             .call_count

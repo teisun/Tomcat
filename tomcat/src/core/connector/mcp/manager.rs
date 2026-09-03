@@ -283,12 +283,15 @@ impl McpManager {
         Ok(connection
             .all_tools
             .values()
+            .filter(|tool| {
+                (filter.include.is_empty() || include.is_match(&tool.raw_name))
+                    && !exclude.is_match(&tool.raw_name)
+            })
             .map(|tool| McpToolSummary {
                 name: tool.model_name.clone(),
                 raw_name: tool.raw_name.clone(),
                 description: tool.description.clone(),
-                enabled: (filter.include.is_empty() || include.is_match(&tool.raw_name))
-                    && !exclude.is_match(&tool.raw_name),
+                enabled: true,
             })
             .collect())
     }

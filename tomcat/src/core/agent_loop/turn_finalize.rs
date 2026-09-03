@@ -84,12 +84,8 @@ fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
         ));
     }
 
-    // 所有 todo 都勾完了却仍是 executing —— 通常是 code review 把计划打了回来。
-    // 若 review 预算已经耗尽，继续催模型「修完再审」只会空转：运行时不会再派 reviewer，
-    // 此时应把未决问题交还用户决定。
-    if plan_runtime.code_review_budget_exhausted(&plan_id)
-        || plan_runtime.code_review_infra_retry_exhausted(&plan_id)
-    {
+    // 基础设施连续失败仍须交还用户；这不是正常 review 预算可以收口的情形。
+    if plan_runtime.code_review_infra_retry_exhausted(&plan_id) {
         return None;
     }
 
@@ -99,6 +95,13 @@ fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
     } else {
         findings.join(", ")
     };
+    if plan_runtime.code_review_budget_exhausted(&plan_id) {
+        return Some(format!(
+            "All todos of plan `{plan_id}` are checked off but the final code review still has unresolved findings: {findings}. \
+             Fix them now by reopening an existing work todo. After that todo is completed, the exhausted review budget will \
+             automatically advance this plan to green-build acceptance without dispatching another reviewer. Do not hand back yet."
+        ));
+    }
     Some(format!(
         "All todos of plan `{plan_id}` are checked off but the plan is still `executing`, \
          which means code review has not passed. Unresolved findings: {findings}. \

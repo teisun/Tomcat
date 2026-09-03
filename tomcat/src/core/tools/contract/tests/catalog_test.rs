@@ -61,7 +61,10 @@ fn success_rate_redline_keeps_critical_usage_in_descriptions() {
         hashline.contains("<line>#<2char>"),
         "hashline_edit 必须保留 `<line>#<2char>` 锚点格式"
     );
-    assert!(hashline.contains("HashMismatch"));
+    assert!(
+        hashline.contains("HashMismatch"),
+        "hashline_edit description lost its HashMismatch guidance: {hashline}"
+    );
 
     // edit：唯一性/精确匹配约束（Ambiguous）+ ORIGINAL 快照语义 + Stale。
     let edit = desc_of("edit");
@@ -436,7 +439,7 @@ fn assert_schema_has_parameter_descriptions(tool_name: &str, schema: &Value) {
 }
 
 #[test]
-fn bash_schema_rejects_legacy_timeout_name() {
+fn bash_schema_exposes_only_a_single_command_string() {
     let entry = BUILTIN_TOOL_CATALOG
         .iter()
         .find(|entry| entry.name == "bash")
@@ -444,4 +447,12 @@ fn bash_schema_rejects_legacy_timeout_name() {
     let schema = (entry.parameters)();
     assert!(schema["properties"].get("foreground_wait_ms").is_some());
     assert!(schema["properties"].get("timeout_ms").is_none());
+    assert!(schema["properties"].get("args").is_none());
+    assert!(schema["properties"]["command"]["description"]
+        .as_str()
+        .is_some_and(|description| {
+            description.contains("Complete shell command line")
+                && description.contains("pipes")
+                && description.contains("sh -c")
+        }));
 }

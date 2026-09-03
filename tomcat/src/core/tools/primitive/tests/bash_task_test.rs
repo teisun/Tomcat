@@ -50,7 +50,6 @@ async fn spawn_then_read_then_stop_then_list() {
         .spawn(
             "i=0; while [ $i -lt 50 ]; do echo line-$i; i=$((i+1)); sleep 0.1; done".to_string(),
             None,
-            None,
         )
         .await
         .expect("spawn");
@@ -106,10 +105,9 @@ async fn natural_finish_marks_finished_with_exit_code() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
     let ticket = reg
-        .spawn("echo hi; exit 7".to_string(), None, None)
+        .spawn("echo hi; exit 7".to_string(), None)
         .await
         .expect("spawn");
-    // 等子进程自然结束。
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let infos = reg.list();
     assert_eq!(infos.len(), 1);
@@ -118,46 +116,6 @@ async fn natural_finish_marks_finished_with_exit_code() {
     assert!(chunk.finished);
     assert_eq!(chunk.exit_code, Some(7));
     assert!(chunk.content.contains("hi"));
-}
-
-#[tokio::test]
-async fn spawn_empty_argv_uses_shell_mode() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
-    let ticket = reg
-        .spawn("echo bg-empty-argv".to_string(), Some(vec![]), None)
-        .await
-        .expect("spawn");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let infos = reg.list();
-    assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].status, BashTaskStatus::Finished { exit_code: 0 });
-    let chunk = reg.read_output(&ticket.task_id, None).await.expect("read");
-    assert!(chunk.finished);
-    assert_eq!(chunk.exit_code, Some(0));
-    assert!(chunk.content.contains("bg-empty-argv"));
-}
-
-#[tokio::test]
-async fn spawn_shell_launcher_command_merges_with_argv() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
-    let ticket = reg
-        .spawn(
-            "sh -c".to_string(),
-            Some(vec!["printf bg-shell-launch-ok".to_string()]),
-            None,
-        )
-        .await
-        .expect("spawn");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let infos = reg.list();
-    assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].status, BashTaskStatus::Finished { exit_code: 0 });
-    let chunk = reg.read_output(&ticket.task_id, None).await.expect("read");
-    assert!(chunk.finished);
-    assert_eq!(chunk.exit_code, Some(0));
-    assert!(chunk.content.contains("bg-shell-launch-ok"));
 }
 
 #[tokio::test]
@@ -181,7 +139,6 @@ async fn wait_for_finish_ignores_new_output_until_terminal() {
     let ticket = reg
         .spawn(
             "i=0; while [ $i -lt 30 ]; do echo line-$i; i=$((i+1)); sleep 0.1; done".to_string(),
-            None,
             None,
         )
         .await
@@ -215,7 +172,7 @@ async fn wait_for_finish_returns_on_natural_exit() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = std::sync::Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let ticket = reg
-        .spawn("echo done; exit 0".to_string(), None, None)
+        .spawn("echo done; exit 0".to_string(), None)
         .await
         .expect("spawn");
     tokio::time::timeout(
@@ -239,7 +196,6 @@ async fn subscribe_lifecycle_emits_once_per_task() {
     let ticket = reg
         .spawn(
             "i=0; while [ $i -lt 50 ]; do echo line-$i; i=$((i+1)); sleep 0.05; done".to_string(),
-            None,
             None,
         )
         .await
@@ -274,7 +230,6 @@ async fn tail_log_returns_suffix() {
     let ticket = reg
         .spawn(
             "for i in 1 2 3 4 5; do echo line-$i; done".to_string(),
-            None,
             None,
         )
         .await
@@ -313,7 +268,6 @@ async fn spawn_denied_by_path_preflight_has_no_task_side_effect() {
     let err = reg
         .spawn(
             format!("ls {}", denied_root.join("secret.txt").display()),
-            None,
             Some(dir.path().to_path_buf()),
         )
         .await
@@ -338,7 +292,6 @@ async fn spawn_denied_by_bash_ast_has_no_task_side_effect() {
     let err = reg
         .spawn(
             "git --version && rm -rf ./danger".to_string(),
-            None,
             Some(dir.path().to_path_buf()),
         )
         .await
@@ -360,7 +313,6 @@ async fn spawn_denied_by_bash_policy_has_no_task_side_effect() {
     let err = reg
         .spawn(
             "echo should-not-run".to_string(),
-            None,
             Some(dir.path().to_path_buf()),
         )
         .await
@@ -377,7 +329,7 @@ async fn runtime_preview_is_bounded_by_bytes_and_tracks_offsets() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
     let ticket = reg
-        .spawn("python3 -c 'print(\"x\" * 70000)'".to_string(), None, None)
+        .spawn("python3 -c 'print(\"x\" * 70000)'".to_string(), None)
         .await
         .expect("spawn");
     reg.wait_for_finish(&ticket.task_id).await.expect("finish");
@@ -407,7 +359,6 @@ async fn runtime_preview_is_bounded_by_lines_and_streams_are_visible() {
             "i=0; while [ $i -lt 1100 ]; do echo out-$i; echo err-$i >&2; i=$((i+1)); done"
                 .to_string(),
             None,
-            None,
         )
         .await
         .expect("spawn");
@@ -435,7 +386,7 @@ async fn completion_event_follows_last_output_and_log_flush() {
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
     let mut rx = reg.subscribe_output();
     let ticket = reg
-        .spawn("printf final-byte".to_string(), None, None)
+        .spawn("printf final-byte".to_string(), None)
         .await
         .expect("spawn");
     reg.wait_for_finish(&ticket.task_id).await.expect("finish");
@@ -461,7 +412,7 @@ async fn lifecycle_waits_for_final_preview_barrier() {
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
     let mut lifecycle = reg.subscribe_lifecycle();
     let ticket = reg
-        .spawn_tracked_with_preview_barrier("printf final-preview".to_string(), None, None, true)
+        .spawn_tracked_with_preview_barrier("printf final-preview".to_string(), None, true)
         .await
         .expect("spawn");
 
@@ -495,12 +446,7 @@ async fn stop_finishes_only_after_output_drain_and_preview_barrier() {
     let mut output = reg.subscribe_output();
     let mut lifecycle = reg.subscribe_lifecycle();
     let ticket = reg
-        .spawn_tracked_with_preview_barrier(
-            "printf before-stop; sleep 30".to_string(),
-            None,
-            None,
-            true,
-        )
+        .spawn_tracked_with_preview_barrier("printf before-stop; sleep 30".to_string(), None, true)
         .await
         .expect("spawn");
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -547,7 +493,7 @@ async fn stderr_preview_offsets_match_durable_combined_log() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
     let ticket = reg
-        .spawn("printf error-byte >&2".to_string(), None, None)
+        .spawn("printf error-byte >&2".to_string(), None)
         .await
         .expect("spawn");
     reg.wait_for_finish(&ticket.task_id).await.expect("finish");

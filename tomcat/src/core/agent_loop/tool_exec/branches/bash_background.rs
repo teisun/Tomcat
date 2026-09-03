@@ -11,7 +11,6 @@ pub(in super::super) async fn handle_bash_background(
     subagent_type: SubagentType,
     command: &str,
     cwd: Option<&str>,
-    argv: Option<Vec<String>>,
 ) -> Result<String, String> {
     let Some(registry) = registry.as_ref() else {
         return Err(super::background_unavailable::bash_background_unavailable(
@@ -21,7 +20,7 @@ pub(in super::super) async fn handle_bash_background(
     };
     let cwd_pb = cwd.map(PathBuf::from);
     registry
-        .spawn(command.to_string(), argv, cwd_pb)
+        .spawn(command.to_string(), cwd_pb)
         .await
         .map(|ticket| serialize_background_ticket(&ticket))
         .map_err(|e| e.to_string())
@@ -50,7 +49,7 @@ mod tests {
             dir.path().join("tool-results"),
         )));
 
-        let text = handle_bash_background(&registry, SubagentType::User, "echo queued", None, None)
+        let text = handle_bash_background(&registry, SubagentType::User, "echo queued", None)
             .await
             .expect("background bash should queue");
 

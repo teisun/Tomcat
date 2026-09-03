@@ -20,6 +20,13 @@ pub struct Finding {
     #[serde(default)]
     pub reference: String,
     pub severity: String,
+    /// P1 的证据类别。运行时只接受明确声明的 `user_defect` 或 `plan_mismatch`，
+    /// 避免把自由散文中的「似乎不符」误升级成阻塞项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// `basis=plan_mismatch` 时必须填写，引用被违反的计划具体行/条目。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_ref: Option<String>,
     pub area: String,
     pub note: String,
 }
@@ -29,6 +36,8 @@ impl Finding {
         Self {
             reference: String::new(),
             severity,
+            basis: None,
+            plan_ref: None,
             area,
             note,
         }
@@ -36,6 +45,12 @@ impl Finding {
 
     pub fn with_reference(mut self, reference: impl Into<String>) -> Self {
         self.reference = reference.into();
+        self
+    }
+
+    fn with_evidence(mut self, basis: Option<String>, plan_ref: Option<String>) -> Self {
+        self.basis = basis;
+        self.plan_ref = plan_ref;
         self
     }
 
@@ -51,6 +66,17 @@ impl Finding {
 
     pub fn blocks(&self) -> bool {
         matches!(self.tier(), SeverityTier::P0 | SeverityTier::P1)
+    }
+
+    fn has_valid_p1_evidence(&self, plan_text: &str) -> bool {
+        match self.basis.as_deref().map(str::trim) {
+            Some("user_defect") => true,
+            Some("plan_mismatch") => self.plan_ref.as_deref().is_some_and(|reference| {
+                let reference = reference.trim();
+                !reference.is_empty() && plan_text.contains(reference)
+            }),
+            _ => false,
+        }
     }
 }
 
@@ -128,6 +154,20 @@ pub fn parse_review_block(text: &str) -> Option<ParsedReview> {
     })
 }
 
+/// 把 code-reviewer 无法自证的 P1 降为 P2。
+///
+/// plan reviewer 也复用 `<review>` 解析器，但它的 P1 判据不同，故这一步必须由
+/// code-review 入口显式调用，不能混入通用解析。
+pub(crate) fn downgrade_invalid_code_review_p1_findings(findings: &mut [Finding], plan_text: &str) {
+    for finding in findings {
+        if finding.tier() == SeverityTier::P1 && !finding.has_valid_p1_evidence(plan_text) {
+            // P1 必须带可机械核验的依据。特别是计划不符，只有明确指出被违反
+            // 的计划条目才可阻塞；未说明依据的自由散文一律降为 P2。
+            finding.severity = "P2".to_string();
+        }
+    }
+}
+
 /// 从 BUILTIN_TOOL_CATALOG 中筛出 `allowed` 名单内的工具，输出 OpenAI function 定义。
 pub fn resolve_internal_tools(allowed: &[&str]) -> Vec<Value> {
     use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
@@ -182,6 +222,8 @@ pub fn parse_finding_line(line: &str) -> Option<Finding> {
     }
     let body = &trimmed[1..trimmed.len() - 1];
     let mut severity = None;
+    let mut basis = None;
+    let mut plan_ref = None;
     let mut area = None;
     let mut note = None;
     for part in split_top_level_commas(body) {
@@ -193,16 +235,21 @@ pub fn parse_finding_line(line: &str) -> Option<Finding> {
             .to_string();
         match key {
             "severity" => severity = Some(val),
+            "basis" => basis = Some(val),
+            "plan_ref" => plan_ref = Some(val),
             "area" => area = Some(val),
             "note" => note = Some(val),
             _ => {}
         }
     }
-    Some(Finding::new(
-        severity.unwrap_or_else(|| "suggestion".into()),
-        area.unwrap_or_default(),
-        note?,
-    ))
+    Some(
+        Finding::new(
+            severity.unwrap_or_else(|| "suggestion".into()),
+            area.unwrap_or_default(),
+            note?,
+        )
+        .with_evidence(basis, plan_ref),
+    )
 }
 
 pub fn split_top_level_commas(s: &str) -> Vec<&str> {

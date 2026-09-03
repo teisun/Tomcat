@@ -62,6 +62,7 @@ fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) ->
             green_build_evidence: Vec::new(),
             code_review_pass: false,
             code_review_pass_at_ms: None,
+            code_review_residual_findings: Vec::new(),
             completion_gate_cycles: 0,
             unknown: serde_yaml::Mapping::new(),
         },
@@ -668,7 +669,7 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
 }
 
 #[tokio::test]
-async fn exhausted_budget_stops_completion_guard() {
+async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
     let _home = home_guard();
     let plan_id = unique_plan_id("guard_review_budget_exhausted");
     let plan_path = write_plan_file(
@@ -696,14 +697,26 @@ async fn exhausted_budget_stops_completion_guard() {
     let mut messages = vec![ChatMessage::user("start building")];
     assert_eq!(
         finalize(&mut agent, &mut messages).await,
-        TurnOutcome::Finished,
-        "review budget exhaustion is a handoff state, not another completion nudge"
+        TurnOutcome::Continue,
+        "预算耗尽前尚有 finding 时，必须引导模型修复并触发 acceptance"
+    );
+    let text = messages
+        .last()
+        .and_then(|message| message.text_content())
+        .unwrap_or("");
+    assert!(
+        text.contains("reopening an existing work todo"),
+        "text={text}"
+    );
+    assert!(
+        text.contains("green-build acceptance without dispatching another reviewer"),
+        "text={text}"
     );
     assert!(
         messages
             .iter()
-            .all(|message| message.kind != MessageKind::Nudge),
-        "an exhausted review budget must not append a completion nudge"
+            .any(|message| message.kind == MessageKind::Nudge),
+        "预算耗尽但尚未放行时，必须追加收口引导"
     );
 
     cleanup_plan_file(&plan_path);

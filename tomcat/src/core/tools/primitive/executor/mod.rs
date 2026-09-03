@@ -13,7 +13,7 @@
 //! │   ├─ list_dir(path, plugin_id)                                           │
 //! │   ├─ write_file(path, content, plugin_id, ...)                           │
 //! │   ├─ edit_file(path, operations, plugin_id, ...)                         │
-//! │   └─ execute_bash(cmd, args, plugin_id, ...)                             │
+//! │   └─ execute_bash(command, plugin_id, ...)                               │
 //! └─────────────────────────────────────────────────────────────────────────┘
 //!    │
 //!    │ ① 路径规范化（infra::platform::normalize_path）：~ 展开、symlink 还原、
@@ -373,10 +373,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         command: &str,
         cwd: Option<&str>,
         plugin_id: &str,
-        argv: Option<&[String]>,
         foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
-        bash::execute_bash_impl(self, command, cwd, plugin_id, argv, foreground_wait_ms).await
+        bash::execute_bash_impl(self, command, cwd, plugin_id, foreground_wait_ms).await
     }
 
     async fn require_user_confirmation(

@@ -208,11 +208,14 @@ pub struct PlanFileFrontmatter {
     pub green_build_pass: bool,
     #[serde(default)]
     pub green_build_evidence: Vec<GreenBuildEvidence>,
-    /// 最近一次针对当前代码 diff 的 P0/P1 review 是否通过。
+    /// 最近一次针对当前代码 diff 的 review gate 是否已放行（可能是预算耗尽后的放行）。
     #[serde(default)]
     pub code_review_pass: bool,
     #[serde(default)]
     pub code_review_pass_at_ms: Option<u128>,
+    /// 评审预算耗尽时带入 acceptance 的剩余 P0/P1 finding 摘要。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_review_residual_findings: Vec<String>,
     /// 已实际运行的「review → green build」门禁周期数。
     #[serde(default)]
     pub completion_gate_cycles: u32,

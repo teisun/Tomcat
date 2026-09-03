@@ -316,7 +316,7 @@ async fn serve_background_task_finish_routes_event_and_queues_follow_up_for_same
         .ctx
         .session_runtime
         .bash_task_registry
-        .spawn("printf done".to_string(), None, None)
+        .spawn("printf done".to_string(), None)
         .await
         .expect("spawn background task");
 

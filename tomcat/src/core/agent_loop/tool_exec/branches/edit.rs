@@ -3,12 +3,19 @@ use super::super::edit_sim::simulate_apply_edits;
 use super::super::guard::{check_mutation_stamp, refresh_read_stamp};
 use super::super::{ToolDisplay, ToolExecCtx, AGENT_PLUGIN_ID};
 use crate::core::tools::primitive::{
-    EditOperation, EDIT_INSERT_AFTER_MARKER, EDIT_INSERT_BEFORE_MARKER, EDIT_REPLACE_ALL_MARKER,
+    DiffTag, EditOperation, FileDiffLine, EDIT_INSERT_AFTER_MARKER, EDIT_INSERT_BEFORE_MARKER,
+    EDIT_REPLACE_ALL_MARKER,
 };
 use crate::infra::events::{ToolDisplayFileEntry, ToolDisplayFileStatus};
 
 /// 一次批量 edit 最多几个文件。上限存在的理由是可读性：一屏能看完的失败列表才有人会看。
 const MAX_BATCH_EDIT_FILES: usize = 10;
+/// 每次编辑后给模型的真实磁盘视图保持足够小，避免修复漂移本身制造上下文膨胀。
+const EDIT_FEEDBACK_MAX_BYTES: usize = 6 * 1024;
+const BATCH_EDIT_FEEDBACK_MAX_BYTES: usize = 8 * 1024;
+const EDIT_FEEDBACK_CONTEXT_LINES: usize = 3;
+const EDIT_FEEDBACK_MAX_LINES: usize = 36;
+const EDIT_FEEDBACK_MAX_LINE_BYTES: usize = 240;
 
 pub(in super::super) async fn handle_edit(
     ctx: &ToolExecCtx<'_>,
@@ -23,33 +30,298 @@ pub(in super::super) async fn handle_edit(
     precheck_file(ctx, path)?;
     reviewer_body_guard(ctx, path, &edits)?;
     let heading_notice = heading_replacement_notice(&edits);
+    let feedback_edits = edits.clone();
 
-    ctx.primitive
+    match ctx
+        .primitive
         .edit_file_with_cancel(path, edits, ctx.cancel, AGENT_PLUGIN_ID)
         .await
-        .map(|r| {
-            if r.applied {
-                if let Some(state) = ctx.read_file_state {
-                    refresh_read_stamp(state, path, ctx.tool_call_id);
-                }
-                *display_out = Some(ToolDisplay::File {
-                    file: r.path.clone(),
-                    added: r.added,
-                    removed: r.removed,
-                    diff: r.diff.clone(),
-                });
-                let mut message = format!("已编辑: {}", r.path);
-                if let Some(notice) = heading_notice {
-                    message.push_str(&format!("\n提示：{notice}"));
-                }
-                message
-            } else {
-                let msg = format!("编辑被拒绝: {}", r.path);
-                *display_out = Some(ToolDisplay::Text { text: msg.clone() });
-                msg
+    {
+        Ok(result) if result.applied => {
+            if let Some(state) = ctx.read_file_state {
+                refresh_read_stamp(state, path, ctx.tool_call_id);
             }
-        })
-        .map_err(|e| e.to_string())
+            let feedback = render_post_edit_feedback(
+                ctx,
+                &result.path,
+                result.diff.as_deref(),
+                &feedback_edits,
+                EDIT_FEEDBACK_MAX_BYTES,
+            )
+            .await;
+            *display_out = Some(ToolDisplay::File {
+                file: result.path.clone(),
+                added: result.added,
+                removed: result.removed,
+                diff: result.diff,
+            });
+            let mut message = format!("已编辑: {}", result.path);
+            if let Some(notice) = heading_notice {
+                message.push_str(&format!("\n提示：{notice}"));
+            }
+            if let Some(feedback) = feedback {
+                message.push_str(&feedback);
+            }
+            Ok(message)
+        }
+        Ok(result) => {
+            let msg = format!("编辑被拒绝: {}", result.path);
+            *display_out = Some(ToolDisplay::Text { text: msg.clone() });
+            Ok(msg)
+        }
+        Err(error) => {
+            Err(enrich_notfound_error(ctx, path, &feedback_edits, error.to_string()).await)
+        }
+    }
+}
+
+/// 只把刚变动的局部真相回喂给模型。视图从编辑成功后再次经原语读取得到，而不是从
+/// 模型输入或 UI diff 猜出：这样行号和文本都对应当前磁盘。读权限若不允许，不影响
+/// 已经成功的编辑，只省略这段辅助信息。
+async fn render_post_edit_feedback(
+    ctx: &ToolExecCtx<'_>,
+    path: &str,
+    diff: Option<&[FileDiffLine]>,
+    edits: &[EditOperation],
+    max_bytes: usize,
+) -> Option<String> {
+    let current = ctx.primitive.read_file(path, AGENT_PLUGIN_ID).await.ok()?;
+    let total_lines = current.lines().count().max(1);
+    let ranges = changed_line_ranges(diff, total_lines)
+        .filter(|ranges| !ranges.is_empty())
+        .unwrap_or_else(|| fallback_changed_line_ranges(&current, edits));
+    (!ranges.is_empty()).then(|| {
+        render_current_line_ranges(
+            &current,
+            &ranges,
+            "编辑后视图（当前磁盘；用这里的原文做下一次 old_content）",
+            max_bytes,
+        )
+    })
+}
+
+/// 成功编辑后的结果已有 pre/post diff；它是定位“本次改动”的最可靠且零猜测来源。
+/// 删除行本身没有 `new_line`，就取相邻仍存在的行作为窗口中心。
+fn changed_line_ranges(
+    diff: Option<&[FileDiffLine]>,
+    total_lines: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let diff = diff?;
+    let mut ranges = Vec::new();
+    for (index, line) in diff.iter().enumerate() {
+        if line.tag == DiffTag::Ctx {
+            continue;
+        }
+        let line_no = line
+            .new_line
+            .map(|line| line as usize)
+            .or_else(|| {
+                diff[index + 1..]
+                    .iter()
+                    .find_map(|line| line.new_line.map(|line| line as usize))
+            })
+            .or_else(|| {
+                diff[..index]
+                    .iter()
+                    .rev()
+                    .find_map(|line| line.new_line.map(|line| line as usize))
+            })
+            .unwrap_or(total_lines);
+        ranges.push(expand_line_range(line_no, line_no, total_lines));
+    }
+    Some(merge_line_ranges(ranges))
+}
+
+/// 超大文件的 diff 为避免内存放大可能缺席；此时仅以刚写入的新文本作保守定位。
+/// 不能唯一定位（例如纯删除）时宁可不伪造行号，让模型显式 read。
+fn fallback_changed_line_ranges(current: &str, edits: &[EditOperation]) -> Vec<(usize, usize)> {
+    let current_lf = current.replace("\r\n", "\n");
+    let total_lines = current_lf.lines().count().max(1);
+    let mut ranges = Vec::new();
+    for edit in edits {
+        let inserted = edit.new_content.replace("\r\n", "\n");
+        if inserted.is_empty() {
+            continue;
+        }
+        let mut hits = current_lf.match_indices(&inserted);
+        let Some((byte_offset, _)) = hits.next() else {
+            continue;
+        };
+        if hits.next().is_some() {
+            continue;
+        }
+        let start = current_lf.as_bytes()[..byte_offset]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count()
+            + 1;
+        let end = start + inserted.lines().count().saturating_sub(1);
+        ranges.push(expand_line_range(start, end, total_lines));
+    }
+    merge_line_ranges(ranges)
+}
+
+fn expand_line_range(start: usize, end: usize, total_lines: usize) -> (usize, usize) {
+    (
+        start.saturating_sub(EDIT_FEEDBACK_CONTEXT_LINES).max(1),
+        end.saturating_add(EDIT_FEEDBACK_CONTEXT_LINES)
+            .min(total_lines),
+    )
+}
+
+fn merge_line_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some((_, previous_end)) if start <= previous_end.saturating_add(1) => {
+                *previous_end = (*previous_end).max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+fn render_current_line_ranges(
+    current: &str,
+    ranges: &[(usize, usize)],
+    title: &str,
+    max_bytes: usize,
+) -> String {
+    let lines: Vec<&str> = current.lines().collect();
+    let total_lines = lines.len().max(1);
+    let mut rendered = format!("\n{title}:\n");
+    let mut rendered_lines = 0usize;
+    let mut truncated = false;
+
+    for (range_index, (start, end)) in ranges.iter().enumerate() {
+        if range_index > 0 && !push_feedback_fragment(&mut rendered, "       …\n", max_bytes) {
+            truncated = true;
+            break;
+        }
+        for line_no in *start..=*end {
+            if rendered_lines >= EDIT_FEEDBACK_MAX_LINES {
+                truncated = true;
+                break;
+            }
+            let line = lines.get(line_no.saturating_sub(1)).copied().unwrap_or("");
+            let text = truncate_feedback_line(line);
+            let fragment = format!("{line_no:>6}\t{text}\n");
+            if !push_feedback_fragment(&mut rendered, &fragment, max_bytes) {
+                truncated = true;
+                break;
+            }
+            rendered_lines += 1;
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    if rendered_lines == 0 && total_lines == 1 && current.is_empty() {
+        let _ = push_feedback_fragment(&mut rendered, "     1\t<文件现为空>\n", max_bytes);
+    }
+    if truncated {
+        let _ = push_feedback_fragment(
+            &mut rendered,
+            "       …（编辑后视图已截断；如需更多上下文请 read）\n",
+            max_bytes,
+        );
+    }
+    rendered
+}
+
+fn push_feedback_fragment(output: &mut String, fragment: &str, max_bytes: usize) -> bool {
+    if output.len().saturating_add(fragment.len()) > max_bytes {
+        return false;
+    }
+    output.push_str(fragment);
+    true
+}
+
+fn truncate_feedback_line(line: &str) -> String {
+    if line.len() <= EDIT_FEEDBACK_MAX_LINE_BYTES {
+        return line.to_string();
+    }
+    let mut end = EDIT_FEEDBACK_MAX_LINE_BYTES.saturating_sub('…'.len_utf8());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &line[..end])
+}
+
+async fn enrich_notfound_error(
+    ctx: &ToolExecCtx<'_>,
+    path: &str,
+    edits: &[EditOperation],
+    error: String,
+) -> String {
+    if !error.contains("NotFound:") && !error.contains("NotFound (") {
+        return error;
+    }
+    let Some(edit) = notfound_edit_index(&error)
+        .and_then(|index| edits.get(index))
+        .or_else(|| edits.first())
+    else {
+        return error;
+    };
+    let Ok(current) = ctx.primitive.read_file(path, AGENT_PLUGIN_ID).await else {
+        return format!("{error}\n无法读取当前文件来定位目标；请先重新 `read` 再编辑。");
+    };
+    let Some(line_no) = nearest_current_line(&current, edit) else {
+        return format!(
+            "{error}\n未能从 old_content 可靠定位当前区域；请先重新 `read` 获取文件真相后再编辑。"
+        );
+    };
+    let total_lines = current.lines().count().max(1);
+    let view = render_current_line_ranges(
+        &current,
+        &[expand_line_range(line_no, line_no, total_lines)],
+        "old_content 的就近当前视图（当前磁盘；请据此一轮改正）",
+        EDIT_FEEDBACK_MAX_BYTES,
+    );
+    format!("{error}\n{view}")
+}
+
+fn notfound_edit_index(error: &str) -> Option<usize> {
+    let start = error.find("edits[")? + "edits[".len();
+    let end = start + error[start..].find(']')?;
+    error[start..end].parse().ok()
+}
+
+/// 从失败的 old_content 中选最长且在当前文件唯一的一行。它只是为回喂真相定位，
+/// 不参与写入和匹配判定，因此“找不到就要求 read”比猜一个位置更安全。
+fn nearest_current_line(current: &str, edit: &EditOperation) -> Option<usize> {
+    let old = edit.old_content.as_deref()?;
+    let old = old
+        .strip_prefix(EDIT_REPLACE_ALL_MARKER)
+        .unwrap_or(old)
+        .strip_prefix(EDIT_INSERT_BEFORE_MARKER)
+        .or_else(|| old.strip_prefix(EDIT_INSERT_AFTER_MARKER))
+        .unwrap_or(old);
+    let mut candidates: Vec<String> = old
+        .lines()
+        .map(crate::core::tools::pipeline::edit_normalize::normalize_for_match)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    candidates.sort_unstable_by_key(|line| std::cmp::Reverse(line.len()));
+
+    for candidate in candidates {
+        let hits: Vec<usize> = current
+            .lines()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                crate::core::tools::pipeline::edit_normalize::normalize_for_match(line)
+                    .contains(&candidate)
+                    .then_some(index + 1)
+            })
+            .collect();
+        if hits.len() == 1 {
+            return hits.first().copied();
+        }
+    }
+    None
 }
 
 struct BatchFile {
@@ -198,12 +470,14 @@ async fn edit_batch(
     // 阶段 2：只落盘预检通过的文件。primitive 内部对单个文件是先算后写的，
     // 所以某个文件即便在这里失败，它自己也不会留下半截内容。
     let mut entries: Vec<ToolDisplayFileEntry> = Vec::with_capacity(files.len());
+    let mut feedback = String::new();
     for (idx, file) in files.into_iter().enumerate() {
         if let Some(err) = precheck_errors.remove(&idx) {
             entries.push(failed_entry(file.path, err));
             continue;
         }
         let heading_notice = heading_replacement_notice(&file.edits);
+        let feedback_edits = file.edits.clone();
         match ctx
             .primitive
             .edit_file_with_cancel(&file.path, file.edits, ctx.cancel, AGENT_PLUGIN_ID)
@@ -212,6 +486,21 @@ async fn edit_batch(
             Ok(result) if result.applied => {
                 if let Some(state) = ctx.read_file_state {
                     refresh_read_stamp(state, &file.path, ctx.tool_call_id);
+                }
+                let remaining_feedback =
+                    BATCH_EDIT_FEEDBACK_MAX_BYTES.saturating_sub(feedback.len());
+                if remaining_feedback > 0 {
+                    if let Some(view) = render_post_edit_feedback(
+                        ctx,
+                        &result.path,
+                        result.diff.as_deref(),
+                        &feedback_edits,
+                        remaining_feedback,
+                    )
+                    .await
+                    {
+                        feedback.push_str(&view);
+                    }
                 }
                 entries.push(ToolDisplayFileEntry {
                     file: result.path,
@@ -224,7 +513,10 @@ async fn edit_batch(
                 });
             }
             Ok(result) => entries.push(failed_entry(result.path, "编辑被拒绝".to_string())),
-            Err(err) => entries.push(failed_entry(file.path, err.to_string())),
+            Err(err) => entries.push(failed_entry(
+                file.path.clone(),
+                enrich_notfound_error(ctx, &file.path, &feedback_edits, err.to_string()).await,
+            )),
         }
     }
 
@@ -264,6 +556,9 @@ async fn edit_batch(
                 entry.note.as_deref().unwrap_or("未知错误")
             ));
         }
+    }
+    if !feedback.is_empty() {
+        text.push_str(&feedback);
     }
 
     *display_out = Some(display_for_entries(summary, entries));

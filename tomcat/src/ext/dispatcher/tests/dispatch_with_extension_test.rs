@@ -3,7 +3,7 @@
 //! 覆盖：
 //!
 //! - `with_primitive`：read/write/edit/executeBash 都通过 `MockPrimitive`，
-//!   并验证 `executeBash` 的 argv 形参可以原样下发到自定义实现。
+//!   并验证 `executeBash` 将完整 shell 命令原样下发到自定义实现。
 //! - `with_llm`：chat / chat_stream / chat_parses_max_tokens_and_temperature。
 //! - `with_tools`：register_tool / list_tools / call_tool / unregister_tool /
 //!   get_active_tools / set_active_tools / register_command 系列；以及
@@ -465,13 +465,13 @@ async fn dispatch_execute_bash_with_registry_supports_task_output_and_task_stop(
 }
 
 #[tokio::test]
-async fn dispatch_execute_bash_with_argv_calls_primitive() {
+async fn dispatch_execute_bash_passes_single_command_to_primitive() {
     let ran = Arc::new(AtomicBool::new(false));
     let ran2 = Arc::clone(&ran);
     #[derive(Clone)]
-    struct ArgvPrimitive(Arc<AtomicBool>);
+    struct SingleCommandPrimitive(Arc<AtomicBool>);
     #[async_trait::async_trait]
-    impl PrimitiveExecutor for ArgvPrimitive {
+    impl PrimitiveExecutor for SingleCommandPrimitive {
         async fn read_file(&self, _p: &str, _id: &str) -> Result<String, AppError> {
             Ok(String::new())
         }
@@ -514,15 +514,10 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
             cmd: &str,
             _cwd: Option<&str>,
             _id: &str,
-            argv: Option<&[String]>,
             _foreground_wait_ms: Option<u64>,
         ) -> Result<BashResult, AppError> {
-            if cmd == "echo" {
-                if let Some(a) = argv {
-                    if a.len() == 2 && a[0] == "a" && a[1] == "b" {
-                        self.0.store(true, Ordering::SeqCst);
-                    }
-                }
+            if cmd == "echo a b" {
+                self.0.store(true, Ordering::SeqCst);
             }
             Ok(BashResult {
                 stdout: String::new(),
@@ -541,22 +536,21 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
         }
     }
     let bus = Arc::new(DefaultEventBus::new());
-    let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(ArgvPrimitive(ran2)));
+    let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(SingleCommandPrimitive(ran2)));
     let req = HostRequest {
         module: "fs".to_string(),
         method: "executeBash".to_string(),
         params: serde_json::json!({
-            "command": "echo",
-            "args": ["a", "b"],
+            "command": "echo a b",
             "pluginId": "p1"
         }),
         call_id: None,
     };
-    let res = d.dispatch_async("inst-argv", req).await.unwrap();
+    let res = d.dispatch_async("inst-single-command", req).await.unwrap();
     assert!(res.ok);
     assert!(
         ran.load(Ordering::SeqCst),
-        "execute_bash 应收到 argv 模式参数"
+        "execute_bash 应收到完整单字符串命令"
     );
 }
 

@@ -294,7 +294,7 @@ async fn code_review_pass_completes_without_verifier() {
 }
 
 #[tokio::test]
-async fn only_p0_p1_block_completion_even_when_reviewer_says_pass() {
+async fn p0_blocks_its_review_round_but_not_unconditional_budget_exhaustion() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -352,6 +352,124 @@ async fn only_p0_p1_block_completion_even_when_reviewer_says_pass() {
         .any(|warning| warning
             .as_str()
             .is_some_and(|text| text.contains("verdict=pass"))));
+
+    update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let exhausted = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(exhausted["code_review_pass"], true);
+    assert_eq!(exhausted["next_step"]["phase"], "run_acceptance");
+    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert_eq!(
+        persisted.frontmatter.code_review_residual_findings,
+        vec!["F01 [P0] authorization: missing ownership check"]
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn exhausted_review_budget_still_rejects_fabricated_green_build_evidence() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let workspace = git_workspace_with_code("tomcat_fail_open_invalid_evidence");
+    let registry = std::sync::Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
+        workspace.path().join(".task-logs"),
+    ));
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+    rt.attach_bash_task_registry(registry);
+    rt.attach_code_reviewer(std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
+        CodeReviewSummary {
+            aborted: false,
+            verdict: Some("fail".into()),
+            summary: "review found a defect".into(),
+            findings: vec![Finding::new(
+                "P1".into(),
+                "logic".into(),
+                "missing regression coverage".into(),
+            )],
+            ..Default::default()
+        },
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    let first = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
+        .await
+        .expect("first review should return its finding");
+    assert_eq!(first["code_review_pass"], false);
+
+    update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .expect("reopen work todo");
+
+    let exhausted = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
+        .await
+        .expect("exhausted review budget should fail open into acceptance");
+    assert_eq!(exhausted["code_review_pass"], true);
+    assert_eq!(exhausted["next_step"]["phase"], "run_acceptance");
+
+    let error = update_plan::execute(
+        &rt,
+        submit_green_evidence_args(&plan_id, "true", "fabricated-task-id"),
+    )
+    .await
+    .expect_err("fail-open must not accept a fabricated green-build task");
+    assert!(
+        error
+            .to_string()
+            .contains("找不到后台 bash 任务 `fabricated-task-id`"),
+        "unexpected error: {error}"
+    );
+
     cleanup_home(&home);
 }
 
@@ -645,7 +763,7 @@ async fn green_build_gate_blocks_completion_until_pass() {
     assert!(!persisted.frontmatter.green_build_pass);
 
     let ticket = registry
-        .spawn("true".into(), None, Some(workspace.clone()))
+        .spawn("true".into(), Some(workspace.clone()))
         .await
         .unwrap();
     registry
@@ -918,7 +1036,7 @@ async fn aborted_code_review_refunds_round_and_stops_after_bounded_retries() {
 }
 
 #[tokio::test]
-async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back() {
+async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_p1_residual() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -1046,10 +1164,25 @@ async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back()
     .unwrap();
     assert!(second["code_review"].is_null());
     assert!(second.get("verify").is_none());
-    // D1-b 后门 2：轮数用尽不是收口的理由。
     assert_eq!(second["plan_state_after"], "executing");
+    assert_eq!(second["code_review_pass"], true);
+    assert_eq!(second["next_step"]["phase"], "run_acceptance");
+    assert!(second["next_step"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("configured round budget")));
+    assert!(second["next_step"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("F01 [P1] logic: missing guard")));
+    assert!(second["items"].as_array().is_some_and(|items| items
+        .iter()
+        .any(|item| item["id"] == GATE_CODE_REVIEW_TODO_ID && item["status"] == "completed")));
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert_eq!(persisted.frontmatter.state, PlanFileState::Executing);
+    assert!(persisted.frontmatter.code_review_pass);
+    assert_eq!(
+        persisted.frontmatter.code_review_residual_findings,
+        vec!["F01 [P1] logic: missing guard"]
+    );
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
     assert_eq!(
         reviewer
@@ -1066,7 +1199,7 @@ async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back()
     let second_warnings = second["warnings"].as_array().expect("warnings array");
     assert!(second_warnings.iter().any(|warning| warning
         .as_str()
-        .is_some_and(|text| text.contains("轮次预算已用尽"))));
+        .is_some_and(|text| text.contains("无条件通过 review gate"))));
 
     let events = captured.lock();
     let exhausted = events
@@ -1075,15 +1208,102 @@ async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_hands_back()
         .expect("缺少 plan.code_review.exhausted");
     assert_eq!(exhausted["rounds"], 1);
     assert_eq!(
-        exhausted["unresolved_findings"]
+        exhausted["outcome"],
+        "passed_to_acceptance_with_residual_findings"
+    );
+    assert_eq!(exhausted["code_review_pass"], true);
+    assert_eq!(
+        exhausted["residual_findings"]
             .as_array()
-            .expect("unresolved_findings array")
+            .expect("residual_findings array")
             .len(),
         1
     );
     assert!(
         !events.iter().any(|v| v["event"] == "plan.complete"),
         "轮数用尽不得写 plan.complete"
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_p0_residual() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_code_reviewer(std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
+        CodeReviewSummary {
+            aborted: false,
+            verdict: Some("fail".into()),
+            summary: "code review found a critical defect".into(),
+            findings: vec![Finding::new(
+                "P0".into(),
+                "security".into(),
+                "authorization can be bypassed".into(),
+            )],
+            ..Default::default()
+        },
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    let first = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
+        .await
+        .unwrap();
+    assert_eq!(first["code_review"]["findings"][0]["severity"], "P0");
+    assert_eq!(first["code_review_pass"], false);
+    assert_eq!(first["plan_state_after"], "executing");
+
+    update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    let exhausted = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(exhausted["code_review"].is_null());
+    assert_eq!(exhausted["code_review_pass"], true);
+    assert_eq!(exhausted["plan_state_after"], "executing");
+    assert_eq!(exhausted["next_step"]["phase"], "run_acceptance");
+    assert!(exhausted["next_step"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("F01 [P0] security: authorization can be bypassed")));
+    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert_eq!(
+        persisted.frontmatter.code_review_residual_findings,
+        vec!["F01 [P0] security: authorization can be bypassed"]
     );
     cleanup_home(&home);
 }
@@ -1386,7 +1606,7 @@ async fn green_build_evidence_rejects_nonzero_and_running_background_tasks() {
     rt.set_max_code_review_rounds(1);
 
     let failed = registry
-        .spawn("false".into(), None, Some(workspace.path().to_path_buf()))
+        .spawn("false".into(), Some(workspace.path().to_path_buf()))
         .await
         .unwrap();
     registry.wait_for_finish(&failed.task_id).await.unwrap();
@@ -1406,7 +1626,7 @@ async fn green_build_evidence_rejects_nonzero_and_running_background_tasks() {
     assert!(nonzero_error.to_string().contains("exit_code="));
 
     let running = registry
-        .spawn("sleep 1".into(), None, Some(workspace.path().to_path_buf()))
+        .spawn("sleep 1".into(), Some(workspace.path().to_path_buf()))
         .await
         .unwrap();
     let running_error = update_plan::execute(
@@ -1446,7 +1666,7 @@ async fn green_build_evidence_rejects_task_started_before_latest_code_edit() {
     rt.set_max_code_review_rounds(1);
 
     let old_task = registry
-        .spawn("true".into(), None, Some(workspace.path().to_path_buf()))
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
         .await
         .unwrap();
     registry.wait_for_finish(&old_task.task_id).await.unwrap();
@@ -1511,7 +1731,7 @@ async fn shot_command_satisfies_green_build_gate() {
         output_dir.display()
     );
     let task = registry
-        .spawn(command.clone(), None, Some(workspace.path().to_path_buf()))
+        .spawn(command.clone(), Some(workspace.path().to_path_buf()))
         .await
         .unwrap();
     registry.wait_for_finish(&task.task_id).await.unwrap();
@@ -1563,7 +1783,7 @@ async fn persisted_fresh_review_skips_rerun_after_runtime_recreation() {
     assert!(!after_review.frontmatter.green_build_pass);
 
     let ticket = registry
-        .spawn("true".into(), None, Some(workspace.path().to_path_buf()))
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
         .await
         .unwrap();
     registry.wait_for_finish(&ticket.task_id).await.unwrap();
@@ -1631,7 +1851,7 @@ async fn code_edit_invalidates_full_gate_and_requires_review_and_fresh_evidence(
     rt.refresh_active_plan_after_write(path, &plan);
 
     let fresh_task = registry
-        .spawn("true".into(), None, Some(workspace.path().to_path_buf()))
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
         .await
         .unwrap();
     registry.wait_for_finish(&fresh_task.task_id).await.unwrap();
@@ -1818,7 +2038,7 @@ async fn green_build_evidence_rejects_command_mismatch_for_completed_registered_
     rt.set_max_code_review_rounds(1);
 
     let task = registry
-        .spawn("true".into(), None, Some(workspace.path().to_path_buf()))
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
         .await
         .expect("spawn a registered verification task");
     registry
@@ -1875,7 +2095,7 @@ async fn green_build_evidence_rejects_empty_duplicate_unknown_and_blank_inputs()
     rt.set_max_code_review_rounds(1);
 
     let task = registry
-        .spawn("true".into(), None, Some(workspace.path().to_path_buf()))
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
         .await
         .expect("spawn a registered verification task");
     registry
@@ -2083,7 +2303,7 @@ async fn missing_reviewer_skips_review_but_still_requires_real_green_build_evide
     );
 
     let task = registry
-        .spawn("true".into(), None, Some(workspace.path().to_path_buf()))
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
         .await
         .expect("spawn a registered verification task");
     registry

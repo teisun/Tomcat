@@ -324,6 +324,7 @@ pub async fn execute_for_tool(
                     );
                 } else {
                     runtime.set_unresolved_findings(&target_plan_id, Vec::new());
+                    plan.frontmatter.code_review_residual_findings.clear();
                     record_code_review_pass(&mut plan.frontmatter, false);
                     runtime_set_gate_status(
                         &mut plan.frontmatter.todos,
@@ -345,6 +346,7 @@ pub async fn execute_for_tool(
                 },
                 runtime.max_code_review_rounds(),
             ));
+            plan.frontmatter.code_review_residual_findings.clear();
             record_code_review_pass(&mut plan.frontmatter, false);
             runtime_set_gate_status(
                 &mut plan.frontmatter.todos,
@@ -355,20 +357,25 @@ pub async fn execute_for_tool(
             write_plan(&path, &plan, runtime.lock_timeout_ms())?;
             runtime.refresh_active_plan_after_write(path.clone(), &plan);
         } else {
+            let residual_findings =
+                format_residual_findings(&runtime.unresolved_findings(&target_plan_id));
             warnings.push(format!(
-                "code review 轮次预算已用尽（{}/{}）；gate 已重新打开并交还用户决定",
+                "code review 轮次预算已用尽（{}/{}）；无条件通过 review gate 并进入 acceptance，带 {} 条残余 finding",
                 runtime.code_review_rounds(&target_plan_id),
-                runtime.max_code_review_rounds()
+                runtime.max_code_review_rounds(),
+                residual_findings.len(),
             ));
+            plan.frontmatter.code_review_residual_findings = residual_findings.clone();
+            record_code_review_pass(&mut plan.frontmatter, false);
             runtime_set_gate_status(
                 &mut plan.frontmatter.todos,
                 TodoKind::GateCodeReview,
-                TodoStatus::Pending,
+                TodoStatus::Completed,
             );
-            write_code_review_handoff(
-                runtime,
+            runtime.write_code_review_exhausted_transcript(
                 &target_plan_id,
                 runtime.code_review_rounds(&target_plan_id),
+                &residual_findings,
             );
             rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
             write_plan(&path, &plan, runtime.lock_timeout_ms())?;
@@ -699,9 +706,33 @@ fn acceptance_evidence_requirements() -> &'static str {
     "The gate validates only real background-task evidence: exit 0 and a task started after the newest edit."
 }
 
-fn run_acceptance_hint() -> String {
+fn format_residual_findings(findings: &[Finding]) -> Vec<String> {
+    findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "{} [{}] {}: {}",
+                finding.reference, finding.severity, finding.area, finding.note
+            )
+        })
+        .collect()
+}
+
+fn run_acceptance_hint(residual_findings: &[String]) -> String {
+    let review_context = if residual_findings.is_empty() {
+        "Code review passed.".to_string()
+    } else {
+        format!(
+            "Code review reached its configured round budget after addressing findings during those rounds. Residual findings still requiring explicit acceptance handling:\n{}",
+            residual_findings
+                .iter()
+                .map(|finding| format!("- {finding}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
     format!(
-        "Code review passed. Set the `[gate] Acceptance` todo to in_progress, then load_skill(verify) to discover and run the project's acceptance commands (scope proportional to the change), and submit green_build_pass with evidence. {}",
+        "{review_context}\nVerify ALL changes with the project's acceptance commands: set the `[gate] Acceptance` todo to in_progress, then load_skill(verify) to discover and run the commands (scope proportional to the change), and submit green_build_pass with evidence. {}",
         acceptance_evidence_requirements()
     )
 }
@@ -720,7 +751,7 @@ fn compute_next_step(
     if frontmatter.code_review_pass && !frontmatter.green_build_pass {
         return NextStep {
             phase: "run_acceptance",
-            hint: run_acceptance_hint(),
+            hint: run_acceptance_hint(&frontmatter.code_review_residual_findings),
         };
     }
     // A review that just failed keeps the review gate pending, but it is not an
@@ -796,6 +827,7 @@ fn invalidate_code_gates(
 ) {
     frontmatter.code_review_pass = false;
     frontmatter.code_review_pass_at_ms = None;
+    frontmatter.code_review_residual_findings.clear();
     frontmatter.green_build_pass = false;
     frontmatter.green_build_evidence.clear();
     runtime_set_gate_status(
@@ -821,10 +853,10 @@ fn record_code_review_pass(
     }
 }
 
-fn green_build_guidance() -> ToolError {
+fn green_build_guidance(residual_findings: &[String]) -> ToolError {
     ToolError::BadArgs(format!(
         "代码 diff 已通过（或跳过）code review，但绿构建验收尚未通过。{}",
-        run_acceptance_hint()
+        run_acceptance_hint(residual_findings)
     ))
 }
 
@@ -852,7 +884,9 @@ fn require_green_build_pass(
             write_plan(path, plan, runtime.lock_timeout_ms())?;
             runtime.refresh_active_plan_after_write(path.to_path_buf(), plan);
         }
-        return Err(green_build_guidance());
+        return Err(green_build_guidance(
+            &plan.frontmatter.code_review_residual_findings,
+        ));
     }
     if args.green_build_evidence.is_empty() {
         return Err(ToolError::BadArgs(
@@ -1014,11 +1048,15 @@ fn blocking_findings(
 }
 
 fn write_code_review_handoff(runtime: &PlanRuntime, plan_id: &str, rounds: u32) {
-    runtime.write_code_review_exhausted_transcript(
-        plan_id,
-        rounds,
-        &runtime.unresolved_finding_references(plan_id),
-    );
+    runtime.write_transcript_custom(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_EXHAUSTED,
+        "plan_id": plan_id,
+        "rounds": rounds,
+        "max_code_review_rounds": runtime.max_code_review_rounds(),
+        "outcome": "handoff_after_review_infrastructure_failure",
+        "code_review_pass": false,
+        "unresolved_findings": runtime.unresolved_finding_references(plan_id),
+    }));
 }
 
 fn resolve_target_plan_path(
@@ -1141,8 +1179,20 @@ mod tests {
 
     #[test]
     fn green_build_bad_args_reuses_the_run_acceptance_hint() {
-        assert!(green_build_guidance()
+        assert!(green_build_guidance(&[])
             .to_string()
-            .contains(&run_acceptance_hint()));
+            .contains(&run_acceptance_hint(&[])));
+    }
+
+    #[test]
+    fn acceptance_hint_carries_residual_findings_without_claiming_a_fixed_findings_ledger() {
+        let residuals = vec!["F01 [P1] oauth: retry path is untested".to_string()];
+        let hint = run_acceptance_hint(&residuals);
+
+        assert!(hint.contains("configured round budget"));
+        assert!(hint.contains("addressing findings during those rounds"));
+        assert!(hint.contains("Verify ALL changes"));
+        assert!(hint.contains(&residuals[0]));
+        assert!(!hint.contains("Fixed findings:"));
     }
 }

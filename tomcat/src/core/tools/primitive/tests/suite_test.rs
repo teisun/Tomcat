@@ -454,7 +454,7 @@ async fn execute_bash_success() {
         make_gate(&dir),
     );
     let res = exec
-        .execute_bash("echo ok", Some(&path_str), "p1", None, None)
+        .execute_bash("echo ok", Some(&path_str), "p1", None)
         .await
         .unwrap();
     assert_eq!(res.exit_code, 0);
@@ -465,6 +465,33 @@ async fn execute_bash_success() {
         res.stderr
     );
     let _ = std::fs::remove_dir(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn execute_bash_single_command_runs_node_script_and_shell_composition() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("echo-argument.mjs");
+    std::fs::write(&script, "console.log(process.argv[2]);").expect("write Node script");
+    let path_str = dir.path().to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(dir.path()),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(dir.path()),
+    );
+
+    let command = format!(
+        "node '{}' node-shell-ok && printf '|pipeline' | tr '|' ':'",
+        script.display()
+    );
+    let result = exec
+        .execute_bash(&command, Some(&path_str), "p1", None)
+        .await
+        .expect("the shell command should start");
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "node-shell-ok\n:pipeline");
 }
 
 #[tokio::test]
@@ -484,7 +511,7 @@ async fn execute_bash_marks_child_as_nested_agent() {
     let command = r#"echo %TOMCAT_AGENT_ACTIVE%"#;
 
     let res = exec
-        .execute_bash(command, Some(&path_str), "p1", None, None)
+        .execute_bash(command, Some(&path_str), "p1", None)
         .await
         .expect("bash command should succeed");
 
@@ -506,7 +533,7 @@ async fn execute_bash_empty_string_cwd_treated_as_none() {
     );
 
     let res = exec
-        .execute_bash("pwd", Some(""), "p1", None, None)
+        .execute_bash("pwd", Some(""), "p1", None)
         .await
         .expect("空 cwd 应视同未传");
 
@@ -523,12 +550,7 @@ async fn bash_registry_empty_string_cwd_treated_as_none() {
     let registry = BashTaskRegistry::new(dir.join("tool-results"));
 
     let ticket = registry
-        .spawn_tracked(
-            "pwd".to_string(),
-            None::<Vec<String>>,
-            Some(PathBuf::from("")),
-            false,
-        )
+        .spawn_tracked("pwd".to_string(), Some(PathBuf::from("")), false)
         .await
         .expect("空 cwd 应视同未传");
     registry
@@ -555,7 +577,6 @@ async fn bash_registry_tilde_cwd_executes_without_guard() {
     let ticket = registry
         .spawn_tracked(
             "pwd".to_string(),
-            None::<Vec<String>>,
             Some(PathBuf::from("~/tilde-registry")),
             false,
         )
@@ -585,7 +606,6 @@ async fn bash_registry_unchecked_still_normalizes_tilde_cwd() {
     let ticket = registry
         .spawn_tracked_unchecked(
             "pwd".to_string(),
-            None::<Vec<String>>,
             ResolvedCwd::from_raw(Some("~/tilde-unchecked")).expect("resolved cwd"),
             false,
         )
@@ -616,7 +636,7 @@ async fn execute_bash_nonexistent_absolute_cwd_returns_clear_error() {
     );
 
     let err = exec
-        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .execute_bash("echo nope", Some(&path_str), "p1", None)
         .await
         .expect_err("不存在 cwd 应前置报错");
     let msg = err.to_string();
@@ -643,7 +663,7 @@ async fn execute_bash_non_directory_cwd_returns_clear_error() {
     );
 
     let err = exec
-        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .execute_bash("echo nope", Some(&path_str), "p1", None)
         .await
         .expect_err("文件路径不应被接受为 cwd");
     let msg = err.to_string();
@@ -665,7 +685,7 @@ async fn execute_bash_dollar_var_like_cwd_returns_hint_when_path_missing() {
 
     let raw_cwd = "$HOME/this-does-not-exist";
     let err = exec
-        .execute_bash("echo nope", Some(raw_cwd), "p1", None, None)
+        .execute_bash("echo nope", Some(raw_cwd), "p1", None)
         .await
         .expect_err("字面 $HOME 且目录缺失时应返回提示");
     let msg = err.to_string();
@@ -690,7 +710,7 @@ async fn execute_bash_dollar_var_like_cwd_executes_when_real_dir() {
     );
 
     let res = exec
-        .execute_bash("pwd", Some("$HOME"), "p1", None, None)
+        .execute_bash("pwd", Some("$HOME"), "p1", None)
         .await
         .expect("客观存在的 $HOME 字面目录不应被误伤");
 
@@ -714,7 +734,7 @@ async fn execute_bash_pre_validation_failure_writes_audit() {
     );
 
     let err = exec
-        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .execute_bash("echo nope", Some(&path_str), "p1", None)
         .await
         .expect_err("不存在 cwd 应写失败审计");
     assert!(err.to_string().contains("bash.cwd does not exist:"));
@@ -737,7 +757,7 @@ async fn execute_bash_pre_validation_failure_writes_audit() {
 }
 
 #[tokio::test]
-async fn execute_bash_spawn_error_includes_cwd_and_input() {
+async fn execute_bash_missing_command_is_a_shell_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dir = dir.path().canonicalize().unwrap();
     let path_str = dir.display().to_string();
@@ -747,48 +767,45 @@ async fn execute_bash_spawn_error_includes_cwd_and_input() {
         Arc::new(TracingAuditRecorder),
         make_gate(&dir),
     );
-    let argv = vec!["--version".to_string()];
 
-    let err = exec
+    let result = exec
         .execute_bash(
             "definitely_missing_binary_for_bash_test",
             Some(&path_str),
             "p1",
-            Some(&argv),
             None,
         )
         .await
-        .expect_err("缺失 binary 应走 spawn 失败路径");
-    let msg = err.to_string();
-    assert!(msg.contains("bash spawn failed"));
-    assert!(msg.contains(&format!("cwd={}", path_str)));
-    assert!(msg.contains(&format!("input={:?}", path_str)));
+        .expect("the shell itself should start");
+    assert_ne!(result.exit_code, 0);
 }
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn bash_registry_spawn_error_includes_cwd_and_raw_input() {
+async fn bash_registry_tracks_missing_shell_command_failure() {
     let home = tempfile::tempdir().expect("home");
     let _home = HomeEnvGuard::set(home.path());
     let target = home.path().join("spawn-error-target");
     std::fs::create_dir_all(&target).unwrap();
-    let target = target.canonicalize().unwrap();
     let registry = BashTaskRegistry::new(home.path().join("tool-results"));
-    let argv = vec!["--version".to_string()];
 
-    let err = registry
+    let ticket = registry
         .spawn_tracked(
             "definitely_missing_binary_for_registry_bash_test".to_string(),
-            Some(argv),
             Some(PathBuf::from("~/spawn-error-target")),
             false,
         )
         .await
-        .expect_err("缺失 binary 应走注册表 spawn 失败路径");
-    let msg = err.to_string();
-    assert!(msg.contains("bash spawn failed"));
-    assert!(msg.contains(&format!("cwd={}", target.display())));
-    assert!(msg.contains(r#"input="~/spawn-error-target""#));
+        .expect("the shell itself should start");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("shell task should finish");
+    let output = registry
+        .read_output(&ticket.task_id, None)
+        .await
+        .expect("read output");
+    assert_ne!(output.exit_code, Some(0));
 }
 
 #[test]
@@ -800,56 +817,6 @@ fn tokio_spawn_with_dollar_home_returns_enoent_when_literal_path_missing() {
         .spawn()
         .expect_err("tokio spawn 应返回 ENOENT");
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-}
-
-#[tokio::test]
-async fn execute_bash_empty_argv_uses_shell_mode() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_empty_argv");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
-        Arc::new(AllowAllConfirmation),
-        Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
-    );
-    let empty_args: Vec<String> = vec![];
-    let res = exec
-        .execute_bash(
-            "echo empty-argv-ok",
-            Some(&path_str),
-            "p1",
-            Some(&empty_args),
-            None,
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.exit_code, 0);
-    assert!(res.stdout.trim().contains("empty-argv-ok"));
-    let _ = std::fs::remove_dir(&dir);
-}
-
-#[tokio::test]
-async fn execute_bash_shell_launcher_command_merges_with_argv() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_shell_launcher");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
-        Arc::new(AllowAllConfirmation),
-        Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
-    );
-    let argv = vec!["printf shell-launch-ok".to_string()];
-    let res = exec
-        .execute_bash("sh -c", Some(&path_str), "p1", Some(&argv), None)
-        .await
-        .unwrap();
-    assert_eq!(res.exit_code, 0);
-    assert_eq!(res.stdout.trim(), "shell-launch-ok");
-    let _ = std::fs::remove_dir(&dir);
 }
 
 #[tokio::test]
@@ -869,7 +836,6 @@ async fn execute_bash_tokens_no_longer_trigger_path_gate() {
             "printf '%s\\n' http://127.0.0.1:4173/ node:fs/promises @playwright/test",
             Some(&path_str),
             "p1",
-            None,
             None,
         )
         .await
@@ -977,7 +943,6 @@ async fn build_bash_task_registry_applies_wait_policy_and_guard() {
     let err = registry
         .spawn(
             "echo should-be-blocked".to_string(),
-            None,
             Some(dir.path().to_path_buf()),
         )
         .await
@@ -1011,7 +976,6 @@ async fn bash_foreground_wait_expiry_stops_without_shared_registry() {
             ),
             Some(&path_str),
             "p1",
-            None,
             Some(8_000),
         )
         .await
@@ -1071,7 +1035,6 @@ async fn bash_foreground_wait_expiry_promotes_with_shared_registry() {
             "sleep 9; echo promoted-done",
             Some(&path_str),
             "p1",
-            None,
             Some(8_000),
         )
         .await
@@ -1128,7 +1091,6 @@ async fn bash_output_truncation_keeps_head_tail() {
             Some(&path_str),
             "p1",
             None,
-            None,
         )
         .await
         .expect("bash 应返回 Ok");
@@ -1175,7 +1137,6 @@ async fn bash_persists_full_output_when_truncated() {
             r#"printf 'A%.0s' $(seq 1 2000)"#,
             Some(&path_str),
             "p1",
-            None,
             None,
         )
         .await
@@ -1224,7 +1185,7 @@ async fn bash_ast_allowlist_denies_compound_command_short_circuit() {
 
     let cmd = format!("git --version && rm -rf {}", probe.display());
     let err = exec
-        .execute_bash(&cmd, Some(&path_str), "p1", None, None)
+        .execute_bash(&cmd, Some(&path_str), "p1", None)
         .await
         .expect_err("AST deny 应当返回 Err，不进入 gate / spawn");
     let msg = err.to_string();
@@ -1259,7 +1220,7 @@ async fn bash_ast_default_empty_lists_keeps_legacy_behavior() {
     .with_bash_ast(BashAstChecker::new(true, vec![], vec![]));
 
     let res = exec
-        .execute_bash("echo ast-skeleton-ok", Some(&path_str), "p1", None, None)
+        .execute_bash("echo ast-skeleton-ok", Some(&path_str), "p1", None)
         .await
         .expect("空 list 时 AST 不应改变行为");
     assert_eq!(res.exit_code, 0);
@@ -1286,7 +1247,7 @@ async fn bash_ast_heredoc_returns_unsupported_error() {
     .with_bash_ast(BashAstChecker::new(true, vec![], vec![]));
 
     let err = exec
-        .execute_bash("cat <<EOF\nhi\nEOF\n", Some(&path_str), "p1", None, None)
+        .execute_bash("cat <<EOF\nhi\nEOF\n", Some(&path_str), "p1", None)
         .await
         .expect_err("heredoc 应当 AstUnsupported 早退");
     assert!(err.to_string().contains("AstUnsupported"));
@@ -1312,7 +1273,6 @@ async fn execute_bash_forbidden() {
             "tomcat config set llm.api_key xxx",
             Some(&path_str),
             "p1",
-            None,
             None,
         )
         .await;

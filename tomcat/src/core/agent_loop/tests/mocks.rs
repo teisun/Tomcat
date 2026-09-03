@@ -264,7 +264,6 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {
@@ -337,7 +336,6 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {
@@ -420,7 +418,6 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {

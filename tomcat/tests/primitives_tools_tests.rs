@@ -393,7 +393,6 @@ async fn test_primitive_executor_execute_bash_echo_succeeds(
             Some(canonical_dir.to_str().unwrap()),
             "test_plugin",
             None,
-            None,
         )
         .await?;
     tracing::info!("Act: execute_bash('echo hello')");
@@ -408,9 +407,9 @@ async fn test_primitive_executor_execute_bash_echo_succeeds(
     Ok(())
 }
 
-/// [execute_bash argv] pi-mono 风格 command + args 不经 shell 拼接
+/// [execute_bash shell] 完整单字符串命令行经 shell 执行
 #[tokio::test]
-async fn test_primitive_executor_execute_bash_argv_echo() -> Result<(), Box<dyn std::error::Error>>
+async fn test_primitive_executor_execute_bash_shell_echo() -> Result<(), Box<dyn std::error::Error>>
 {
     common::setup_logging();
     let tmp = TempDir::new()?;
@@ -422,18 +421,16 @@ async fn test_primitive_executor_execute_bash_argv_echo() -> Result<(), Box<dyn 
         Arc::new(TracingAuditRecorder),
         make_gate(&canonical_dir, false),
     );
-    let argv = vec!["hello".to_string(), "argv".to_string()];
     let result = executor
         .execute_bash(
-            "echo",
+            "echo hello shell",
             Some(canonical_dir.to_str().unwrap()),
             "test_plugin",
-            Some(&argv),
             None,
         )
         .await?;
     assert_eq!(result.exit_code, 0);
     assert!(result.stdout.contains("hello"));
-    assert!(result.stdout.contains("argv"));
+    assert!(result.stdout.contains("shell"));
     Ok(())
 }

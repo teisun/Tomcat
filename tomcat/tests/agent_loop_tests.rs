@@ -179,7 +179,6 @@ impl PrimitiveExecutor for MockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
@@ -248,7 +247,6 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -321,7 +319,6 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
@@ -393,7 +390,6 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
@@ -905,7 +901,7 @@ async fn test_same_chat_context_recovers_after_task_output_interrupt_without_sig
     let (dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
     let registry = ctx.session_runtime.bash_task_registry.clone();
     let ticket = registry
-        .spawn("sleep 60".to_string(), None, Some(dir.path().to_path_buf()))
+        .spawn("sleep 60".to_string(), Some(dir.path().to_path_buf()))
         .await?;
     let task_id = ticket.task_id.clone();
 

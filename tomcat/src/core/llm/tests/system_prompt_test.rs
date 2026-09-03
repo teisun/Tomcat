@@ -133,6 +133,14 @@ fn build_system_prompt_contains_edit_workflow_guidance() {
         prompt.contains("never include display prefixes"),
         "system prompt 应提醒不要把 read 展示前缀粘进 old_content"
     );
+    assert!(
+        prompt.contains("small, unique, exact, and one continuous excerpt"),
+        "system prompt 应要求 old_content 是小且唯一的连续原文"
+    );
+    assert!(
+        prompt.contains("use that current text for the next edit"),
+        "system prompt 应引导模型使用 edit 成功回传的当前视图"
+    );
 }
 
 #[test]

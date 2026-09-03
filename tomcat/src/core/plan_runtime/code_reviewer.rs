@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 
 use super::{
-    review::{Finding, ParsedReview},
+    review::{downgrade_invalid_code_review_p1_findings, Finding, ParsedReview},
     DisputedFinding,
 };
 
@@ -30,7 +30,22 @@ fn render_open_findings_section(open_findings: &[Finding]) -> String {
     }
     let lines = open_findings
         .iter()
-        .map(|f| format!("         - [{}] {}: {}", f.severity, f.area, f.note))
+        .map(|finding| {
+            let evidence = match finding.basis.as_deref() {
+                Some("plan_mismatch") => finding
+                    .plan_ref
+                    .as_deref()
+                    .map(|reference| format!(" [basis=plan_mismatch; plan_ref={reference}]"))
+                    .unwrap_or_else(|| " [basis=plan_mismatch]".to_string()),
+                Some("user_defect") => " [basis=user_defect]".to_string(),
+                Some(other) => format!(" [basis={other}]"),
+                None => String::new(),
+            };
+            format!(
+                "         - [{}] {}: {}{}",
+                finding.severity, finding.area, finding.note, evidence
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -67,8 +82,10 @@ pub(crate) struct CodeReviewPromptInput<'a> {
     pub plan_text: &'a str,
     pub plan_path: &'a Path,
     pub workspace_root: Option<&'a Path>,
-    pub diff_stat: &'a str,
     pub changed_files: &'a [String],
+    pub delta_files: &'a [String],
+    pub round: u32,
+    pub is_incremental: bool,
     pub open_findings: &'a [Finding],
     pub disputed_findings: &'a [DisputedFinding],
 }
@@ -79,8 +96,10 @@ pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> Stri
         plan_text,
         plan_path,
         workspace_root,
-        diff_stat,
         changed_files,
+        delta_files,
+        round,
+        is_incremental,
         open_findings,
         disputed_findings,
     } = input;
@@ -95,32 +114,20 @@ pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> Stri
             )
         })
         .unwrap_or_default();
-    let diff_section = if diff_stat.trim().is_empty() {
-        "         Runtime git diff summary: unavailable (git diff injection failed or found no tracked changes).\n".to_string()
+    let review_scope_section = if is_incremental {
+        let delta = render_changed_files(delta_files);
+        format!(
+            "         Incremental review (round {round}).\n\
+             >>> DELTA — the ONLY files to review for NEW problems this round (changed since the previous review round; includes untracked new files):\n\
+             {delta}\
+             Every other changed file is frozen (already reviewed in an earlier round, unchanged since): do NOT open new issues there. Look at one ONLY if (a) an open finding below points into it, or (b) a DELTA change's impact reaches it (then flag the regression — do NOT re-review its unrelated pre-existing code).\n"
+        )
     } else {
         format!(
-            "         Runtime git diff summary (`git diff --stat HEAD`):\n\
-             ```text\n{diff_stat}\n```\n"
+            "         Runtime changed files list (`git diff --name-only HEAD` ∪ `git ls-files --others --exclude-standard` = tracked changes + untracked new files — the COMPLETE set to review):\n\
+             {}",
+            render_changed_files(changed_files)
         )
-    };
-    let changed_files_section = if changed_files.is_empty() {
-        "         Runtime changed files list: unavailable.\n".to_string()
-    } else {
-        let joined = changed_files
-            .iter()
-            .take(80)
-            .map(|path| format!("         - `{path}`"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let suffix = if changed_files.len() > 80 {
-            format!(
-                "\n         - ... {} more file(s) omitted",
-                changed_files.len() - 80
-            )
-        } else {
-            String::new()
-        };
-        format!("         Runtime changed files list:\n{joined}{suffix}\n")
     };
     render_prompt(
         PromptKey::ReviewerCodeBrief,
@@ -128,8 +135,7 @@ pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> Stri
             ("plan_id", plan_id),
             ("plan_path", &plan_path),
             ("workspace_hint", &workspace_hint),
-            ("diff_section", &diff_section),
-            ("changed_files_section", &changed_files_section),
+            ("review_scope_section", &review_scope_section),
             (
                 "open_findings_section",
                 &render_open_findings_section(open_findings),
@@ -141,6 +147,24 @@ pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> Stri
             ("plan_text", plan_text),
         ],
     )
+}
+
+fn render_changed_files(files: &[String]) -> String {
+    if files.is_empty() {
+        return "         - (none)\n".to_string();
+    }
+    let joined = files
+        .iter()
+        .take(80)
+        .map(|path| format!("         - `{path}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let suffix = if files.len() > 80 {
+        format!("\n         - ... {} more file(s) omitted", files.len() - 80)
+    } else {
+        String::new()
+    };
+    format!("{joined}{suffix}\n")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,14 +219,16 @@ impl CodeReviewSummary {
         }
     }
 
-    pub fn from_parsed(parsed: ParsedReview) -> Self {
+    pub fn from_parsed(parsed: ParsedReview, plan_text: &str) -> Self {
+        let mut findings = parsed.findings;
+        downgrade_invalid_code_review_p1_findings(&mut findings, plan_text);
         Self {
             aborted: false,
             verdict: parsed.verdict,
             summary: parsed.summary,
             changes_summary: parsed.changes_summary,
             applied_changes: parsed.applied_changes,
-            findings: parsed.findings,
+            findings,
             reviewer_turns_used: 0,
             reviewer_turns_limit: 0,
             reviewer_stop_reason: "completed".into(),
@@ -274,12 +300,9 @@ impl CodeReviewSummary {
     }
 }
 
-pub async fn collect_git_diff_context(workspace_root: &std::path::Path) -> (String, Vec<String>) {
+/// 当前工作树相对 HEAD 的完整变更文件集：已跟踪的差异与未跟踪新文件的并集。
+pub async fn collect_git_changed_files(workspace_root: &std::path::Path) -> Vec<String> {
     use std::collections::BTreeSet;
-
-    let diff_stat = run_git_capture(workspace_root, &["diff", "--stat", "--no-ext-diff", "HEAD"])
-        .await
-        .unwrap_or_default();
 
     let mut changed_files = BTreeSet::new();
     for line in run_git_lines(
@@ -303,7 +326,44 @@ pub async fn collect_git_diff_context(workspace_root: &std::path::Path) -> (Stri
         }
     }
 
-    (diff_stat, changed_files.into_iter().collect())
+    changed_files.into_iter().collect()
+}
+
+/// 从完整 changed-files 集合筛出上次 reviewer 派发后被修改的文件。
+///
+/// 删除文件没有可读取的 mtime，保守地保留在增量集，避免删代码的改动逃过复审。
+/// mtime 只用于缩小导航范围；它晚于 `since_ms` 才入选，因此误报至多多审一次。
+pub(crate) fn changed_files_since(
+    workspace_root: &std::path::Path,
+    changed_files: &[String],
+    since_ms: u128,
+) -> Vec<String> {
+    changed_files
+        .iter()
+        .filter(|relative| {
+            file_modified_ms(&workspace_root.join(relative))
+                .map(|modified_ms| modified_ms > since_ms)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn unix_timestamp_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn file_modified_ms(path: &std::path::Path) -> Option<u128> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis())
 }
 
 /// 当前 Git diff 中的代码文件和其中最新的文件修改时间。
@@ -318,7 +378,7 @@ pub struct CodeDiffContext {
 }
 
 pub async fn collect_code_diff_context(workspace_root: &std::path::Path) -> CodeDiffContext {
-    let (_, changed_files) = collect_git_diff_context(workspace_root).await;
+    let changed_files = collect_git_changed_files(workspace_root).await;
     let changed_code_files: Vec<String> = changed_files
         .into_iter()
         .filter(|path| is_code_path(path))
@@ -327,16 +387,10 @@ pub async fn collect_code_diff_context(workspace_root: &std::path::Path) -> Code
         return CodeDiffContext::default();
     }
 
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let now_ms = unix_timestamp_ms();
     let newest_edit_mtime_ms = changed_code_files
         .iter()
-        .filter_map(|relative| std::fs::metadata(workspace_root.join(relative)).ok())
-        .filter_map(|metadata| metadata.modified().ok())
-        .filter_map(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis())
+        .filter_map(|relative| file_modified_ms(&workspace_root.join(relative)))
         .max()
         .or(Some(now_ms));
 
@@ -416,7 +470,7 @@ async fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<S
 
 #[cfg(test)]
 mod tests {
-    use super::is_code_path;
+    use super::{collect_git_changed_files, is_code_path};
 
     #[test]
     fn user_visible_markup_and_styles_trigger_code_review() {
@@ -436,5 +490,46 @@ mod tests {
         for path in ["README.md", "docs/guide.txt", "assets/logo.png"] {
             assert!(!is_code_path(path), "{path} must not trigger the code gate");
         }
+    }
+
+    #[tokio::test]
+    async fn changed_files_include_tracked_diff_and_untracked_files() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let root = workspace.path();
+        std::fs::write(root.join("tracked.rs"), "fn before() {}\n").expect("seed tracked");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .expect("git init");
+        assert!(init.success());
+        let add = std::process::Command::new("git")
+            .args(["add", "tracked.rs"])
+            .current_dir(root)
+            .status()
+            .expect("git add");
+        assert!(add.success());
+        let commit = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=tomcat-test",
+                "-c",
+                "user.email=tomcat-test@example.invalid",
+                "commit",
+                "-qm",
+                "seed",
+            ])
+            .current_dir(root)
+            .status()
+            .expect("git commit");
+        assert!(commit.success());
+
+        std::fs::write(root.join("tracked.rs"), "fn after() {}\n").expect("modify tracked");
+        std::fs::write(root.join("untracked.rs"), "fn fresh() {}\n").expect("add untracked");
+
+        assert_eq!(
+            collect_git_changed_files(root).await,
+            vec!["tracked.rs".to_string(), "untracked.rs".to_string()]
+        );
     }
 }

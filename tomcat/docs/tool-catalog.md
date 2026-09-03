@@ -171,10 +171,10 @@ Parameters:
 - Destructive: `true`
 - Search hint: `edit replace old_content new_content file`
 
-Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
+Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. A successful result includes a bounded, numbered current view around changed ranges; use that exact text for a following edit, or read again if the next target is not shown. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). old_content must be a small, unique, continuous exact excerpt; do not combine distant text. Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
 
 Guidelines:
-- Default file-edit workflow: read -> edit; prefer edit for prose and Markdown. For repeated short snippets or line-anchored code edits, use read(hashline=true) -> hashline_edit. hashline_edit may batch non-overlapping ranges from one original snapshot: every anchor is checked before a write, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Prefer continuous ranges for reliability. For distant ranges, prefer edit; if hashline_edit is necessary, take a fresh hashline read covering every target immediately before the call and never mix anchors from separate reads. To modify text created by the batch, read again first. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.
+- Default file-edit workflow: read -> edit; prefer edit for prose and Markdown. old_content must be small, unique, exact, and one continuous excerpt—never join distant excerpts. A successful edit returns a bounded, numbered current view around its changes: use that current text for the next edit; if its target is not shown, read again first. For repeated short snippets or line-anchored code edits, use read(hashline=true) -> hashline_edit. hashline_edit may batch non-overlapping ranges from one original snapshot: every anchor is checked before a write, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Prefer continuous ranges for reliability. For distant ranges, prefer edit; if hashline_edit is necessary, take a fresh hashline read covering every target immediately before the call and never mix anchors from separate reads. To modify text created by the batch, read again first. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.
 - When copying from read output, never include display prefixes like `  N\t` or `N#XX:` in edit.old_content.
 - Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.
 
@@ -906,15 +906,8 @@ Parameters:
 ```json
 {
   "properties": {
-    "args": {
-      "description": "Optional argv elements appended to `command`; when present the command runs argv-style (no shell) — safer for paths with spaces or quotes.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
-    },
     "command": {
-      "description": "Shell command to execute. With `args` set, runs argv-style (no shell); otherwise via `sh -c` (Unix) / `cmd /C` (Windows).",
+      "description": "Complete shell command line, including the executable and every argument. Supports pipes, &&, ||, ;, redirects, globbing, and quotes. Always runs via `sh -c` (Unix) / `cmd /C` (Windows).",
       "type": "string"
     },
     "cwd": {

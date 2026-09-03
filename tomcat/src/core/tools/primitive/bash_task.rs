@@ -82,33 +82,6 @@ fn grant_trigger_str(s: GrantTrigger) -> String {
     .to_string()
 }
 
-fn normalize_launcher_argv(
-    command: String,
-    argv: Option<Vec<String>>,
-) -> (String, Option<Vec<String>>) {
-    let Some(mut argv) = argv else {
-        return (command, None);
-    };
-    let trimmed = command.trim();
-    let mut parts = trimmed.split_whitespace();
-    let Some(program) = parts.next() else {
-        return (command, Some(argv));
-    };
-    if !matches!(
-        program,
-        "sh" | "bash" | "zsh" | "cmd" | "powershell" | "pwsh"
-    ) {
-        return (command, Some(argv));
-    }
-    let launcher_args: Vec<String> = parts.map(str::to_string).collect();
-    if launcher_args.is_empty() {
-        return (command, Some(argv));
-    }
-    let mut merged = launcher_args;
-    merged.append(&mut argv);
-    (program.to_string(), Some(merged))
-}
-
 fn op_summary(op: PrimitiveOperation) -> &'static str {
     match op {
         PrimitiveOperation::Read => "读取",
@@ -647,28 +620,19 @@ impl BashTaskRegistry {
     pub async fn spawn(
         &self,
         command: String,
-        argv: Option<Vec<String>>,
         cwd: Option<PathBuf>,
     ) -> Result<BashTaskTicket, AppError> {
-        self.spawn_tracked(command, argv, cwd, true).await
+        self.spawn_tracked(command, cwd, true).await
     }
 
     pub async fn spawn_tracked_unchecked(
         &self,
         command: String,
-        argv: Option<Vec<String>>,
         cwd: ResolvedCwd,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
-        self.spawn_tracked_inner(
-            command,
-            argv,
-            cwd,
-            deliver_completion_on_finish,
-            false,
-            false,
-        )
-        .await
+        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, false, false)
+            .await
     }
 
     /// The single spawn primitive used by foreground and explicit background Bash.
@@ -676,20 +640,12 @@ impl BashTaskRegistry {
     pub async fn spawn_tracked(
         &self,
         command: String,
-        argv: Option<Vec<String>>,
         cwd: Option<PathBuf>,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
         let cwd = ResolvedCwd::from_path_buf(cwd)?;
-        self.spawn_tracked_inner(
-            command,
-            argv,
-            cwd,
-            deliver_completion_on_finish,
-            true,
-            false,
-        )
-        .await
+        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, false)
+            .await
     }
 
     /// Spawn a tracked task whose terminal state is held until the AgentLoop output bridge
@@ -697,28 +653,22 @@ impl BashTaskRegistry {
     pub async fn spawn_tracked_with_preview_barrier(
         &self,
         command: String,
-        argv: Option<Vec<String>>,
         cwd: Option<PathBuf>,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
         let cwd = ResolvedCwd::from_path_buf(cwd)?;
-        self.spawn_tracked_inner(command, argv, cwd, deliver_completion_on_finish, true, true)
+        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, true)
             .await
     }
 
     async fn spawn_tracked_inner(
         &self,
         command: String,
-        argv: Option<Vec<String>>,
         cwd: ResolvedCwd,
         deliver_completion_on_finish: bool,
         apply_guard: bool,
         preview_flush_required: bool,
     ) -> Result<BashTaskTicket, AppError> {
-        // 空 argv 与未提供 args 同义，避免 `command="echo hi", args=[]` 被误当成 argv 模式。
-        let argv = argv.filter(|args| !args.is_empty());
-        // 兼容真 LLM 把 `sh -c` / `bash -lc` 写进 command、把脚本正文放进 args 的形态。
-        let (command, argv) = normalize_launcher_argv(command, argv);
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -726,17 +676,7 @@ impl BashTaskRegistry {
             .as_millis();
         let task_id = format!("{}-{}", now, simple_rand6());
         let log_path = self.persist_dir.join(format!("bash-{}.log", &task_id));
-        let audit_cmd = match argv.as_deref() {
-            None => command.clone(),
-            Some(args) => {
-                let mut text = command.clone();
-                for arg in args {
-                    text.push(' ');
-                    text.push_str(arg);
-                }
-                text
-            }
-        };
+        let audit_cmd = command.clone();
         let bash_scope_grant = if apply_guard {
             if let Some(guard) = self.background_guard.as_ref() {
                 match guard.bash_preflight_and_gate(&audit_cmd, &cwd).await {
@@ -761,22 +701,12 @@ impl BashTaskRegistry {
             .map_err(AppError::Io)?;
         let log_writer = Arc::new(AsyncMutex::new(log_file));
 
-        let mut cmd = match argv.as_deref() {
-            None => {
-                #[cfg(unix)]
-                let (shell, arg) = ("sh", "-c");
-                #[cfg(windows)]
-                let (shell, arg) = ("cmd", "/C");
-                let mut c = Command::new(shell);
-                c.arg(arg).arg(&command);
-                c
-            }
-            Some(args) => {
-                let mut c = Command::new(&command);
-                c.args(args);
-                c
-            }
-        };
+        #[cfg(unix)]
+        let (shell, arg) = ("sh", "-c");
+        #[cfg(windows)]
+        let (shell, arg) = ("cmd", "/C");
+        let mut cmd = Command::new(shell);
+        cmd.arg(arg).arg(&command);
         if let Some(c) = cwd.command_cwd() {
             cmd.current_dir(c);
         }

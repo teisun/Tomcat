@@ -106,15 +106,10 @@ pub(super) async fn execute_bash_impl(
     command: &str,
     cwd: Option<&str>,
     plugin_id: &str,
-    argv: Option<&[String]>,
     foreground_wait_ms: Option<u64>,
 ) -> Result<BashResult, AppError> {
     let started = Instant::now();
-    let argv = argv.filter(|a| !a.is_empty()).map(<[String]>::to_vec);
-    let audit_cmd = match argv.as_deref() {
-        None => command.to_string(),
-        Some(args) => format!("{} {}", command, args.join(" ")),
-    };
+    let audit_cmd = command.to_string();
     let cwd = resolve_cwd(executor, cwd, &audit_cmd, plugin_id).await?;
     let (bash_scope, bash_grant) =
         match preflight(executor, &audit_cmd, cwd.resolved_path(), plugin_id).await {
@@ -137,7 +132,7 @@ pub(super) async fn execute_bash_impl(
         )
     });
     let ticket = registry
-        .spawn_tracked_unchecked(command.to_string(), argv, cwd.clone(), false)
+        .spawn_tracked_unchecked(command.to_string(), cwd.clone(), false)
         .await?;
     let wait_ms = resolve_foreground_wait_ms(executor, foreground_wait_ms);
     let finished = tokio::select! {

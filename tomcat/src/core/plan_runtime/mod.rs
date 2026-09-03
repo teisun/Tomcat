@@ -183,7 +183,7 @@ pub struct PlanRuntime {
     explorer: Mutex<Option<Arc<dyn ExplorerDispatcher>>>,
     /// `[plan].verify_gate` 当前值：`soft`（默认）或 `gate`。
     verify_gate_mode: RwLock<String>,
-    /// green build 前 code reviewer 的最大尝试轮次。默认 4；0 表示直接跳过 code review。
+    /// green build 前 code reviewer 的最大尝试轮次。默认 2；0 表示直接跳过 code review。
     max_code_review_rounds: AtomicU32,
     /// 代码编辑使上一轮验收失效后，允许重新运行 review + green build 的最大周期。
     max_completion_gate_cycles: AtomicU32,
@@ -191,9 +191,10 @@ pub struct PlanRuntime {
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// 计数 verifier 前 code reviewer 实际派发轮次。
     code_review_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
-    /// 上一轮 code review 留下的未清 finding。用于两处：下一轮把它们交给 reviewer 按 id
-    /// 核销已修项（D1-d），以及 completion guard 在"todo 全勾完但 review 打回"时告诉模型
-    /// 还差什么（C1）。
+    /// 上一次 code reviewer 派发的 wall-clock 时间，用 mtime 划定下一轮增量范围。
+    last_code_review_dispatch_ms: parking_lot::Mutex<std::collections::HashMap<String, u128>>,
+    /// 上一轮 code review 留下的未清 finding。下一轮 reviewer 逐条按语义核销已修项；
+    /// 不用不稳定的跨轮 finding id。completion guard 也据此说明尚未解决的问题。
     unresolved_findings:
         parking_lot::Mutex<std::collections::HashMap<String, Vec<review::Finding>>>,
     /// 主 Agent 已书面申辩、用户需要看到的 P1 取舍。仅在当前计划执行期间保留；
@@ -292,10 +293,11 @@ impl PlanRuntime {
             verifier: Mutex::new(None),
             explorer: Mutex::new(None),
             verify_gate_mode: RwLock::new("soft".into()),
-            max_code_review_rounds: AtomicU32::new(4),
+            max_code_review_rounds: AtomicU32::new(2),
             max_completion_gate_cycles: AtomicU32::new(3),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             code_review_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            last_code_review_dispatch_ms: parking_lot::Mutex::new(std::collections::HashMap::new()),
             unresolved_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
             disputed_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
             review_infra_retries: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -914,8 +916,8 @@ impl PlanRuntime {
             }
         };
 
-        // 上一轮未清的 finding 一并交给 reviewer：它按 id 逐条核销，修好的不再重复报，
-        // 没修的沿用同一个 id 报回来——否则 8 轮预算会被同一个问题的不同措辞烧光。
+        // 上一轮未清 finding 一并交给 reviewer，由它逐条按当前代码语义核销；
+        // 参考号仅在本轮有效，不能把措辞变化伪装成稳定跨轮 id。
         let open_findings = self.unresolved_findings(plan_id);
         dispatcher
             .dispatch(plan_id, &plan_text, &open_findings, dispatch)
@@ -1103,20 +1105,21 @@ impl PlanRuntime {
         self.write_transcript_custom(payload);
     }
 
-    /// 轮次预算用尽但仍有未清 finding：留痕并交还用户。计划保持 `executing`，
-    /// 不做 best-effort 收口 —— 没拿到通过结论就不能声称完成。
+    /// 代码评审预算用尽仍有未清 finding：记录残余，随后由 acceptance 的绿构建证据收口。
     pub(crate) fn write_code_review_exhausted_transcript(
         &self,
         plan_id: &str,
         rounds: u32,
-        unresolved_findings: &[String],
+        residual_findings: &[String],
     ) {
         self.write_transcript_custom(serde_json::json!({
             "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_EXHAUSTED,
             "plan_id": plan_id,
             "rounds": rounds,
             "max_code_review_rounds": self.max_code_review_rounds(),
-            "unresolved_findings": unresolved_findings,
+            "outcome": "passed_to_acceptance_with_residual_findings",
+            "code_review_pass": true,
+            "residual_findings": residual_findings,
         }));
     }
 
@@ -1148,6 +1151,7 @@ impl PlanRuntime {
 
     pub fn reset_code_review_rounds(&self, plan_id: &str) {
         self.code_review_rounds.lock().remove(plan_id);
+        self.last_code_review_dispatch_ms.lock().remove(plan_id);
         self.unresolved_findings.lock().remove(plan_id);
         self.disputed_findings.lock().remove(plan_id);
         self.review_infra_retries.lock().remove(plan_id);
@@ -1169,6 +1173,19 @@ impl PlanRuntime {
             .get(plan_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn last_code_review_dispatch_ms(&self, plan_id: &str) -> Option<u128> {
+        self.last_code_review_dispatch_ms
+            .lock()
+            .get(plan_id)
+            .copied()
+    }
+
+    pub(crate) fn set_last_code_review_dispatch_ms(&self, plan_id: &str, timestamp_ms: u128) {
+        self.last_code_review_dispatch_ms
+            .lock()
+            .insert(plan_id.to_string(), timestamp_ms);
     }
 
     pub fn unresolved_finding_references(&self, plan_id: &str) -> Vec<String> {
@@ -1643,7 +1660,7 @@ pub struct CodeReviewDispatchInfo {
 #[async_trait::async_trait]
 pub trait CodeReviewerDispatcher: Send + Sync {
     /// `open_findings` 是上一轮未清的 finding；实现应把它们渲染进 prompt，
-    /// 让 reviewer 按 id 核销而不是重新发明问题编号。
+    /// 让 reviewer 按语义核销而不是重新发明问题；参考号仅在本轮输出中有效。
     async fn dispatch(
         &self,
         plan_id: &str,

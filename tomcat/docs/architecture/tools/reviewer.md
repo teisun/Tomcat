@@ -1,6 +1,6 @@
 # `reviewer`：审稿 subagent 派生契约（非 LLM 工具）
 
-> 当前权威口径（2026-07-22）  
+> 当前权威口径（2026-09-03）
 > 本文档旧版曾把 reviewer 描述成一个靠 `ReviewKind::{Plan, Code}` 区分形态的统一子 Agent，并且把 code review 写成 verifier 前置环节。该描述已经过时。现在请以本页顶部的“当前架构”小节和仓库代码为准；若下文旧段落与这里冲突，以这里为准。
 
 本文档是 **B 类**：`docs/architecture/tools/`，承接 [`plan-runtime.md`](../plan-runtime.md)、[`multi-agent.md`](../multi-agent.md) §14（基础设施）、[`create-plan.md`](./create-plan.md)（派发入口）。**实现以仓库代码为准**。
@@ -23,8 +23,8 @@ update_plan(all todos completed)
            +--> child audit: sub_agent_start -> sub_agent_end (不驱动产品 UI)
            +--> tool result: update_plan.code_review
            +--> verdict=pass      -> verified green build -> completed
-           +--> verdict=fail/partial -> stay executing, 强指令要求 reopen/add fix todo
-           +--> rounds exhausted  -> stay executing and hand back to the user
+           +--> verdict=fail/partial -> stay executing, 修复后进入下一轮增量复审
+           +--> rounds exhausted  -> review gate pass + residual findings -> green-build acceptance
 ```
 
 ### Code review 时间线契约
@@ -63,17 +63,17 @@ plan.update + plan.todos
 
 ### 3. EXEC 收口现在怎么走
 
-- 默认最多跑 **4 轮** code review：每次修复后重新 `update_plan` 收口，会进入下一轮复审。
+- 默认最多跑 **2 轮** code review（可由用户配置提高）：首轮审完整变更文件集；后续轮只对自上轮派发后修改的 DELTA 找新问题，同时逐条核销上一轮 open findings。DELTA 之外的文件冻结，除非 open finding 指向它或本轮修改直接波及它。
 - `verdict = pass`：先记录 review 已通过；仍必须提供当前代码 diff 的 green-build 证据，才会
   completed 并切回 CHAT。
 - `verdict = fail | partial`：plan 保持 `executing`，runtime 不自动造 todo，而是明确要求主 Agent：
   - `reopen` 一个已有 todo，或
   - `add` 一个修复 todo。
-- 修完再次 `update_plan` 收口时，只要 4 轮预算尚未耗尽，就继续多轮复审。
-- 轮次耗尽但仍没有通过结论时，runtime 保持 `executing` 并交还用户决定；不会
-  best-effort completed。
+- 修完再次 `update_plan` 收口时，只要预算尚未耗尽，就继续增量复审。
+- 轮次耗尽时，不论残余是 P0 还是 P1，runtime 都置 `code_review_pass = true` 并完成 review gate；残余清单同时写入 transcript 与 PlanFile frontmatter，`run_acceptance` 明示它们，随后必须对**全部改动**提交真实的 green-build 证据。它放行到 acceptance，不是 best-effort completed。
 - `verdict = aborted`：按技术故障处理，不消耗正常轮次；重试仍无法恢复时同样保持
   `executing` 并交还用户。
+- P1 必须声明证据类别：用户可见缺陷标 `basis: "user_defect"`；计划不符标 `basis: "plan_mismatch"` 且必须附 `plan_ref`（被违反的具体计划条目的原文摘录）。缺少或无法在计划中找到这份证据的 P1 会被运行时降级为 P2。
 
 ### 4. verifier 当前状态
 

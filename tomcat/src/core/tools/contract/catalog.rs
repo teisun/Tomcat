@@ -121,7 +121,7 @@ pub fn summarize_tool_description(description: &str) -> String {
 }
 
 // ─── 跨工具规则常量（供多个工具共享同一字符串，聚合时按 byte 相等去重） ───
-const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; prefer edit for prose and Markdown. For repeated short snippets or line-anchored code edits, use read(hashline=true) -> hashline_edit. hashline_edit may batch non-overlapping ranges from one original snapshot: every anchor is checked before a write, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Prefer continuous ranges for reliability. For distant ranges, prefer edit; if hashline_edit is necessary, take a fresh hashline read covering every target immediately before the call and never mix anchors from separate reads. To modify text created by the batch, read again first. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.";
+const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; prefer edit for prose and Markdown. old_content must be small, unique, exact, and one continuous excerpt—never join distant excerpts. A successful edit returns a bounded, numbered current view around its changes: use that current text for the next edit; if its target is not shown, read again first. For repeated short snippets or line-anchored code edits, use read(hashline=true) -> hashline_edit. hashline_edit may batch non-overlapping ranges from one original snapshot: every anchor is checked before a write, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Prefer continuous ranges for reliability. For distant ranges, prefer edit; if hashline_edit is necessary, take a fresh hashline read covering every target immediately before the call and never mix anchors from separate reads. To modify text created by the batch, read again first. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.";
 const G_NO_DISPLAY_PREFIX: &str = "When copying from read output, never include display prefixes like `  N\\t` or `N#XX:` in edit.old_content.";
 const G_NO_FAKE_EDIT: &str = "Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.";
 const G_PATH_LINE: &str =
@@ -182,7 +182,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "edit",
         label: "Edit File",
-        description: "Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.\n",
+        description: "Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. A successful result includes a bounded, numbered current view around changed ranges; use that exact text for a following edit, or read again if the next target is not shown. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). old_content must be a small, unique, continuous exact excerpt; do not combine distant text. Do NOT include `cat -n`/hashline display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.\n",
         display_summary: Some("Replace exact text in an existing file (multi-segment, original-snapshot)."),
         parameters: edit_parameters,
         scope: PermissionScope::Write,
@@ -197,7 +197,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "hashline_edit",
         label: "Hashline Edit File",
-        description: "Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns every invalid anchor (no write). Multiple non-overlapping segments use one original snapshot: all anchors validate before writing, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Prefer normal `edit` for prose and Markdown; use this for repeated short snippets or strong line-level consistency. Prefer continuous ranges; for distant ranges, use a fresh hashline read covering every target. To modify text created by this batch, read again first. A fresh read stamp is still required.\n",
+        description: "Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns HashMismatch for every invalid anchor (no write). Multiple non-overlapping segments use one original snapshot: all anchors validate before writing, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Prefer normal `edit` for prose and Markdown; use this for repeated short snippets or strong line-level consistency. Prefer continuous ranges; for distant ranges, use a fresh hashline read covering every target. To modify text created by this batch, read again first. A fresh read stamp is still required.\n",
         display_summary: Some("Line-number + content-hash anchored edits (companion to read hashline=true)."),
         parameters: hashline_edit_parameters,
         scope: PermissionScope::Write,
@@ -932,16 +932,11 @@ fn bash_parameters() -> Value {
         serde_json::json!({
             "command": {
                 "type": "string",
-                "description": "Shell command to execute. With `args` set, runs argv-style (no shell); otherwise via `sh -c` (Unix) / `cmd /C` (Windows)."
+                "description": "Complete shell command line, including the executable and every argument. Supports pipes, &&, ||, ;, redirects, globbing, and quotes. Always runs via `sh -c` (Unix) / `cmd /C` (Windows)."
             },
             "cwd": {
                 "type": "string",
                 "description": "Optional working directory. Empty means unset. Use an absolute path or `~/...`; shell vars like `$HOME` are NOT expanded here. Defaults to the agent process cwd."
-            },
-            "args": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Optional argv elements appended to `command`; when present the command runs argv-style (no shell) — safer for paths with spaces or quotes."
             },
             "foreground_wait_ms": {
                 "type": "integer",

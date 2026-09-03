@@ -111,6 +111,7 @@ fn write_planning_plan(plan_id: &str, body: &str) -> PathBuf {
                 green_build_evidence: Vec::new(),
                 code_review_pass: false,
                 code_review_pass_at_ms: None,
+                code_review_residual_findings: Vec::new(),
                 completion_gate_cycles: 0,
                 unknown: Default::default(),
             },
@@ -363,7 +364,6 @@ impl PrimitiveExecutor for UnusedPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         unreachable!("binding test should not call bash")

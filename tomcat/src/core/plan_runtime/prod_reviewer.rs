@@ -16,9 +16,9 @@ use crate::core::llm::{
     ChatMessage, LlmProvider, LlmResolver, LlmScene, ResolvedCall, SharedModelCatalog,
 };
 use crate::core::plan_runtime::code_reviewer::{
-    build_code_review_prompt, code_review_system_prompt_text,
-    code_reviewer_allowed_tools_with_policy, collect_git_diff_context, CodeReviewPromptInput,
-    CodeReviewSummary,
+    build_code_review_prompt, changed_files_since, code_review_system_prompt_text,
+    code_reviewer_allowed_tools_with_policy, collect_git_changed_files, unix_timestamp_ms,
+    CodeReviewPromptInput, CodeReviewSummary,
 };
 use crate::core::plan_runtime::explorer::{
     build_explorer_prompt, explorer_system_prompt_text, ExplorerReport, ExplorerTask,
@@ -448,15 +448,26 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             Err(err) => return CodeReviewSummary::aborted_with(err),
         };
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
-        let (diff_stat, changed_files) =
-            collect_git_diff_context(deps.agent_workspace_dir.as_path()).await;
+        let changed_files = collect_git_changed_files(deps.agent_workspace_dir.as_path()).await;
+        let previous_dispatch_ms = (dispatch.round > 1)
+            .then(|| plan_runtime.last_code_review_dispatch_ms(plan_id))
+            .flatten();
+        let is_incremental = previous_dispatch_ms.is_some();
+        let delta_files = previous_dispatch_ms
+            .map(|since_ms| {
+                changed_files_since(deps.agent_workspace_dir.as_path(), &changed_files, since_ms)
+            })
+            .unwrap_or_default();
+        plan_runtime.set_last_code_review_dispatch_ms(plan_id, unix_timestamp_ms());
         let initial_user_message = build_code_review_prompt(CodeReviewPromptInput {
             plan_id,
             plan_text,
             plan_path: &plan_path,
             workspace_root,
-            diff_stat: &diff_stat,
             changed_files: &changed_files,
+            delta_files: &delta_files,
+            round: dispatch.round,
+            is_incremental,
             open_findings,
             disputed_findings: &plan_runtime.disputed_findings(plan_id),
         });
@@ -511,6 +522,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             None
         };
         let plan_id_for_closure = plan_id.to_string();
+        let plan_text_for_validation = plan_text.to_owned();
         let dispatch = dispatch.clone();
         let compaction_provider = runtime.compaction_provider.clone();
         let compaction_output_limit = runtime
@@ -624,6 +636,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         origin,
                         &child_session_id,
                         turns_limit,
+                        &plan_text_for_validation,
                         run_outcome,
                     );
                     let mut summary = summary;
@@ -730,6 +743,7 @@ fn build_code_summary_from_outcome(
     origin: &'static str,
     child_session_id: &str,
     turns_limit: u32,
+    plan_text: &str,
     outcome: AgentRunOutcome,
 ) -> (CodeReviewSummary, SubagentOutcomeLabel) {
     match outcome {
@@ -738,7 +752,7 @@ fn build_code_summary_from_outcome(
             let text = extract_review_text(&result);
             match parse_review_block(&text) {
                 Some(parsed) => {
-                    let mut s = CodeReviewSummary::from_parsed(parsed);
+                    let mut s = CodeReviewSummary::from_parsed(parsed, plan_text);
                     s.reviewer_turns_used = turns_used;
                     s.reviewer_turns_limit = turns_limit;
                     s.reviewer_stop_reason = if turns_used >= turns_limit {

@@ -118,7 +118,6 @@ impl PrimitiveExecutor for SkillFilePrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
@@ -179,7 +178,6 @@ impl PrimitiveExecutor for RecordingSkillPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()

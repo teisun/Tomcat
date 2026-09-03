@@ -220,6 +220,7 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
         "partial",
         "pass",
         "plan_id",
+        "plan_ref",
         "pytest",
         "rg",
         "since",

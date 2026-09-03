@@ -54,7 +54,6 @@ impl PrimitiveExecutor for UnusedPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
@@ -100,7 +99,7 @@ impl PrimitiveExecutor for EditOkPrimitive {
         unreachable!()
     }
     async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
-        unreachable!()
+        Ok("## Goal\n\nupdated smoke\n\n## Notes\n".to_string())
     }
     async fn list_dir(
         &self,
@@ -137,7 +136,6 @@ impl PrimitiveExecutor for EditOkPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
         _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()

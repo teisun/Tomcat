@@ -16,11 +16,6 @@ pub(in super::super) async fn handle_bash(
     }
     let command = args["command"].as_str().unwrap_or("");
     let cwd = args["cwd"].as_str();
-    let argv: Option<Vec<String>> = args.get("args").and_then(|v| v.as_array()).map(|arr| {
-        arr.iter()
-            .filter_map(|x| x.as_str().map(String::from))
-            .collect()
-    });
     let run_in_background = args
         .get("run_in_background")
         .and_then(|v| v.as_bool())
@@ -35,11 +30,11 @@ pub(in super::super) async fn handle_bash(
                 ctx.subagent_type,
             ));
         }
-        return foreground_via_primitive(ctx, command, cwd, argv, args).await;
+        return foreground_via_primitive(ctx, command, cwd, args).await;
     };
 
     if run_in_background {
-        return run_background_bash(ctx, registry, command, cwd, argv).await;
+        return run_background_bash(ctx, registry, command, cwd).await;
     }
 
     let wait_ms = args
@@ -53,12 +48,7 @@ pub(in super::super) async fn handle_bash(
     let started = Instant::now();
     let output_rx = registry.subscribe_output();
     let ticket = registry
-        .spawn_tracked_with_preview_barrier(
-            command.to_string(),
-            argv,
-            cwd.map(PathBuf::from),
-            false,
-        )
+        .spawn_tracked_with_preview_barrier(command.to_string(), cwd.map(PathBuf::from), false)
         .await
         .map_err(|e| e.to_string())?;
     // Caller cancellation must tear down the tracked process tree. The outer tool
@@ -122,19 +112,12 @@ async fn foreground_via_primitive(
     ctx: &ToolExecCtx<'_>,
     command: &str,
     cwd: Option<&str>,
-    argv: Option<Vec<String>>,
     args: &serde_json::Value,
 ) -> Result<String, String> {
     let foreground_wait_ms = args.get("foreground_wait_ms").and_then(|v| v.as_u64());
     let result = ctx
         .primitive
-        .execute_bash(
-            command,
-            cwd,
-            AGENT_PLUGIN_ID,
-            argv.as_deref(),
-            foreground_wait_ms,
-        )
+        .execute_bash(command, cwd, AGENT_PLUGIN_ID, foreground_wait_ms)
         .await
         .map_err(|e| e.to_string())?;
     Ok(format_primitive_bash_result(result))
@@ -199,11 +182,10 @@ async fn run_background_bash(
     registry: &std::sync::Arc<crate::core::tools::primitive::BashTaskRegistry>,
     command: &str,
     cwd: Option<&str>,
-    argv: Option<Vec<String>>,
 ) -> Result<String, String> {
     let output_rx = registry.subscribe_output();
     let ticket = registry
-        .spawn_tracked_with_preview_barrier(command.to_string(), argv, cwd.map(PathBuf::from), true)
+        .spawn_tracked_with_preview_barrier(command.to_string(), cwd.map(PathBuf::from), true)
         .await
         .map_err(|error| error.to_string())?;
     let bridge = spawn_live_output_bridge(
@@ -429,12 +411,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
         let ticket = registry
-            .spawn_tracked(
-                "sleep 30".to_string(),
-                None::<Vec<String>>,
-                None::<std::path::PathBuf>,
-                false,
-            )
+            .spawn_tracked("sleep 30".to_string(), None::<std::path::PathBuf>, false)
             .await
             .expect("spawn tracked");
 

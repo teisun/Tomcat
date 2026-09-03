@@ -591,8 +591,28 @@
               "type": "string"
             }
           },
+          "auth": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "command": {
             "type": "string"
+          },
+          "env": {
+            "default": {},
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "headers": {
+            "default": {},
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
           },
           "id": {
             "type": [
@@ -603,10 +623,23 @@
           "name": {
             "type": "string"
           },
+          "oauth": true,
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "type": {
             "type": "string",
             "enum": [
               "add_connector"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
             ]
           }
         }
@@ -690,6 +723,78 @@
       {
         "type": "object",
         "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "login_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "cancel_login_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "logout_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "type"
         ],
         "properties": {
@@ -736,6 +841,12 @@
           },
           "name": {
             "type": "string"
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "type": {
             "type": "string",
@@ -3734,17 +3845,38 @@
             }
           },
           {
-            "description": "轮次预算用尽但仍有未清 finding：计划保持 executing，控制权交还用户。",
+            "description": "轮次预算用尽后的 review 收口事件：正常路径无条件放行进 acceptance 并携带残余； 基础设施连续故障时仍可能以 handoff outcome 交还用户。",
             "type": "object",
             "required": [
               "type"
             ],
             "properties": {
+              "codeReviewPass": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "planId": {
                 "type": [
                   "string",
                   "null"
                 ]
+              },
+              "residualFindings": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
               },
               "rounds": {
                 "type": [
