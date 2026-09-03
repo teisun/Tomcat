@@ -180,6 +180,15 @@ export type ServePlanEvent = {
   transcriptPath?: null | string;
   type: "plan.explorer.started";
 } | {
+  codeReviewPass?: boolean | null;
+  outcome?: null | string;
+  planId?: null | string;
+  residualFindings?: null | string[];
+  rounds?: null | number;
+  sessionId?: null | string;
+  type: "plan.code_review.exhausted";
+  unresolvedFindings?: null | string[];
+} | {
   path?: null | string;
   planId?: null | string;
   sessionId?: null | string;
@@ -233,12 +242,6 @@ export type ServePlanEvent = {
   rounds?: null | number;
   sessionId?: null | string;
   type: "plan.review.warning";
-} | {
-  planId?: null | string;
-  rounds?: null | number;
-  sessionId?: null | string;
-  type: "plan.code_review.exhausted";
-  unresolvedFindings?: null | string[];
 } | {
   planId?: null | string;
   sessionId?: null | string;

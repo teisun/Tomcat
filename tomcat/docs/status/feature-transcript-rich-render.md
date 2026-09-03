@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-03 15:24 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-03 22:09 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 依赖去重与迭代编译剖面已落地：`config` 只开 TOML，`syntect` 改纯 Rust `default-fancy`，删除未直接使用的 `swc_ecma_visit`；项目直连 HTTP 升到 `reqwest 0.13` 并显式保留 `json/stream/form/query/multipart`，与 `rmcp` 共用 rustls，去掉 0.12 + native-tls 双栈。新增 `[profile.fast]`（关 LTO、`codegen-units=16`、开 incremental）供本地迭代，`[profile.release]` 体积优先配置不变。`Cargo.lock` 从 573 降至 541。版本统一升为 CLI `0.1.44`、扩展 `0.1.58`、bundled CLI `0.1.44`。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets -- -D warnings`、`cargo check --all-targets`、`release-version check`、`git diff --check` 全绿；全量 `cargo test` 中 `code_review_test` 12 条失败已单例复现为既有基线，与本次依赖迁移无关。Cov% 未跑，仍为 —。@2026-09-03
 - [✓] **[P0]** Bash/Edit/Plan review 收口及 argv 展示链清理已完成：bash LLM 契约和同步/异步摘要统一为单一完整 `command` 字符串，进程层统一经 `sh -c` / `cmd /C` 执行，删除 argv 双模以消除 `spawn ENOENT`；edit 成功后回传有界、带行号的当前磁盘视图，`NotFound` 时按 `old_content` 的唯一就近行回喂真相；code review 改为首轮全量、后续 mtime 增量审查，默认最多两轮，到界无条件进入 acceptance 并留下残余 finding，P1 计划不符必须引用计划原文。版本统一升为 CLI `0.1.43`、扩展 `0.1.57`、bundled CLI `0.1.43`。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets -- -D warnings`、`cargo test -p tomcat --lib one_line_summary`（5 passed）、`release-version check`、`git diff --check` 全绿；Cov% 未跑，仍为 —。@2026-09-03
 - [✓] **[P0]** `hashline_edit` 在中文、纯符号和空白行不再因行号平移而制造 `HashMismatch`：`compute_line_hash` 收敛为纯内容指纹，行号仅负责定位；一次调用可批量处理互不重叠的原始快照区间，全部锚点先校验、再自下向上套用，所以上方插入/删除不会改变同批下方锚点。无效锚点现在一次汇总 `HashMismatch` / `OutOfRange` 并保证不写盘；提示词与工具契约说明 prose/Markdown 优先 `edit`、新插入文本须重读后再改。验证：hashline 相关 19 项、prompt/catalog、派生工具文档、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 全绿。CLI `0.1.40 → 0.1.41`、扩展 `0.1.54 → 0.1.55`、bundled CLI `0.1.40 → 0.1.41`；纯插件包 `tomcat-vscode-ext-0.1.55.vsix`（1.52 MB，SHA-256 `4f9c9ff5adc8bdfc27ab6b89647da657287dc928512ef2e55d127b85175446e3`）不含 `bin/tomcat`。Cov% 未跑，仍为 —。@2026-09-02
 - [✓] **[P0]** Transcript 通用工具卡不再丢失连接器/未知工具的调用参数：`tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 有可读标签与图标，`tool_call` 只展示内层 MCP arguments；无专属卡片的当前和未来工具都会在展开区显示 JSON 参数（4,000 字符上限且不截断 Unicode）。同时纠正 `ServeConnectionSupervisor` 的冷启动回归：initialize 握手预算从错误的 12 秒恢复为 `max(60 秒, 常规请求 30 秒)`；进程仍存活却未握手时只终止一次并引导 View Logs/Retry，不再杀掉冷启动半成品形成重启活锁；真实进程退出继续走原有有界退避自动恢复。新增慢握手 fake serve 和开发态、纯 VSIX 安装态 E2E（延迟 15 秒仍 ready），另锁住握手超时单次失败和子进程崩溃重试的单测。扩展 `0.1.52 → 0.1.54`；验证：ToolRow focused GUI 测试、`npm run lint`、supervisor 12/12、devhost 慢握手 E2E、完整 `npm run verify:vsix` 与 VSIX 解压校验通过；Cov% 未跑，仍为 —。@2026-09-02
@@ -83,6 +84,10 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- 发布版本：CLI `0.1.44`、扩展 `0.1.58`、`bundledCliVersion=0.1.44`。
+- 构建：新增 Cargo `[profile.fast]`，不影响 `[profile.release]`。
+- HTTP：直接依赖 `reqwest` 从 0.12 升至 0.13；TLS 统一为 rustls + 平台证书验证器，不再编译 native-tls。
+- 依赖治理结论见 `docs/architecture/dependency-governance.md`。
 - 发布版本：CLI `0.1.43`、扩展 `0.1.57`、`bundledCliVersion=0.1.43`。
 - `hashline_edit`：锚点指纹改为纯内容；同一调用的多段非重叠操作统一按原始快照校验并自下向上应用。无效锚点会返回聚合 `HashlineValidationFailed`，写入保持全有或全无。
 - Serve 连接监管：新增扩展内部 `ServeConnectionSupervisor` 状态机（`idle|starting|handshaking|backoff|ready|fatal`）和 webview 内部 `connectionStatus`（`connecting|reconnecting|ready|failed`）；不改变 Rust serve RPC、NDJSON wire 或用户配置格式。
@@ -175,6 +180,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-09-03 22:09）：依赖去重与 `[profile.fast]` 合入。`Cargo.lock` 573→541；CLI `0.1.44` / 扩展 `0.1.58` / bundled CLI `0.1.44`。验证：fmt、clippy `-D warnings`、`cargo check --all-targets`、`release-version check`、`git diff --check` 全绿。Cov% 未跑，仍为 —。
 - 最新补充（2026-08-30 20:10）：CLI `0.1.39` / 扩展 `0.1.51` / bundled CLI `0.1.39`；`package:vsix` 增加 yauzl 解压门禁。验证：`release-version check`、VSIX 解压单测、完整打包流程；本机纯插件 `tomcat-vscode-ext-0.1.51.vsix` SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`。Cov% 未跑，仍为 —。
 - 最新补充（2026-08-29 15:42）：完成态计划不再渲染 Composer 待办 widget，Tomcat Box 右侧留白已移除；截图 E2E 的根节点宽度现在无论成功或超时都会恢复。Plan Preview 自定义编辑器 E2E 的正文引用源行由唯一 token 推导，并把引用计数断言改为相对当前操作，修复错误 `:0` 行号造成的等待超时。`npm run test:e2e:vscode-devhost` 33 passing、`npm run lint:extension`、`git diff --check` 与 `npm run package:vsix` 均通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 为 1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`，包内不含源码、测试、E2E harness、node_modules 或 CLI 二进制。Cov% 未跑，仍为 —。
 
