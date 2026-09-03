@@ -11,5 +11,12 @@ if (!root) {
 }
 
 ReactDOM.createRoot(root).render(
-  <SettingsApp vscodeApi={acquireVsCodeApiLike()} />,
+  <SettingsApp
+    initialRoute={
+      new URLSearchParams(window.location.search).get("route") === "connectors"
+        ? "connectors"
+        : "models"
+    }
+    vscodeApi={acquireVsCodeApiLike()}
+  />,
 );

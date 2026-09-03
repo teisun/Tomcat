@@ -34,6 +34,24 @@ import type {
 } from "../../shared/settingsProtocol";
 import { isSettingsIntent as isSettingsIntentMessage } from "../../shared/settingsProtocol";
 import { resolveWebviewEntryAssets } from "../guiAssets";
+import type {
+  ConnectorInput,
+  ConnectorToolFilter,
+  ConnectorToolView,
+  ConnectorView,
+} from "../../shared/connectorsProtocol";
+import { normalizeConnectorView } from "../../shared/connectorsProtocol";
+
+const CONNECTOR_CAPABILITIES = {
+  add: "add_connector",
+  filter: "set_connector_tool_filter",
+  list: "list_connectors",
+  listTools: "list_connector_tools",
+  login: "login_connector",
+  reload: "reload_connector",
+  remove: "remove_connector",
+  trust: "set_connector_trust",
+} as const;
 
 function getNonce(): string {
   return (
@@ -122,6 +140,38 @@ function parseProviderKeysPayload(
   payload: ListProviderKeysPayload | undefined,
 ): SettingsProviderKeyView[] {
   return payload?.keys?.map(parseProviderKeyView) ?? [];
+}
+
+function parseConnectorsPayload(payload: unknown): ConnectorView[] {
+  if (!isRecord(payload) || !Array.isArray(payload.connectors)) return [];
+  return payload.connectors
+    .map(normalizeConnectorView)
+    .filter((connector): connector is ConnectorView => connector !== null);
+}
+
+function parseConnectorToolsPayload(payload: unknown): ConnectorToolView[] {
+  if (!isRecord(payload) || !Array.isArray(payload.tools)) return [];
+  return payload.tools.flatMap((value) => {
+    if (!isRecord(value)) return [];
+    const modelName = typeof value.modelName === "string"
+      ? value.modelName
+      : typeof value.name === "string"
+        ? value.name
+        : null;
+    if (!modelName) return [];
+    return [{
+      modelName,
+      rawName: typeof value.rawName === "string"
+        ? value.rawName
+        : typeof value.raw_name === "string"
+          ? value.raw_name
+          : modelName,
+      label: typeof value.label === "string" ? value.label : modelName,
+      description: typeof value.description === "string" ? value.description : "",
+      inputSchema: value.inputSchema,
+      enabled: value.enabled !== false,
+    }];
+  });
 }
 
 function toWireModelEntryInput(model: SettingsModelInput): ModelEntryInput {
@@ -220,6 +270,7 @@ export class SettingsPanel implements vscode.Disposable {
     }
   >();
   private route: SettingsRoute = "models";
+  private connectorRefreshTimer?: ReturnType<typeof setInterval>;
   private state: SettingsStateSnapshot = {
     capabilities: {
       listModels: false,
@@ -232,6 +283,9 @@ export class SettingsPanel implements vscode.Disposable {
     extensionVersion: null,
     models: [],
     providerKeys: [],
+    connectors: [],
+    connectorTools: [],
+    selectedConnector: null,
     ready: false,
     route: "models",
     serverVersion: null,
@@ -245,6 +299,10 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   dispose(): void {
+    if (this.connectorRefreshTimer) {
+      clearInterval(this.connectorRefreshTimer);
+      this.connectorRefreshTimer = undefined;
+    }
     for (const pending of this.pendingDomSnapshots.values()) {
       clearTimeout(pending.timeout);
       pending.reject(
@@ -375,6 +433,14 @@ export class SettingsPanel implements vscode.Disposable {
       case "settings.ready":
         this.webviewReady = true;
         this.route = intent.data?.route ?? this.route;
+        if (this.route === "connectors" && !this.connectorRefreshTimer) {
+          this.connectorRefreshTimer = setInterval(() => {
+            void this.refreshState();
+          }, 5000);
+        } else if (this.route !== "connectors" && this.connectorRefreshTimer) {
+          clearInterval(this.connectorRefreshTimer);
+          this.connectorRefreshTimer = undefined;
+        }
         await this.refreshState();
         return;
       case "listModels":
@@ -395,10 +461,54 @@ export class SettingsPanel implements vscode.Disposable {
       case "setProviderKey":
         await this.handleSetProviderKey(intent.data.envName, intent.data.value);
         return;
+      case "listConnectors":
+      case "reloadConnectors":
+        await this.refreshState();
+        return;
+      case "listConnectorTools": {
+        const response = await this.deps.messenger.sendListConnectorTools(intent.data.name);
+        this.state = {
+          ...this.state,
+          connectorTools: response.success ? parseConnectorToolsPayload(response.payload) : [],
+          error: response.success ? null : response.error ?? "Unable to load connector tools.",
+          selectedConnector: intent.data.name,
+        };
+        this.postState();
+        return;
+      }
+      case "addConnector":
+        await this.handleAddConnector(intent.data.connector);
+        return;
+      case "removeConnector":
+      case "reloadConnector":
+      case "loginConnector":
+      case "cancelLoginConnector":
+      case "logoutConnector":
+      case "trustConnector":
+      case "denyConnector":
+        await this.handleConnectorAction(intent.type, intent.data.name);
+        return;
+      case "setConnectorToolFilter": {
+        const connectorScope = this.state.connectors?.find((connector) => connector.name === intent.data.name)?.source === "User"
+          ? "user"
+          : "workspace";
+        const response = await this.deps.messenger.sendSetConnectorToolFilter(
+          intent.data.name,
+          intent.data.filter.include,
+          intent.data.filter.exclude,
+          connectorScope,
+        );
+        await this.refreshState(
+          response.success ? null : response.error ?? "Unable to update connector tools.",
+          response.success ? "Connector tools updated." : null,
+        );
+        return;
+      }
     }
   }
 
   private async handleUpsertModel(
+
     model: SettingsModelInput,
     providerKey?: SettingsProviderKeyInput,
   ): Promise<void> {
@@ -458,8 +568,66 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async handleRemoveModel(modelId: string): Promise<void> {
+  private async handleAddConnector(input: ConnectorInput): Promise<void> {
     try {
+      const response = await this.deps.messenger.sendAddConnector({
+        args: input.args ?? [],
+        command: input.command ?? "",
+        auth: input.auth,
+        env: input.env,
+        headers: input.headers,
+        name: input.name,
+        oauth: input.oauth,
+        scope: input.scope,
+        url: input.url,
+      });
+      if (!response.success) {
+        await this.refreshState(
+          response.error ?? "Unable to add connector.",
+          "Connector add failed.",
+        );
+        return;      }
+      if (input.transport === "http" && input.oauth !== undefined) {
+        await this.refreshState(null, "Authorizing connector…");
+        const login = await this.deps.messenger.sendLoginConnector(input.name);
+        if (login.success && (login.payload as { authorizing?: boolean } | undefined)?.authorizing) {
+          return;
+        }
+        await this.refreshState(
+          login.success ? null : login.error ?? "Connector saved, but OAuth authorization failed.",
+          login.success ? "Connector authorized and connected." : "Connector saved; authorization is still required.",
+        );
+        return;      }
+      await this.refreshState(null, "Connector saved.");
+    } catch (error) {
+      await this.refreshState(String(error), "Connector add failed.");    }
+  }
+
+  private async handleConnectorAction(
+    action: "removeConnector" | "reloadConnector" | "loginConnector" | "logoutConnector" | "trustConnector" | "denyConnector" | "cancelLoginConnector",
+    name: string,
+  ): Promise<void> {
+    const response = action === "removeConnector"
+      ? await this.deps.messenger.sendRemoveConnector(name)
+      : action === "trustConnector" || action === "denyConnector"
+        ? await this.deps.messenger.sendSetConnectorTrust(name, action === "trustConnector")
+        : action === "reloadConnector"
+          ? await this.deps.messenger.sendReloadConnector()
+          : action === "loginConnector"
+            ? await this.deps.messenger.sendLoginConnector(name)
+            : action === "cancelLoginConnector"
+              ? await this.deps.messenger.sendCancelLoginConnector(name)
+              : await this.deps.messenger.sendLogoutConnector(name);
+    await this.refreshState(      response.success ? null : response.error ?? "Connector operation failed.",
+      response.success
+        ? action === "loginConnector"
+          ? "Authorizing connector…"
+          : "Connector updated."
+        : null,
+    );
+  }
+
+  private async handleRemoveModel(modelId: string): Promise<void> {    try {
       const capabilities = this.buildCapabilities(
         await this.deps.ensureInitialized(),
       );
@@ -523,13 +691,17 @@ export class SettingsPanel implements vscode.Disposable {
     const modelsResult = capabilities.listModels
       ? await this.fetchModels(this.state.models)
       : { error: null, models: [] };
+    const connectorsResult = this.route === "connectors" && capabilities.connectorCapabilities?.list
+      ? await this.fetchConnectors(this.state.connectors ?? [])
+      : { error: null, connectors: this.state.connectors ?? [] };
     this.state = {
       capabilities,
-      error: error ?? modelsResult.error ?? providerKeysResult.error,
+      error: error ?? modelsResult.error ?? providerKeysResult.error ?? connectorsResult.error,
       expectedCliVersion: this.deps.expectedCliVersion,
       extensionVersion: this.deps.extensionVersion,
       models: modelsResult.models,
       providerKeys: providerKeysResult.providerKeys,
+      connectors: connectorsResult.connectors,
       ready: true,
       route: this.route,
       serverVersion: initializeResult.serverVersion,
@@ -587,8 +759,20 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async fetchProviderKeys(
-    fallback: SettingsProviderKeyView[],
+  private async fetchConnectors(
+    fallback: ConnectorView[],
+  ): Promise<{ error: string | null; connectors: ConnectorView[] }> {
+    try {
+      const response = await this.deps.messenger.sendListConnectors();
+      return response.success
+        ? { error: null, connectors: parseConnectorsPayload(response.payload) }
+        : { error: response.error ?? "Unable to load connectors.", connectors: fallback };
+    } catch (error) {
+      return { error: String(error), connectors: fallback };
+    }
+  }
+
+  private async fetchProviderKeys(    fallback: SettingsProviderKeyView[],
   ): Promise<{
     error: string | null;
     providerKeys: SettingsProviderKeyView[];
@@ -637,6 +821,16 @@ export class SettingsPanel implements vscode.Disposable {
         initializeResult,
         SERVE_CAPABILITY_UPSERT_MODEL,
       ),
+      connectorCapabilities: {
+        add: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.add),
+        filter: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.filter),
+        list: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.list),
+        listTools: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.listTools),
+        login: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.login),
+        reload: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.reload),
+        remove: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.remove),
+        trust: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.trust),
+      },
     };
   }
 

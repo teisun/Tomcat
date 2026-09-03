@@ -345,6 +345,65 @@ export class TomcatMessenger {
     ) as Promise<TypedResponseFrame<UpsertModelResponse>>;
   }
 
+  sendListConnectors(timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ type: "list_connectors" }, timeoutMs);
+  }
+
+  sendListConnectorTools(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ name, type: "list_connector_tools" }, timeoutMs);
+  }
+
+  sendAddConnector(input: {
+    name: string;
+    command: string;
+    args: string[];
+    url?: string | null;
+    headers?: Record<string, string>;
+    auth?: "none" | "bearer" | "oauth";
+    env?: Record<string, string>;
+    oauth?: unknown;
+    scope?: "user" | "workspace" | null;
+  }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ ...input, type: "add_connector" }, timeoutMs);
+  }
+
+  sendRemoveConnector(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ name, type: "remove_connector" }, timeoutMs);
+  }
+
+  sendReloadConnector(timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ type: "reload_connector" }, timeoutMs);
+  }
+  sendSetConnectorTrust(name: string, trusted: boolean, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ name, trusted, type: "set_connector_trust" }, timeoutMs);
+  }
+
+  sendTestConnector(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ name, type: "test_connector" }, timeoutMs);
+  }
+
+  sendLoginConnector(name: string, timeoutMs = 300_000): Promise<ResponseFrame> {
+    return this.request({ name, type: "login_connector" }, timeoutMs);
+  }
+
+  sendLogoutConnector(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ name, type: "logout_connector" }, timeoutMs);
+  }
+
+  sendCancelLoginConnector(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ name, type: "cancel_login_connector" }, timeoutMs);
+  }
+  sendSetConnectorToolFilter(
+    name: string,
+    include: string[],
+    exclude: string[],
+    scope: "user" | "workspace" = "workspace",
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request({ exclude, include, name, scope, type: "set_connector_tool_filter" }, timeoutMs);
+  }
+
+
   sendRemoveModel(
     modelId: string,
     timeoutMs = this.timeoutMs(),

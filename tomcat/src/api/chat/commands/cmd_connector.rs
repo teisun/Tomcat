@@ -28,6 +28,12 @@ pub enum ConnectorCommand {
     Test {
         name: String,
     },
+    Login {
+        name: String,
+    },
+    Logout {
+        name: String,
+    },
     Reload,
     Tools {
         name: String,
@@ -63,6 +69,12 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
         [command, sub, name] if command == "/connector" && sub == "test" => {
             ChatCommand::Connector(ConnectorCommand::Test { name: name.clone() })
         }
+        [command, sub, name] if command == "/connector" && sub == "login" => {
+            ChatCommand::Connector(ConnectorCommand::Login { name: name.clone() })
+        }
+        [command, sub, name] if command == "/connector" && sub == "logout" => {
+            ChatCommand::Connector(ConnectorCommand::Logout { name: name.clone() })
+        }
         [command, sub] if command == "/connector" && sub == "reload" => {
             ChatCommand::Connector(ConnectorCommand::Reload)
         }
@@ -97,13 +109,15 @@ pub(crate) async fn run(ctx: &ChatContext, command: ConnectorCommand) -> ChatCom
         ConnectorCommand::Trust { name } => trust(ctx, &name).await,
         ConnectorCommand::Deny { name } => deny(ctx, &name),
         ConnectorCommand::Test { name } => test(ctx, &name).await,
+        ConnectorCommand::Login { name } => login(ctx, &name).await,
+        ConnectorCommand::Logout { name } => logout(ctx, &name),
         ConnectorCommand::Reload => reload(ctx).await,
     }
 }
 
 fn usage() -> ChatCommand {
     ChatCommand::UsageError {
-        message: "用法错误：/connector list | add <name> <command> [args...] | remove <name> | trust|deny|test <name> | tools <name> [--include <glob>]... [--exclude <glob>]... | reload".to_string(),
+        message: "用法错误：/connector list | add <name> <command> [args...] | remove <name> | trust|deny|test <name> | login|logout <name> | tools <name> [--include <glob>]... [--exclude <glob>]... | reload".to_string(),
     }
 }
 
@@ -258,6 +272,10 @@ async fn add(
         command,
         args,
         env: Default::default(),
+        url: None,
+        auth: None,
+        headers: Default::default(),
+        oauth: None,
         cwd: None,
         trusted: false,
         integrity: None,
@@ -329,6 +347,31 @@ async fn test(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
     match registry.mcp_manager().reconnect_server(name).await {
         Ok(()) => println!("[connector] 测试连接成功: {name}"),
         Err(error) => println!("[connector] 测试连接失败: {error}"),
+    }
+    ChatCommandOutcome::Handled
+}
+
+async fn login(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
+    let Some(registry) = registry(ctx) else {
+        println!("[connector] 模块未启用。");
+        return ChatCommandOutcome::Handled;
+    };
+    match registry.mcp_manager().login_server(name).await {
+        Ok(()) => println!("[connector] OAuth 授权成功并已连接: {name}"),
+        Err(error) => println!("[connector] OAuth 授权失败: {error}"),
+    }
+    ChatCommandOutcome::Handled
+}
+
+fn logout(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
+    let Some(registry) = registry(ctx) else {
+        println!("[connector] 模块未启用。");
+        return ChatCommandOutcome::Handled;
+    };
+    match registry.mcp_manager().logout_server(name) {
+        Ok(true) => println!("[connector] 已退出 OAuth: {name}"),
+        Ok(false) => println!("[connector] 没有保存的 OAuth 凭证: {name}"),
+        Err(error) => println!("[connector] 退出 OAuth 失败: {error}"),
     }
     ChatCommandOutcome::Handled
 }

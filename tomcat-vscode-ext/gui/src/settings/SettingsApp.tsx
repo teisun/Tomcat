@@ -29,6 +29,7 @@ import {
 } from "./relayDerive";
 import { KeySlotCombobox, type KeySlotOption } from "./KeySlotCombobox";
 import { isValidKeySlotName } from "./keySlot";
+import { ConnectorsSettingsView } from "./ConnectorsSettingsView";
 
 type FormState = SettingsModelInput;
 type FormMode = "create" | "edit";
@@ -525,8 +526,10 @@ function send(
 
 export function SettingsApp({
   vscodeApi,
+  initialRoute = "models",
 }: {
   vscodeApi: VsCodeApiLike<SettingsIntent>;
+  initialRoute?: "models" | "connectors";
 }) {
   const [state, setState] = useState<SettingsStateSnapshot>({
     capabilities: {
@@ -539,8 +542,7 @@ export function SettingsApp({
     models: [],
     providerKeys: [],
     ready: false,
-    route: "models",
-  });
+    route: initialRoute,  });
   const [dialogKind, setDialogKind] = useState<DialogKind>("official");
   const [form, setForm] = useState<FormState>(() => createEmptyForm());
   const [draftApiKey, setDraftApiKey] = useState("");
@@ -595,14 +597,13 @@ export function SettingsApp({
     window.addEventListener("message", handleMessage);
     send(vscodeApi, {
       data: {
-        route: "models",
-      },
+        route: initialRoute,      },
       type: "settings.ready",
     });
     return () => {
       window.removeEventListener("message", handleMessage);
     };
-  }, [vscodeApi]);
+  }, [vscodeApi, initialRoute]);
 
   useEffect(() => {
     if (!keySlotRefreshFeedback) {
@@ -1172,12 +1173,16 @@ export function SettingsApp({
   const saveDisabled = saveDisabledReason !== null;
   const serveVersionWarning = buildServeVersionWarning(state);
 
+  if (state.route === "connectors") {
+    return <ConnectorsSettingsView state={state} vscodeApi={vscodeApi} />;
+  }
+
   return (
     <div className="tc-settings-shell">
       <aside className="tc-settings-shell__nav">
         <div className="tc-settings-shell__brand">Tomcat Settings</div>
         <button
-          className="tc-settings-nav__item tc-settings-nav__item--active"
+          className={`tc-settings-nav__item${state.route === "models" ? " tc-settings-nav__item--active" : ""}`}
           type="button"
         >
           Models
@@ -1187,6 +1192,18 @@ export function SettingsApp({
         </button>
         <button className="tc-settings-nav__item" disabled type="button">
           Tools
+        </button>
+        <button
+          className="tc-settings-nav__item"
+          onClick={() =>
+            send(vscodeApi, {
+              data: { route: "connectors" },
+              type: "settings.ready",
+            })
+          }
+          type="button"
+        >
+          Connectors
         </button>
         <div
           className="tc-settings-shell__version"

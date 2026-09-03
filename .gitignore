@@ -38,6 +38,7 @@ build/
 node_modules/
 test-stuff/
 .tomcat/shots/
+tomcat/assets/cache/
 
 ### Env (API keys, do not commit) ###
 .env

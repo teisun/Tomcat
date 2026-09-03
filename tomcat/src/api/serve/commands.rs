@@ -12,13 +12,15 @@ use base64::Engine as _;
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracing::warn;
 
 use crate::api::chat::commands::{
     checkpoint_kind_label, compact_session, restore_core, RestoreCoreReport,
 };
 use crate::core::connector::mcp::config::{
-    remove_global_server, set_global_tool_filter, upsert_global_server, McpServerConfig, ToolFilter,
+    upsert_global_server, upsert_project_server, McpOAuthConfig, McpServerConfig, ToolFilter,
 };
+use crate::core::connector::mcp::manager::ServerState;
 use crate::core::llm::{
     list_model_views_with_prefs, list_provider_keys, remove_user_model, set_provider_key,
     upsert_user_model, ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind,
@@ -1312,6 +1314,7 @@ pub(crate) async fn handle_command(
                 .statuses()
                 .into_iter()
                 .map(|status| {
+                    let configured = connector.mcp_manager().configured_server(&status.name);
                     json!({
                         "name": status.name,
                         "source": status.source.as_str(),
@@ -1319,9 +1322,27 @@ pub(crate) async fn handle_command(
                         "trust": status.trust,
                         "toolCount": status.tool_count,
                         "resourceCount": status.resource_count,
+                        "transport": if configured.as_ref().is_some_and(|server| server.config.url.is_some()) { "http" } else { "stdio" },
+                        "url": configured.as_ref().and_then(|server| server.config.url.clone()),
+                        "command": configured.as_ref().map(|server| server.config.command.clone()),
+                        "oauthConfigured": configured.as_ref().is_some_and(|server| {
+                            server.config.oauth.is_some()
+                                || server.config.auth.as_deref() == Some("oauth")
+                                || status.state.code() == "needs_authorization"
+                        }),
+                        "auth": configured.as_ref().and_then(|server| server.config.auth.clone()),
+                        "error": match &status.state {
+                            ServerState::Failed(error) => Some(error.clone()),
+                            _ => None,
+                        },
+                        "toolFilter": configured.as_ref().map(|server| {
+                            json!({
+                                "include": server.config.tool_filter.include,
+                                "exclude": server.config.tool_filter.exclude,
+                            })
+                        }),
                     })
-                })
-                .collect::<Vec<_>>();
+                })                .collect::<Vec<_>>();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
@@ -1341,21 +1362,29 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let tools = connector
-                .mcp_manager()
-                .tool_defs(&name)
-                .into_iter()
-                .map(|tool| {
-                    let label = tool.raw_name.clone();
-                    json!({
-                        "modelName": tool.model_name,
-                        "rawName": tool.raw_name,
-                        "label": label,
-                        "description": tool.description,
-                        "inputSchema": tool.input_schema,
-                    })
+            let tools = match connector.mcp_manager().list_tools(&name) {
+                Ok(tools) => tools,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            }
+            .into_iter()
+            .map(|tool| {
+                json!({
+                    "modelName": tool.name,
+                    "rawName": tool.raw_name,
+                    "label": tool.raw_name,
+                    "description": tool.description,
+                    "enabled": tool.enabled,
                 })
-                .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
@@ -1367,11 +1396,63 @@ pub(crate) async fn handle_command(
             name,
             command,
             args,
+            url,
+            mut headers,
+            oauth,
+            env,
+            auth,
+            scope,
         } => {
+            let static_bearer = headers.iter().find_map(|(key, value)| {
+                key.eq_ignore_ascii_case("authorization")
+                    .then(|| {
+                        value
+                            .strip_prefix("Bearer ")
+                            .or_else(|| value.strip_prefix("bearer "))
+                    })
+                    .flatten()
+                    .map(ToOwned::to_owned)
+            });
+            let has_authorization_header = headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("authorization"));
+            if has_authorization_header && static_bearer.is_none() {
+                return Err(AppError::Config(
+                    "Authorization headers must use the Bearer scheme".to_string(),
+                ));
+            }
+            if has_authorization_header && auth.as_deref() == Some("oauth") {
+                return Err(AppError::Config(
+                    "OAuth connectors cannot include a static Authorization header".to_string(),
+                ));
+            }
+            if auth.as_deref() == Some("bearer") && static_bearer.is_none() {
+                return Err(AppError::Config(
+                    "Bearer connectors require an Authorization header".to_string(),
+                ));
+            }
+            if auth.as_deref() == Some("none") && static_bearer.is_some() {
+                return Err(AppError::Config(
+                    "auth=none cannot be combined with an Authorization header".to_string(),
+                ));
+            }
+            headers.retain(|key, _| !key.eq_ignore_ascii_case("authorization"));
+            let auth = auth.or_else(|| static_bearer.as_ref().map(|_| "bearer".to_string()));
+            let oauth = oauth
+                .map(serde_json::from_value::<McpOAuthConfig>)
+                .transpose()
+                .map_err(|error| {
+                    AppError::Config(format!("invalid connector oauth config: {error}"))
+                })?;
+            let token_resource = url.clone();
             let config = McpServerConfig {
                 command,
                 args,
-                env: Default::default(),
+                url,
+                auth,
+                headers,
+                oauth,
+                env,
                 cwd: None,
                 trusted: false,
                 integrity: None,
@@ -1379,7 +1460,20 @@ pub(crate) async fn handle_command(
                 call_timeout_ms: 120_000,
                 tool_filter: ToolFilter::default(),
             };
-            if let Err(error) = upsert_global_server(&state.cfg, name.clone(), config) {
+            let use_workspace = scope.as_deref() == Some("workspace");
+            let workspace_root = resolve_connector_registry(&state)
+                .map(|connector| connector.mcp_manager().workspace_root().to_path_buf())
+                .unwrap_or_else(|_| {
+                    resolve_active_slot(&state)
+                        .map(|slot| slot.ctx.scope_services.agent_workspace_dir.clone())
+                        .unwrap_or_default()
+                });
+            let result = if use_workspace {
+                upsert_project_server(&workspace_root, name.clone(), config)
+            } else {
+                upsert_global_server(&state.cfg, name.clone(), config)
+            };
+            if let Err(error) = result {
                 send_error(
                     &state,
                     id,
@@ -1388,8 +1482,15 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             }
-            if let Ok(connector) = resolve_connector_registry(&state) {
-                if let Err(error) = connector.reload().await {
+            if let Some(token) = static_bearer {
+                let connector = resolve_connector_registry(&state)?;
+                connector
+                    .mcp_manager()
+                    .save_static_bearer(&name, token, token_resource)?;
+            }
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
                     send_error(
                         &state,
                         id,
@@ -1398,6 +1499,13 @@ pub(crate) async fn handle_command(
                     )?;
                     return Ok(());
                 }
+            };
+            connector.mcp_manager().reload_configuration(&state.cfg)?;
+            if use_workspace {
+                connector.mcp_manager().approve(&name)?;
+            }
+            if let Err(error) = connector.mcp_manager().connect_server(&name).await {
+                warn!(server = %name, error = %error, "connector configuration saved but server is not ready yet");
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
@@ -1406,7 +1514,22 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::RemoveConnector { id, name } => {
-            let removed = match remove_global_server(&state.cfg, &name) {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let removed = match connector
+                .mcp_manager()
+                .remove_configured_server(&name, &state.cfg)
+            {
                 Ok(removed) => removed,
                 Err(error) => {
                     send_error(
@@ -1418,16 +1541,8 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            if let Ok(connector) = resolve_connector_registry(&state) {
-                if let Err(error) = connector.reload().await {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
+            if removed {
+                connector.reload().await?;
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
@@ -1496,6 +1611,72 @@ pub(crate) async fn handle_command(
                 Some(json!({ "name": name, "connected": true })),
             )))?;
         }
+        ServeCommand::LoginConnector { id, name } => {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let manager = connector.mcp_manager();
+            let login_name = name.clone();
+            tokio::spawn(async move {
+                if let Err(error) = manager.login_server(&login_name).await {
+                    warn!(server = %login_name, error = %error, "connector OAuth login failed");
+                }
+            });
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name, "authorizing": true })),
+            )))?;
+        }
+        ServeCommand::CancelLoginConnector { id, name } => {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let cancelled = connector.mcp_manager().cancel_login(&name);
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name, "cancelled": cancelled })),
+            )))?;
+        }
+        ServeCommand::LogoutConnector { id, name } => {
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let removed = connector.mcp_manager().logout_server(&name)?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "name": name, "loggedOut": removed })),
+            )))?;
+        }
         ServeCommand::ReloadConnector { id } => {
             let connector = match resolve_connector_registry(&state) {
                 Ok(connector) => connector,
@@ -1529,9 +1710,24 @@ pub(crate) async fn handle_command(
             name,
             include,
             exclude,
+            scope: _,
         } => {
-            if let Err(error) =
-                set_global_tool_filter(&state.cfg, &name, ToolFilter { include, exclude })
+            let connector = match resolve_connector_registry(&state) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let filter = ToolFilter { include, exclude };
+            if let Err(error) = connector
+                .mcp_manager()
+                .set_configured_tool_filter(&name, filter, &state.cfg)
             {
                 send_error(
                     &state,

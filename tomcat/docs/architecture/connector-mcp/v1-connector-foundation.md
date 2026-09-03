@@ -1,10 +1,10 @@
 # 连接器(Connector)模块：把 MCP / CLI / A2A 等外部能力接入 Agent 工具面（本期实现 MCP 连接器）
 
-> 适用范围：给 Tomcat 增加一个通用**连接器(Connector)模块**——统一「连接外部能力、发现其工具、把工具接入 Agent 工具面、把结果（含文本/图片）回流给模型」这件事。连接器类型规划为 **MCP / CLI / A2A** 三种；**本期只实现 MCP 连接器**（CLI/A2A 在架构与文档里预留为未来类型，不写实现），且 MCP 传输**本期只落 stdio**（Streamable HTTP / OAuth 已写进设计、列为紧跟子阶段，见 §3.1 R2 与「传输」章）。首个落地目标是 `@playwright/mcp`（交互式浏览器验收），为**前端 UI 验收计划**（规划产物 `frontend_ui_acceptance_capability_a3f1bb7e`，位于用户 `~/.cursor/plans/`，不在本仓）的 Phase 2 提供能力底座。
+> 适用范围：给 Tomcat 增加通用连接器模块。连接器类型规划为 MCP / CLI / A2A；本期已实现 MCP 的 stdio 与 Streamable HTTP 传输，HTTP OAuth/PKCE 由标准 metadata discovery、loopback callback 与安全 token store 驱动。CLI/A2A 仍只保留扩展边界。
 > 上位规范：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（本文 `## 1`–`## 10` 对应规范 §1–§10）。相邻方案：[`plugin-system-overview.md`](../plugin-system-overview.md)（动态工具注册的现成范式）、[`skill-system.md`](../skill-system.md)（内置资产物化范式）、[`tools/read.md`](../tools/read.md)（图片回流的单一事实源）。
 > 单一事实源：连接器抽象（`Connector` trait / `ConnectorType {Mcp, Cli, A2a}` / `ConnectorRegistry`）在 `core/connector/mod.rs`；**MCP 连接器**的运行时事实源在 `core/connector/mcp/manager.rs::McpManager`；工具暴露给模型经 `core/llm/system_prompt.rs::ToolSurface`；图片回流由 `core/agent_loop/tool_dispatcher.rs::extract_tool_result_media` 使用 `ChatMessageContentPart` 与 `openai_files` 共享原语完成。`core/connector/` 已在当前工作树落地；CLI/A2A 只保留枚举值，尚未创建实现目录。
 
-**一句话定位**：连接器模块 = 「把外部能力（MCP/CLI/A2A）暴露的工具，当成 Tomcat 自己的工具用」的统一框架；**本期实现的 MCP 连接器**做三件事——**把 server 拉起来（config 即信任、Cursor 对齐；stdio spawn）**、**把它的工具目录并进模型看得见的工具面**、**把结果（尤其截图）用 Tomcat 已有的 `follow_up_parts` 图片回流管道喂回模型**。不重写图片管道、不新增门禁类型、MCP 传输本期只 stdio；CLI/A2A 是同一框架下的未来连接器类型。
+**一句话定位**：连接器模块 = 把外部能力暴露的工具安全地接入 Tomcat。当前 MCP 支持 stdio 与 Streamable HTTP；HTTP 连接器可使用无认证、Bearer/custom headers 或标准 OAuth/PKCE。MCP 目录仍由 `McpManager` 维护并通过 v2 渐进式披露提供。
 
 ---
 
@@ -235,9 +235,10 @@ PreSpawn 信任检查（spawn 前唯一关卡，默认无感放行）
 | **P6 启动装配与工具生命周期（R9）** | `ConnectorRegistry`（含 MCP 连接器）注入 `GlobalServices`；`spawn_connect_all()` 对已信任 server **后台并行预连**（非阻塞，首轮/serve handshake 不 await）；事件协调器在 Ready `register_tool`、NotReady `unregister_plugin_tools`，只持 `Weak<dyn ToolRegistry>` | `api/chat/context.rs`（按总开关构造并注入）、`api/chat/run_loop/mod.rs`（每轮入口懒触发）、`api/chat/session_runtime.rs::GlobalServices`（持有 `connector_registry`） | `context::tests::connector_registry_constructed_when_enabled`、`connector::tests::{startup_connect_is_non_blocking,ready_mcp_tools_register_into_the_shared_tool_registry}`、E2E `E2E-MCP-001` | 开机悄悄并行去连、不等它；连好才挂工具，断了就撤下，避免菜单里留必失败的工具。 |
 | **P7 命令面（本期 CLI + serve，无 webview；R-C1/R-C2/R11）** | 「添加」`/connector add` + serve `add_connector`；「查看/管理」`/connector list\|trust\|deny\|remove\|test` + serve 对等；`list` 富状态（来源/连接态/工具数+资源数/信任态）、`reload`、`tools <server>`（按 `toolFilter` 裁剪）与 serve `list_connector_tools` 对等 | `api/chat/commands/cmd_connector.rs` + `commands/parse.rs`（Chat）、`api/serve/types.rs::ServeCommand` + `commands.rs` + `control.rs`；写盘统一走 `config.rs::{upsert_global_server,remove_global_server,set_global_tool_filter}` 后 reload | `cmd_connector_test::cmd_connector_add_and_list_round_trips_filtered_tools`、`control_test::serve_connector_commands_keep_list_light_and_tools_on_demand` | 本期命令行 + 直接改 `mcp.json`（不做界面）；命令能干 Cursor 界面能干的事：看状态、重连、裁剪工具，落到同一份配置。 |
 
-> **紧跟子阶段（本期只出设计，不实现）**：
-> - **P8 MCP 远程传输**：`core/connector/mcp/transport_http.rs`（Streamable HTTP，2026-07-28 单端点）+ OAuth（认证远程 server）。`McpTransport` trait 已在 P2 留好接缝；`rmcp` 已支持 streamable http，增量集中在 OAuth 授权流与 `url`/`headers` 配置。
-> - **P9 其它连接器类型**：CLI/A2A 当前只保留 `ConnectorType::{Cli,A2a}` 枚举值；真正落地时再定义其目录、协议和工具路由，不能把尚不存在的目录写成已交付。
+> **已实现：**
+> - **P8 MCP 远程传输**：`core/connector/mcp/transport.rs::HttpTransport` 使用 rmcp Streamable HTTP client（2026-07-28 单端点）；`McpServerConfig.url` 与 `headers` 支持无认证、Bearer/custom headers。
+> - **P8 OAuth**：`core/connector/mcp/oauth.rs` 按 401 challenge → protected-resource metadata → RFC 8414/OIDC metadata 发现端点，支持预注册 client_id、动态注册、PKCE、token refresh 与 `connector-oauth.json` 安全存储；`oauth_callback.rs` 使用动态 loopback 端口并校验 state。
+> - **P9 其它连接器类型**：CLI/A2A 当前只保留 `ConnectorType::{Cli,A2a}` 枚举值；真正落地时再定义其目录、协议和工具路由。
 
 #### 3.2.1 P5 图片回流细节（复用而非新建）
 
@@ -282,7 +283,7 @@ CallToolResult.content[i]
 | `callTimeoutMs` | number | 否 | `120000` | 单次 `tools/call` 超时 | 一次调用最多等多久。 |
 | `toolFilter` | `{include?,exclude?}` | 否 | 全部 | glob 裁剪暴露给模型的工具子集（R11 的声明式 per-tool 控制） | 只暴露/排除部分工具。 |
 
-> **传输隐含 stdio**：`mcp.json` 无 `type`/`transport` 字段——本期只 stdio，`command`+`args` 即 stdio 语义。远程 Streamable HTTP（P8）落地时按 Cursor/生态惯例用 `"url"` 键区分（有 `url` 即 HTTP，有 `command` 即 stdio），不引入 `transport` 枚举。
+> **HTTP/OAuth 已实现**：`core/connector/mcp/transport.rs::HttpTransport` 使用 rmcp 的 Streamable HTTP client，支持无认证、Bearer 与 custom headers；`core/connector/mcp/oauth.rs` 实现 protected-resource → authorization-server/OIDC metadata discovery、动态 client registration、PKCE、token refresh 与安全文件存储；`oauth_callback.rs` 绑定 `127.0.0.1:0` 并校验 state。
 
 主配置 `tomcat.config.toml` 侧（`AppConfig.connector`）：
 
@@ -383,7 +384,7 @@ CallToolResult.content[i]
 
 > **`@playwright/mcp` 的截图特例（由受忽略的真实 LLM E2E 覆盖）**：它只有在 `browser_take_screenshot` **省略 `filename` 且不传 `fullPage=true`** 时，才把 PNG 作为 MCP `image` block 返回；指定文件名或全页截图会只落盘、返回 Markdown 文件链接，模型看不到图。故 `assets/skills/verify/SKILL.md` 与 MCP 工具描述都明确该约束；命名/全页截图只用于人工保留文件，不能充当视觉回流证据。
 
-### 4.4 MCP 传输（本期 stdio；Streamable HTTP + OAuth 设计紧跟）
+### 4.4 MCP 传输（stdio 与 Streamable HTTP；OAuth 为 HTTP 的认证层）
 
 MCP 规范（2026-07-28）定义两种一等传输；本模块把它们做成 `McpTransport` trait 后面的可插拔实现：
 
@@ -392,14 +393,14 @@ MCP 规范（2026-07-28）定义两种一等传输；本模块把它们做成 `M
 ──────────────    ─────────────────────────────────     ────    ──────────────────────────────────
 stdio             client 把 server 当子进程,               ✅本期   core/connector/mcp/transport.rs::StdioTransport
                   stdin/stdout 上跑 newline-JSON-RPC             （经 rmcp；@playwright/mcp 默认；零网络零 OAuth）
-Streamable HTTP   单 POST 端点(/mcp)，回 JSON 或            设计    transport_http.rs（P8；rmcp 已支持；远程/托管 server）
+Streamable HTTP   单 POST 端点(/mcp)，回 JSON 或            ✅已实现  core/connector/mcp/transport.rs::HttpTransport（rmcp；远程/托管 server）
                   request-scoped SSE 流                          @playwright/mcp 加 --port 8931 即此模式
-OAuth             认证远程 server 的授权流                  设计    P8（最重、单列；mcp.json 该 server 加 url/headers/auth）
+OAuth             认证远程 server 的授权流                  ✅已实现  core/connector/mcp/oauth.rs + oauth_callback.rs；标准 discovery/PKCE/refresh
 HTTP+SSE(旧)      两端点                                   不做    已废弃(2025-03)，不实现
 ```
 
 - **纠正误解**：stdio 不是"简化版"，是规范里 "All versions" 的一等且本地最常见传输；"MCP 都是 HTTP" 指的是远程/托管场景。本期视觉验收（本地浏览器）用 stdio 完全够。
-- **接缝**：`McpTransport` trait（P2）让 P8 加 `HttpTransport` 时不动 `McpManager` 与上层；`rmcp` 同一 crate 已支持 streamable http，故增量集中在 OAuth 授权流与 `url`/`headers` 配置。
+- **接缝**：`McpTransport` trait 后面已有 `HttpTransport`；`rmcp` 同一 crate 提供 Streamable HTTP client，OAuth 增量集中在标准 discovery、PKCE、loopback callback、token store 与 `url`/`headers` 配置。
 - **证据**：MCP 规范 `modelcontextprotocol.io/specification/2026-07-28/basic/transports`（stdio + Streamable HTTP 两种一等传输，HTTP+SSE 已废弃）；`@playwright/mcp` 默认 stdio、`--port` 启 HTTP（`github.com/microsoft/playwright-mcp`）。
 
 ---

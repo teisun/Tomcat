@@ -3,5 +3,7 @@ pub mod config;
 pub mod executor;
 pub mod manager;
 pub mod naming;
+pub mod oauth;
+pub mod oauth_callback;
 pub mod transport;
 pub mod trust;

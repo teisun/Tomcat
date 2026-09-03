@@ -32,11 +32,40 @@ pub struct ToolFilter {
     pub exclude: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthConfig {
+    /// Optional pre-registered public client identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Name of an environment variable used only when the provider requires a confidential client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_metadata_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
+    /// Stdio executable. Empty when `url` selects Streamable HTTP.
+    #[serde(default)]
     pub command: String,
+    #[serde(default)]
     pub args: Vec<String>,
+    /// Streamable HTTP endpoint. Mutually exclusive with `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -60,10 +89,61 @@ impl McpServerConfig {
                 "MCP server name cannot be empty".to_string(),
             ));
         }
-        if self.command.trim().is_empty() {
+        let has_command = !self.command.trim().is_empty();
+        let has_url = self
+            .url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty());
+        if self.url.is_some() && !has_url {
             return Err(AppError::Config(format!(
-                "MCP server '{server_name}' command cannot be empty"
+                "MCP server '{server_name}' url cannot be empty"
             )));
+        }
+        if has_command == has_url {
+            return Err(AppError::Config(format!(
+                "MCP server '{server_name}' must define exactly one of command or url"
+            )));
+        }
+        if let Some(auth) = self.auth.as_deref() {
+            if !matches!(auth, "none" | "bearer" | "oauth") {
+                return Err(AppError::Config(format!(
+                    "MCP server '{server_name}' has unsupported auth mode '{auth}'"
+                )));
+            }
+        }
+        let has_auth_header = self
+            .headers
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("authorization"));
+        match self.auth.as_deref() {
+            Some("none") if has_auth_header || self.oauth.is_some() => {
+                return Err(AppError::Config(format!(
+                    "MCP server '{server_name}' auth=none cannot include OAuth or Authorization"
+                )));
+            }
+            Some("bearer") if self.oauth.is_some() => {
+                return Err(AppError::Config(format!(
+                    "MCP server '{server_name}' bearer auth cannot include OAuth config"
+                )));
+            }
+            Some("oauth") if has_auth_header => {
+                return Err(AppError::Config(format!(
+                    "MCP server '{server_name}' OAuth auth cannot include Authorization"
+                )));
+            }
+            _ => {}
+        }
+        if let Some(url) = self.url.as_deref() {
+            let parsed = reqwest::Url::parse(url).map_err(|error| {
+                AppError::Config(format!(
+                    "MCP server '{server_name}' has invalid url: {error}"
+                ))
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                return Err(AppError::Config(format!(
+                    "MCP server '{server_name}' url must be an http(s) URL"
+                )));
+            }
         }
         if self.startup_timeout_ms == 0 || self.call_timeout_ms == 0 {
             return Err(AppError::Config(format!(
@@ -226,6 +306,43 @@ pub fn remove_global_server(cfg: &AppConfig, name: &str) -> Result<bool, AppErro
     Ok(removed)
 }
 
+pub fn upsert_project_server(
+    workspace_root: &Path,
+    name: String,
+    server: McpServerConfig,
+) -> Result<(), AppError> {
+    server.validate(&name)?;
+    let path = project_mcp_path(workspace_root);
+    let mut file = read_mcp_file(&path)?;
+    file.mcp_servers.insert(name, server);
+    write_mcp_file(&path, &file)
+}
+
+pub fn remove_project_server(workspace_root: &Path, name: &str) -> Result<bool, AppError> {
+    let path = project_mcp_path(workspace_root);
+    let mut file = read_mcp_file(&path)?;
+    let removed = file.mcp_servers.remove(name).is_some();
+    if removed {
+        write_mcp_file(&path, &file)?;
+    }
+    Ok(removed)
+}
+
+pub fn set_project_tool_filter(
+    workspace_root: &Path,
+    name: &str,
+    tool_filter: ToolFilter,
+) -> Result<(), AppError> {
+    let path = project_mcp_path(workspace_root);
+    let mut file = read_mcp_file(&path)?;
+    let server = file
+        .mcp_servers
+        .get_mut(name)
+        .ok_or_else(|| AppError::Tool(format!("unknown project MCP server: {name}")))?;
+    server.tool_filter = tool_filter;
+    write_mcp_file(&path, &file)
+}
+
 pub fn set_global_tool_filter(
     cfg: &AppConfig,
     name: &str,
@@ -270,7 +387,9 @@ const fn default_call_timeout_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_floating_npm_version, load_servers, project_mcp_path, McpConfigSource};
+    use super::{
+        is_floating_npm_version, load_servers, project_mcp_path, McpConfigSource, McpServerConfig,
+    };
     use crate::infra::config::get_work_dir;
     use crate::AppConfig;
 
@@ -329,6 +448,29 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].config.command, "project");
         assert_eq!(servers[0].source, McpConfigSource::Project);
+    }
+
+    #[test]
+    fn http_server_requires_exactly_one_transport_selector() {
+        let both: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "node",
+            "args": [],
+            "url": "https://example.test/mcp"
+        }))
+        .expect("config");
+        assert!(both.validate("both").is_err());
+
+        let http: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "url": "https://example.test/mcp"
+        }))
+        .expect("HTTP config");
+        assert!(http.validate("http").is_ok());
+
+        let invalid: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "url": "file:///tmp/mcp"
+        }))
+        .expect("invalid URL config parses before validation");
+        assert!(invalid.validate("invalid").is_err());
     }
 
     #[test]

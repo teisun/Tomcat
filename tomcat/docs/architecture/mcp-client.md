@@ -8,7 +8,7 @@
 
 ## 一、这个子系统解决什么问题（一句话）
 
-把**外部能力**（MCP / CLI / A2A server）暴露的工具，**当成 Tomcat 自己的工具给模型用**——统一「连接 → 发现工具 → 接入工具面 → 结果（含截图）回流」这条链路。本期落地的是 **MCP 连接器**（stdio 传输，首个目标 `@playwright/mcp` 交互式浏览器验收）。
+把外部能力（MCP / CLI / A2A server）安全地接入 Tomcat。当前 MCP 连接器同时支持 stdio 与 Streamable HTTP；HTTP 可使用无认证、Bearer/custom headers 或标准 OAuth/PKCE。工具目录仍通过 v2 的 `tool_search` → `tool_describe` → `tool_call` 渐进式发现。
 
 ```text
    外部 server (MCP: @playwright/mcp …)          Tomcat Agent
@@ -34,7 +34,7 @@ ToolRegistry】、随 list_tools                tool_search / tool_describe / to
 ✘ 「进前缀」导致缓存失稳 + token 爆炸
 ```
 
-- **v1 仍权威的部分**：传输（R2，stdio + HTTP/OAuth 规划）、图片回流（R5）、信任模型（R7，config 即信任）、配置形状（R10）。
+- **v1 仍权威的部分**：传输（R2，stdio + Streamable HTTP + OAuth）、图片回流（R5）、信任模型（R7）、配置形状（R10）。
 - **v2 修订的部分**：v1 §3.1 **R4「MCP 工具进 `ToolRegistry` / 进前缀」+ R9「Ready 即注册」** 被推翻，改走渐进式披露。
 - **冲突时**：以 v2 为准。
 
@@ -62,7 +62,7 @@ ToolRegistry】、随 list_tools                tool_search / tool_describe / to
 | 文档 | 内容 | 何时读 |
 |------|------|--------|
 | **本文** `mcp-client.md` | 总纲 / 导航 / 两代演进 / 病根 | 先读，建立全局 |
-| [`connector-mcp/v1-connector-foundation.md`](./connector-mcp/v1-connector-foundation.md) | v1 基座：连接器抽象、stdio 传输、信任模型（config 即信任）、图片回流、配置形状、决策日志 R1–R10 | 要了解**传输/信任/图片/配置**细节 |
+| [`connector-mcp/v1-connector-foundation.md`](./connector-mcp/v1-connector-foundation.md) | v1 基座：MCP stdio/Streamable HTTP、OAuth/PKCE、信任模型、图片回流与配置形状 | 要了解**传输/信任/图片/配置**细节 |
 | [`connector-mcp/v2-progressive-disclosure.md`](./connector-mcp/v2-progressive-disclosure.md) | v2 渐进式披露：抽象/具体总图、三元工具、**静态** connectors skill（只教方法）、`tool_search` 两级发现与打分、代码执行（复用插件 VM）、落地选型与实施、测试矩阵 | 要了解**当前工具暴露方式 / 缓存整改 / 落地步骤** |
 
 ---

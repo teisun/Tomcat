@@ -185,6 +185,12 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             name: "fake".to_string(),
             command: "node".to_string(),
             args: vec![fixture.to_string_lossy().into_owned()],
+            url: None,
+            headers: Default::default(),
+            oauth: None,
+            env: Default::default(),
+            auth: None,
+            scope: Some("workspace".to_string()),
         },
     )
     .await
@@ -250,6 +256,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             name: "fake".to_string(),
             include: vec!["capture".to_string()],
             exclude: vec![],
+            scope: Some("workspace".to_string()),
         },
     )
     .await

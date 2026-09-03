@@ -2,13 +2,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::core::connector::mcp::config::{load_servers, ConfiguredMcpServer, McpConfigSource};
+use crate::core::connector::mcp::config::{
+    load_servers, remove_global_server, remove_project_server, set_global_tool_filter,
+    set_project_tool_filter, ConfiguredMcpServer, McpConfigSource, ToolFilter,
+};
 use crate::core::connector::mcp::naming::to_model_name;
-use crate::core::connector::mcp::transport::{McpClient, McpTransport, StdioTransport};
+use crate::core::connector::mcp::oauth;
+use crate::core::connector::mcp::oauth::OAuthTokenStore;
+use crate::core::connector::mcp::transport::{
+    http_client_for, HttpTransport, McpClient, McpTransport, StdioTransport,
+};
 use crate::core::connector::mcp::trust::{TrustDecision, TrustStatus, TrustStore};
 use crate::infra::error::AppError;
 use crate::AppConfig;
@@ -20,6 +29,7 @@ pub enum ServerState {
     Ready,
     Disconnected,
     NeedsConfirmation,
+    NeedsAuthorization,
     Blocked,
     Failed(String),
 }
@@ -32,6 +42,7 @@ impl ServerState {
             Self::Ready => "connected",
             Self::Disconnected => "disconnected",
             Self::NeedsConfirmation => "needs_confirmation",
+            Self::NeedsAuthorization => "needs_authorization",
             Self::Blocked => "blocked",
             Self::Failed(_) => "failed",
         }
@@ -44,6 +55,7 @@ impl ServerState {
             Self::Ready => "已连接",
             Self::Disconnected => "已断开",
             Self::NeedsConfirmation => "待确认",
+            Self::NeedsAuthorization => "需要授权",
             Self::Blocked => "已阻止",
             Self::Failed(_) => "失败",
         }
@@ -86,6 +98,9 @@ pub struct McpToolSource {
 pub struct McpToolSummary {
     pub name: String,
     pub description: String,
+    #[serde(rename = "rawName")]
+    pub raw_name: String,
+    pub enabled: bool,
 }
 
 /// 关键词检索的命中项；`source` 保持元工具的通用术语。
@@ -114,12 +129,15 @@ pub struct McpManager {
     states: RwLock<BTreeMap<String, ServerStatus>>,
     connections: RwLock<BTreeMap<String, Arc<ConnectedServer>>>,
     trust: TrustStore,
+    oauth_store: OAuthTokenStore,
+    oauth_cancellations: DashMap<String, CancellationToken>,
     workspace_root: std::path::PathBuf,
 }
 
 struct ConnectedServer {
     client: McpClient,
     tools: BTreeMap<String, McpToolDef>,
+    all_tools: BTreeMap<String, McpToolDef>,
     title: Option<String>,
     instructions: Option<String>,
     call_timeout: Duration,
@@ -140,6 +158,7 @@ impl McpManager {
             }
         };
         let trust = TrustStore::open(cfg)?;
+        let oauth_store = OAuthTokenStore::open(cfg)?;
         let states = servers
             .iter()
             .map(|server| (server.name.clone(), initial_server_status(server, &trust)))
@@ -154,12 +173,56 @@ impl McpManager {
             states: RwLock::new(states),
             connections: RwLock::new(BTreeMap::new()),
             trust,
+            oauth_store,
             workspace_root: workspace_root.to_path_buf(),
+            oauth_cancellations: DashMap::new(),
         }))
     }
 
     pub fn statuses(&self) -> Vec<ServerStatus> {
         self.states.read().values().cloned().collect()
+    }
+
+    pub fn workspace_root(&self) -> &std::path::Path {
+        &self.workspace_root
+    }
+
+    pub fn remove_configured_server(
+        &self,
+        server_name: &str,
+        cfg: &AppConfig,
+    ) -> Result<bool, AppError> {
+        let server = self
+            .configured_server(server_name)
+            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {server_name}")))?;
+        let removed = match server.source {
+            McpConfigSource::Global => remove_global_server(cfg, server_name)?,
+            McpConfigSource::Project => remove_project_server(&self.workspace_root, server_name)?,
+        };
+        if removed {
+            self.connections.write().remove(server_name);
+            self.servers.write().remove(server_name);
+            self.states.write().remove(server_name);
+        }
+        Ok(removed)
+    }
+
+    pub fn set_configured_tool_filter(
+        &self,
+        server_name: &str,
+        filter: ToolFilter,
+        cfg: &AppConfig,
+    ) -> Result<(), AppError> {
+        let server = self
+            .configured_server(server_name)
+            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {server_name}")))?;
+        match server.source {
+            McpConfigSource::Global => set_global_tool_filter(cfg, server_name, filter)?,
+            McpConfigSource::Project => {
+                set_project_tool_filter(&self.workspace_root, server_name, filter)?
+            }
+        }
+        Ok(())
     }
 
     pub fn configured_server(&self, server_name: &str) -> Option<ConfiguredMcpServer> {
@@ -211,12 +274,21 @@ impl McpManager {
     /// L2：列出单个来源的工具卡片，不泄露 schema。
     pub fn list_tools(&self, source: &str) -> Result<Vec<McpToolSummary>, AppError> {
         let connection = self.connected_source(source)?;
+        let filter = self
+            .configured_server(source)
+            .map(|server| server.config.tool_filter)
+            .unwrap_or_default();
+        let include = build_glob_set(&filter.include)?;
+        let exclude = build_glob_set(&filter.exclude)?;
         Ok(connection
-            .tools
+            .all_tools
             .values()
             .map(|tool| McpToolSummary {
                 name: tool.model_name.clone(),
+                raw_name: tool.raw_name.clone(),
                 description: tool.description.clone(),
+                enabled: (filter.include.is_empty() || include.is_match(&tool.raw_name))
+                    && !exclude.is_match(&tool.raw_name),
             })
             .collect())
     }
@@ -370,13 +442,22 @@ impl McpManager {
         let startup_timeout = Duration::from_millis(server.config.startup_timeout_ms);
         let connected = match tokio::time::timeout(
             startup_timeout,
-            ConnectedServer::connect(&server, &self.workspace_root),
+            ConnectedServer::connect(&server, &self.workspace_root, self.oauth_store.clone()),
         )
         .await
         {
             Ok(Ok(connection)) => Arc::new(connection),
             Ok(Err(error)) => {
-                self.update_state(server_name, ServerState::Failed(error.to_string()), 0);
+                let state = if error
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("authorization required")
+                {
+                    ServerState::NeedsAuthorization
+                } else {
+                    ServerState::Failed(error.to_string())
+                };
+                self.update_state(server_name, state, 0);
                 return Err(error);
             }
             Err(_) => {
@@ -448,6 +529,80 @@ impl McpManager {
         };
         serde_json::to_value(result)
             .map_err(|error| AppError::Tool(format!("serialize MCP tool result: {error}")))
+    }
+
+    pub async fn login_server(&self, server_name: &str) -> Result<(), AppError> {
+        let server = self
+            .configured_server(server_name)
+            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {server_name}")))?;
+        match self.trust.decide(&server)? {
+            TrustDecision::Allowed => {}
+            TrustDecision::NeedsConfirmation => {
+                self.update_state(server_name, ServerState::NeedsConfirmation, 0);
+                return Err(AppError::Tool(format!(
+                    "connector '{server_name}' requires trust confirmation before OAuth login"
+                )));
+            }
+            TrustDecision::Blocked => {
+                self.update_state(server_name, ServerState::Blocked, 0);
+                return Err(AppError::Tool(format!(
+                    "connector '{server_name}' is blocked"
+                )));
+            }
+        }
+        let url = server.config.url.clone().ok_or_else(|| {
+            AppError::Tool(format!(
+                "MCP server '{server_name}' does not use HTTP OAuth"
+            ))
+        })?;
+        let oauth = server.config.oauth.clone().unwrap_or_default();
+        let client = http_client_for(&url)?;
+        let cancellation = CancellationToken::new();
+        self.oauth_cancellations
+            .insert(server_name.to_string(), cancellation.clone());
+        let result = tokio::select! {
+            result = oauth::authorize(&client, &self.oauth_store, server_name, &url, &oauth, true) => result,
+            _ = cancellation.cancelled() => Err(AppError::Tool("OAuth login cancelled".to_string())),
+        };
+        self.oauth_cancellations.remove(server_name);
+        if let Err(error) = result {
+            if error.to_string().contains("cancelled") {
+                self.update_state(server_name, ServerState::Disconnected, 0);
+            } else {
+                self.update_state(server_name, ServerState::NeedsAuthorization, 0);
+            }
+            return Err(error);
+        }
+        self.reconnect_server(server_name).await
+    }
+
+    pub fn cancel_login(&self, server_name: &str) -> bool {
+        self.oauth_cancellations
+            .remove(server_name)
+            .map(|(_, cancellation)| {
+                cancellation.cancel();
+            })
+            .is_some()
+    }
+
+    pub fn save_static_bearer(
+        &self,
+        server_name: &str,
+        access_token: String,
+        resource: Option<String>,
+    ) -> Result<(), AppError> {
+        self.oauth_store
+            .save_static_bearer(server_name, access_token, resource)
+    }
+
+    pub fn logout_server(&self, server_name: &str) -> Result<bool, AppError> {
+        self.cancel_login(server_name);
+        let removed = self.oauth_store.remove(server_name)?;
+        if removed {
+            self.connections.write().remove(server_name);
+            self.update_state(server_name, ServerState::Disconnected, 0);
+        }
+        Ok(removed)
     }
 
     pub async fn reconnect_server(&self, server_name: &str) -> Result<(), AppError> {
@@ -583,10 +738,19 @@ impl ConnectedServer {
     async fn connect(
         server: &ConfiguredMcpServer,
         workspace_root: &std::path::Path,
+        oauth_store: OAuthTokenStore,
     ) -> Result<Self, AppError> {
-        let transport = StdioTransport::new(workspace_root);
-        let client = transport.connect(server).await?;
+        let client = if server.config.url.is_some() {
+            HttpTransport::new(oauth_store).connect(server).await?
+        } else {
+            StdioTransport::new(workspace_root).connect(server).await?
+        };
         let listed_value = list_all_tools(&client, &server.name).await?;
+        let all_tools = parse_tools(
+            &server.name,
+            &crate::core::connector::mcp::config::ToolFilter::default(),
+            &listed_value,
+        )?;
         let tools = parse_tools(&server.name, &server.config.tool_filter, &listed_value)?;
         let (title, instructions) = client
             .peer()
@@ -602,6 +766,7 @@ impl ConnectedServer {
         Ok(Self {
             client,
             tools,
+            all_tools,
             title,
             instructions,
             call_timeout: Duration::from_millis(server.config.call_timeout_ms),

@@ -4765,4 +4765,115 @@ span.tc-attachment-strip__file-chip {
   .tc-plan-todo__icon-check {
     stroke: HighlightText;
   }
+
+
 }
+
+.tc-connector-list {
+  display: grid;
+  gap: 10px;
+}
+
+.tc-connector-card {
+  align-items: center;
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  padding: 13px 16px;
+  text-align: left;
+  width: 100%;
+}
+
+.tc-connector-card:hover,
+.tc-connector-card:focus-visible {
+  border-color: var(--vscode-focusBorder);
+}
+
+.tc-connector-card__body {
+  display: grid;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tc-connector-card__body span,
+.tc-connector-card__source,
+.tc-connector-modal__status,
+.tc-muted {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.tc-connector-status--connected { color: var(--vscode-testing-iconPassed, #73c991); }
+.tc-connector-status--connecting { color: var(--vscode-charts-yellow, #e5c07b); }
+.tc-connector-status--failed { color: var(--vscode-testing-iconFailed, #f14c4c); }
+.tc-connector-status--needs_confirmation,
+.tc-connector-status--needs_authorization,
+.tc-connector-status--pending { color: var(--vscode-descriptionForeground); }
+.tc-connector-status--blocked { color: var(--vscode-disabledForeground); }
+
+.tc-modal-backdrop {
+  align-items: center;
+  background: rgb(0 0 0 / 55%);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: fixed;
+  z-index: 20;
+}
+
+.tc-modal {
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 12px;
+  box-shadow: 0 18px 60px rgb(0 0 0 / 45%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 28px;
+  position: relative;
+  width: min(640px, calc(100vw - 48px));
+}
+
+.tc-modal h2 { margin: 0 0 8px; }
+.tc-modal h3 { margin: 0 0 6px; }
+.tc-modal label { display: grid; gap: 6px; margin-top: 12px; }
+.tc-modal input,
+.tc-modal select {
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  color: var(--vscode-input-foreground);
+  padding: 8px 10px;
+}
+
+.tc-modal__close {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+  position: absolute;
+  right: 16px;
+  top: 14px;
+}
+
+.tc-modal__footer,
+.tc-connector-radio-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.tc-connector-radio-row { justify-content: flex-start; }
+.tc-connector-radio-row label { display: flex; margin: 0; }
+.tc-connector-tools { border: 1px solid var(--vscode-panel-border); border-radius: 8px; margin-top: 10px; overflow: hidden; }
+.tc-connector-tool { align-items: center; background: transparent; border: 0; border-bottom: 1px solid var(--vscode-panel-border); cursor: pointer; display: flex; justify-content: space-between; padding: 10px 12px; text-align: left; width: 100%; }
+.tc-connector-tool:last-child { border-bottom: 0; }
+.tc-connector-tool:hover { background: var(--vscode-list-hoverBackground); }
+.tc-button--danger { color: var(--vscode-testing-iconFailed, #f14c4c); }

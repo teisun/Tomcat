@@ -71,6 +71,7 @@ import type {
 } from "./shared/imagePreviewProtocol";
 import type {
   SettingsIntent,
+  SettingsRoute,
   SettingsStateSnapshot,
 } from "./shared/settingsProtocol";
 import type {
@@ -236,7 +237,7 @@ export interface TomcatExtensionApi {
       sessionId?: string,
     ): Promise<Awaited<ReturnType<SessionRouter["getState"]>>>;
     getSettingsPanelState(): {
-      route: "models";
+      route: SettingsRoute;
       state: SettingsStateSnapshot;
       visible: boolean;
       webviewReady: boolean;

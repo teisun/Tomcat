@@ -8,6 +8,26 @@ license = "MIT"
 name = "tomcat"
 path = "src/main.rs"
 
+[[bin]]
+name = "test_streamable_http_server"
+path = "tests/support/test_streamable_http_server.rs"
+test = false
+required-features = ["test-streamable-http-server"]
+
+[[test]]
+name = "connector_http_tests"
+path = "tests/connector_http_tests.rs"
+required-features = ["test-streamable-http-server"]
+
+[features]
+# The fake Streamable HTTP/OAuth server is executable test infrastructure, not
+# production connector code. Keep its HTTP server stack out of normal builds.
+test-streamable-http-server = [
+    "dep:axum",
+    "rmcp/server",
+    "rmcp/transport-streamable-http-server",
+]
+
 [dependencies]
 thiserror = "2.0"
 anyhow = "1.0"
@@ -19,6 +39,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5.0"
 async-trait = "0.1"
+axum = { version = "0.8", optional = true }
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -62,7 +83,7 @@ getrandom = "0.4.2"
 uuid = { version = "1.23.3", features = ["v4"] }
 aes-gcm = "0.10.3"
 ed25519-dalek = "2.2.0"
-rmcp = { version = "3.1.4", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "3.1.4", default-features = false, features = ["auth", "client", "reqwest", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 
 # Unix-only：bash 工具超时时按整组 SIGKILL 杀掉 sh 派生的子进程
 # （仅 sh -c 的复合命令会派生子 shell，单 PID kill 不到 sleep 等被遗弃的孙子进程）。

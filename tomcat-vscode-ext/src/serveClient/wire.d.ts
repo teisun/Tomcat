@@ -385,10 +385,16 @@ export type ServeCommand = {
   type: "set_plan_mode";
 } | {
   args: string[];
+  auth?: null | string;
   command: string;
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
   id?: null | string;
   name: string;
+  oauth?: any;
+  scope?: null | string;
   type: "add_connector";
+  url?: null | string;
 } | {
   attachment: IngestAttachmentInput;
   id?: null | string;
@@ -417,6 +423,7 @@ export type ServeCommand = {
   id?: null | string;
   include?: string[];
   name: string;
+  scope?: null | string;
   type: "set_connector_tool_filter";
 } | {
   id?: null | string;
@@ -450,7 +457,19 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   name: string;
+  type: "cancel_login_connector";
+} | {
+  id?: null | string;
+  name: string;
   type: "list_connector_tools";
+} | {
+  id?: null | string;
+  name: string;
+  type: "login_connector";
+} | {
+  id?: null | string;
+  name: string;
+  type: "logout_connector";
 } | {
   id?: null | string;
   name: string;

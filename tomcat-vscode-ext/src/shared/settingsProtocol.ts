@@ -1,4 +1,11 @@
-export type SettingsRoute = "models";
+import type {
+  ConnectorInput,
+  ConnectorToolFilter,
+  ConnectorToolView,
+  ConnectorView,
+} from "./connectorsProtocol";
+
+export type SettingsRoute = "models" | "connectors";
 
 export interface SettingsModelCapabilities {
   files: boolean;
@@ -62,6 +69,18 @@ export interface SettingsCapabilities {
   removeModel: boolean;
   setProviderKey: boolean;
   upsertModel: boolean;
+  connectorCapabilities?: SettingsConnectorCapabilities;
+}
+
+export interface SettingsConnectorCapabilities {
+  list: boolean;
+  listTools: boolean;
+  add: boolean;
+  remove: boolean;
+  reload: boolean;
+  trust: boolean;
+  filter: boolean;
+  login: boolean;
 }
 
 export interface SettingsStateSnapshot {
@@ -71,6 +90,10 @@ export interface SettingsStateSnapshot {
   extensionVersion?: string | null;
   models: SettingsModelView[];
   providerKeys: SettingsProviderKeyView[];
+  connectors?: ConnectorView[];
+  connectorCapabilities?: SettingsConnectorCapabilities;
+  connectorTools?: ConnectorToolView[];
+  selectedConnector?: string | null;
   ready: boolean;
   route: SettingsRoute;
   serverVersion?: string | null;
@@ -122,7 +145,27 @@ export type SettingsIntent =
         envName: string;
         value: string;
       };
+    }
+  | {
+      messageId: string;
+      type: "listConnectors" | "reloadConnectors";
+    }
+  | {
+      messageId: string;
+      type: "listConnectorTools" | "reloadConnector" | "removeConnector" | "loginConnector" | "logoutConnector" | "trustConnector" | "denyConnector" | "cancelLoginConnector";
+      data: { name: string };
+    }
+  | {
+      messageId: string;
+      type: "addConnector";
+      data: { connector: ConnectorInput };
+    }
+  | {
+      messageId: string;
+      type: "setConnectorToolFilter";
+      data: { name: string; filter: ConnectorToolFilter };
     };
+
 
 export interface VsCodeApiLike<TMessage = unknown> {
   postMessage(message: TMessage): void;
@@ -144,7 +187,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isSettingsRoute(value: unknown): value is SettingsRoute {
-  return value === "models";
+  return value === "models" || value === "connectors";
 }
 
 function isSettingsModelCapabilities(value: unknown): value is SettingsModelCapabilities {
@@ -224,6 +267,22 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
         typeof value.data.envName === "string" &&
         typeof value.data.value === "string"
       );
+    case "listConnectors":
+    case "reloadConnectors":
+      return true;
+    case "listConnectorTools":
+    case "reloadConnector":
+    case "removeConnector":
+    case "loginConnector":
+    case "logoutConnector":
+    case "trustConnector":
+    case "denyConnector":
+    case "cancelLoginConnector":      return isRecord(value.data) && typeof value.data.name === "string";
+    case "addConnector":
+      return isRecord(value.data) && isRecord(value.data.connector) && typeof value.data.connector.name === "string";
+    case "setConnectorToolFilter":
+      return isRecord(value.data) && typeof value.data.name === "string" && isRecord(value.data.filter);
+
     default:
       return false;
   }

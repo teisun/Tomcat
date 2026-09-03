@@ -57,7 +57,10 @@ pub(crate) async fn handle_control_or_interrupt(
                             "remove_connector",
                             "set_connector_trust",
                             "test_connector",
-                            "reload_connector",
+                            "reload_connector",                            "login_connector",
+                            "cancel_login_connector",
+                            "logout_connector",
+
                             "set_connector_tool_filter",
                             "new_session",
                             "switch_session",

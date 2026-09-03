@@ -6,6 +6,8 @@
 //! - agent -> UI 的响应/事件信封
 //! - schema 导出所需的 `schemars` 派生
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -383,6 +385,19 @@ pub enum ServeCommand {
         name: String,
         command: String,
         args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oauth: Option<Value>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<String>,
+
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     RemoveConnector {
@@ -404,6 +419,24 @@ pub enum ServeCommand {
         name: String,
     },
     #[serde(rename_all = "camelCase")]
+    LoginConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    CancelLoginConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    LogoutConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+    },
+    #[serde(rename_all = "camelCase")]
     ReloadConnector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -417,6 +450,8 @@ pub enum ServeCommand {
         include: Vec<String>,
         #[serde(default)]
         exclude: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     NewSession {
@@ -640,6 +675,9 @@ impl ServeCommand {
             | Self::RemoveConnector { id, .. }
             | Self::SetConnectorTrust { id, .. }
             | Self::TestConnector { id, .. }
+            | Self::LoginConnector { id, .. }
+            | Self::CancelLoginConnector { id, .. }
+            | Self::LogoutConnector { id, .. }
             | Self::ReloadConnector { id, .. }
             | Self::SetConnectorToolFilter { id, .. }
             | Self::NewSession { id, .. }
@@ -696,6 +734,9 @@ impl ServeCommand {
             | Self::RemoveConnector { .. }
             | Self::SetConnectorTrust { .. }
             | Self::TestConnector { .. }
+            | Self::LoginConnector { .. }
+            | Self::CancelLoginConnector { .. }
+            | Self::LogoutConnector { .. }
             | Self::ReloadConnector { .. }
             | Self::SetConnectorToolFilter { .. }
             | Self::ListSessions { .. } => None,
@@ -744,6 +785,9 @@ impl ServeCommand {
             Self::RemoveConnector { .. } => "remove_connector",
             Self::SetConnectorTrust { .. } => "set_connector_trust",
             Self::TestConnector { .. } => "test_connector",
+            Self::LoginConnector { .. } => "login_connector",
+            Self::CancelLoginConnector { .. } => "cancel_login_connector",
+            Self::LogoutConnector { .. } => "logout_connector",
             Self::ReloadConnector { .. } => "reload_connector",
             Self::SetConnectorToolFilter { .. } => "set_connector_tool_filter",
             Self::NewSession { .. } => "new_session",

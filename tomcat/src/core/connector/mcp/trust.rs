@@ -29,10 +29,11 @@ pub enum TrustConfirmationReason {
 pub struct SafeLaunchSnapshot {
     pub command: String,
     pub args: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
     pub cwd: Option<PathBuf>,
     pub has_redacted_arguments: bool,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum TrustStatus {
@@ -40,7 +41,7 @@ pub enum TrustStatus {
     NeedsConfirmation {
         reason: TrustConfirmationReason,
         previous: Option<SafeLaunchSnapshot>,
-        current: SafeLaunchSnapshot,
+        current: Box<SafeLaunchSnapshot>,
         environment_changed: bool,
         hidden_argument_changed: bool,
     },
@@ -134,7 +135,7 @@ impl TrustStore {
                         .command_args_cwd_fingerprint
                         .as_deref()
                         .is_some_and(|previous| previous != command_args_cwd_fingerprint.as_str()),
-                current: snapshot,
+                current: Box::new(snapshot),
             }),
             None if server.source == McpConfigSource::Global || server.config.trusted => {
                 Ok(TrustStatus::Trusted)
@@ -142,7 +143,7 @@ impl TrustStore {
             None => Ok(TrustStatus::NeedsConfirmation {
                 reason: TrustConfirmationReason::FirstSeen,
                 previous: None,
-                current: snapshot,
+                current: Box::new(snapshot),
                 environment_changed: false,
                 hidden_argument_changed: false,
             }),
@@ -170,6 +171,9 @@ pub fn command_fingerprint(server: &ConfiguredMcpServer) -> String {
     fingerprint_json(serde_json::json!({
         "command": server.config.command,
         "args": server.config.args,
+        "url": server.config.url,
+        "headers": server.config.headers,
+        "oauthClientId": server.config.oauth.as_ref().and_then(|oauth| oauth.client_id.clone()),
         "env": server.config.env,
         "cwd": server.config.cwd,
     }))
@@ -179,10 +183,10 @@ fn command_args_cwd_fingerprint(server: &ConfiguredMcpServer) -> String {
     fingerprint_json(serde_json::json!({
         "command": server.config.command,
         "args": server.config.args,
+        "url": server.config.url,
         "cwd": server.config.cwd,
     }))
 }
-
 fn fingerprint_json(payload: serde_json::Value) -> String {
     let encoded = serde_json::to_vec(&payload).expect("command fingerprint JSON serialization");
     let digest = Sha256::digest(encoded);
@@ -203,11 +207,11 @@ fn safe_launch_snapshot(server: &ConfiguredMcpServer) -> SafeLaunchSnapshot {
     SafeLaunchSnapshot {
         command: server.config.command.clone(),
         args,
+        url: server.config.url.clone(),
         cwd: server.config.cwd.clone(),
         has_redacted_arguments,
     }
 }
-
 fn redact_sensitive_arguments(args: &[String]) -> (Vec<String>, bool) {
     let mut redact_next = false;
     let mut redacted = false;
@@ -339,6 +343,11 @@ mod tests {
                 command: command.to_string(),
                 args: vec!["-y".to_string(), "browser-mcp".to_string()],
                 env: Default::default(),
+                url: None,
+                auth: None,
+                headers: Default::default(),
+                oauth: None,
+
                 cwd: None,
                 trusted: false,
                 integrity: None,
