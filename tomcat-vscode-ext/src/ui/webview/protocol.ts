@@ -141,11 +141,12 @@ export interface WebviewTodo {
   status: "cancelled" | "completed" | "in_progress" | "pending";
 }
 
-export type FileDiffTag = "add" | "ctx" | "del";
+export type FileDiffTag = "add" | "ctx" | "del" | "gap";
 
 export interface FileDiffLine {
   newLine?: number | null;
   oldLine?: number | null;
+  skippedLines?: number | null;
   tag: FileDiffTag;
   text: string;
 }
@@ -153,6 +154,8 @@ export interface FileDiffLine {
 export interface WebviewToolDisplayFile {
   added?: number | null;
   diff?: FileDiffLine[] | null;
+  diffTruncated?: boolean | null;
+  expired?: boolean | null;
   file: string;
   kind: "file";
   removed?: number | null;
@@ -163,6 +166,8 @@ export type WebviewToolDisplayFileStatus = "applied" | "failed" | "skipped";
 export interface WebviewToolDisplayFileEntry {
   added?: number | null;
   diff?: FileDiffLine[] | null;
+  diffTruncated?: boolean | null;
+  expired?: boolean | null;
   file: string;
   note?: string | null;
   range?: string | null;
@@ -171,6 +176,7 @@ export interface WebviewToolDisplayFileEntry {
 }
 
 export interface WebviewToolDisplayFiles {
+  expired?: boolean | null;
   files: WebviewToolDisplayFileEntry[];
   kind: "files";
   summary: string;
@@ -236,6 +242,8 @@ export interface WebviewToolCard {
   logPath?: string;
   display?: WebviewToolDisplay;
   diff?: FileDiffLine[];
+  diffTruncated?: boolean;
+  diffExpired?: boolean;
   diffStat?: WebviewToolDiffStat;
   id: string;
   isError: boolean;
@@ -402,6 +410,7 @@ export type WebviewConnectionStatus =
   | "connecting"
   | "reconnecting"
   | "ready"
+  | "degraded"
   | "failed";
 
 export interface WebviewStateSnapshot {

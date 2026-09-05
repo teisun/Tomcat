@@ -157,11 +157,12 @@ pub(crate) fn default_mode(cfg: &AppConfig) -> Result<SessionMode, AppError> {
 
 /// 进程启动时跑一遍附件目录的家务活。
 ///
-/// 三件事，都只做一次、都在握手时做完，因此永远不落在打字或发送的热路径上：
+/// 握手响应写入 stdout 后异步执行一次，因此不阻塞初始化或交互热路径：
 ///
 /// 1. 删掉旧版本遗留的后端草稿目录 —— 草稿改由扩展层持有后它已无人读取
 /// 2. 回收超期租约（上次会话没发出去、进程又崩了的那些字节）
 /// 3. 把派生缓存压回上限以内
+/// 4. 将超过保留期的历史 diff 压缩成摘要
 ///
 /// 全部失败都只记日志：家务活做不成的后果是多占点磁盘，不该阻止用户开始工作。
 pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
@@ -169,34 +170,68 @@ pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
         return;
     };
     manager.discard_legacy_draft_dir();
-
+    let mut live = match manager.run_incremental_attachment_housekeeping() {
+        Ok(mark) => {
+            if mark.compacted_displays > 0 {
+                tracing::info!(
+                    "serve: compacted {} expired tool-display sidecar record(s)",
+                    mark.compacted_displays
+                );
+            }
+            mark.live_blob_references
+        }
+        Err(error) => {
+            tracing::warn!("serve: startup attachment housekeeping mark pass failed: {error}");
+            return;
+        }
+    };
+    tracing::debug!(
+        bytes_scanned = live.bytes_scanned,
+        transcripts_scanned = live.transcripts_scanned,
+        "serve: refreshed changed transcript references for attachment housekeeping"
+    );
     let store = manager.attachment_store();
-    let is_referenced = |sha: &str| manager.any_transcript_references_blob(sha);
-    match store.gc_pending(
-        crate::core::session::attachments::PENDING_BLOB_TTL,
-        &is_referenced,
-    ) {
-        Ok(report) if report.leases_released > 0 || report.blobs_deleted > 0 => {
+    match store.gc_pending(crate::core::session::attachments::PENDING_BLOB_TTL) {
+        Ok(report) if report.leases_released > 0 => {
             tracing::info!(
-                "serve: attachment gc released {} lease(s), reclaimed {} blob(s), kept {} still referenced",
+                "serve: attachment gc released {} expired lease(s)",
                 report.leases_released,
-                report.blobs_deleted,
-                report.blobs_retained
             );
         }
         Ok(_) => {}
         Err(error) => tracing::warn!("serve: attachment gc failed: {error}"),
     }
+    // `gc_pending` may have released expired leases. Re-read just the lease directory
+    // (not every transcript) and rebuild the live set, so stale markers do not
+    // artificially extend an orphan's grace period by one more startup.
+    match store.collect_pending_blob_shas() {
+        Ok(pending) => live.refresh_pending_blob_shas(pending),
+        Err(error) => {
+            tracing::warn!("serve: could not refresh live attachment leases: {error}");
+            return;
+        }
+    }
 
-    match store.evict_rebuildable_over_budget(
-        crate::core::session::attachments::REBUILDABLE_MAX_BYTES,
-        &is_referenced,
-    ) {
+    match store
+        .evict_rebuildable_over_budget(crate::core::session::attachments::REBUILDABLE_MAX_BYTES)
+    {
         Ok(evicted) if evicted > 0 => {
             tracing::info!("serve: evicted {evicted} bytes of rebuildable attachment data");
         }
         Ok(_) => {}
         Err(error) => tracing::warn!("serve: attachment eviction failed: {error}"),
+    }
+    match store.sweep_orphan_blobs(
+        &live.shas,
+        crate::core::session::attachments::ORPHAN_BLOB_GRACE,
+    ) {
+        Ok(report) if report.blobs_deleted > 0 => tracing::info!(
+            "serve: attachment sweep reclaimed {} orphan blob(s) after scanning {} bytes",
+            report.blobs_deleted,
+            live.bytes_scanned
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!("serve: attachment orphan sweep failed: {error}"),
     }
 }
 

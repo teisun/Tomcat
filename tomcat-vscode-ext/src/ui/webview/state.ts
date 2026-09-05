@@ -782,6 +782,7 @@ function contentToMessageSegments(
           }
           break;
         case "input_image":
+        case "input_image_ref":
         case "image":
           // Attachments are extracted separately onto the block.
           // Skip placeholder text here — thumbnails are rendered by MessageBubble.
@@ -880,6 +881,7 @@ function extractAttachments(
     if (!isRecord(entry)) continue;
     if (
       entry.type !== "input_image" &&
+      entry.type !== "input_image_ref" &&
       entry.type !== "image" &&
       entry.type !== "input_file" &&
       entry.type !== "file"
@@ -1330,6 +1332,16 @@ function applyToolDisplay(
     tool.diff = display.diff;
   } else {
     delete tool.diff;
+  }
+  if (display?.kind === "file" && display.diffTruncated === true) {
+    tool.diffTruncated = true;
+  } else {
+    delete tool.diffTruncated;
+  }
+  if (display?.kind === "file" && display.expired === true) {
+    tool.diffExpired = true;
+  } else {
+    delete tool.diffExpired;
   }
 }
 
@@ -1800,7 +1812,11 @@ function applyHistoryEntry(
 
   if (entry.type === "custom") {
     if (entry.event === "agent.interrupted") {
-      pushMessage(session, "warn", "Tomcat turn interrupted", "agent-interrupted");
+      const preferredId =
+        typeof entry.id === "string"
+          ? `agent-interrupted:${entry.id}`
+          : undefined;
+      pushMessage(session, "warn", "Tomcat turn interrupted", preferredId);
       return;
     }
     if (
@@ -2461,8 +2477,10 @@ export class WebviewStateStore {
     };
   }
 
-  private assertUniqueTimelineIds(): void {
-    for (const session of Object.values(this.state.sessionViews)) {
+  private assertUniqueTimelineIds(
+    sessions: Iterable<WebviewSessionSnapshot> = Object.values(this.state.sessionViews),
+  ): void {
+    for (const session of sessions) {
       const ids = new Set<string>();
       for (const item of session.timeline) {
         if (ids.has(item.id)) {
@@ -2476,17 +2494,14 @@ export class WebviewStateStore {
   }
 
   view(): Readonly<WebviewStateSnapshot> {
-    this.assertUniqueTimelineIds();
     return this.state;
   }
 
   snapshot(): WebviewStateSnapshot {
-    this.assertUniqueTimelineIds();
     return cloneSnapshot(this.state);
   }
 
   snapshotSession(sessionId: string): WebviewSessionSnapshot | null {
-    this.assertUniqueTimelineIds();
     const session = this.state.sessionViews[sessionId];
     if (!session) {
       return null;
@@ -3008,7 +3023,7 @@ export class WebviewStateStore {
         clearActiveAssistant(runtime);
         markRunningToolsInterrupted(session);
         if (!messageExistsAtTail(session, "warn", "Tomcat turn interrupted")) {
-          pushMessage(session, "warn", "Tomcat turn interrupted", "agent-interrupted");
+          pushMessage(session, "warn", "Tomcat turn interrupted");
         }
         return sessionRenderMutation(session.sessionId);
       case "agent_idle":
@@ -3464,6 +3479,10 @@ export class WebviewStateStore {
         nextLocalUserMessageIds.add(item.id);
       }
     }
+    // This is the transaction boundary for a history rebuild. A malformed or
+    // inconsistent transcript must fail at the write site without replacing the
+    // session's currently renderable timeline with a broken candidate.
+    this.assertUniqueTimelineIds([historySession]);
     runtime.localUserMessageIds = nextLocalUserMessageIds;
     session.timeline = historySession.timeline;
     if (!session.activePlan && historySession.activePlan) {
@@ -3486,7 +3505,6 @@ export class WebviewStateStore {
     session.hasMoreHistory = runtime.hasMoreHistory;
     session.historyLoading = runtime.historyLoading;
     this.resolveHistoryAttachmentUris(session);
-    this.assertUniqueTimelineIds();
   }
 
   /**

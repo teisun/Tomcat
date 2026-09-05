@@ -411,7 +411,7 @@ async fn ingest_then_prompt_reaches_transcript_and_provider_without_rewriting_by
     );
     drop(captured);
 
-    // (2) transcript 里也有同一份字节
+    // (2) transcript 只保留 CAS 引用；字节的唯一副本在 blob store。
     let transcript = std::fs::read_to_string(
         slot.ctx
             .session_runtime
@@ -420,17 +420,18 @@ async fn ingest_then_prompt_reaches_transcript_and_provider_without_rewriting_by
     )
     .unwrap();
     assert!(
-        transcript.contains(&b64(&bytes)),
-        "transcript 格式不变，仍是权威事实源"
+        transcript.contains("\"type\":\"input_image_ref\"")
+            && transcript.contains(&blob_sha)
+            && !transcript.contains(&b64(&bytes)),
+        "transcript 必须是无字节的 CAS 引用"
     );
     let _ = temp;
 
     // (3) 零拷贝：blob 文件原地不动
     let after = std::fs::metadata(&blob_path).unwrap();
-    assert_eq!(
-        after.modified().unwrap(),
-        before_modified,
-        "发送不得重写 blob 字节"
+    assert!(
+        after.modified().unwrap() >= before_modified,
+        "发送提升必须刷新 blob mtime，避免立即被孤儿 sweep"
     );
     #[cfg(unix)]
     assert_eq!(
@@ -487,7 +488,7 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
                     kind: ServeAttachmentKind::Image,
                     filename: Some("icon.svg".to_string()),
                     mime_type: Some("image/svg+xml".to_string()),
-                    blob_sha: Some(blob_sha),
+                    blob_sha: Some(blob_sha.clone()),
                     provider_sha: Some(provider_sha),
                     file_id: None,
                 }],
@@ -504,6 +505,11 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
     .await;
 
     let captured = requests.0.lock();
+    assert!(
+        !captured.is_empty(),
+        "provider should receive the image request; frames={:?}",
+        read_ndjson_lines(&buffer)
+    );
     let user_message = latest_persisted_user_message(&captured[0]);
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
         panic!("expected parts");
@@ -530,8 +536,10 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
     )
     .unwrap();
     assert!(
-        transcript.contains(&b64(&svg)),
-        "transcript 必须留住用户实际附上的原始 SVG"
+        transcript.contains("\"type\":\"input_image_ref\"")
+            && transcript.contains(&blob_sha)
+            && !transcript.contains(&b64(&svg)),
+        "transcript 必须以 CAS 引用保留用户实际附上的原始 SVG"
     );
     assert!(
         transcript.contains("image/svg+xml"),
@@ -931,8 +939,8 @@ async fn get_messages_reference_mode_returns_pdf_hashes_instead_of_bytes() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn reference_mode_rebuilds_from_transcript_after_the_cache_is_wiped() {
-    // 缓存是纯派生数据：删掉只该变慢，不该丢数据。
+async fn reference_mode_keeps_missing_blob_visible_without_recreating_bytes() {
+    // Blob 是原图唯一副本，不是缓存。异常丢失时历史仍保留引用，但不能凭空重建字节。
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot, _requests) =
         build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
@@ -940,7 +948,7 @@ async fn reference_mode_rebuilds_from_transcript_after_the_cache_is_wiped() {
     seed_session_with_one_image(&state, &buffer, &slot, &bytes).await;
 
     let store = slot.ctx.session_runtime.session.attachment_store();
-    // 把落盘的字节全清掉，只留 transcript —— 它才是权威记录。
+    // 模拟磁盘损坏：删掉唯一 blob，只留下 transcript 引用。
     let blobs = store.blobs_dir();
     if blobs.exists() {
         for entry in std::fs::read_dir(&blobs).unwrap() {
@@ -957,17 +965,14 @@ async fn reference_mode_rebuilds_from_transcript_after_the_cache_is_wiped() {
     )
     .await;
     let serialized = serde_json::to_string(&payload).unwrap();
-    let sha = serialized
-        .split("\"blobSha\":\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .expect("blobSha in payload")
-        .to_string();
-
+    assert!(
+        serialized.contains("\"type\":\"input_image_ref\"") && !serialized.contains("blobSha"),
+        "缺失 blob 时必须保留历史引用、但不伪造可访问的 blobSha"
+    );
     assert_eq!(
-        store.get(&sha).unwrap().as_deref(),
-        Some(bytes.as_slice()),
-        "字节被清掉后必须能从 transcript 正确重建"
+        std::fs::read_dir(store.blobs_dir()).unwrap().count(),
+        0,
+        "get_messages 不得从 transcript 内联字节重建 blob"
     );
 }
 
@@ -1120,7 +1125,7 @@ async fn initialize_reports_the_attachment_root_for_local_resource_roots() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn deleting_a_session_releases_its_attachment_bytes() {
+async fn deleting_a_session_releases_attachment_lease_for_orphan_sweep() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot, _requests) =
         build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
@@ -1143,7 +1148,10 @@ async fn deleting_a_session_releases_its_attachment_bytes() {
         .delete_session(&slot.session_id)
         .expect("delete session");
 
-    assert!(!store.exists(&blob_sha), "会话删除后其未发送字节应一并回收");
+    assert!(
+        store.exists(&blob_sha),
+        "删除会话只释放租约；blob 要等统一 orphan sweep 的宽限窗"
+    );
     assert!(store.list_pending(&slot.session_id).unwrap().is_empty());
 }
 

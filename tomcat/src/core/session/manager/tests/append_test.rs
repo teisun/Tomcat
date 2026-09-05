@@ -10,6 +10,9 @@
 
 use super::super::*;
 use super::mocks::temp_sessions_dir;
+use crate::core::session::tool_display_sidecar::{append_tool_display, tool_display_sidecar_path};
+use crate::core::tools::primitive::{DiffTag, FileDiffLine};
+use crate::infra::events::ToolDisplay;
 
 fn new_copy_forward_manager() -> (tempfile::TempDir, SessionManager) {
     let temp = tempfile::tempdir().unwrap();
@@ -39,6 +42,158 @@ fn append_failed_turn_error(manager: &SessionManager) {
             detail: "retry exhausted".to_string(),
         })
         .unwrap();
+}
+
+fn file_display(text: &str) -> ToolDisplay {
+    ToolDisplay::File {
+        file: "src/lib.rs".to_string(),
+        added: Some(1),
+        removed: Some(0),
+        diff: Some(vec![FileDiffLine {
+            tag: DiffTag::Add,
+            old_line: None,
+            new_line: Some(1),
+            skipped_lines: None,
+            text: text.to_string(),
+        }]),
+        diff_truncated: false,
+        expired: false,
+    }
+}
+
+#[test]
+fn tool_display_is_persisted_only_in_its_sidecar() {
+    let (_temp, manager) = new_copy_forward_manager();
+    let transcript = manager.current_transcript_path().unwrap().unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "display-1",
+                "type": "function",
+                "function": { "name": "edit", "arguments": "{}" }
+            }]
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "display-1",
+            "content": "edited",
+            "tool_display": {
+                "kind": "file",
+                "file": "src/lib.rs",
+                "added": 1,
+                "removed": 0,
+                "diff": [{"tag": "add", "newLine": 1, "text": "new"}]
+            }
+        }))
+        .unwrap();
+
+    let main = std::fs::read_to_string(&transcript).unwrap();
+    assert!(!main.contains("\"tool_display\""));
+    let sidecar = std::fs::read_to_string(tool_display_sidecar_path(&transcript)).unwrap();
+    assert!(sidecar.contains("\"toolCallId\":\"display-1\""));
+    assert!(sidecar.contains("\"kind\":\"file\""));
+}
+
+#[test]
+fn sidecar_write_can_precede_a_failed_transcript_append_without_creating_a_message() {
+    let (_temp, manager) = new_copy_forward_manager();
+    let transcript = manager.current_transcript_path().unwrap().unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "orphan-display",
+                "type": "function",
+                "function": { "name": "edit", "arguments": "{}" }
+            }]
+        }))
+        .unwrap();
+    let before_failed_append = std::fs::read_to_string(&transcript).unwrap();
+    let original_permissions = std::fs::metadata(&transcript).unwrap().permissions();
+    let mut readonly_permissions = original_permissions.clone();
+    readonly_permissions.set_readonly(true);
+    std::fs::set_permissions(&transcript, readonly_permissions).unwrap();
+
+    let error = manager
+        .append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "orphan-display",
+            "content": "this tool result must not enter the main transcript",
+            "tool_display": {
+                "kind": "file",
+                "file": "src/lib.rs",
+                "added": 1,
+                "removed": 0,
+                "diff": [{"tag": "add", "newLine": 1, "text": "new"}]
+            }
+        }))
+        .unwrap_err();
+    std::fs::set_permissions(&transcript, original_permissions).unwrap();
+
+    assert!(
+        error.to_string().contains("Permission denied") || error.to_string().contains("permission"),
+        "the injected transcript append failure must reach the caller: {error}"
+    );
+    assert!(
+        !before_failed_append.contains("this tool result"),
+        "the failed tool result cannot have been in the prior main transcript"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&transcript).unwrap(),
+        before_failed_append,
+        "a failed transcript append must not create a tool-result message"
+    );
+    let sidecar = std::fs::read_to_string(tool_display_sidecar_path(&transcript)).unwrap();
+    assert_eq!(
+        sidecar.lines().count(),
+        1,
+        "the durable sidecar must contain each display-producing tool result even if its main row fails"
+    );
+    assert!(sidecar.contains("\"toolCallId\":\"orphan-display\""));
+}
+
+#[test]
+fn compaction_skips_a_busy_session_until_a_later_housekeeping_run() {
+    let (_temp, manager) = new_copy_forward_manager();
+    let transcript = manager.current_transcript_path().unwrap().unwrap();
+    let old = chrono::Utc::now() - chrono::Duration::days(8);
+    append_tool_display(
+        &transcript,
+        "old-display",
+        &old.to_rfc3339(),
+        &file_display("old"),
+    )
+    .unwrap();
+
+    let lock = manager.transcript_mutex_for_path(&transcript).unwrap();
+    let guard = lock.lock().unwrap();
+    assert_eq!(manager.compact_tool_display_sidecars().unwrap(), 0);
+    drop(guard);
+
+    assert_eq!(manager.compact_tool_display_sidecars().unwrap(), 1);
+}
+
+#[test]
+fn delete_session_removes_its_tool_display_sidecar() {
+    let (_temp, manager) = new_copy_forward_manager();
+    let session_id = manager.current_session_id().unwrap().unwrap();
+    let transcript = manager.transcript_path(&session_id);
+    append_tool_display(
+        &transcript,
+        "display-to-delete",
+        &chrono::Utc::now().to_rfc3339(),
+        &file_display("deleted"),
+    )
+    .unwrap();
+    let sidecar = tool_display_sidecar_path(&transcript);
+    assert!(sidecar.exists());
+
+    manager.delete_session(&session_id).unwrap();
+
+    assert!(!sidecar.exists());
 }
 
 #[test]

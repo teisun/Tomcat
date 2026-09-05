@@ -517,6 +517,27 @@ fn content_part_serde_roundtrip_image_b64() {
 }
 
 #[test]
+fn content_part_serde_roundtrip_image_blob_ref_without_inline_bytes() {
+    let sha = "a".repeat(64);
+    let part = ChatMessageContentPart::image_blob_ref(sha.clone(), "image/png", None).unwrap();
+    let value = serde_json::to_value(&part).unwrap();
+
+    assert_eq!(value["type"], "input_image_ref");
+    assert_eq!(value["blob_sha"], sha);
+    assert_eq!(value["mime_type"], "image/png");
+    assert!(value.get("image_b64").is_none());
+    assert!(matches!(
+        serde_json::from_value::<ChatMessageContentPart>(value).unwrap(),
+        ChatMessageContentPart::InputImageRef { .. }
+    ));
+}
+
+#[test]
+fn image_blob_ref_rejects_non_canonical_sha() {
+    assert!(ChatMessageContentPart::image_blob_ref("A".repeat(64), "image/png", None).is_err());
+}
+
+#[test]
 fn content_part_serde_roundtrip_image_base64_data() {
     let p =
         ChatMessageContentPart::image_base64_data("image/png", TINY_PNG_B64.to_string()).unwrap();

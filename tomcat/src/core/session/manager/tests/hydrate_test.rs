@@ -183,6 +183,53 @@ fn init_context_state_with_messages() {
 }
 
 #[test]
+fn init_context_state_materializes_persisted_image_references_for_the_model() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = SessionManager::new(dir.clone());
+    let key = manager.current_session_key().to_string();
+    manager.create_session(&key, None).unwrap();
+    let image_bytes = b"persisted image payload";
+    let blob_sha = manager.attachment_store().put(image_bytes).unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "input_image_ref",
+                "blob_sha": blob_sha,
+                "mime_type": "image/png",
+                "detail": "high"
+            }]
+        }))
+        .unwrap();
+
+    let state = init_context_state(&manager, &ContextConfig::default(), "system").unwrap();
+    let user = state
+        .messages
+        .iter()
+        .find(|message| message.role == ChatMessageRole::User)
+        .expect("hydrated user message");
+    let crate::core::llm::ChatMessageContent::Parts(parts) =
+        user.content.as_ref().expect("image content")
+    else {
+        panic!("persisted image reference must hydrate as multipart content");
+    };
+    let crate::core::llm::ChatMessageContentPart::InputImage {
+        source: crate::core::llm::ImageSource::Inline(source),
+        detail,
+    } = &parts[0]
+    else {
+        panic!("model context must contain materialized inline image bytes");
+    };
+    assert_eq!(source.mime_type, "image/png");
+    assert_eq!(source.data, "cGVyc2lzdGVkIGltYWdlIHBheWxvYWQ=");
+    assert_eq!(detail.as_deref(), Some("high"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn init_context_state_skips_legacy_empty_assistant_after_output_exhaustion() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

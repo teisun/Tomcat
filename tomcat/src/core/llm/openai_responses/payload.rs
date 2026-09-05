@@ -447,6 +447,7 @@ fn extract_text(content: &Option<ChatMessageContent>) -> Option<String> {
                         Some(reference.to_prompt_text())
                     }
                     ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. }
                     | ChatMessageContentPart::InputFile { .. } => None,
                 })
                 .collect::<Vec<_>>()
@@ -488,6 +489,9 @@ fn part_to_responses_value(p: &ChatMessageContentPart) -> Value {
             }
             v
         }
+        ChatMessageContentPart::InputImageRef { .. } => {
+            json!({"type": "input_text", "text": "[图片引用尚未物化]"})
+        }
         ChatMessageContentPart::InputFile { source } => {
             let mut v = json!({"type": "input_file"});
             match source {
@@ -522,6 +526,7 @@ fn user_content_parts(content: &Option<ChatMessageContent>) -> Vec<Value> {
                         text.push_str(&reference.to_prompt_text());
                     }
                     ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. }
                     | ChatMessageContentPart::InputFile { .. } => {
                         out.push(part_to_responses_value(part));
                     }
@@ -545,6 +550,7 @@ fn warn_drop_non_text_parts(role: ChatMessageRole, parts: &[ChatMessageContentPa
             matches!(
                 part,
                 ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. }
                     | ChatMessageContentPart::InputFile { .. }
             )
         })

@@ -396,12 +396,14 @@ describe("Composer", () => {
     });
 
     expect(screen.queryByTestId("send-button")).toBeNull();
-    const stopButton = screen.getByTestId("stop-button");
+    const stopButton = screen.getByTestId("stop-button") as HTMLButtonElement;
     // Busy renders the Cursor-style solid square (CSS-drawn), not a codicon glyph.
     expect(stopButton.querySelector(".tc-stop-square")).not.toBeNull();
     expect(screen.getByTestId("stop-glyph")).toBeTruthy();
     fireEvent.click(stopButton);
     expect(onInterrupt).toHaveBeenCalledTimes(1);
+    expect(stopButton.disabled).toBe(true);
+    expect(stopButton.textContent).toContain("Stopping…");
   });
 
   it("disables the stop button when interrupt is not allowed", () => {

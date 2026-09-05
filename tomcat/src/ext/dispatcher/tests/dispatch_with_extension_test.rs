@@ -493,6 +493,7 @@ async fn dispatch_execute_bash_passes_single_command_to_primitive() {
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         async fn edit_file(
@@ -507,6 +508,7 @@ async fn dispatch_execute_bash_passes_single_command_to_primitive() {
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         async fn execute_bash(

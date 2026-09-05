@@ -54,6 +54,8 @@ pub(in super::super) async fn handle_edit(
                 added: result.added,
                 removed: result.removed,
                 diff: result.diff,
+                diff_truncated: result.diff_truncated,
+                expired: false,
             });
             let mut message = format!("已编辑: {}", result.path);
             if let Some(notice) = heading_notice {
@@ -507,6 +509,8 @@ async fn edit_batch(
                     added: result.added,
                     removed: result.removed,
                     diff: result.diff,
+                    diff_truncated: result.diff_truncated,
+                    expired: false,
                     range: None,
                     status: Some(ToolDisplayFileStatus::Applied),
                     note: heading_notice,
@@ -573,11 +577,14 @@ fn display_for_entries(summary: String, mut entries: Vec<ToolDisplayFileEntry>) 
             added: entry.added,
             removed: entry.removed,
             diff: entry.diff,
+            diff_truncated: entry.diff_truncated,
+            expired: entry.expired,
         };
     }
     ToolDisplay::Files {
         summary,
         files: entries,
+        expired: false,
     }
 }
 
@@ -587,6 +594,8 @@ fn failed_entry(file: String, error: String) -> ToolDisplayFileEntry {
         added: None,
         removed: None,
         diff: None,
+        diff_truncated: false,
+        expired: false,
         range: None,
         status: Some(ToolDisplayFileStatus::Failed),
         note: Some(error),

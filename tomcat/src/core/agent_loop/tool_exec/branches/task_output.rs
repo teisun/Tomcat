@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::core::agent_loop::types::{BackgroundCompletionRoutes, CompletionRoute, ToolCallInfo};
+use crate::core::session::manager::INTERRUPTED_TOOL_RESULT_TEXT;
 use crate::core::tools::primitive::BashTaskRegistry;
 use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::{AgentEvent, ToolOutput};
@@ -125,7 +126,10 @@ async fn handle_task_output_blocking(
                 if let Some(routes) = completion_routes {
                     routes.lock().remove(task_id);
                 }
-                return Err("task_output(block=true) 已被取消".to_string());
+                // This is a terminal tool result, not a tool failure. Returning the shared
+                // interruption sentinel lets the dispatcher persist a complete assistant/tool
+                // pair before the enclosing turn observes cancellation and becomes aborted.
+                return Err(INTERRUPTED_TOOL_RESULT_TEXT.to_string());
             }
             wait = registry.wait_for_finish(task_id) => {
                 match wait {

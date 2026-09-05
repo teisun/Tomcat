@@ -167,6 +167,7 @@ async fn async_timeout_produces_error() {
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         async fn edit_file(
@@ -181,6 +182,7 @@ async fn async_timeout_produces_error() {
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         async fn execute_bash(

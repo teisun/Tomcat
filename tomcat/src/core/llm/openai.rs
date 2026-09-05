@@ -160,6 +160,7 @@ fn parts_to_completions_text(parts: &[ChatMessageContentPart]) -> String {
                 text.push_str(&reference.to_prompt_text());
             }
             ChatMessageContentPart::InputImage { .. }
+            | ChatMessageContentPart::InputImageRef { .. }
             | ChatMessageContentPart::InputFile { .. } => {}
         }
     }
@@ -170,7 +171,9 @@ fn parts_need_multimodal_content(parts: &[ChatMessageContentPart]) -> bool {
     parts.iter().any(|part| {
         matches!(
             part,
-            ChatMessageContentPart::InputImage { .. } | ChatMessageContentPart::InputFile { .. }
+            ChatMessageContentPart::InputImage { .. }
+                | ChatMessageContentPart::InputImageRef { .. }
+                | ChatMessageContentPart::InputFile { .. }
         )
     })
 }
@@ -223,6 +226,13 @@ fn part_to_completions_content(
                 "image_url": image_url,
             })
         }
+        // References are a transcript-only representation and are materialized before
+        // reaching a provider. Keep this defensive fallback visible instead of silently
+        // sending an invalid wire shape.
+        ChatMessageContentPart::InputImageRef { .. } => json!({
+            "type": "text",
+            "text": degrade_placeholder(part),
+        }),
         ChatMessageContentPart::InputFile { source } => {
             let mut file = serde_json::Map::new();
             match source {

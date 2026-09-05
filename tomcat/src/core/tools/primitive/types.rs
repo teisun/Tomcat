@@ -8,6 +8,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio_util::sync::CancellationToken;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirEntry {
@@ -21,6 +25,9 @@ pub enum DiffTag {
     Add,
     Del,
     Ctx,
+    /// 连续未改动区域的省略标记。`text` 说明省略了多少行；
+    /// 这不是文件内容，故没有行号。
+    Gap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -31,6 +38,12 @@ pub struct FileDiffLine {
     pub old_line: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_line: Option<u32>,
+    /// Number of unchanged source lines omitted by a `gap` row.
+    ///
+    /// `text` remains a human-readable fallback for historical transcripts, but consumers
+    /// must use this structured field when it is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_lines: Option<u32>,
     pub text: String,
 }
 
@@ -56,6 +69,9 @@ pub struct WriteFileResult {
     /// transcript / IDE diff 展示复用的结构化逐行 diff。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<Vec<FileDiffLine>>,
+    /// diff 因渲染预算被截断；`diff` 仍是可安全显示的前缀。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub diff_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +88,9 @@ pub struct EditFileResult {
     /// transcript / IDE diff 展示复用的结构化逐行 diff。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<Vec<FileDiffLine>>,
+    /// diff 因渲染预算被截断；`diff` 仍是可安全显示的前缀。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub diff_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

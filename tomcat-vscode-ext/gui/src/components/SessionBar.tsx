@@ -90,11 +90,15 @@ export function SessionBar({
     : sessions.length
       ? "Select session"
       : "No sessions";
+  const connected =
+    connectionStatus === "ready" || (!connectionStatus && ready);
   const connectionLabel =
-    connectionStatus === "ready" || (!connectionStatus && ready)
+    connected
       ? "Connected"
       : connectionStatus === "reconnecting"
         ? "Reconnecting…"
+        : connectionStatus === "degraded"
+          ? "Connected, but initial data loading failed"
         : connectionStatus === "failed"
           ? "Connection failed"
           : "Connecting…";
@@ -120,7 +124,7 @@ export function SessionBar({
     <section className="tc-topbar" aria-label="Session bar" ref={wrapperRef}>
       <span
         aria-label={connectionLabel}
-        className={`tc-conn-light tc-conn-light--${ready ? "connected" : "connecting"}`}
+        className={`tc-conn-light tc-conn-light--${connected ? "connected" : "connecting"}`}
         data-testid="connection-chip"
         title={connectionLabel}
       />

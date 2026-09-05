@@ -634,6 +634,8 @@ fn path_display_shows_absolute_path() {
             added: Some(1),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
+            expired: false,
         }),
         false,
     );

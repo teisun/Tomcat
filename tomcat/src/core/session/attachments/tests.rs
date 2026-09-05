@@ -9,7 +9,8 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::{
-    safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore, PENDING_BLOB_TTL,
+    safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore,
+    ORPHAN_BLOB_GRACE, PENDING_BLOB_TTL,
 };
 use crate::core::llm::{FILE_MAX_BYTES, IMAGE_MAX_BYTES};
 
@@ -17,16 +18,6 @@ fn setup() -> (TempDir, AttachmentBlobStore) {
     let tmp = TempDir::new().unwrap();
     let store = AttachmentBlobStore::new(tmp.path());
     (tmp, store)
-}
-
-/// 没有任何东西被 transcript 引用。
-fn nothing_referenced(_sha: &str) -> bool {
-    false
-}
-
-/// 一切都被 transcript 引用。
-fn all_referenced(_sha: &str) -> bool {
-    true
 }
 
 fn minimal_png() -> Vec<u8> {
@@ -47,6 +38,14 @@ fn age_lease(store: &AttachmentBlobStore, session_id: &str, sha: &str, age: Dura
     let path = store.root().join("pending").join(session_id).join(sha);
     let when = std::time::SystemTime::now() - age;
     let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(when).unwrap();
+}
+
+/// 把 blob 的 mtime 往回拨，模拟没有被任何活跃操作碰过的孤儿。
+fn age_blob(store: &AttachmentBlobStore, sha: &str, age: Duration) {
+    let path = store.blobs_dir().join(sha);
+    let when = std::time::SystemTime::now() - age;
+    let file = std::fs::File::options().write(true).open(path).unwrap();
     file.set_modified(when).unwrap();
 }
 
@@ -85,7 +84,7 @@ fn put_does_not_rewrite_existing_blob() {
     store.put(&bytes).unwrap();
 
     let after = std::fs::metadata(&path).unwrap().modified().unwrap();
-    assert_eq!(before, after, "重复 put 不得改动已有 blob 的 mtime");
+    assert!(after > before, "重复 put 必须刷新孤儿宽限窗");
 }
 
 #[test]
@@ -280,8 +279,8 @@ fn mark_and_list_pending() {
 }
 
 #[test]
-fn promote_releases_lease_without_touching_bytes() {
-    // 这条就是「零拷贝提升」的断言：发送前后 blob 文件的 mtime 与内容都不变。
+fn promote_releases_lease_and_refreshes_blob_grace_window() {
+    // 提升仍不搬字节，但必须刷新 mtime，以免并发 sweep 将刚发出的唯一副本误判为孤儿。
     let (_tmp, store) = setup();
     let bytes = minimal_png();
     let sha = store.put(&bytes).unwrap();
@@ -295,10 +294,9 @@ fn promote_releases_lease_without_touching_bytes() {
 
     assert!(store.list_pending("s1").unwrap().is_empty(), "租约应已释放");
     assert!(store.exists(&sha), "字节必须保留给 transcript 引用");
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().modified().unwrap(),
-        before,
-        "提升不得重写字节"
+    assert!(
+        std::fs::metadata(&path).unwrap().modified().unwrap() > before,
+        "提升必须刷新 blob 的宽限窗"
     );
     assert_eq!(store.get(&sha).unwrap(), Some(bytes));
 }
@@ -312,9 +310,7 @@ fn touch_pending_renews_an_expiring_lease() {
 
     store.touch_pending("s1", &sha).unwrap();
 
-    let report = store
-        .gc_pending(Duration::from_secs(30), &nothing_referenced)
-        .unwrap();
+    let report = store.gc_pending(Duration::from_secs(30)).unwrap();
     assert_eq!(report.leases_released, 0, "续期后不该被 GC 判为超期");
     assert!(store.exists(&sha));
 }
@@ -412,37 +408,30 @@ fn retain_pending_batch_rolls_back_only_markers_created_by_that_call() {
     );
 }
 
-// ── TTL GC 三分支 ─────────────────────────────────────────────────────
+// ── 租约释放与标记清扫 ─────────────────────────────────────────────────
 
 #[test]
-fn gc_deletes_expired_and_unreferenced_blob() {
+fn gc_releases_expired_lease_without_deleting_blob() {
     let (_tmp, store) = setup();
     let sha = store.put(&minimal_png()).unwrap();
     store.mark_pending("s1", &sha).unwrap();
     age_lease(&store, "s1", &sha, Duration::from_secs(3600));
 
-    let report = store
-        .gc_pending(Duration::from_secs(60), &nothing_referenced)
-        .unwrap();
+    let report = store.gc_pending(Duration::from_secs(60)).unwrap();
 
     assert_eq!(report.leases_released, 1);
-    assert_eq!(report.blobs_deleted, 1);
-    assert_eq!(report.blobs_retained, 0);
-    assert!(!store.exists(&sha), "超期且无人引用的字节应被回收");
+    assert!(store.exists(&sha), "实际删除只允许由标记清扫负责");
 }
 
 #[test]
-fn gc_keeps_expired_but_referenced_blob() {
+fn sweep_keeps_expired_but_transcript_referenced_blob() {
     let (_tmp, store) = setup();
     let sha = store.put(&minimal_png()).unwrap();
-    store.mark_pending("s1", &sha).unwrap();
-    age_lease(&store, "s1", &sha, Duration::from_secs(3600));
+    age_blob(&store, &sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
+    let mut live = std::collections::HashSet::new();
+    live.insert(sha.clone());
+    let report = store.sweep_orphan_blobs(&live, ORPHAN_BLOB_GRACE).unwrap();
 
-    let report = store
-        .gc_pending(Duration::from_secs(60), &all_referenced)
-        .unwrap();
-
-    assert_eq!(report.leases_released, 1, "租约照常释放");
     assert_eq!(report.blobs_deleted, 0);
     assert_eq!(report.blobs_retained, 1);
     assert!(store.exists(&sha), "被 transcript 引用的字节必须保留");
@@ -454,40 +443,58 @@ fn gc_leaves_fresh_lease_alone() {
     let sha = store.put(&minimal_png()).unwrap();
     store.mark_pending("s1", &sha).unwrap();
 
-    let report = store
-        .gc_pending(PENDING_BLOB_TTL, &nothing_referenced)
-        .unwrap();
+    let report = store.gc_pending(PENDING_BLOB_TTL).unwrap();
 
     assert_eq!(report, Default::default(), "未超期的租约不应被动");
     assert!(store.exists(&sha));
 }
 
 #[test]
-fn gc_keeps_blob_still_leased_by_another_session() {
-    // 同一张图被两个会话粘贴过：其中一个会话的租约超期，字节仍不能删。
+fn sweep_keeps_blob_still_live_from_another_session_lease() {
+    // 在用名单已经合并所有 pending 租约；sweep 不需要逐会话判断。
     let (_tmp, store) = setup();
     let sha = store.put(&minimal_png()).unwrap();
-    store.mark_pending("s1", &sha).unwrap();
-    store.mark_pending("s2", &sha).unwrap();
-    age_lease(&store, "s1", &sha, Duration::from_secs(3600));
-
-    let report = store
-        .gc_pending(Duration::from_secs(60), &nothing_referenced)
-        .unwrap();
+    age_blob(&store, &sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
+    let mut live = std::collections::HashSet::new();
+    live.insert(sha.clone());
+    let report = store.sweep_orphan_blobs(&live, ORPHAN_BLOB_GRACE).unwrap();
 
     assert_eq!(report.blobs_deleted, 0);
     assert_eq!(report.blobs_retained, 1);
     assert!(store.exists(&sha), "还有别的会话租着，不能回收");
-    assert_eq!(store.list_pending("s2").unwrap(), vec![sha]);
+}
+
+#[test]
+fn sweep_obeys_grace_window_then_deletes_orphan_and_thumbnail() {
+    let (_tmp, store) = setup();
+    let sha = store.put(&minimal_png()).unwrap();
+    store.put_thumbnail(&sha, b"thumbnail").unwrap();
+    age_blob(
+        &store,
+        &sha,
+        ORPHAN_BLOB_GRACE.saturating_sub(Duration::from_secs(60)),
+    );
+
+    let early = store
+        .sweep_orphan_blobs(&std::collections::HashSet::new(), ORPHAN_BLOB_GRACE)
+        .unwrap();
+    assert_eq!(early.blobs_deleted, 0, "59 分钟的孤儿仍在宽限期");
+    assert!(store.exists(&sha));
+
+    age_blob(&store, &sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
+    let late = store
+        .sweep_orphan_blobs(&std::collections::HashSet::new(), ORPHAN_BLOB_GRACE)
+        .unwrap();
+    assert_eq!(late.blobs_deleted, 1, "61 分钟的孤儿应被回收");
+    assert!(!store.exists(&sha));
+    assert!(!store.has_thumbnail(&sha));
 }
 
 #[test]
 fn gc_on_empty_store_is_a_no_op() {
     let (_tmp, store) = setup();
     assert_eq!(
-        store
-            .gc_pending(PENDING_BLOB_TTL, &nothing_referenced)
-            .unwrap(),
+        store.gc_pending(PENDING_BLOB_TTL).unwrap(),
         Default::default()
     );
 }
@@ -495,23 +502,18 @@ fn gc_on_empty_store_is_a_no_op() {
 // ── delete_session 联动 ───────────────────────────────────────────────
 
 #[test]
-fn clear_session_releases_leases_and_collects_unreferenced_bytes() {
+fn clear_session_releases_leases_and_defers_blob_collection_to_sweep() {
     let (_tmp, store) = setup();
     let kept = store.put(b"referenced-by-transcript").unwrap();
     let dropped = store.put(&minimal_png()).unwrap();
     store.mark_pending("s1", &kept).unwrap();
     store.mark_pending("s1", &dropped).unwrap();
 
-    let kept_for_closure = kept.clone();
-    let report = store
-        .clear_session("s1", &move |sha| sha == kept_for_closure)
-        .unwrap();
+    let report = store.clear_session("s1").unwrap();
 
     assert_eq!(report.leases_released, 2);
-    assert_eq!(report.blobs_deleted, 1);
-    assert_eq!(report.blobs_retained, 1);
-    assert!(store.exists(&kept), "被 transcript 引用的必须留下");
-    assert!(!store.exists(&dropped), "未被引用的应随会话一起回收");
+    assert!(store.exists(&kept), "删除会话不会猜测全局引用关系");
+    assert!(store.exists(&dropped), "实际删除留给带完整在用名单的 sweep");
     assert!(store.list_pending("s1").unwrap().is_empty());
 }
 
@@ -522,7 +524,7 @@ fn clear_session_does_not_touch_other_sessions() {
     store.mark_pending("s1", &sha).unwrap();
     store.mark_pending("s2", &sha).unwrap();
 
-    store.clear_session("s1", &nothing_referenced).unwrap();
+    store.clear_session("s1").unwrap();
 
     assert_eq!(store.list_pending("s2").unwrap(), vec![sha.clone()]);
     assert!(store.exists(&sha), "另一个会话还租着，字节不能被回收");
@@ -609,9 +611,7 @@ fn eviction_never_touches_unsent_bytes() {
     store.mark_pending("sid_owner", &sha).unwrap();
 
     // 预算为 0：只要允许动，就一定会被删。
-    let freed = store
-        .evict_rebuildable_over_budget(0, &all_referenced)
-        .unwrap();
+    let freed = store.evict_rebuildable_over_budget(0).unwrap();
 
     assert_eq!(freed, 0);
     assert!(
@@ -621,18 +621,16 @@ fn eviction_never_touches_unsent_bytes() {
 }
 
 #[test]
-fn eviction_reclaims_history_bytes_that_can_be_rebuilt() {
+fn eviction_never_touches_sent_history_blob() {
     let (_tmp, store) = setup();
-    let sha = store.materialize_from_transcript(&vec![9u8; 8192]).unwrap();
+    let sha = store.put(&vec![9u8; 8192]).unwrap();
 
-    let freed = store
-        .evict_rebuildable_over_budget(0, &all_referenced)
-        .unwrap();
+    let freed = store.evict_rebuildable_over_budget(0).unwrap();
 
-    assert!(freed >= 8192, "实际释放 {freed} 字节");
+    assert_eq!(freed, 0);
     assert!(
-        !store.exists(&sha),
-        "transcript 里还有原件，这份副本随时能再造，可以淘汰"
+        store.exists(&sha),
+        "transcript 只保存哈希；CAS blob 是历史图片的唯一副本，不可淘汰"
     );
 }
 
@@ -643,15 +641,10 @@ fn eviction_leaves_unreferenced_garbage_to_the_collector() {
     let (_tmp, store) = setup();
     let sha = store.put(&vec![3u8; 4096]).unwrap();
 
-    let freed = store
-        .evict_rebuildable_over_budget(0, &nothing_referenced)
-        .unwrap();
+    let freed = store.evict_rebuildable_over_budget(0).unwrap();
     assert_eq!(freed, 0);
 
-    let report = store
-        .gc_pending(Duration::ZERO, &nothing_referenced)
-        .unwrap();
-    assert_eq!(report.blobs_deleted, 0, "没有租约就不会进入 GC 的扫描范围");
+    store.gc_pending(Duration::ZERO).unwrap();
     assert!(store.exists(&sha));
 }
 
@@ -662,9 +655,7 @@ fn eviction_drops_thumbnails_before_anything_else_when_over_budget() {
     store.mark_pending("sid_owner", &source).unwrap();
     store.put_thumbnail(&source, &vec![2u8; 2048]).unwrap();
 
-    let freed = store
-        .evict_rebuildable_over_budget(0, &all_referenced)
-        .unwrap();
+    let freed = store.evict_rebuildable_over_budget(0).unwrap();
 
     assert!(freed >= 2048);
     assert!(
@@ -677,42 +668,38 @@ fn eviction_drops_thumbnails_before_anything_else_when_over_budget() {
 #[test]
 fn eviction_is_a_no_op_within_budget() {
     let (_tmp, store) = setup();
-    let sha = store.materialize_from_transcript(&vec![5u8; 1024]).unwrap();
+    let sha = store.put(&vec![5u8; 1024]).unwrap();
 
-    let freed = store
-        .evict_rebuildable_over_budget(1024 * 1024, &all_referenced)
-        .unwrap();
+    let freed = store.evict_rebuildable_over_budget(1024 * 1024).unwrap();
 
     assert_eq!(freed, 0);
     assert!(store.exists(&sha));
 }
 
 #[test]
-fn materialize_from_transcript_does_not_create_a_lease() {
-    // 历史图落盘只是「为了有个 URL 可以指」，不是未发送内容，不该占租约。
+fn put_does_not_create_a_lease() {
+    // 写入内容寻址 blob 本身不代表草稿归属，租约必须由调用方显式创建。
     let (_tmp, store) = setup();
-    let sha = store
-        .materialize_from_transcript(b"history image bytes")
-        .unwrap();
+    let sha = store.put(b"history image bytes").unwrap();
 
     assert!(store.exists(&sha));
     assert!(store.list_pending("sid_any").unwrap().is_empty());
 }
 
 #[test]
-fn materialize_from_transcript_reuses_an_existing_blob() {
+fn duplicate_put_reuses_an_existing_blob_and_refreshes_grace_window() {
     let (_tmp, store) = setup();
     let bytes = b"same image in two places";
     let put_sha = store.put(bytes).unwrap();
     let path = store.blobs_dir().join(&put_sha);
     let before = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-    let materialized_sha = store.materialize_from_transcript(bytes).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    let materialized_sha = store.put(bytes).unwrap();
 
     assert_eq!(materialized_sha, put_sha);
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().modified().unwrap(),
-        before,
-        "同一份字节不该被重写一遍"
+    assert!(
+        std::fs::metadata(&path).unwrap().modified().unwrap() > before,
+        "命中已有字节时也必须刷新孤儿宽限窗"
     );
 }

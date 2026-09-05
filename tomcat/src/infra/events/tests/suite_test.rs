@@ -33,6 +33,8 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
             added: Some(10),
             removed: Some(2),
             diff: None,
+            diff_truncated: false,
+            expired: false,
         }),
         is_error: false,
     };

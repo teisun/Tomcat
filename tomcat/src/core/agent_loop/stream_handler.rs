@@ -109,7 +109,10 @@ fn describe_message_shape(message: &ChatMessage) -> String {
                 }
                 for part in parts {
                     match part {
-                        ChatMessageContentPart::InputImage { .. } => tokens.push("input_image"),
+                        ChatMessageContentPart::InputImage { .. }
+                        | ChatMessageContentPart::InputImageRef { .. } => {
+                            tokens.push("input_image")
+                        }
                         ChatMessageContentPart::InputFile { .. } => tokens.push("input_file"),
                         ChatMessageContentPart::InputText { .. }
                         | ChatMessageContentPart::InputReference { .. } => {}

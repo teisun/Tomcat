@@ -20,6 +20,27 @@
 
 ---
 
+## 6.1 stdin 调度：FIFO 工作线与急停控制线
+
+```text
+stdin 一行命令
+   │
+   ├─ interrupt ─────────────► 立即调用 control handler ─► cancel token
+   │
+   └─ 其它命令 ──────────────► FIFO worker ─► commands.rs
+                                （保持原有顺序）
+```
+
+`src/api/serve/stdin.rs::run_stdio_loop` 只将需要保持状态顺序的普通命令送入 FIFO。
+`interrupt` 是控制信号，不能排在 `get_messages`、磁盘分页或模型初始化后面；它被读到后立即
+处理。取消 handler 本身不得做整份 transcript 的同步读取。
+
+对照 `codex/codex-rs/core/src/session/handlers.rs::submission_loop`（约 530 行）：Codex 也用
+单个 submission 队列串行分派，但 `Op::Interrupt` 分支只执行轻量 `interrupt(&sess)`。Tomcat
+保留普通命令的同一语义，同时在 stdio 读入层将急停提前，避免重命令已经在执行时控制帧根本读不到。
+
+---
+
 ## 7. 错误模型 / 截断 / 警告
 
 ```text

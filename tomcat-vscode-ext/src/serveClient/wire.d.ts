@@ -16,11 +16,12 @@ export interface Capabilities {
   vision?: boolean;
   web_search?: boolean;
 }
-export type DiffTag = "add" | "del" | "ctx";
+export type DiffTag = "add" | "del" | "ctx" | "gap";
 
 export interface FileDiffLine {
   newLine?: null | number;
   oldLine?: null | number;
+  skippedLines?: null | number;
   tag: DiffTag;
   text: string;
 }
@@ -294,10 +295,13 @@ export type SetPlanModeAction = "enter" | "exit" | "build";
 export type ToolDisplay = {
   added?: null | number;
   diff?: FileDiffLine[] | null;
+  diffTruncated?: boolean;
+  expired?: boolean;
   file: string;
   kind: "file";
   removed?: null | number;
 } | {
+  expired?: boolean;
   files: ToolDisplayFileEntry[];
   kind: "files";
   summary: string;
@@ -312,6 +316,8 @@ export type ToolDisplay = {
 export interface ToolDisplayFileEntry {
   added?: null | number;
   diff?: FileDiffLine[] | null;
+  diffTruncated?: boolean;
+  expired?: boolean;
   file: string;
   note?: null | string;
   range?: null | string;

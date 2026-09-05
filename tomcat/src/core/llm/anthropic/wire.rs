@@ -969,6 +969,10 @@ fn content_part_to_block(
                 }
             }
         }
+        ChatMessageContentPart::InputImageRef { .. } => json!({
+            "type": "text",
+            "text": degrade_placeholder(part),
+        }),
         ChatMessageContentPart::InputFile { source } => {
             if !capabilities.files {
                 return json!({
@@ -1031,6 +1035,7 @@ fn flatten_message_text(message: &ChatMessage) -> String {
                         text.push_str(&reference.to_prompt_text());
                     }
                     ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. }
                     | ChatMessageContentPart::InputFile { .. } => {
                         text.push_str(&degrade_placeholder(part));
                     }

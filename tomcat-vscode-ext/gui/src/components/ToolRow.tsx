@@ -1196,7 +1196,18 @@ function FileEntryRow({
           </button>
         ) : null}
       </div>
-      {expanded && hasDiff ? <DiffView diff={entry.diff ?? undefined} /> : null}
+      {expanded && hasDiff ? (
+        <DiffView
+          diff={entry.diff ?? undefined}
+          expired={entry.expired === true}
+          truncated={entry.diffTruncated === true}
+        />
+      ) : null}
+      {entry.expired === true ? (
+        <div className="tc-diff-view__empty" data-testid="diff-view-expired">
+          Diff 已超过 7 天保留期。
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -1399,9 +1410,14 @@ function ToolRowComponent({
     />
   );
   const hasStructuredDiff = (item.diff?.length ?? 0) > 0;
+  const fileDisplay = item.display?.kind === "file" ? item.display : undefined;
+  const hasReconstructableDiff =
+    hasStructuredDiff &&
+    item.diffTruncated !== true &&
+    !item.diff?.some((line) => line.tag === "gap");
   const hasLargeDiffFallback =
     category === "edit" &&
-    item.display?.kind === "file" &&
+    fileDisplay !== undefined &&
     !hasStructuredDiff &&
     Boolean(
       item.diffStat && (item.diffStat.added > 0 || item.diffStat.removed > 0),
@@ -1421,19 +1437,21 @@ function ToolRowComponent({
     (category === "command" && contentVisible) ||
     filesDisplay !== null ||
     (category === "edit" &&
-      item.display?.kind === "file" &&
+      fileDisplay !== undefined &&
       (hasStructuredDiff || hasLargeDiffFallback));
   const disclosureStatusVariant: DisclosureStatusVariant = item.isError
     ? "error"
     : isRunningForDisplay(item)
       ? "running"
       : "success";
-  const showOpenDiffButton =
+  const canOpenCurrentFile =
     category === "edit" &&
-    item.display?.kind === "file" &&
-    hasStructuredDiff &&
-    Boolean(item.toolCallId) &&
-    Boolean(onOpenDiff);
+    fileDisplay !== undefined &&
+    (hasStructuredDiff || hasLargeDiffFallback) &&
+    Boolean(onOpenFile);
+  const showOpenDiffButton =
+    hasReconstructableDiff && Boolean(item.toolCallId) && Boolean(onOpenDiff);
+  const showOpenFileButton = canOpenCurrentFile && !showOpenDiffButton;
 
   const disclosureHeader = (
     <div className="tc-tool-row__card-header">
@@ -1518,6 +1536,22 @@ function ToolRowComponent({
           <span>View diff</span>
         </button>
       ) : null}
+      {showOpenFileButton ? (
+        <button
+          aria-label="打开文件"
+          className="tc-tool-row__action-link"
+          data-testid="tool-row-open-file"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenFile(fileDisplay!.file);
+          }}
+          type="button"
+        >
+          <span aria-hidden="true" className="codicon codicon-go-to-file" />
+          <span>打开文件</span>
+        </button>
+      ) : null}
     </div>
   );
 
@@ -1544,7 +1578,12 @@ function ToolRowComponent({
                   text={tailTerminalOutput(boundedTerminalText, 5)}
                 />
               ) : (
-                <DiffView diff={item.diff} previewRows={5} />
+                <DiffView
+                  diff={item.diff}
+                  expired={item.diffExpired === true}
+                  previewRows={5}
+                  truncated={item.diffTruncated === true}
+                />
               )
             }
             resetKey={item.id}
@@ -1575,7 +1614,11 @@ function ToolRowComponent({
                 ) : null}
               </>
             ) : (
-              <DiffView diff={item.diff} />
+              <DiffView
+                diff={item.diff}
+                expired={item.diffExpired === true}
+                truncated={item.diffTruncated === true}
+              />
             )}
           </DisclosureCard>
         ) : (

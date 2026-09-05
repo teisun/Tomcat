@@ -94,6 +94,81 @@ describe("ToolRow", () => {
     expect(screen.queryByRole("button", { name: /apply/i })).toBeNull();
   });
 
+  it("opens the real file when a compact diff contains an omitted gap", () => {
+    const onOpenFile = vi.fn();
+    render(
+      <ToolRow
+        item={buildTool({
+          diff: [
+            { newLine: 1, oldLine: 1, tag: "ctx", text: "before gap" },
+            { newLine: null, oldLine: null, tag: "gap", text: "90 unmodified lines" },
+            { newLine: 92, oldLine: null, tag: "add", text: "after gap" },
+          ],
+          diffStat: { added: 1, removed: 0 },
+          display: { file: "/workspace/a.rs", kind: "file" },
+          toolName: "edit",
+        })}
+        onOpenDiff={vi.fn()}
+        onOpenFile={onOpenFile}
+      />,
+    );
+
+    expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-row-open-file"));
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/a.rs");
+  });
+
+  it("offers the current file when the inline diff was truncated", () => {
+    const onOpenFile = vi.fn();
+    render(
+      <ToolRow
+        item={buildTool({
+          diff: [{ newLine: 1, oldLine: null, tag: "add", text: "kept prefix" }],
+          diffStat: { added: 2_001, removed: 0 },
+          diffTruncated: true,
+          display: { file: "/workspace/a.rs", kind: "file" },
+          toolName: "edit",
+        })}
+        onOpenDiff={vi.fn()}
+        onOpenFile={onOpenFile}
+      />,
+    );
+
+    expect(screen.getByTestId("diff-view-truncated").textContent).toContain(
+      "diff 过大已截断，点击打开文件对比",
+    );
+    fireEvent.click(screen.getByTestId("tool-row-open-file"));
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/a.rs");
+  });
+
+  it("shows an expired diff summary without an expansion action", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          diffExpired: true,
+          diffStat: { added: 109, removed: 0 },
+          display: {
+            added: 109,
+            diff: null,
+            expired: true,
+            file: "/workspace/old.rs",
+            kind: "file",
+            removed: 0,
+          },
+          status: "complete",
+          toolName: "edit",
+        })}
+        onOpenDiff={vi.fn()}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("diff-view-expired").textContent).toContain(
+      "超过 7 天保留期",
+    );
+    expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
+  });
+
   it("edit row preview stays anchored to the first real change", () => {
     render(
       <ToolRow

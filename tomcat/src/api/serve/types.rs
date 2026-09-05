@@ -152,7 +152,7 @@ pub enum AttachmentMode {
     /// 原样回 transcript 里的 base64。**默认值**，保证 CLI 与既有调用方行为不变。
     #[default]
     Inline,
-    /// 把字节物化进 `attachments/cache/` 并只回哈希引用。
+    /// UI 只回内容哈希引用；字节始终保留在 `attachments/blobs/`。
     ///
     /// webview 走这一条：字节由 Chromium 通过资源 URI 自己去拉，完全不进 JS 内存。
     Reference,

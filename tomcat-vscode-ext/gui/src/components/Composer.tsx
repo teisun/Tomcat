@@ -516,6 +516,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const planStatus = formatPlanStatus(planState);
   const [capabilityHint, setCapabilityHint] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
+  const [stopping, setStopping] = useState(false);
+
+  useEffect(() => {
+    if (!busy) {
+      setStopping(false);
+    }
+  }, [busy]);
   const [draft, setDraft] = useState<ComposerDraft>(EMPTY_DRAFT);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -1140,14 +1147,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </span>
 
           <button
-            aria-label={busy ? "Stop" : "Send prompt"}
+            aria-label={busy ? (stopping ? "Stopping…" : "Stop") : "Send prompt"}
             className="tc-send-button"
             data-testid={busy ? "stop-button" : "send-button"}
-            disabled={busy ? !canInterrupt : !draft.hasContent || !canPrompt}
-            onClick={busy ? onInterrupt : onSubmit}
+            disabled={busy ? !canInterrupt || stopping : !draft.hasContent || !canPrompt}
+            onClick={
+              busy
+                ? () => {
+                    if (stopping) return;
+                    setStopping(true);
+                    onInterrupt?.();
+                  }
+                : onSubmit
+            }
             type="button"
           >
-            {busy ? (
+            {busy && stopping ? (
+              "Stopping…"
+            ) : busy ? (
               <span aria-hidden="true" className="tc-stop-square" data-testid="stop-glyph" />
             ) : (
               "↑"

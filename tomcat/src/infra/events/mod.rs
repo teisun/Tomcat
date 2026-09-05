@@ -72,6 +72,10 @@ use crate::core::tools::primitive::FileDiffLine;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// JSON `type` 字段与 pi-mono / 审计展示用字符串；业务与测试请引用此处常量，避免散落字面量。
 pub mod wire {
     // --- AgentEvent（`#[serde(tag = "type", rename_all = "snake_case")]` 下的线格式名）---
@@ -247,12 +251,27 @@ pub enum ToolDisplay {
         removed: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         diff: Option<Vec<FileDiffLine>>,
+        /// Inline diff reached its rendering budget. Any retained prefix is safe to show,
+        /// but the host must identify it as incomplete.
+        #[serde(
+            default,
+            rename = "diffTruncated",
+            alias = "diff_truncated",
+            skip_serializing_if = "is_false"
+        )]
+        diff_truncated: bool,
+        /// Historical diff payload was compacted after its retention window elapsed.
+        #[serde(default, skip_serializing_if = "is_false")]
+        expired: bool,
     },
     /// 一次调用碰了多个文件（批量 `read` / `edit`）。折叠时看 summary，展开时逐文件；
     /// 失败项必须留在列表里 —— 只报成功的那几个会让人以为整批都成了。
     Files {
         summary: String,
         files: Vec<ToolDisplayFileEntry>,
+        /// Every file diff in this historical batch was compacted after retention elapsed.
+        #[serde(default, skip_serializing_if = "is_false")]
+        expired: bool,
     },
     Plan {
         plan: String,
@@ -272,6 +291,17 @@ pub struct ToolDisplayFileEntry {
     pub removed: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<Vec<FileDiffLine>>,
+    /// Inline diff reached its rendering budget.
+    #[serde(
+        default,
+        rename = "diffTruncated",
+        alias = "diff_truncated",
+        skip_serializing_if = "is_false"
+    )]
+    pub diff_truncated: bool,
+    /// Historical diff payload was compacted after its retention window elapsed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub expired: bool,
     /// 批量 `read` 用：这一段的行号区间，例如 `L1-900 (900 lines)`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<String>,

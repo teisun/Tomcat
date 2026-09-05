@@ -2001,6 +2001,7 @@ describe("session state hydration", () => {
       messages: [
         {
           event: "agent.interrupted",
+          id: "interrupt-1",
           partial_text_len: 12,
           tool_results_count: 1,
           type: "custom",
@@ -2011,9 +2012,69 @@ describe("session state hydration", () => {
 
     expect(
       store.snapshot().sessionViews.s1.timeline.find(
-        (item) => item.type === "message" && item.id === "agent-interrupted",
+        (item) => item.type === "message" && item.id === "agent-interrupted:interrupt-1",
       ),
     ).toMatchObject({ kind: "warn", text: "Tomcat turn interrupted" });
+  });
+
+  it("rehydrates distinct cards for multiple durable interruption markers", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          event: "agent.interrupted",
+          id: "interrupt-1",
+          partial_text_len: 0,
+          tool_results_count: 0,
+          type: "custom",
+        },
+        {
+          event: "agent.interrupted",
+          id: "interrupt-2",
+          partial_text_len: 0,
+          tool_results_count: 0,
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const cards = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "message" && item.kind === "warn",
+    );
+    expect(cards.map((item) => item.id)).toEqual([
+      "agent-interrupted:interrupt-1",
+      "agent-interrupted:interrupt-2",
+    ]);
+  });
+
+  it("generates unique ids for legacy interruption markers without entry ids", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          event: "agent.interrupted",
+          partial_text_len: 1,
+          tool_results_count: 0,
+          type: "custom",
+        },
+        {
+          event: "agent.interrupted",
+          partial_text_len: 0,
+          tool_results_count: 0,
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const cards = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "message" && item.kind === "warn",
+    );
+    expect(cards).toHaveLength(2);
+    expect(new Set(cards.map((item) => item.id))).toHaveLength(2);
   });
 
   it("deduplicates a live interruption frame against its hydrated durable marker", () => {
@@ -2029,6 +2090,7 @@ describe("session state hydration", () => {
       messages: [
         {
           event: "agent.interrupted",
+          id: "interrupt-1",
           partial_text_len: 0,
           tool_results_count: 0,
           type: "custom",
@@ -2041,9 +2103,91 @@ describe("session state hydration", () => {
       (item) =>
         item.type === "message" &&
         item.kind === "warn" &&
-        item.id === "agent-interrupted",
+        item.id === "agent-interrupted:interrupt-1",
     );
     expect(cards).toHaveLength(1);
+  });
+
+  it("uses distinct cards for separate live interruptions", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      partialTextLen: 0,
+      sessionId: "s1",
+      toolResultsCount: 0,
+      type: "agent_interrupted",
+    });
+    store.appendLocalUserMessage("s1", "next turn", {
+      messageId: "user-1",
+      submitKind: "prompt",
+    });
+    store.applyEvent({
+      partialTextLen: 0,
+      sessionId: "s1",
+      toolResultsCount: 0,
+      type: "agent_interrupted",
+    });
+
+    const cards = store.snapshot().sessionViews.s1.timeline.filter(
+      (item) => item.type === "message" && item.kind === "warn",
+    );
+    expect(cards).toHaveLength(2);
+    expect(new Set(cards.map((item) => item.id))).toHaveLength(2);
+  });
+
+  it("keeps snapshot reads available when a caller corrupts timeline ids", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const session = (
+      store as unknown as {
+        ensureSession(sessionId: string): { timeline: WebviewMessageBlock[] };
+      }
+    ).ensureSession("s1");
+    session.timeline.push(
+      { id: "duplicate", kind: "notice", text: "first", type: "message" },
+      { id: "duplicate", kind: "notice", text: "second", type: "message" },
+    );
+
+    expect(() => store.view()).not.toThrow();
+    expect(() => store.snapshot()).not.toThrow();
+    expect(() => store.snapshotSession("s1")).not.toThrow();
+  });
+
+  it("rejects a duplicate-id history rebuild without replacing the old timeline", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.appendLocalUserMessage("s1", "still renderable", {
+      messageId: "preserved-local",
+      submitKind: "prompt",
+    });
+
+    expect(() =>
+      store.hydrateHistory("s1", {
+        messages: [
+          {
+            id: "assistant-1-thinking",
+            message: { content: "user text", role: "user" },
+            type: "message",
+          },
+          {
+            id: "assistant-1",
+            message: { role: "assistant", thinking_text: "thinking text" },
+            type: "message",
+          },
+        ],
+        sessionId: "s1",
+      }),
+    ).toThrow("duplicate timeline id in session s1: assistant-1-thinking");
+
+    expect(store.snapshot().sessionViews.s1.timeline).toMatchObject([
+      {
+        deliveryState: "pending",
+        id: "preserved-local",
+        kind: "user",
+        text: "still renderable",
+        type: "message",
+      },
+    ]);
   });
 
 describe("custom history replay", () => {

@@ -192,6 +192,9 @@ export function buildVscePackageArgs(outPath: string, target?: string): string[]
 }
 
 function shouldIncludeOutPath(relativePath: string): boolean {
+  if (path.posix.basename(relativePath) === ".DS_Store") {
+    return false;
+  }
   if (
     relativePath === "test" ||
     relativePath === "tests" ||
@@ -235,6 +238,9 @@ function copyFilteredOut(sourceRoot: string, targetRoot: string, relativePath = 
 function copyDirectory(sourcePath: string, targetPath: string): void {
   fs.mkdirSync(targetPath, { recursive: true });
   for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+    if (entry.name === ".DS_Store") {
+      continue;
+    }
     const sourceChild = path.join(sourcePath, entry.name);
     const targetChild = path.join(targetPath, entry.name);
     if (entry.isDirectory()) {
@@ -338,6 +344,9 @@ export function assertPublishableFiles(
   }
 
   for (const file of fileList) {
+    if (path.posix.basename(file) === ".DS_Store") {
+      throw new Error(`VSIX source should not include macOS metadata: ${file}`);
+    }
     if (/^out\/.+\/tests\//.test(file)) {
       throw new Error(`VSIX source should not include compiled test output: ${file}`);
     }

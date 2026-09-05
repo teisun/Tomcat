@@ -6,9 +6,11 @@
 //! - 响应帧与错误帧
 //! - `ChatMessage` 多模态装配
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use base64::Engine as _;
+use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -32,6 +34,7 @@ use crate::core::session::attachments::{
     REBUILDABLE_MAX_BYTES,
 };
 use crate::core::session::manager::init_context_state_with_limits;
+use crate::core::session::tool_display_sidecar::read_tool_displays_for_calls;
 use crate::core::session::transcript::{
     entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset,
     TranscriptEntry, TranscriptPage,
@@ -535,8 +538,18 @@ pub(crate) async fn handle_command(
                 AppError::Config(format!("encode get_messages cursor failed: {error}"))
             })?;
             let mut page = page;
-            if params.attachment_mode == AttachmentMode::Reference {
-                dereference_page_attachments(&slot, &mut page.entries);
+            attach_page_tool_displays(
+                &slot.ctx.session_runtime.session,
+                &slot.session_id,
+                &mut page.entries,
+            )?;
+            match params.attachment_mode {
+                AttachmentMode::Inline => {
+                    materialize_page_image_refs(&slot, &mut page.entries);
+                }
+                AttachmentMode::Reference => {
+                    dereference_page_attachments(&slot, &mut page.entries);
+                }
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
@@ -1805,6 +1818,61 @@ pub(crate) async fn handle_command(
     Ok(())
 }
 
+/// Join the UI-only sidecar only for tool results contained in this response page.
+/// The transcript remains the authoritative LLM history; the sidecar is a bounded
+/// rendering enhancement and never participates in model replay.
+fn attach_page_tool_displays(
+    session: &SessionManager,
+    session_id: &str,
+    entries: &mut [TranscriptEntry],
+) -> Result<(), AppError> {
+    let oldest_page_message_at = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message) => DateTime::parse_from_rfc3339(&message.timestamp)
+                .ok()
+                .map(|timestamp| timestamp.with_timezone(&Utc)),
+            _ => None,
+        })
+        .min();
+    let wanted = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message) => message
+                .message
+                .get("tool_call_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let displays = read_tool_displays_for_calls(
+        &session.transcript_path(session_id),
+        &wanted,
+        oldest_page_message_at,
+    )?;
+    for entry in entries {
+        let TranscriptEntry::Message(message) = entry else {
+            continue;
+        };
+        let Some(tool_call_id) = message
+            .message
+            .get("tool_call_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let Some(display) = displays.get(tool_call_id) else {
+            continue;
+        };
+        let object = message.message.as_object_mut().ok_or_else(|| {
+            AppError::Config("tool transcript message is not an object".to_string())
+        })?;
+        object.insert("tool_display".to_string(), serde_json::to_value(display)?);
+    }
+    Ok(())
+}
+
 async fn resolve_slot_or_error(
     state: &ServeState,
     id: Option<String>,
@@ -2306,13 +2374,12 @@ fn build_turn_messages(
 ) -> Result<(ChatMessage, ChatMessage), String> {
     let store = slot.ctx.session_runtime.session.attachment_store();
     let archival = build_user_message(&store, text, params, AttachmentBytes::Archival)?;
-    let needs_provider_override = params.attachments.iter().any(|attachment| {
-        attachment
-            .provider_sha
-            .as_deref()
-            .is_some_and(|provider| Some(provider) != attachment.blob_sha.as_deref())
+    // Sent image history uses a content reference, while the provider needs base64 for
+    // this request. Only image blobs therefore need distinct archival/input messages.
+    let needs_provider_message = params.attachments.iter().any(|attachment| {
+        attachment.kind == ServeAttachmentKind::Image && attachment.blob_sha.is_some()
     });
-    if !needs_provider_override {
+    if !needs_provider_message {
         let input = archival.clone();
         return Ok((archival, input));
     }
@@ -2547,25 +2614,20 @@ fn cache_attachment_thumbnail(
     store
         .put_thumbnail(&input.source_sha, &thumb)
         .map_err(|error| format!("unable to store thumbnail: {error}"))?;
-    evict_rebuildable(slot, &store);
+    evict_rebuildable(&store);
     Ok(())
 }
 
-/// 把一页 transcript 条目里的内联图片字节换成引用。
+/// Restore byte-free transcript image references for the legacy CLI history contract.
 ///
-/// transcript **格式不变**，它仍是唯一权威事实源；这里改的只是「回给调用方的那一份表示」。
-/// 字节被物化进 `attachments/blobs/` 后，宿主拿到的就只有哈希，
-/// 图片由 Chromium 通过 webview 资源 URI 自己去拉，完全不进 JavaScript 内存。
-///
-/// 出错时保留原样的 base64：宁可这一张回退成内联，也不要让整页历史打不开。
-/// 注意这**不是**「取不到资源就回退 base64」那条被禁止的降级路径 —— 那条禁令针对的是
-/// 渲染侧的资源 URI 配错，必须直接暴露；这里是物化写盘失败，属于真正的 IO 异常。
-fn dereference_page_attachments(
+/// Webviews use [`AttachmentMode::Reference`] and must never receive the encoded bytes.
+/// The default `inline` mode remains available for terminal callers that historically
+/// received `input_image.image_b64` in `get_messages`.
+fn materialize_page_image_refs(
     slot: &Arc<super::registry::SessionSlot>,
     entries: &mut [TranscriptEntry],
 ) {
     let store = slot.ctx.session_runtime.session.attachment_store();
-    let mut touched = false;
     for entry in entries.iter_mut() {
         let TranscriptEntry::Message(message) = entry else {
             continue;
@@ -2581,18 +2643,80 @@ fn dereference_page_attachments(
             let Some(object) = part.as_object_mut() else {
                 continue;
             };
+            if object.get("type").and_then(|value| value.as_str()) != Some("input_image_ref") {
+                continue;
+            }
+            let Some(sha) = object
+                .get("blob_sha")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+            match store.get(&sha) {
+                Ok(Some(bytes)) => {
+                    object.insert("type".to_string(), json!("input_image"));
+                    object.remove("blob_sha");
+                    object.insert(
+                        "image_b64".to_string(),
+                        json!(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                    );
+                }
+                Ok(None) => {
+                    tracing::warn!("serve: transcript image reference points at missing blob {sha}")
+                }
+                Err(error) => tracing::warn!(
+                    "serve: failed to materialize transcript image reference {sha}: {error}"
+                ),
+            }
+        }
+    }
+}
+
+/// Add webview-only metadata to durable image references without reading image bytes.
+/// The transcript itself remains byte-free; Chromium resolves `blobSha` from the attachment
+/// root supplied during the initialize handshake.
+fn dereference_page_attachments(
+    slot: &Arc<super::registry::SessionSlot>,
+    entries: &mut [TranscriptEntry],
+) {
+    let store = slot.ctx.session_runtime.session.attachment_store();
+    for entry in entries.iter_mut() {
+        let TranscriptEntry::Message(message) = entry else {
+            continue;
+        };
+        let Some(parts) = message
+            .message
+            .get_mut("content")
+            .and_then(|content| content.as_array_mut())
+        else {
+            continue;
+        };
+        for part in parts {
+            let Some(object) = part.as_object_mut() else {
+                continue;
+            };
+            if object.get("type").and_then(|t| t.as_str()) == Some("input_image_ref") {
+                let Some(sha) = object
+                    .get("blob_sha")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned)
+                else {
+                    continue;
+                };
+                if store.exists(&sha) {
+                    object.insert("blobSha".to_string(), json!(sha));
+                    object.insert("hasThumb".to_string(), json!(store.has_thumbnail(&sha)));
+                } else {
+                    tracing::warn!(
+                        "serve: transcript image reference points at missing blob {sha}"
+                    );
+                }
+                continue;
+            }
+
             let (encoded_field, encoded, mime_type, has_thumb) =
                 match object.get("type").and_then(|t| t.as_str()) {
-                    Some("input_image") => {
-                        let Some(encoded) = object
-                            .get("image_b64")
-                            .and_then(|d| d.as_str())
-                            .map(ToString::to_string)
-                        else {
-                            continue;
-                        };
-                        ("image_b64", encoded, None, true)
-                    }
                     Some("input_file") => {
                         let Some(encoded) = object
                             .get("file_b64")
@@ -2619,7 +2743,7 @@ fn dereference_page_attachments(
             let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&encoded) else {
                 continue;
             };
-            match store.materialize_from_transcript(&bytes) {
+            match store.put(&bytes) {
                 Ok(sha) => {
                     object.remove(encoded_field);
                     object.insert("blobSha".to_string(), json!(sha));
@@ -2630,7 +2754,6 @@ fn dereference_page_attachments(
                     if let Some(mime_type) = mime_type {
                         object.insert("mimeType".to_string(), json!(mime_type));
                     }
-                    touched = true;
                 }
                 Err(error) => {
                     tracing::warn!("serve: unable to materialize history attachment: {error}");
@@ -2638,23 +2761,11 @@ fn dereference_page_attachments(
             }
         }
     }
-    if touched {
-        evict_rebuildable(slot, &store);
-    }
 }
 
-/// 顺手把可重建字节压回预算内。
-///
-/// 判据要问 transcript：只有「transcript 里还留着这份字节」的图才允许被淘汰，
-/// 因为那意味着它随时能再物化一份。未发送的字节磁盘上只有一份，永远不参与淘汰。
-fn evict_rebuildable(
-    slot: &Arc<super::registry::SessionSlot>,
-    store: &crate::core::session::attachments::AttachmentBlobStore,
-) {
-    let session = &slot.ctx.session_runtime.session;
-    let _ = store.evict_rebuildable_over_budget(REBUILDABLE_MAX_BYTES, &|sha| {
-        session.any_transcript_references_blob(sha)
-    });
+/// 顺手把可重建的缩略图压回预算内。
+fn evict_rebuildable(store: &crate::core::session::attachments::AttachmentBlobStore) {
+    let _ = store.evict_rebuildable_over_budget(REBUILDABLE_MAX_BYTES);
 }
 
 fn decode_base64(encoded: &str, field: &str) -> Result<Vec<u8>, String> {
@@ -2724,11 +2835,23 @@ fn resolve_attachment_part(
         ServeAttachmentKind::Image => None,
     };
 
-    // ── 取字节 ──
     let blob_sha = attachment
         .blob_sha
         .as_deref()
         .expect("blobSha presence checked above");
+    crate::core::session::attachments::validate_blob_sha(blob_sha)
+        .map_err(|error| format!("invalid_attachment: {error}"))?;
+    if attachment.kind == ServeAttachmentKind::Image && which == AttachmentBytes::Archival {
+        if !store.exists(blob_sha) {
+            return Err(format!(
+                "invalid_attachment: unknown attachment blob {blob_sha}; call ingest_attachment first"
+            ));
+        }
+        return ChatMessageContentPart::image_blob_ref(blob_sha, declared_mime, None)
+            .map_err(|error| format!("invalid_attachment: {error}"));
+    }
+
+    // ── 取字节 ──
     // Provider 方向优先取 provider_sha（SVG 转出的 PNG），其余情况两者相同。
     let sha = match which {
         AttachmentBytes::Provider => attachment.provider_sha.as_deref().unwrap_or(blob_sha),

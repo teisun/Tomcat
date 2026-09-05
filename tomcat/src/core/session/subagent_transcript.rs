@@ -9,11 +9,13 @@ use tracing::warn;
 use crate::core::agent_loop::SubagentType;
 use crate::core::llm::ChatMessage;
 use crate::core::session::manager::{generate_entry_id, MessageAppendSink};
+use crate::core::session::tool_display_sidecar::append_tool_display;
 use crate::core::session::transcript::{
     append_entry_with_sync, write_header, CustomEntry, MessageEntry, SessionHeader, SyncLevel,
     TranscriptEntry,
 };
 use crate::infra::error::AppError;
+use crate::infra::events::ToolDisplay;
 
 pub(crate) fn open_subagent_transcript(
     agent_trail_dir: &str,
@@ -147,7 +149,7 @@ impl JsonlFileAppendSink {
 
     fn append_message_internal(
         &self,
-        message: serde_json::Value,
+        mut message: serde_json::Value,
         forced_id: Option<&str>,
     ) -> Result<String, AppError> {
         let row_id = forced_id
@@ -165,10 +167,28 @@ impl JsonlFileAppendSink {
             return Ok(row_id);
         }
 
+        let timestamp = iso_ts_now();
+        if let Some(object) = message.as_object_mut() {
+            if let Some(value) = object.remove("tool_display") {
+                let tool_call_id = object
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        AppError::Config("tool_display message is missing tool_call_id".to_string())
+                    })?;
+                let display = serde_json::from_value::<ToolDisplay>(value).map_err(|error| {
+                    AppError::Config(format!(
+                        "invalid tool_display on subagent transcript message: {error}"
+                    ))
+                })?;
+                append_tool_display(&self.path, tool_call_id, &timestamp, &display)?;
+            }
+        }
+
         let entry = TranscriptEntry::Message(MessageEntry {
             id: Some(row_id.clone()),
             parent_id: None,
-            timestamp: iso_ts_now(),
+            timestamp,
             message,
         });
         if let Err(error) = append_entry_with_sync(&self.path, &entry, SyncLevel::Flush) {

@@ -8,7 +8,8 @@ pub(crate) const UNSUPPORTED_FILE_INPUT_PLACEHOLDER: &str = "[文件已省略：
 
 pub(crate) fn degrade_placeholder(part: &ChatMessageContentPart) -> String {
     match part {
-        ChatMessageContentPart::InputImage { .. } => {
+        ChatMessageContentPart::InputImage { .. }
+        | ChatMessageContentPart::InputImageRef { .. } => {
             UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER.to_string()
         }
         ChatMessageContentPart::InputFile { .. } => UNSUPPORTED_FILE_INPUT_PLACEHOLDER.to_string(),
@@ -22,7 +23,10 @@ fn unsupported_placeholder_for_part(
     capabilities: &Capabilities,
 ) -> Option<String> {
     match part {
-        ChatMessageContentPart::InputImage { .. } if !capabilities.vision => {
+        ChatMessageContentPart::InputImage { .. }
+        | ChatMessageContentPart::InputImageRef { .. }
+            if !capabilities.vision =>
+        {
             Some(degrade_placeholder(part))
         }
         ChatMessageContentPart::InputFile { .. } if !capabilities.files => {

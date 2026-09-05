@@ -106,6 +106,12 @@ type PromptRecord = {
   severity: "info" | "warning";
 };
 
+type BootstrapFailure = {
+  error: Error;
+  kind: "bootstrap";
+  stderr: string;
+};
+
 export interface ObservedEventFilter {
   sessionId?: string;
   textIncludes?: string;
@@ -736,27 +742,32 @@ export async function activate(
   };
 
   const showConnectionFailure = async (
-    failure: ServeConnectionFailure,
+    failure: ServeConnectionFailure | BootstrapFailure,
   ): Promise<void> => {
     if (failure.kind === "executable_missing") {
       await maybeShowExecutableWarning();
       return;
     }
     const handshakeTimedOut = failure.kind === "handshake_timeout";
+    const bootstrapFailed = failure.kind === "bootstrap";
     const detail = (failure.stderr || failure.error.message).trim().slice(-1_500);
     const selection = await showPromptMessage(
       promptHistory,
       "warning",
       [
-        handshakeTimedOut
+        bootstrapFailed
+          ? "Tomcat 已连接，但初始化数据加载失败。"
+          : handshakeTimedOut
           ? "Tomcat did not complete its startup handshake in time."
           : "Tomcat could not start after several attempts.",
         detail ? `The local serve process reported:\n${detail}` : undefined,
-        handshakeTimedOut
+        bootstrapFailed
+          ? "View Logs 查看详细错误，然后重试初始化。"
+          : handshakeTimedOut
           ? "The serve process did not answer initialize. View logs, then retry."
           : "Check the error above, then retry or run setup if this is a new installation.",
       ].filter((line): line is string => !!line).join("\n\n"),
-      handshakeTimedOut
+      bootstrapFailed || handshakeTimedOut
         ? [RETRY_CONNECTION_ACTION, VIEW_LOGS_ACTION]
         : [
           START_SETUP_ACTION,
@@ -773,7 +784,11 @@ export async function activate(
     } else if (selection === OPEN_GUIDE_ACTION) {
       await openExtensionGuide(context);
     } else if (selection === RETRY_CONNECTION_ACTION) {
-      void supervisor.reconnect().catch(() => undefined);
+      if (bootstrapFailed) {
+        void webviewProvider.retryBootstrap().catch(() => undefined);
+      } else {
+        void supervisor.reconnect().catch(() => undefined);
+      }
     } else if (selection === VIEW_LOGS_ACTION) {
       output.show(true);
     }
@@ -899,6 +914,14 @@ export async function activate(
     refreshPlanPreview: (planId, path, state) =>
       planPreviewProvider.refreshFromServeEvent(planId, path, state),
     sessionRouter,
+    reportBootstrapFailure: (error) => {
+      appendOutput(output, "error", `serve bootstrap failed: ${error.message}`);
+      void showConnectionFailure({
+        error,
+        kind: "bootstrap",
+        stderr: "",
+      });
+    },
     showOpenDialog: (options) =>
       testOpenDialogHandler?.(options) ?? vscode.window.showOpenDialog(options),
   });

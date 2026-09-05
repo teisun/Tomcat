@@ -41,7 +41,8 @@ fn follow_up_parts_chars(parts: &[ChatMessageContentPart]) -> usize {
             ChatMessageContentPart::InputReference { reference } => {
                 reference.to_prompt_text().chars().count()
             }
-            ChatMessageContentPart::InputImage { .. } => 3600,
+            ChatMessageContentPart::InputImage { .. }
+            | ChatMessageContentPart::InputImageRef { .. } => 3600,
             ChatMessageContentPart::InputFile { .. } => 8000,
         })
         .sum()

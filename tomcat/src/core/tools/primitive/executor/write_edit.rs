@@ -234,6 +234,7 @@ pub(super) async fn write_file_impl(
             added: None,
             removed: None,
             diff: None,
+            diff_truncated: false,
         });
     }
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -263,7 +264,8 @@ pub(super) async fn write_file_impl(
         diff_hint,
         added: Some(added),
         removed: Some(removed),
-        diff,
+        diff: diff.lines,
+        diff_truncated: diff.truncated,
     })
 }
 
@@ -379,6 +381,7 @@ pub(super) async fn edit_file_impl(
             added: None,
             removed: None,
             diff: None,
+            diff_truncated: false,
         });
     }
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -399,7 +402,8 @@ pub(super) async fn edit_file_impl(
         applied: true,
         added: Some(added),
         removed: Some(removed),
-        diff,
+        diff: diff.lines,
+        diff_truncated: diff.truncated,
     })
 }
 

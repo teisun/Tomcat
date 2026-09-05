@@ -30,6 +30,19 @@ function collapseContextRows(diff: FileDiffLine[]): RenderRow[] {
   let index = 0;
   while (index < diff.length) {
     const current = diff[index];
+    if (current.tag === "gap") {
+      rows.push({
+        hiddenCount: current.skippedLines ?? 0,
+        kind: "fold",
+        key: `gap-${index}`,
+        label:
+          typeof current.skippedLines === "number"
+            ? `${current.skippedLines} unmodified lines`
+            : current.text,
+      });
+      index += 1;
+      continue;
+    }
     if (current.tag !== "ctx") {
       rows.push({
         key: `line-${index}-${current.oldLine ?? "n"}-${current.newLine ?? "n"}`,
@@ -89,7 +102,9 @@ function previewRows(rows: RenderRow[], maxRows: number): RenderRow[] {
   }
 
   const firstChangeIndex = rows.findIndex(
-    (row) => row.kind === "line" && row.line.tag !== "ctx",
+    (row) =>
+      row.kind === "line" &&
+      (row.line.tag === "add" || row.line.tag === "del"),
   );
   let start =
     firstChangeIndex === -1
@@ -125,14 +140,25 @@ function diffRowClass(tag: FileDiffLine["tag"]): string {
 export function DiffView({
   diff,
   previewRows: previewLimit,
+  truncated = false,
+  expired = false,
 }: {
   diff?: FileDiffLine[];
   previewRows?: number;
+  truncated?: boolean;
+  expired?: boolean;
 }) {
+  if (expired) {
+    return (
+      <div className="tc-diff-view__empty" data-testid="diff-view-expired">
+        Diff 已超过 7 天保留期。
+      </div>
+    );
+  }
   if (!diff) {
     return (
       <div className="tc-diff-view__empty" data-testid="diff-view-empty">
-        File too large to render inline diff. Showing summary only.
+        diff 过大已截断，点击打开文件对比。
       </div>
     );
   }
@@ -173,6 +199,11 @@ export function DiffView({
           </div>
         ),
       )}
+      {truncated ? (
+        <div className="tc-diff-view__empty" data-testid="diff-view-truncated">
+          diff 过大已截断，点击打开文件对比。
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -243,6 +243,7 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -257,6 +258,7 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -315,6 +317,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -329,6 +332,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -397,6 +401,7 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -411,6 +416,7 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(

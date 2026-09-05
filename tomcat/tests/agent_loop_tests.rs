@@ -158,6 +158,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -172,6 +173,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -226,6 +228,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -240,6 +243,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -298,6 +302,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -312,6 +317,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -369,6 +375,7 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -383,6 +390,7 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(

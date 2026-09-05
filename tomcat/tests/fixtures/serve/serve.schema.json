@@ -1236,7 +1236,7 @@
             ]
           },
           {
-            "description": "把字节物化进 `attachments/cache/` 并只回哈希引用。\n\nwebview 走这一条：字节由 Chromium 通过资源 URI 自己去拉，完全不进 JS 内存。",
+            "description": "UI 只回内容哈希引用；字节始终保留在 `attachments/blobs/`。\n\nwebview 走这一条：字节由 Chromium 通过资源 URI 自己去拉，完全不进 JS 内存。",
             "type": "string",
             "enum": [
               "reference"
@@ -2780,11 +2780,22 @@
         "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
       },
       "DiffTag": {
-        "type": "string",
-        "enum": [
-          "add",
-          "del",
-          "ctx"
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "add",
+              "del",
+              "ctx"
+            ]
+          },
+          {
+            "description": "连续未改动区域的省略标记。`text` 说明省略了多少行； 这不是文件内容，故没有行号。",
+            "type": "string",
+            "enum": [
+              "gap"
+            ]
+          }
         ]
       },
       "FileDiffLine": {
@@ -2848,6 +2859,14 @@
                   "$ref": "#/definitions/FileDiffLine"
                 }
               },
+              "diffTruncated": {
+                "description": "Inline diff reached its rendering budget. Any retained prefix is safe to show, but the host must identify it as incomplete.",
+                "type": "boolean"
+              },
+              "expired": {
+                "description": "Historical diff payload was compacted after its retention window elapsed.",
+                "type": "boolean"
+              },
               "file": {
                 "type": "string"
               },
@@ -2876,6 +2895,10 @@
               "summary"
             ],
             "properties": {
+              "expired": {
+                "description": "Every file diff in this historical batch was compacted after retention elapsed.",
+                "type": "boolean"
+              },
               "files": {
                 "type": "array",
                 "items": {
@@ -2954,6 +2977,14 @@
             "items": {
               "$ref": "#/definitions/FileDiffLine"
             }
+          },
+          "diffTruncated": {
+            "description": "Inline diff reached its rendering budget.",
+            "type": "boolean"
+          },
+          "expired": {
+            "description": "Historical diff payload was compacted after its retention window elapsed.",
+            "type": "boolean"
           },
           "file": {
             "type": "string"
@@ -3128,11 +3159,22 @@
         ]
       },
       "DiffTag": {
-        "type": "string",
-        "enum": [
-          "add",
-          "del",
-          "ctx"
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "add",
+              "del",
+              "ctx"
+            ]
+          },
+          {
+            "description": "连续未改动区域的省略标记。`text` 说明省略了多少行； 这不是文件内容，故没有行号。",
+            "type": "string",
+            "enum": [
+              "gap"
+            ]
+          }
         ]
       },
       "FileDiffLine": {
@@ -4259,6 +4301,14 @@
                   "$ref": "#/definitions/FileDiffLine"
                 }
               },
+              "diffTruncated": {
+                "description": "Inline diff reached its rendering budget. Any retained prefix is safe to show, but the host must identify it as incomplete.",
+                "type": "boolean"
+              },
+              "expired": {
+                "description": "Historical diff payload was compacted after its retention window elapsed.",
+                "type": "boolean"
+              },
               "file": {
                 "type": "string"
               },
@@ -4287,6 +4337,10 @@
               "summary"
             ],
             "properties": {
+              "expired": {
+                "description": "Every file diff in this historical batch was compacted after retention elapsed.",
+                "type": "boolean"
+              },
               "files": {
                 "type": "array",
                 "items": {
@@ -4365,6 +4419,14 @@
             "items": {
               "$ref": "#/definitions/FileDiffLine"
             }
+          },
+          "diffTruncated": {
+            "description": "Inline diff reached its rendering budget.",
+            "type": "boolean"
+          },
+          "expired": {
+            "description": "Historical diff payload was compacted after its retention window elapsed.",
+            "type": "boolean"
           },
           "file": {
             "type": "string"

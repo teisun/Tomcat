@@ -2505,6 +2505,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
               <p>
                 {state.connectionStatus === "reconnecting"
                   ? "Reconnecting…"
+                  : state.connectionStatus === "degraded"
+                    ? "Connected, but initialization failed. Choose Retry in the notification."
                   : state.connectionStatus === "failed"
                     ? "Unable to connect. Choose Retry in the notification."
                     : "Connecting…"}

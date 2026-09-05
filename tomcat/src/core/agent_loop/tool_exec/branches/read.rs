@@ -146,6 +146,8 @@ async fn read_batch(
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
+                expired: false,
                 range: None,
                 status: Some(ToolDisplayFileStatus::Skipped),
                 note: Some(format!("output budget exhausted; resume: {hint}")),
@@ -165,6 +167,8 @@ async fn read_batch(
                     added: None,
                     removed: None,
                     diff: None,
+                    diff_truncated: false,
+                    expired: false,
                     range: outcome.range,
                     status: None,
                     note: outcome.note,
@@ -179,6 +183,8 @@ async fn read_batch(
                     added: None,
                     removed: None,
                     diff: None,
+                    diff_truncated: false,
+                    expired: false,
                     range: None,
                     status: Some(ToolDisplayFileStatus::Failed),
                     note: Some(err),
@@ -198,6 +204,7 @@ async fn read_batch(
     *display_out = Some(ToolDisplay::Files {
         summary,
         files: entries,
+        expired: false,
     });
 
     Ok((sections.join("\n\n"), parts))

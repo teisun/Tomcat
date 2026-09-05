@@ -7,12 +7,17 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::AppError;
 
 use super::cleanup_session_slot;
 use super::types::{ControlFrame, OutFrame, ResponseFrame, ServeCommand};
 use super::ServeState;
+
+/// Keep first paint and the initial session/history fetch ahead of disk-heavy,
+/// best-effort cleanup. This runs only after the initialize response is queued.
+const STARTUP_HOUSEKEEPING_DELAY: Duration = Duration::from_secs(2);
 
 pub(crate) async fn handle_control_or_interrupt(
     state: Arc<ServeState>,
@@ -27,7 +32,6 @@ pub(crate) async fn handle_control_or_interrupt(
         } => {
             if subtype == "initialize" {
                 state.initialized.store(true, Ordering::SeqCst);
-                super::run_attachment_housekeeping(&state);
                 let response = ControlFrame::response(
                     request_id,
                     session_id.or_else(|| state.registry.active_session_id()),
@@ -65,6 +69,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "new_session",
                             "switch_session",
                             "get_messages",
+                            "list_checkpoints",
                             "ingest_attachment",
                             "retain_attachment_leases",
                             "cache_attachment_thumbnail",
@@ -81,6 +86,14 @@ pub(crate) async fn handle_control_or_interrupt(
                     }),
                 );
                 state.writer.send(OutFrame::Control(response))?;
+                let housekeeping_state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    tokio::time::sleep(STARTUP_HOUSEKEEPING_DELAY).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        super::run_attachment_housekeeping(&housekeeping_state);
+                    })
+                    .await;
+                });
                 if let Some(session_id) = state.registry.active_session_id() {
                     if let Some(slot) = state.registry.get(&session_id) {
                         super::resume_pending_ask_question(&state, &slot);

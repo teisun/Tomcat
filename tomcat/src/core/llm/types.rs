@@ -5,7 +5,7 @@
 //! ## 多模态 parts
 //!
 //! [`ChatMessageContentPart`] 是 `#[serde(tag = "type", rename_all = "snake_case")]`
-//! 三态枚举：`InputText` / `InputImage` / `InputFile`，对齐 OpenAI Responses 的
+//! 四态枚举：`InputText` / `InputImage` / `InputImageRef` / `InputFile`，对齐 OpenAI Responses 的
 //! `input_text` / `input_image` / `input_file` content part 形状。
 //!
 //! - **A 通道（inline base64）**：调用方传 `(mime_type, &Path)` 让 helper
@@ -171,6 +171,7 @@ impl ContextReference {
 /// {"type": "input_text",  "text": "..."}
 /// {"type": "input_reference", "ref_kind": "file", "path": "src/app.ts", "label": "app.ts"}
 /// {"type": "input_image", "mime_type": "image/png", "image_b64": "...", "detail": "high"}
+/// {"type": "input_image_ref", "blob_sha": "<sha256>", "mime_type": "image/png"}
 /// {"type": "input_image", "file_id": "file-abc"}
 /// {"type": "input_file",  "filename": "x.pdf", "mime_type": "application/pdf", "file_b64": "..."}
 /// {"type": "input_file",  "file_id": "file-abc"}
@@ -190,6 +191,14 @@ pub enum ChatMessageContentPart {
         #[serde(flatten)]
         source: ImageSource,
         /// vision detail：`auto` / `low` / `high`，可选，默认 auto。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// Durable transcript representation of a sent image. Before a message reaches a
+    /// provider this is resolved from `AttachmentBlobStore` into `InputImage`.
+    InputImageRef {
+        blob_sha: String,
+        mime_type: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
@@ -457,6 +466,38 @@ impl ChatMessageContentPart {
         })
     }
 
+    /// Build the byte-free transcript form of an image that already lives in the
+    /// attachment content store. The SHA is validated again when it is read.
+    pub fn image_blob_ref(
+        blob_sha: impl Into<String>,
+        mime_type: impl Into<String>,
+        detail: Option<String>,
+    ) -> Result<Self, AppError> {
+        let mime_type = mime_type.into();
+        let mime_lower = mime_type.to_ascii_lowercase();
+        if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) && mime_lower != "image/svg+xml" {
+            return Err(AppError::Llm(format!(
+                "image_blob_ref: 不支持的 mime_type {:?}, 仅允许 {:?} 或 image/svg+xml",
+                mime_type, ALLOWED_IMAGE_MIMES,
+            )));
+        }
+        let blob_sha = blob_sha.into();
+        if blob_sha.len() != 64
+            || !blob_sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(AppError::Llm(
+                "image_blob_ref: blob_sha 必须是 64 位小写十六进制".to_string(),
+            ));
+        }
+        Ok(Self::InputImageRef {
+            blob_sha,
+            mime_type,
+            detail,
+        })
+    }
+
     /// 已知 file_id 引用文件（B 通道），可附带 filename 提示。
     pub fn file_file_id(
         file_id: impl Into<String>,
@@ -524,7 +565,7 @@ impl ChatMessageContentPart {
         match self {
             Self::InputText { text } => text.chars().count(),
             Self::InputReference { reference } => reference.to_prompt_text().chars().count(),
-            Self::InputImage { .. } => IMAGE_CHAR_ESTIMATE,
+            Self::InputImage { .. } | Self::InputImageRef { .. } => IMAGE_CHAR_ESTIMATE,
             Self::InputFile { .. } => FILE_CHAR_ESTIMATE,
         }
     }

@@ -182,7 +182,8 @@
   ③ 零拷贝提升
      「发送」不需要搬字节 —— 只需要停止把它当作「待清理的草稿字节」
      promote() 的全部工作就是删掉一个空的租约标记文件
-     （有测试断言发送前后 blob 的 inode 与 mtime 不变）
+     并刷新 blob mtime，给并发 GC 一小时宽限
+     （有测试断言 inode 不变、mtime 被刷新）
 ```
 
 第 ③ 条是这套设计最省事的地方：传统做法会有一个「从草稿区搬到正式区」的动作，那既要拷贝 4MB 字节，又要处理「搬一半崩了」。内容寻址下这个动作根本不存在。
@@ -206,23 +207,35 @@
   hydrate  → touch_pending 续期，证明这份草稿还活着
              （租约已被 GC 回收但 blob 还在时会重新建立，不是报错）
   send     → promote(sid, sha) 只删租约标记，blob 原地不动
-  GC       → 租约超过 TTL 后：
-               blob 未被任何 transcript 引用 → 连 blob 一起删
-               blob 被引用                  → 只删租约，字节留给 transcript
+  GC       → 租约超过 TTL 后只删租约
+             随后一次 mark-and-sweep：
+               在 transcript / pending 名单中 → 保留唯一 blob
+               两处都没有                  → 等 1 小时宽限后删 blob + thumb
 ```
 
 ### 4.3 三条 GC 分支
 
-`gc_pending(ttl, is_referenced)` 的判定表 —— 三条分支都有单测精确构造：
+`gc_pending(ttl, is_referenced)` 只负责释放过期租约；它不直接删除 blob。随后
+`sweep_orphan_blobs(live_shas, grace)` 用同一份在用名单执行实际删除：
 
 | 租约是否超期 | 是否仍被 transcript 引用 | 是否还有别的 session 租着 | 动作 |
 |---|---|---|---|
 | 否 | — | — | 什么都不做 |
-| 是 | 否 | 否 | 删租约 + 删 blob + 删缩略图 |
-| 是 | 是 | — | 只删租约（`blobs_retained`） |
-| 是 | 否 | 是 | 只删租约（别人还在用） |
+| 是 | 否 | 否 | 删租约；若 blob 已过 1 小时宽限，sweep 再删 blob + 缩略图 |
+| 是 | 是 | — | 只删租约；名单保留 blob |
+| 是 | 否 | 是 | 只删租约；pending 名单保留 blob |
 
-`is_referenced` 由调用方注入（实际是「扫一遍 transcript 看这个 sha 在不在」）。这样 blob store 模块本身**不需要知道 transcript 的存在** —— 它是一个纯字节仓库，也让三条分支都能在单测里精确构造。
+在用名单由 `SessionManager::collect_live_blob_shas()` 一次流式扫描构建：
+
+```text
+pending/<session>/<sha>  ─┐
+                          ├── HashSet<sha> ──► gc_pending / sweep_orphan_blobs
+所有主 transcript 的 blob_sha ─┘
+```
+
+不维护 `referenced.json` 或引用计数。它们会引入崩溃时的双写一致性和修复路径；
+transcript 已经是权威事实，低频后台扫描更简单可靠。若 sessions 目录超过 1GB 或扫描超过
+2 秒，再增加可从 transcript 重建的每会话 `<session>.blob_refs` 派生文件。
 
 ### 4.4 TTL 取 7 天
 
@@ -234,31 +247,35 @@ pub const PENDING_BLOB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 ### 4.5 超预算淘汰：判据是「能不能重建」
 
-`evict_rebuildable_over_budget(max_bytes, is_referenced)` 把**可重建的那部分**压到 256MB 以内，按最近最少使用淘汰。
+`evict_rebuildable_over_budget(max_bytes, _)` 只把缩略图压到 256MB 以内，按最近最少使用淘汰。
 
 关键是判据不是「在哪个目录」，而是**这份字节能不能重新造出来**：
 
 ```text
   缩略图                     能（webview 重新降采样一次）        → 可淘汰
-  transcript 引用着的图      能（从 transcript 重新物化一份）    → 可淘汰
-  还持有租约的图             不能（未发送，磁盘上就这一份）      → 绝不动
+  transcript 引用着的图      CAS 是唯一副本                      → 绝不动
+  还持有租约的图             未发送，磁盘上就这一份              → 绝不动
 ```
 
-所以淘汰只会让下次打开老会话慢一点，**永远不会丢用户没发出去的东西**。这一点很重要：如果哪天有人想「清一下磁盘」，删 `thumbs/` 和被 transcript 引用的 `blobs/` 都是安全的，删 `pending/` 里还在租约期内的对应字节则会丢草稿附件。
+所以超预算淘汰只会让下次打开图片时重建缩略图。已发送图片不再内联于 transcript，
+删除它的 blob 会让历史图片永久裂开；总量治理应采用会话归档/保留策略，而不是淘汰 blob。
 
 ### 4.6 GC 什么时候跑
 
 ```text
   serve 启动时     run_attachment_housekeeping()（serve/mod.rs）
                      ├ discard_legacy_draft_dir()  丢弃旧版后端草稿目录
-                     ├ gc_pending(7 天 TTL)
-                     └ evict_rebuildable_over_budget(256MB)
-  delete_session   store.clear_session()：该会话全部租约释放 +
-                     回收不再被任何人引用的字节
-  物化历史图之后    顺手做一次超预算淘汰（commands.rs）
+                     ├ collect_live_blob_shas()（一次流式扫描）
+                     ├ gc_pending(7 天 TTL) + sweep_orphan_blobs(1 小时宽限)
+                     └ evict_rebuildable_over_budget(256MB，仅 thumbs)
+  delete_session   释放本会话租约后，再构建一次名单并 sweep
+  物化历史图之后    只检查缩略图的 256MB 预算（commands.rs）
 ```
 
 没有后台定时任务 —— GC 挂在本来就会发生的事件上，避免引入一个需要自己管生命周期的循环。
+所以运行一次 `migrate_transcripts_v2.py` 后，还需要启动一次 Tomcat：迁移只搬运记录，
+首次 `serve` 握手后的异步家务活才会开始清扫孤儿 blob；为防止崩溃时刚写入的引用丢失，
+孤儿仍会保留一小时宽限期。
 
 ---
 

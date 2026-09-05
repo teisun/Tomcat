@@ -3,9 +3,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use base64::Engine as _;
 use chrono::{NaiveDate, Utc};
 
-use crate::core::llm::{ChatMessage, MessageKind};
+use crate::core::llm::{ChatMessage, ChatMessageContentPart, MessageKind};
 use crate::core::session::resume_index::{
     load_or_rebuild_resume_index, rebuild_resume_index, ResumeAnchor, ResumeIndex,
     ResumeIndexIoStats, ResumeIndexSource,
@@ -511,6 +512,53 @@ fn chat_message_from_entry(
     Some(msg)
 }
 
+/// The persisted image form is a cheap content reference. Convert it only when
+/// rebuilding the live model context, where an upstream provider actually requires
+/// base64. A missing referenced blob is a durable-data failure: silently omitting a
+/// sent image would change the user's request.
+fn materialize_image_refs(
+    session: &SessionManager,
+    messages: &mut [ChatMessage],
+) -> Result<(), AppError> {
+    let store = session.attachment_store();
+    for message in messages {
+        let Some(crate::core::llm::ChatMessageContent::Parts(parts)) = message.content.as_mut()
+        else {
+            continue;
+        };
+        for part in parts {
+            let ChatMessageContentPart::InputImageRef {
+                blob_sha,
+                mime_type,
+                detail,
+            } = part
+            else {
+                continue;
+            };
+            let bytes = store.get(blob_sha)?.ok_or_else(|| {
+                AppError::Config(format!(
+                    "session image blob {blob_sha} is missing; restore it before resuming"
+                ))
+            })?;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            let mut resolved = if mime_type.eq_ignore_ascii_case("image/svg+xml") {
+                ChatMessageContentPart::validated_svg_base64_for_transcript(encoded)?
+            } else {
+                ChatMessageContentPart::image_base64_data(mime_type.clone(), encoded)?
+            };
+            if let ChatMessageContentPart::InputImage {
+                detail: resolved_detail,
+                ..
+            } = &mut resolved
+            {
+                *resolved_detail = detail.clone();
+            }
+            *part = resolved;
+        }
+    }
+    Ok(())
+}
+
 fn extract_latest_plan_event(entries: &[TranscriptEntry]) -> Option<PlanEventRef> {
     entries.iter().rev().find_map(|entry| match entry {
         TranscriptEntry::Custom(custom) => PlanEventRef::from_custom_event(&custom.extra),
@@ -775,7 +823,8 @@ pub fn init_context_state(
     let resume_control = load_outcome.resume_control;
     let fold_start = compute_fold_start(&entries, today, DEFAULT_CONTEXT_CAP);
     let fold_out = fold_entries_to_messages(&entries[fold_start..], system_text.len());
-    let selected = filter_messages_by_day(fold_out.messages, today, DEFAULT_CONTEXT_CAP);
+    let mut selected = filter_messages_by_day(fold_out.messages, today, DEFAULT_CONTEXT_CAP);
+    materialize_image_refs(session, &mut selected)?;
 
     let total_chars = system_text.len() + selected.iter().map(estimate_msg_chars).sum::<usize>();
 

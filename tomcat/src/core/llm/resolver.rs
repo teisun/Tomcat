@@ -361,7 +361,8 @@ pub fn capability_requirements_for_messages(messages: &[ChatMessage]) -> Capabil
             for part in parts {
                 match part {
                     ChatMessageContentPart::InputReference { .. } => {}
-                    ChatMessageContentPart::InputImage { .. } => {
+                    ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. } => {
                         requirements.vision = true;
                     }
                     ChatMessageContentPart::InputFile { .. } => {

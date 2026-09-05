@@ -30,9 +30,9 @@
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::read::compute_line_hash;
 use super::DefaultPrimitiveExecutor;
-use crate::core::tools::primitive::diff::{build_line_diff, line_diff_stat};
+use crate::core::tools::primitive::diff::{build_line_diff, line_diff_stat, LineDiff};
 use crate::core::tools::primitive::{
-    EditFileResult, FileDiffLine, HashlineOp, HashlineSegment, PrimitiveOperation,
+    EditFileResult, HashlineOp, HashlineSegment, PrimitiveOperation,
 };
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
@@ -43,7 +43,7 @@ enum HashlineEditOutcome {
     Applied {
         added: u32,
         removed: u32,
-        diff: Option<Vec<FileDiffLine>>,
+        diff: LineDiff,
     },
     Cancelled,
 }
@@ -256,6 +256,7 @@ pub async fn hashline_edit_impl(
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         Err(e) => {
@@ -293,7 +294,8 @@ pub async fn hashline_edit_impl(
                 applied: true,
                 added: Some(added),
                 removed: Some(removed),
-                diff,
+                diff: diff.lines,
+                diff_truncated: diff.truncated,
             })
         }
     }

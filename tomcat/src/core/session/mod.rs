@@ -3,12 +3,14 @@
 mod append_message_chain;
 pub mod attachments;
 pub mod context_metrics;
+pub(crate) mod housekeeping_ledger;
 pub(crate) mod manager;
 mod model_thinking;
 pub(crate) mod resume_index;
 pub mod scope;
 pub(crate) mod store;
 pub(crate) mod subagent_transcript;
+pub(crate) mod tool_display_sidecar;
 pub(crate) mod user_message_sidecar;
 
 pub mod transcript;

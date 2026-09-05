@@ -129,6 +129,7 @@ impl PrimitiveExecutor for EditOkPrimitive {
             added: Some(1),
             removed: Some(1),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(

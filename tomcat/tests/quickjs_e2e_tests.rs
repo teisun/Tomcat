@@ -287,6 +287,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
 
@@ -302,6 +303,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
 

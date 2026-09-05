@@ -37,12 +37,24 @@ async function main(): Promise<void> {
     0,
     Number(process.env.TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES ?? "0") || 0,
   );
+  const bootstrapListModelsFailures = Math.max(
+    0,
+    Number(process.env.TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES ?? "0") || 0,
+  );
   const handshakeDelayMs = Math.max(
     0,
     Number(process.env.TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS ?? "0") || 0,
   );
+  const requestedInterruptDelayMs = Number(
+    process.env.TOMCAT_VSCODE_TEST_INTERRUPT_DELAY_MS ?? "150",
+  );
+  const interruptDelayMs = Number.isFinite(requestedInterruptDelayMs)
+    ? Math.max(0, requestedInterruptDelayMs)
+    : 150;
   const fixture = await createHostE2eFixture({
+    bootstrapListModelsFailures,
     handshakeDelayMs,
+    interruptDelayMs,
     transientServeFailures,
   });
   const extensionTestsEnv = { ...fixture.env };
@@ -52,7 +64,9 @@ async function main(): Promise<void> {
     "TOMCAT_E2E_PLAN_FIND_CAPTURE_ONLY",
     "TOMCAT_EXPECT_SLOW_HANDSHAKE",
     "TOMCAT_EXPECT_TRANSIENT_SERVE_RECOVERY",
+    "TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES",
     "TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS",
+    "TOMCAT_VSCODE_TEST_INTERRUPT_DELAY_MS",
     "TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES",
     "TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR",
   ]) {

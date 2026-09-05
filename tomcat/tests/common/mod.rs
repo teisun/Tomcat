@@ -5,7 +5,8 @@
 
 pub mod serve;
 
-use rcgen::generate_simple_self_signed;
+use base64::Engine as _;
+use native_tls::{Identity, TlsAcceptor as NativeTlsAcceptor};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
@@ -16,8 +17,7 @@ use std::time::Duration;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio_rustls::TlsAcceptor;
+use tokio_native_tls::TlsAcceptor;
 use tomcat::{
     AppConfig, DefaultLlmResolver, LlmProvider, LlmResolver, LlmScene, ModelCatalog,
     ModelPrefsStore, ThinkingLevel,
@@ -651,23 +651,23 @@ pub struct HttpsTestServer {
 
 impl HttpsTestServer {
     pub async fn start(
-        hostname: &str,
+        _hostname: &str,
         status_line: &str,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
         delay: Duration,
     ) -> Self {
-        let certified = generate_simple_self_signed(vec![hostname.to_string()])
-            .expect("generate self-signed cert");
-        let cert_chain = vec![CertificateDer::from(certified.cert.der().to_vec())];
-        let private_key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
-            certified.signing_key.serialize_der(),
-        ));
-        let server_config = tokio_rustls::rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, private_key)
-            .expect("build rustls server config");
-        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let encoded = include_str!("../fixtures/native-tls-test-identity.p12.b64")
+            .split_whitespace()
+            .collect::<String>();
+        let pkcs12 = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode native TLS test identity");
+        let identity =
+            Identity::from_pkcs12(&pkcs12, "tomcat-test").expect("load native TLS test identity");
+        let acceptor = TlsAcceptor::from(
+            NativeTlsAcceptor::new(identity).expect("build native TLS server acceptor"),
+        );
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind https test server");

@@ -14,18 +14,21 @@ fn sample_diff() -> Vec<crate::core::tools::primitive::FileDiffLine> {
             tag: crate::core::tools::primitive::DiffTag::Add,
             old_line: None,
             new_line: Some(1),
+            skipped_lines: None,
             text: "hello".to_string(),
         },
         crate::core::tools::primitive::FileDiffLine {
             tag: crate::core::tools::primitive::DiffTag::Add,
             old_line: None,
             new_line: Some(2),
+            skipped_lines: None,
             text: "world".to_string(),
         },
         crate::core::tools::primitive::FileDiffLine {
             tag: crate::core::tools::primitive::DiffTag::Add,
             old_line: None,
             new_line: Some(3),
+            skipped_lines: None,
             text: "!".to_string(),
         },
     ]
@@ -72,6 +75,7 @@ impl PrimitiveExecutor for DisplayPrimitive {
             added: Some(3),
             removed: Some(0),
             diff: Some(sample_diff()),
+            diff_truncated: false,
         })
     }
 
@@ -87,6 +91,7 @@ impl PrimitiveExecutor for DisplayPrimitive {
             added: Some(3),
             removed: Some(0),
             diff: Some(sample_diff()),
+            diff_truncated: false,
         })
     }
 
@@ -112,6 +117,7 @@ impl PrimitiveExecutor for DisplayPrimitive {
             added: Some(3),
             removed: Some(0),
             diff: Some(sample_diff()),
+            diff_truncated: false,
         })
     }
 
@@ -187,6 +193,8 @@ async fn write_success_populates_file_display() {
             added: Some(3),
             removed: Some(0),
             diff: Some(sample_diff()),
+            diff_truncated: false,
+            expired: false,
         })
     );
 }
@@ -229,6 +237,8 @@ async fn edit_success_populates_file_display() {
             added: Some(3),
             removed: Some(0),
             diff: Some(sample_diff()),
+            diff_truncated: false,
+            expired: false,
         })
     );
 }
@@ -275,6 +285,8 @@ async fn hashline_edit_success_populates_file_display() {
             added: Some(3),
             removed: Some(0),
             diff: Some(sample_diff()),
+            diff_truncated: false,
+            expired: false,
         })
     );
 }
@@ -319,6 +331,8 @@ async fn batch_edit_with_one_file_still_populates_file_display() {
             added: Some(3),
             removed: Some(0),
             diff: Some(sample_diff()),
+            diff_truncated: false,
+            expired: false,
         })
     );
 }

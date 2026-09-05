@@ -24,6 +24,8 @@ pub(in super::super) async fn handle_hashline_edit(
                     added: r.added,
                     removed: r.removed,
                     diff: r.diff.clone(),
+                    diff_truncated: r.diff_truncated,
+                    expired: false,
                 });
                 format!("已 hashline 编辑: {}", r.path)
             } else {

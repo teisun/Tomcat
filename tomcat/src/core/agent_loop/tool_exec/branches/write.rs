@@ -38,6 +38,8 @@ pub(in super::super) async fn handle_write(
                     added: r.added,
                     removed: r.removed,
                     diff: r.diff.clone(),
+                    diff_truncated: r.diff_truncated,
+                    expired: false,
                 });
                 let verb = if r.diff_hint.is_some() {
                     "已覆盖"

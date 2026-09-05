@@ -1802,10 +1802,64 @@ describe("mutation diff stat injection", () => {
         (item) =>
           item.type === "message" &&
           item.kind === "notice" &&
-          item.text.includes("File too large for inline diff"),
+          item.text.includes("diff 过大或上下文不完整"),
       ),
     ).toBe(true);
 
+    provider.dispose();
+  });
+
+  it("opens the current file rather than fabricating a reconstructed diff with gaps", async () => {
+    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {
+        getPreparedChange: () => undefined,
+        openReconstructedDiff,
+        rememberToolResult: vi.fn().mockResolvedValue(undefined),
+        showFile,
+      } as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      display: {
+        added: 1,
+        diff: [
+          { newLine: 1, oldLine: 1, tag: "ctx", text: "before gap" },
+          { newLine: null, oldLine: null, tag: "gap", text: "90 unmodified lines" },
+          { newLine: 92, oldLine: null, tag: "add", text: "changed" },
+        ],
+        file: "src/partial.ts",
+        kind: "file",
+        removed: 0,
+      },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-partial",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    await provider.dispatchTestIntent({
+      data: { toolCallId: "tool-partial" },
+      messageId: "intent-open-diff-partial",
+      type: "openDiff",
+    });
+
+    expect(showFile).toHaveBeenCalledWith("src/partial.ts");
+    expect(openReconstructedDiff).not.toHaveBeenCalled();
     provider.dispose();
   });
 });
@@ -2461,6 +2515,248 @@ describe("serve connection readiness", () => {
       connectionStatus: "reconnecting",
       ready: false,
     });
+    provider.dispose();
+  });
+
+  it("waits for attachment-root reload before bootstrapping the replacement document", async () => {
+    let resolveInitialize!: (value: unknown) => void;
+    const initialize = vi.fn(
+      () =>
+        new Promise<unknown>((resolve) => {
+          resolveInitialize = resolve;
+        }),
+    );
+    const provider = createProvider(initialize);
+    const bootstrap = vi.spyOn(provider as any, "bootstrap").mockResolvedValue(undefined);
+    provider.resolveWebviewView({
+      onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+      show() {},
+      visible: true,
+      webview: {
+        asWebviewUri: (uri: vscode.Uri) => uri,
+        cspSource: "vscode-test-webview",
+        html: "",
+        onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+        options: {},
+        postMessage: vi.fn().mockResolvedValue(true),
+      },
+    } as unknown as vscode.WebviewView);
+    await provider.setServeConnectionState("ready");
+
+    const invalidatedReady = provider.dispatchTestIntent({
+      messageId: "webview-ready-before-attachment-root",
+      type: "ready",
+    });
+    resolveInitialize({ attachmentRoot: "/storage/attachments", sessionId: "s1" });
+    await invalidatedReady;
+    expect(bootstrap).not.toHaveBeenCalled();
+
+    await provider.dispatchTestIntent({
+      messageId: "webview-ready-after-attachment-root",
+      type: "ready",
+    });
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    provider.dispose();
+  });
+
+  it("marks the connection degraded and reports a post-handshake bootstrap failure", async () => {
+    const reportBootstrapFailure = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({
+        capabilities: ["list_models"],
+        sessionId: "s1",
+      } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        sendListModels: async () => {
+          throw new Error("list_models timed out");
+        },
+      } as never,
+      reportBootstrapFailure,
+      sessionRouter: {} as never,
+    });
+    await provider.setServeConnectionState("ready");
+
+    await provider.dispatchTestIntent({
+      messageId: "webview-ready-bootstrap-timeout",
+      type: "ready",
+    });
+
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "degraded",
+      ready: false,
+    });
+    // The supervisor can deliver its ready notification after `initialize()` resolves.
+    // That notification describes the process, not bootstrap success, so it must not
+    // overwrite the actionable degraded UI state.
+    await provider.setServeConnectionState("ready");
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "degraded",
+      ready: false,
+    });
+    expect(reportBootstrapFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "list_models timed out" }),
+    );
+    consoleError.mockRestore();
+    provider.dispose();
+  });
+
+  it("publishes a degraded snapshot for a duplicate-timeline bootstrap failure", async () => {
+    const postMessage = vi.fn().mockResolvedValue(true);
+    const reportBootstrapFailure = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = createProvider(async () => ({ sessionId: "s1" }));
+    (provider as any).deps.reportBootstrapFailure = reportBootstrapFailure;
+    provider.resolveWebviewView({
+      onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+      show() {},
+      visible: true,
+      webview: {
+        asWebviewUri: (uri: vscode.Uri) => uri,
+        cspSource: "vscode-test-webview",
+        html: "",
+        onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+        options: {},
+        postMessage,
+      },
+    } as unknown as vscode.WebviewView);
+    vi.spyOn(provider as any, "bootstrap").mockRejectedValue(
+      new Error("duplicate timeline id in session s1: duplicate"),
+    );
+
+    await provider.setServeConnectionState("ready");
+    await provider.dispatchTestIntent({
+      messageId: "webview-ready-duplicate-timeline",
+      type: "ready",
+    });
+
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "degraded",
+      ready: false,
+    });
+    expect(reportBootstrapFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "duplicate timeline id in session s1: duplicate" }),
+    );
+    expect(postMessage.mock.calls.some(([frame]) => frame.channel === "state")).toBe(true);
+    consoleError.mockRestore();
+    provider.dispose();
+  });
+
+  it("reports a bootstrap failure even when publishing degraded state fails", async () => {
+    const reportBootstrapFailure = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ sessionId: "s1" } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      reportBootstrapFailure,
+      sessionRouter: {} as never,
+    });
+    vi.spyOn(provider as any, "bootstrap").mockRejectedValue(new Error("history failed"));
+    vi.spyOn(provider as any, "postState").mockRejectedValueOnce(new Error("state publish failed"));
+
+    await provider.setServeConnectionState("ready");
+    await provider.dispatchTestIntent({
+      messageId: "webview-ready-post-state-failure",
+      type: "ready",
+    });
+
+    expect(reportBootstrapFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "history failed" }),
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      "[Tomcat webview] failed to publish degraded bootstrap state",
+      expect.objectContaining({ message: "state publish failed" }),
+    );
+    consoleError.mockRestore();
+    provider.dispose();
+  });
+
+  it("keeps a ready connection when list_models is not an advertised capability", async () => {
+    const sendListModels = vi.fn();
+    const reportBootstrapFailure = vi.fn();
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({
+        capabilities: ["get_state"],
+        sessionId: "s1",
+      } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        sendListModels,
+      } as never,
+      reportBootstrapFailure,
+      sessionRouter: {} as never,
+    });
+    vi.spyOn(provider as any, "bootstrap").mockImplementation(async () => {
+      await (provider as any).refreshModels({ strict: true });
+    });
+    (provider as any).isReady = true;
+    await provider.setServeConnectionState("ready");
+
+    await provider.retryBootstrap();
+
+    expect(sendListModels).not.toHaveBeenCalled();
+    expect(reportBootstrapFailure).not.toHaveBeenCalled();
+    expect(provider.currentState()).toMatchObject({
+      availableModels: [],
+      connectionStatus: "ready",
+      ready: true,
+    });
+    provider.dispose();
+  });
+
+  it("returns from degraded to ready when a bootstrap retry succeeds", async () => {
+    const sendListModels = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("first list_models failure"))
+      .mockResolvedValueOnce({
+        payload: { models: [] },
+        success: true,
+      });
+    const reportBootstrapFailure = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({
+        capabilities: ["list_models"],
+        sessionId: "s1",
+      } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        sendListModels,
+      } as never,
+      reportBootstrapFailure,
+      sessionRouter: {} as never,
+    });
+    vi.spyOn(provider as any, "bootstrap").mockImplementation(async () => {
+      await (provider as any).refreshModels({ strict: true });
+    });
+    (provider as any).isReady = true;
+    await provider.setServeConnectionState("ready");
+
+    await provider.retryBootstrap();
+    expect(provider.currentState().connectionStatus).toBe("degraded");
+
+    await provider.retryBootstrap();
+    expect(provider.currentState()).toMatchObject({
+      availableModels: [],
+      connectionStatus: "ready",
+      ready: true,
+    });
+    expect(sendListModels).toHaveBeenCalledTimes(2);
+    expect(reportBootstrapFailure).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
     provider.dispose();
   });
 });

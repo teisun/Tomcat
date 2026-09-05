@@ -8,6 +8,8 @@ import {
   assertWebviewPersistedMessageKindFlow,
   assertWebviewAnswerCardFlow,
   assertWebviewAddModelsFlow,
+  assertWebviewBootstrapDegradedFlow,
+  assertWebviewBootstrapRetryRecoveryFlow,
   assertWebviewDiffFlow,
   assertWebviewEditDisplayReplayFlow,
   assertWebviewReviewProgressFlow,
@@ -37,6 +39,28 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
+  const bootstrapFailureScenario =
+    process.env.TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES === "1";
+  const bootstrapRetryScenario =
+    bootstrapFailureScenario &&
+    process.env.TOMCAT_VSCODE_TEST_WARNING_ACTION === "Retry";
+
+  (bootstrapFailureScenario && !bootstrapRetryScenario ? test : test.skip)(
+    "shows the connected-but-degraded bootstrap state",
+    async () => {
+      const api = await getTomcatExtensionApi();
+      await assertWebviewBootstrapDegradedFlow(api);
+    },
+  );
+
+  (bootstrapRetryScenario ? test : test.skip)(
+    "recovers a connected-but-degraded bootstrap after Retry",
+    async () => {
+      const api = await getTomcatExtensionApi();
+      await assertWebviewBootstrapRetryRecoveryFlow(api);
+    },
+  );
+
   test("interrupts an executing plan and resumes it in Chat", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewPlanModeSwitchFlow(api);

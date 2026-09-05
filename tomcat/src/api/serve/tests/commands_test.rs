@@ -2,6 +2,7 @@ use super::*;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
+use std::process::Command as StdCommand;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -2874,6 +2875,127 @@ async fn serve_get_messages_returns_cursor_metadata_and_continuous_pages() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn transcript_migration_preserves_get_messages_image_and_display_semantics() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    let image_bytes = b"migration fixture image";
+    let image_b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+    crate::core::session::transcript::append_entry(
+        &transcript,
+        &crate::core::session::transcript::TranscriptEntry::Message(
+            crate::core::session::transcript::MessageEntry {
+                id: Some("legacy-user-image".to_string()),
+                parent_id: None,
+                timestamp: "2020-01-01T00:00:00.000Z".to_string(),
+                message: serde_json::json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "input_image",
+                        "mime_type": "image/png",
+                        "image_b64": image_b64
+                    }]
+                }),
+            },
+        ),
+    )
+    .unwrap();
+    crate::core::session::transcript::append_entry(
+        &transcript,
+        &crate::core::session::transcript::TranscriptEntry::Message(
+            crate::core::session::transcript::MessageEntry {
+                id: Some("legacy-tool-display".to_string()),
+                parent_id: None,
+                timestamp: "2020-01-01T00:00:01.000Z".to_string(),
+                message: serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": "legacy-tool-call",
+                    "content": "edited",
+                    "tool_display": {
+                        "kind": "file",
+                        "file": "src/lib.rs",
+                        "added": 1,
+                        "removed": 0,
+                        "diff": [{"tag": "add", "newLine": 1, "text": "new"}]
+                    }
+                }),
+            },
+        ),
+    )
+    .unwrap();
+
+    let sessions_dir = transcript.parent().unwrap();
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/migrate_transcripts_v2.py");
+    let migration = StdCommand::new("python3")
+        .env("TOMCAT_MIGRATION_TEST_ALLOW_RUNNING_SERVE", "1")
+        .arg(script)
+        .arg("--sessions-dir")
+        .arg(sessions_dir)
+        .output()
+        .expect("run transcript migration script");
+    assert!(
+        migration.status.success(),
+        "migration failed: {}",
+        String::from_utf8_lossy(&migration.stderr)
+    );
+    let rewritten = std::fs::read_to_string(&transcript).unwrap();
+    assert!(!rewritten.contains("image_b64"));
+    assert!(!rewritten.contains("tool_display"));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-migrated".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                attachment_mode: AttachmentMode::Reference,
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-migrated")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-migrated"))
+        .expect("migrated get_messages response");
+    let messages = response["payload"]["messages"]
+        .as_array()
+        .expect("messages");
+    let image = messages
+        .iter()
+        .find_map(|entry| {
+            entry["message"]["content"]
+                .as_array()
+                .and_then(|content| content.first())
+        })
+        .expect("migrated image message");
+    assert_eq!(image["type"], "input_image_ref");
+    let sha = image["blob_sha"].as_str().expect("migrated image sha");
+    assert_eq!(
+        std::fs::read(sessions_dir.join("attachments/blobs").join(sha)).unwrap(),
+        image_bytes
+    );
+    let tool = messages
+        .iter()
+        .find(|entry| entry["message"]["tool_call_id"] == "legacy-tool-call")
+        .expect("migrated tool result");
+    assert_eq!(tool["message"]["content"], "edited");
+    assert_eq!(tool["message"]["tool_display"]["kind"], "file");
+    assert_eq!(tool["message"]["tool_display"]["expired"], true);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_get_messages_keeps_assistant_and_tool_result_atomic_by_tool_call_id() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
@@ -2907,7 +3029,14 @@ async fn serve_get_messages_keeps_assistant_and_tool_result_atomic_by_tool_call_
             serde_json::json!({
                 "role": "tool",
                 "tool_call_id": "ask-call-1",
-                "content": "{\"answers\":[],\"cancelled\":true,\"outcome\":\"skipped\"}"
+                "content": "{\"answers\":[],\"cancelled\":true,\"outcome\":\"skipped\"}",
+                "tool_display": {
+                    "kind": "file",
+                    "file": "src/lib.rs",
+                    "added": 1,
+                    "removed": 0,
+                    "diff": [{"tag": "add", "newLine": 1, "text": "new"}]
+                }
             }),
         )
         .expect("append ask_question result");
@@ -2941,6 +3070,11 @@ async fn serve_get_messages_keeps_assistant_and_tool_result_atomic_by_tool_call_
     let messages = first["payload"]["messages"].as_array().expect("messages");
     assert_eq!(messages[0]["message"]["tool_calls"][0]["id"], "ask-call-1");
     assert_eq!(messages[1]["message"]["tool_call_id"], "ask-call-1");
+    assert_eq!(messages[1]["message"]["tool_display"]["kind"], "file");
+    assert_eq!(
+        messages[1]["message"]["tool_display"]["diff"][0]["text"],
+        "new"
+    );
     let next_cursor = first["payload"]["nextCursor"]
         .as_str()
         .expect("cursor before atomic companion")

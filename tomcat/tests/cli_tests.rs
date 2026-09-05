@@ -349,6 +349,7 @@ impl PrimitiveExecutor for DeterministicMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
 
@@ -364,6 +365,7 @@ impl PrimitiveExecutor for DeterministicMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
 

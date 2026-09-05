@@ -1,18 +1,25 @@
 //! SessionManager struct and its implementation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::core::session::append_message_chain::{
     classify_resumable_ask_question_result, collect_recent_chat_messages_from_tail,
     find_dangling_tail_tool_calls, pending_replay_safe_tail_tool_call_ids, validate_append_message,
 };
+use crate::core::session::housekeeping_ledger::{
+    session_id_from_transcript_path, FileFingerprint, HousekeepingLedger, SidecarLedgerEntry,
+    TranscriptLedgerEntry,
+};
 use crate::core::session::resume_index::remove_resume_index;
+use crate::core::session::tool_display_sidecar::{
+    append_tool_display, compact_tool_display_sidecar, tool_display_sidecar_path,
+};
 use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 
 use crate::core::session::store::{
@@ -29,6 +36,7 @@ use crate::core::session::transcript::{
     ThinkingTraceEntry, TranscriptEntry, TranscriptPage,
 };
 use crate::infra::error::AppError;
+use crate::infra::events::ToolDisplay;
 use crate::infra::platform::normalize_path;
 
 use super::types::ContextState;
@@ -41,13 +49,101 @@ const SESSIONS_FILE: &str = "sessions.json";
 const TITLE_MAX_CHARS: usize = 40;
 const PENDING_QUESTION_SKIPPED_RESULT: &str =
     r#"{"outcome":"skipped","cancelled":true,"answers":[]}"#;
+
+/// Result of the single streaming pass that marks attachment blobs as live.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LiveBlobReferences {
+    pub shas: HashSet<String>,
+    /// Durable references are separate from leases so expiry does not require a second
+    /// transcript scan before orphan sweeping.
+    transcript_shas: HashSet<String>,
+    pub bytes_scanned: u64,
+    /// Number of main transcript files opened during the single GC mark pass.
+    pub transcripts_scanned: usize,
+}
+
+/// Results produced by the incremental, startup-only housekeeping mark pass.
+#[derive(Debug)]
+pub struct IncrementalHousekeepingMark {
+    pub compacted_displays: usize,
+    pub live_blob_references: LiveBlobReferences,
+}
+
+impl LiveBlobReferences {
+    /// Replace lease-derived liveness after pending-lease cleanup.
+    ///
+    /// Extending the old set would retain an expired lease for one extra housekeeping pass.
+    pub(crate) fn refresh_pending_blob_shas(&mut self, pending_shas: HashSet<String>) {
+        self.shas.clone_from(&self.transcript_shas);
+        self.shas.extend(pending_shas);
+    }
+}
+
 /// 只有主 transcript 才能参与 session 枚举与附件引用判定；派生 sidecar 不是会话。
 fn is_session_transcript_path(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
         && !path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".user_messages.jsonl"))
+            .is_some_and(|name| {
+                name.ends_with(".user_messages.jsonl") || name.ends_with(".tool_display.jsonl")
+            })
+}
+
+/// Pull local rendering metadata out before a message becomes part of the model's
+/// transcript. Callers retain their in-memory display, while the durable main row only
+/// contains the tool result that a future LLM request needs.
+fn persist_tool_display_sidecar_if_present(
+    transcript_path: &Path,
+    message: &mut serde_json::Value,
+    timestamp: &str,
+) -> Result<(), AppError> {
+    let Some(object) = message.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(display) = object.remove("tool_display") else {
+        return Ok(());
+    };
+    let tool_call_id = object
+        .get("tool_call_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            AppError::Config("tool_display message is missing tool_call_id".to_string())
+        })?;
+    let display = serde_json::from_value::<ToolDisplay>(display).map_err(|error| {
+        AppError::Config(format!(
+            "invalid tool_display on tool transcript message: {error}"
+        ))
+    })?;
+    append_tool_display(transcript_path, tool_call_id, timestamp, &display)
+}
+
+fn is_blob_sha(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn collect_blob_shas(value: &serde_json::Value, shas: &mut HashSet<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(sha) = object.get("blob_sha").and_then(serde_json::Value::as_str) {
+                if is_blob_sha(sha) {
+                    shas.insert(sha.to_string());
+                }
+            }
+            for value in object.values() {
+                collect_blob_shas(value, shas);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_blob_shas(value, shas);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 在内存中试算 tool result 落盘后的逻辑消息链。
@@ -258,37 +354,229 @@ impl SessionManager {
     }
 
     /// 判断某份字节是否仍被本会话的 transcript 引用。
-    ///
-    /// 供附件 GC 决定「租约到期后字节能不能删」。逐行扫 transcript 找 `blobSha`
-    /// 字面量即可 —— GC 是低频后台动作，不值得为它维护一份反向索引。
     pub fn transcript_references_blob(&self, session_id: &str, sha: &str) -> bool {
-        let Ok(content) = std::fs::read_to_string(self.transcript_path(session_id)) else {
+        let path = self.transcript_path(session_id);
+        let Ok(file) = std::fs::File::open(path) else {
             return false;
         };
-        content.contains(sha)
+        let reader = BufReader::new(file);
+        reader
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+            .any(|value| {
+                let mut shas = HashSet::new();
+                collect_blob_shas(&value, &mut shas);
+                shas.contains(sha)
+            })
     }
 
-    /// 判断某份字节是否仍被**任何**会话的 transcript 引用。
+    /// Mark every sent image and every live draft lease in one streaming pass.
     ///
-    /// 内容寻址意味着同一张图会被多个会话共享同一份字节，所以 GC 前必须问遍所有 transcript，
-    /// 只看当前会话会把别人还在用的字节删掉。这是启动时的一次性动作，扫全量是可以接受的。
-    pub fn any_transcript_references_blob(&self, sha: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
-            return false;
+    /// The returned set is deliberately ephemeral: a persisted reference count/index would
+    /// become another crash-recovery problem. GC runs only in background housekeeping, where a
+    /// single bounded scan is simpler and is the source of truth.
+    pub fn collect_live_blob_shas(&self) -> Result<LiveBlobReferences, AppError> {
+        self.collect_live_blob_shas_with_ledger(None)
+    }
+
+    /// Compact stale UI diffs without ever blocking a live transcript append.
+    ///
+    /// This runs only in startup housekeeping. A contended transcript means a turn has already
+    /// started, so that session is safely skipped until the next serve startup.
+    pub fn compact_tool_display_sidecars(&self) -> Result<usize, AppError> {
+        self.compact_tool_display_sidecars_with_ledger(None)
+    }
+
+    /// Performs the expensive startup-only work against a discardable fingerprint cache.
+    ///
+    /// The ledger never becomes an authority: a missing, malformed, changed, or otherwise
+    /// untrusted entry falls back to the same full per-file scan as `collect_live_blob_shas`.
+    /// Keeping this as one transaction means the compacting and GC passes share one small
+    /// ledger write instead of touching a cache on every message append.
+    pub fn run_incremental_attachment_housekeeping(
+        &self,
+    ) -> Result<IncrementalHousekeepingMark, AppError> {
+        let mut ledger = HousekeepingLedger::load(&self.sessions_dir);
+        let original_ledger = ledger.clone();
+        let compacted_displays =
+            self.compact_tool_display_sidecars_with_ledger(Some(&mut ledger))?;
+        let live_blob_references = self.collect_live_blob_shas_with_ledger(Some(&mut ledger))?;
+        let current_session_ids = self
+            .session_transcript_paths()?
+            .iter()
+            .filter_map(|path| session_id_from_transcript_path(path).map(ToOwned::to_owned))
+            .collect::<HashSet<_>>();
+        ledger.prune_to(&current_session_ids);
+        if ledger != original_ledger {
+            ledger.save(&self.sessions_dir)?;
+        }
+        Ok(IncrementalHousekeepingMark {
+            compacted_displays,
+            live_blob_references,
+        })
+    }
+
+    fn session_transcript_paths(&self) -> Result<Vec<PathBuf>, AppError> {
+        let mut paths = std::fs::read_dir(&self.sessions_dir)
+            .map_err(AppError::Io)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| is_session_transcript_path(path))
+            .collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn collect_live_blob_shas_with_ledger(
+        &self,
+        mut ledger: Option<&mut HousekeepingLedger>,
+    ) -> Result<LiveBlobReferences, AppError> {
+        let pending_shas = self.attachment_store().collect_pending_blob_shas()?;
+        let mut live = LiveBlobReferences {
+            shas: HashSet::new(),
+            transcript_shas: HashSet::new(),
+            bytes_scanned: 0,
+            transcripts_scanned: 0,
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !is_session_transcript_path(&path) {
+        live.refresh_pending_blob_shas(pending_shas);
+        for path in self.session_transcript_paths()? {
+            let Some(session_id) = session_id_from_transcript_path(&path) else {
+                continue;
+            };
+            let Some(fingerprint) = FileFingerprint::for_path(&path)? else {
+                continue;
+            };
+            let cached_shas = ledger.as_deref().and_then(|ledger| {
+                ledger
+                    .entry(session_id)
+                    .and_then(|entry| entry.transcript.as_ref())
+                    .filter(|entry| entry.fingerprint == fingerprint)
+                    .map(|entry| entry.blob_shas.clone())
+            });
+            if let Some(cached_shas) = cached_shas {
+                live.transcript_shas.extend(cached_shas);
                 continue;
             }
-            if std::fs::read_to_string(&path)
-                .map(|content| content.contains(sha))
-                .unwrap_or(false)
-            {
-                return true;
+            let file = std::fs::File::open(&path).map_err(AppError::Io)?;
+            live.transcripts_scanned += 1;
+            let mut reader = BufReader::new(file);
+            let mut row = Vec::new();
+            let mut transcript_shas = HashSet::new();
+            loop {
+                row.clear();
+                let bytes_read = reader.read_until(b'\n', &mut row).map_err(AppError::Io)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                live.bytes_scanned = live
+                    .bytes_scanned
+                    .saturating_add(u64::try_from(bytes_read).unwrap_or(u64::MAX));
+                match serde_json::from_slice::<serde_json::Value>(row.trim_ascii()) {
+                    Ok(value) => collect_blob_shas(&value, &mut transcript_shas),
+                    // Transcript readers consistently skip malformed JSONL rows. Keep GC on
+                    // that same availability-first contract: a broken historical row may lose
+                    // an otherwise unobservable image reference, but must not permanently
+                    // prevent cleanup of every healthy session.
+                    Err(error) => tracing::warn!(
+                        transcript = %path.display(),
+                        error = %error,
+                        "sessions: skipping malformed transcript row while collecting attachment references"
+                    ),
+                };
+            }
+            live.transcript_shas.extend(transcript_shas.iter().cloned());
+            // Do not cache a file that changed while it was being scanned. Its current live
+            // set remains conservative because orphan sweep has a grace period; the next
+            // housekeeping pass will retry from the new fingerprint.
+            if FileFingerprint::for_path(&path)? == Some(fingerprint) {
+                let mut blob_shas = transcript_shas.into_iter().collect::<Vec<_>>();
+                blob_shas.sort();
+                if let Some(ledger) = ledger.as_deref_mut() {
+                    ledger.entry_mut(session_id).transcript = Some(TranscriptLedgerEntry {
+                        fingerprint,
+                        blob_shas,
+                    });
+                }
+            } else if let Some(ledger) = ledger.as_deref_mut() {
+                ledger.entry_mut(session_id).transcript = None;
             }
         }
-        false
+        live.shas.extend(live.transcript_shas.iter().cloned());
+        Ok(live)
+    }
+
+    fn compact_tool_display_sidecars_with_ledger(
+        &self,
+        mut ledger: Option<&mut HousekeepingLedger>,
+    ) -> Result<usize, AppError> {
+        let mut compacted = 0;
+        let now = Utc::now();
+        let cutoff = now
+            - chrono::Duration::from_std(
+                crate::core::session::tool_display_sidecar::TOOL_DISPLAY_DIFF_RETENTION,
+            )
+            .expect("seven-day retention fits chrono duration");
+        for path in self.session_transcript_paths()? {
+            let Some(session_id) = session_id_from_transcript_path(&path) else {
+                continue;
+            };
+            let lock = self.transcript_mutex_for_path(&path)?;
+            let _guard = match lock.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    tracing::debug!(
+                        transcript = %path.display(),
+                        "sessions: skipping busy tool-display sidecar compaction"
+                    );
+                    continue;
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    return Err(AppError::Config(format!(
+                        "tool-display compaction lock failed: {error}"
+                    )));
+                }
+            };
+            let sidecar_path = tool_display_sidecar_path(&path);
+            let fingerprint = FileFingerprint::for_path(&sidecar_path)?;
+            let Some(fingerprint) = fingerprint else {
+                if let Some(ledger) = ledger.as_deref_mut() {
+                    ledger.entry_mut(session_id).sidecar = None;
+                }
+                continue;
+            };
+            let can_skip = ledger.as_deref().is_some_and(|ledger| {
+                ledger
+                    .entry(session_id)
+                    .and_then(|entry| entry.sidecar.as_ref())
+                    .is_some_and(|entry| {
+                        entry.fingerprint == fingerprint
+                            && !entry.requires_rescan
+                            && entry
+                                .oldest_uncompacted_ts
+                                .as_ref()
+                                .is_none_or(|timestamp| {
+                                    DateTime::parse_from_rfc3339(timestamp)
+                                        .map(|timestamp| timestamp.with_timezone(&Utc) >= cutoff)
+                                        .unwrap_or(false)
+                                })
+                    })
+            });
+            if can_skip {
+                continue;
+            }
+            let report = compact_tool_display_sidecar(&path, now)?;
+            compacted += report.entries_compacted;
+            if let Some(fingerprint) = FileFingerprint::for_path(&sidecar_path)? {
+                if let Some(ledger) = ledger.as_deref_mut() {
+                    ledger.entry_mut(session_id).sidecar = Some(SidecarLedgerEntry {
+                        fingerprint,
+                        oldest_uncompacted_ts: report.oldest_uncompacted_ts,
+                        requires_rescan: report.requires_rescan,
+                    });
+                }
+            }
+        }
+        Ok(compacted)
     }
 
     /// 丢弃旧版本遗留的后端草稿目录。
@@ -341,7 +629,10 @@ impl SessionManager {
         Ok(output)
     }
 
-    fn transcript_mutex_for_path(&self, path: &Path) -> Result<Arc<Mutex<()>>, AppError> {
+    pub(crate) fn transcript_mutex_for_path(
+        &self,
+        path: &Path,
+    ) -> Result<Arc<Mutex<()>>, AppError> {
         let mut registry = self
             .transcript_mutexes
             .lock()
@@ -755,22 +1046,45 @@ impl SessionManager {
         })?;
         let path = self.transcript_path(&entry.session_id);
         let sidecar_path = user_message_sidecar_path(&path);
+        let tool_display_sidecar_path = tool_display_sidecar_path(&path);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&sidecar_path);
+        let _ = std::fs::remove_file(&tool_display_sidecar_path);
         let _ = remove_resume_index(&path);
         // 本会话的 transcript 已删，但内容寻址意味着同一份字节可能被别的会话共享。
         // 所以判据必须是「问遍所有 transcript」——只看自己会把别人还在用的图删掉。
         // 仍被别的会话租着的字节由 clear_session 自己按租约保留。
-        if let Err(error) = self
-            .attachment_store()
-            .clear_session(&entry.session_id, &|sha| {
-                self.any_transcript_references_blob(sha)
-            })
-        {
+        if let Err(error) = self.attachment_store().clear_session(&entry.session_id) {
             tracing::warn!(
                 "sessions: failed to release attachment leases for {}: {error}",
                 entry.session_id
             );
+        }
+        match self.collect_live_blob_shas() {
+            Ok(mut live) => {
+                let store = self.attachment_store();
+                let _ = store.gc_pending(crate::core::session::attachments::PENDING_BLOB_TTL);
+                match store.collect_pending_blob_shas() {
+                    Ok(pending) => live.refresh_pending_blob_shas(pending),
+                    Err(error) => {
+                        tracing::warn!(
+                            "sessions: failed to refresh attachment leases after deleting {}: {error}",
+                            entry.session_id
+                        );
+                        return Ok(());
+                    }
+                }
+                if let Err(error) = store.sweep_orphan_blobs(
+                    &live.shas,
+                    crate::core::session::attachments::ORPHAN_BLOB_GRACE,
+                ) {
+                    tracing::warn!("sessions: failed to sweep attachment orphans: {error}");
+                }
+            }
+            Err(error) => tracing::warn!(
+                "sessions: failed to collect live attachment references after deleting {}: {error}",
+                entry.session_id
+            ),
         }
         Ok(())
     }
@@ -847,7 +1161,7 @@ impl SessionManager {
     fn append_message_while_locked(
         &self,
         path: &Path,
-        message: serde_json::Value,
+        mut message: serde_json::Value,
         chain_violation_is_invariant: bool,
         forced_id: Option<&str>,
     ) -> Result<(String, usize), AppError> {
@@ -871,6 +1185,7 @@ impl SessionManager {
             .map(ToOwned::to_owned)
             .unwrap_or_else(generate_entry_id);
         let now = iso_ts_now()?;
+        persist_tool_display_sidecar_if_present(path, &mut message, &now)?;
         let sync = Self::message_sync_level(&message);
         let message_for_title = message.clone();
         let entry = TranscriptEntry::Message(MessageEntry {
@@ -1133,6 +1448,8 @@ impl SessionManager {
             }
             let id = generate_entry_id();
             let now = iso_ts_now()?;
+            let mut message = message;
+            persist_tool_display_sidecar_if_present(&path, &mut message, &now)?;
             let sync = Self::message_sync_level(&message);
             let message_for_title = message.clone();
             let entry = TranscriptEntry::Message(MessageEntry {

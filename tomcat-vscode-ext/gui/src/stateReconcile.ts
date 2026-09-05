@@ -202,6 +202,7 @@ export function reconcileStateSnapshot(
     previous.availableModelDetails === availableModelDetails &&
     previous.availableModelReasoningLevels === availableModelReasoningLevels &&
     previous.buildModel === next.buildModel &&
+    previous.connectionStatus === next.connectionStatus &&
     previous.mediaRoots === mediaRoots &&
     previous.modelAdminSupported === next.modelAdminSupported &&
     previous.ready === next.ready &&

@@ -37,9 +37,10 @@
 //! 打字     → 不碰这里（草稿文本在扩展层，见 tomcat-vscode-ext/docs/architecture/image-attachments.md）
 //! hydrate  → touch_pending 续期，证明这份草稿还活着
 //! send     → promote(sid, sha) 只删租约标记，blob 原地不动（零拷贝）
-//! GC       → 租约超过 TTL：blob 未被 transcript 引用则连 blob 一起删；被引用则只删租约
+//! GC       → 租约超过 TTL：先删租约；随后标记所有 transcript 引用，再在 1 小时宽限期后清扫孤儿 blob
 //! ```
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -56,10 +57,11 @@ use crate::infra::platform::write_file_atomic;
 /// 取 7 天：足够覆盖「周五写了草稿、周一回来接着写」，又不至于让被遗忘的草稿字节长期占盘。
 pub const PENDING_BLOB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// 可重建字节的总量上限（历史图 + 缩略图）。超过则按最近最少使用淘汰。
-///
-/// 这部分被删只会让下次打开老会话慢一点，不会丢任何东西，所以可以放心设一个不大的上限。
-/// 未发送的字节不计入此预算，也永远不会因为超预算被删。
+/// Orphans stay for an hour before sweeping. A process that crashes between publishing a
+/// blob and appending its transcript reference must not lose the just-sent image.
+pub const ORPHAN_BLOB_GRACE: Duration = Duration::from_secs(60 * 60);
+
+/// Thumbnails are derived data and can be recreated, so they alone have an LRU budget.
 pub const REBUILDABLE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// sha256 十六进制字符串的长度。
@@ -76,14 +78,14 @@ const ALLOWED_IMAGE_MIME: [&str; 5] = [
 
 // ── 类型 ──────────────────────────────────────────────────────────────
 
-/// GC 一轮的结果，用于日志与测试断言。
+/// 附件清理步骤的结果，用于日志与测试断言。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlobGcReport {
     /// 删除的租约标记数量。
     pub leases_released: usize,
-    /// 连同字节一起删除的 blob 数量。
+    /// `sweep_orphan_blobs` 连同缩略图删除的 blob 数量。
     pub blobs_deleted: usize,
-    /// 因仍被 transcript 引用而保留字节、只释放租约的数量。
+    /// `sweep_orphan_blobs` 因仍在 live set 而保留的 blob 数量。
     pub blobs_retained: usize,
 }
 
@@ -143,12 +145,13 @@ impl AttachmentBlobStore {
 
     /// 落盘一份字节，返回它的 sha256。
     ///
-    /// 内容寻址天然去重：同一份字节第二次 `put` 不会重写文件，因此已经存在的 blob
-    /// 的 inode 与 mtime 保持不变（`r-test-zero-copy` 依赖这个性质）。
+    /// 内容寻址天然去重：同一份字节第二次 `put` 不会重写内容，但会刷新 mtime。
+    /// mtime 是 orphan grace window 的活动信号，不是内容版本。
     pub fn put(&self, bytes: &[u8]) -> Result<String, AppError> {
         let sha = sha256_hex(bytes);
         let path = self.blob_path(&sha);
         if path.exists() {
+            touch_blob(&path)?;
             return Ok(sha);
         }
         write_file_atomic(&path, bytes)?;
@@ -177,15 +180,6 @@ impl AttachmentBlobStore {
     /// 字节是否可取到。不做内容校验。
     pub fn exists(&self, sha: &str) -> bool {
         validate_sha(sha).is_ok() && self.blob_path(sha).exists()
-    }
-
-    /// 把历史图从 transcript 物化成一份可被 webview 直接取用的文件，返回它的 sha。
-    ///
-    /// 与 `put` 的唯一区别是**不建立租约**：transcript 已经是这份字节的权威记录，
-    /// 所以这里落下的只是一份「为了有个 URL 可以指」的可重建副本，
-    /// 空间紧张时按 LRU 淘汰掉也不会丢任何东西。
-    pub fn materialize_from_transcript(&self, bytes: &[u8]) -> Result<String, AppError> {
-        self.put(bytes)
     }
 
     // ── 缩略图 ───────────────────────────────────────────────────────
@@ -312,6 +306,10 @@ impl AttachmentBlobStore {
     /// 这就是「零拷贝提升」的全部内容 —— 不读、不写、不复制任何字节。
     pub fn promote(&self, session_id: &str, sha: &str) -> Result<(), AppError> {
         validate_sha(sha)?;
+        let blob_path = self.blob_path(sha);
+        if blob_path.exists() {
+            touch_blob(&blob_path)?;
+        }
         let path = self
             .session_pending_dir(validate_session_id(session_id)?)
             .join(sha);
@@ -338,20 +336,46 @@ impl AttachmentBlobStore {
         Ok(out)
     }
 
-    /// 会话被删除：清理它的全部租约，并回收不再被任何人引用的字节。
+    /// Collect every active draft lease in one directory walk so a GC pass can make
+    /// membership decisions in O(blobs + leases), rather than probing all leases per blob.
+    pub fn collect_pending_blob_shas(&self) -> Result<HashSet<String>, AppError> {
+        let pending_root = self.pending_dir();
+        if !pending_root.exists() {
+            return Ok(HashSet::new());
+        }
+        let mut shas = HashSet::new();
+        for session_entry in std::fs::read_dir(&pending_root).map_err(AppError::Io)? {
+            let session_entry = session_entry.map_err(AppError::Io)?;
+            if !session_entry.file_type().map_err(AppError::Io)?.is_dir() {
+                continue;
+            }
+            for lease in std::fs::read_dir(session_entry.path()).map_err(AppError::Io)? {
+                let lease = lease.map_err(AppError::Io)?;
+                if !lease.file_type().map_err(AppError::Io)?.is_file() {
+                    continue;
+                }
+                if let Some(sha) = lease
+                    .file_name()
+                    .to_str()
+                    .filter(|sha| validate_sha(sha).is_ok())
+                {
+                    shas.insert(sha.to_string());
+                }
+            }
+        }
+        Ok(shas)
+    }
+
+    /// 会话被删除：仅清理它的全部租约。孤儿 blob 统一交给带宽限窗的 sweep，
+    /// 避免各个调用点对「能否删除」做不同判定。
     ///
     /// 与 `SessionManager::delete_session` 联动。
-    pub fn clear_session(
-        &self,
-        session_id: &str,
-        is_referenced: &dyn Fn(&str) -> bool,
-    ) -> Result<BlobGcReport, AppError> {
+    pub fn clear_session(&self, session_id: &str) -> Result<BlobGcReport, AppError> {
         let session_id = validate_session_id(session_id)?;
         let mut report = BlobGcReport::default();
         for sha in self.list_pending(session_id)? {
             self.promote(session_id, &sha)?;
             report.leases_released += 1;
-            self.collect_unleased_blob(&sha, is_referenced, &mut report)?;
         }
         let _ = std::fs::remove_dir(self.session_pending_dir(session_id));
         Ok(report)
@@ -359,13 +383,8 @@ impl AttachmentBlobStore {
 
     /// 回收超期租约。
     ///
-    /// `is_referenced` 由调用方提供（通常是「扫一遍 transcript 看这个 sha 在不在」），
-    /// 这样本模块不需要知道 transcript 的存在，也让三条 GC 分支都能在单测里精确构造。
-    pub fn gc_pending(
-        &self,
-        ttl: Duration,
-        is_referenced: &dyn Fn(&str) -> bool,
-    ) -> Result<BlobGcReport, AppError> {
+    /// Final blob deletion happens in [`Self::sweep_orphan_blobs`] after the grace window.
+    pub fn gc_pending(&self, ttl: Duration) -> Result<BlobGcReport, AppError> {
         let pending_root = self.pending_dir();
         if !pending_root.exists() {
             return Ok(BlobGcReport::default());
@@ -391,62 +410,41 @@ impl AttachmentBlobStore {
                 if !is_lease_expired(&lease_path, now, ttl) {
                     continue;
                 }
-                let sha = sha.to_string();
                 let _ = std::fs::remove_file(&lease_path);
                 report.leases_released += 1;
-                self.collect_unleased_blob(&sha, is_referenced, &mut report)?;
             }
             let _ = std::fs::remove_dir(&session_dir);
         }
         Ok(report)
     }
 
-    /// 把「可重建的那部分字节」压到上限以内，按最近最少使用淘汰。
-    ///
-    /// 判据不是「在哪个目录」，而是**这份字节能不能重新造出来**：
-    ///
-    /// ```text
-    ///   缩略图                     能（webview 重新降采样一次）        → 可淘汰
-    ///   transcript 引用着的图      能（从 transcript 重新物化一份）    → 可淘汰
-    ///   还持有租约的图             不能（未发送，磁盘上就这一份）      → 绝不动
-    /// ```
-    ///
-    /// 所以淘汰只会让下次打开老会话慢一点，永远不会丢用户没发出去的东西。
-    pub fn evict_rebuildable_over_budget(
-        &self,
-        max_bytes: u64,
-        is_referenced: &dyn Fn(&str) -> bool,
-    ) -> Result<u64, AppError> {
+    /// Apply the budget only to thumbnails. A sent-image blob is its transcript's sole
+    /// copy, so it is never a cache entry and must not be evicted for capacity.
+    pub fn evict_rebuildable_over_budget(&self, max_bytes: u64) -> Result<u64, AppError> {
         let mut entries: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
         let mut total = 0u64;
-        for (dir, is_thumbnail) in [(self.thumbs_dir(), true), (self.blobs_dir(), false)] {
-            if !dir.exists() {
+        let dir = self.thumbs_dir();
+        if !dir.exists() {
+            return Ok(0);
+        }
+        for entry in std::fs::read_dir(&dir).map_err(AppError::Io)? {
+            let entry = entry.map_err(AppError::Io)?;
+            let metadata = entry.metadata().map_err(AppError::Io)?;
+            if !metadata.is_file() {
                 continue;
             }
-            for entry in std::fs::read_dir(&dir).map_err(AppError::Io)? {
-                let entry = entry.map_err(AppError::Io)?;
-                let metadata = entry.metadata().map_err(AppError::Io)?;
-                if !metadata.is_file() {
-                    continue;
-                }
-                let Some(sha) = entry.file_name().to_str().map(str::to_string) else {
-                    continue;
-                };
-                if validate_sha(&sha).is_err() {
-                    continue;
-                }
-                if !is_thumbnail && (self.has_any_lease(&sha)? || !is_referenced(&sha)) {
-                    // 还在租约里 → 是未发送内容的唯一副本，不能碰。
-                    // 没有租约又没人引用 → 这是垃圾，交给 GC 直接删，不该只是「超预算才删」。
-                    continue;
-                }
-                let used = metadata
-                    .accessed()
-                    .or_else(|_| metadata.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                total = total.saturating_add(metadata.len());
-                entries.push((used, metadata.len(), entry.path()));
+            let Some(sha) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if validate_sha(&sha).is_err() {
+                continue;
             }
+            let used = metadata
+                .accessed()
+                .or_else(|_| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            total = total.saturating_add(metadata.len());
+            entries.push((used, metadata.len(), entry.path()));
         }
         if total <= max_bytes {
             return Ok(0);
@@ -468,40 +466,59 @@ impl AttachmentBlobStore {
         Ok(freed)
     }
 
-    /// 租约已释放后，判断字节本身能否回收。
-    ///
-    /// 只有「没有任何其他 session 还租着它」且「transcript 也不引用它」时才删字节。
-    fn collect_unleased_blob(
+    /// Delete blobs with neither a transcript reference nor a live draft lease once they
+    /// are older than `grace`. Each orphan thumbnail goes with its source blob.
+    pub fn sweep_orphan_blobs(
         &self,
-        sha: &str,
-        is_referenced: &dyn Fn(&str) -> bool,
-        report: &mut BlobGcReport,
-    ) -> Result<(), AppError> {
-        if self.has_any_lease(sha)? || is_referenced(sha) {
-            report.blobs_retained += 1;
-            return Ok(());
+        live_shas: &HashSet<String>,
+        grace: Duration,
+    ) -> Result<BlobGcReport, AppError> {
+        let mut report = BlobGcReport::default();
+        let blobs = self.blobs_dir();
+        if !blobs.exists() {
+            return Ok(report);
         }
-        let _ = std::fs::remove_file(self.blob_path(sha));
-        // 缩略图是这份字节的派生物，随源一起走，不留孤儿。
-        let _ = std::fs::remove_file(self.thumb_path(sha));
-        report.blobs_deleted += 1;
-        Ok(())
-    }
-
-    /// 是否还有任意 session 租着这份字节。
-    fn has_any_lease(&self, sha: &str) -> Result<bool, AppError> {
-        let pending_root = self.pending_dir();
-        if !pending_root.exists() {
-            return Ok(false);
-        }
-        for session_entry in std::fs::read_dir(&pending_root).map_err(AppError::Io)? {
-            let session_entry = session_entry.map_err(AppError::Io)?;
-            if session_entry.path().join(sha).exists() {
-                return Ok(true);
+        let now = SystemTime::now();
+        for entry in std::fs::read_dir(blobs).map_err(AppError::Io)? {
+            let entry = entry.map_err(AppError::Io)?;
+            let metadata = entry.metadata().map_err(AppError::Io)?;
+            if !metadata.is_file() {
+                continue;
+            }
+            let Some(sha) = entry
+                .file_name()
+                .to_str()
+                .filter(|sha| validate_sha(sha).is_ok())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if live_shas.contains(&sha) {
+                report.blobs_retained += 1;
+                continue;
+            }
+            let age = now
+                .duration_since(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH))
+                .unwrap_or_default();
+            if age < grace {
+                continue;
+            }
+            if std::fs::remove_file(entry.path()).is_ok() {
+                let _ = std::fs::remove_file(self.thumb_path(&sha));
+                report.blobs_deleted += 1;
             }
         }
-        Ok(false)
+        Ok(report)
     }
+}
+
+fn touch_blob(path: &Path) -> Result<(), AppError> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(AppError::Io)?
+        .set_times(std::fs::FileTimes::new().set_modified(SystemTime::now()))
+        .map_err(AppError::Io)
 }
 
 // ── 不变量 ────────────────────────────────────────────────────────────
@@ -526,6 +543,13 @@ fn validate_sha(sha: &str) -> Result<(), AppError> {
     Err(AppError::Config(format!(
         "attachments: invalid blob sha256: {sha:?}"
     )))
+}
+
+/// Validate an externally supplied blob identifier before a caller derives any behavior
+/// from it. This is intentionally byte-free: callers that merely need to distinguish a
+/// malformed ID from a missing blob must not load the entire attachment.
+pub(crate) fn validate_blob_sha(sha: &str) -> Result<(), AppError> {
+    validate_sha(sha)
 }
 
 /// session id 只允许出现能安全用作单层目录名的字符。

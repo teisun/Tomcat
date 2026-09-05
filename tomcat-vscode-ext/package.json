@@ -2,7 +2,7 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
   "description": "Tomcat Agent Box, an AI coding agent in your VS Code sidebar.",
-  "version": "0.1.58",
+  "version": "0.1.60",
   "publisher": "tomcat",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/teisun/tomcat-agent.git"
   },
   "tomcat": {
-    "bundledCliVersion": "0.1.44"
+    "bundledCliVersion": "0.1.46"
   },
   "categories": [
     "AI",
@@ -265,6 +265,8 @@
     "test:e2e:vscode-devhost": "tsx scripts/run-vscode-devhost.ts",
     "test:e2e:vscode-install": "tsx scripts/run-vscode-install-e2e.ts",
     "test:e2e:webview-devhost": "tsx scripts/run-vscode-devhost.ts",
+    "test:e2e:webview-degraded": "TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES=1 TOMCAT_E2E_GREP='connected-but-degraded' npm run test:e2e:webview-devhost",
+    "test:e2e:webview-stop": "TOMCAT_E2E_GREP='resets interrupted Tomcat' npm run test:e2e:webview-devhost",
     "test:e2e:webview-install": "tsx scripts/run-vscode-install-e2e.ts",
     "bench:webview-bridge": "tsx gui/scripts/measure-webview-bridge.tsx",
     "test": "npm run test:unit",

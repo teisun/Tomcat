@@ -14,7 +14,9 @@ export interface HostE2eFixture {
 }
 
 export interface HostE2eFixtureOptions {
+  bootstrapListModelsFailures?: number;
   handshakeDelayMs?: number;
+  interruptDelayMs?: number;
   requireInit?: boolean;
   transientServeFailures?: number;
 }
@@ -103,6 +105,20 @@ const handshakeDelayMs = Math.max(
     process.env.TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS
       || ${JSON.stringify(options.handshakeDelayMs ?? 0)},
   ),
+);
+let bootstrapListModelsFailures = Math.max(
+  0,
+  Number(
+    process.env.TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES
+      || ${JSON.stringify(options.bootstrapListModelsFailures ?? 0)},
+  ),
+);
+const interruptDelayMs = Math.max(
+  0,
+  Number(
+    process.env.TOMCAT_VSCODE_TEST_INTERRUPT_DELAY_MS
+      ?? ${JSON.stringify(options.interruptDelayMs ?? 150)},
+  ) || 0,
 );
 const setupMarkerPath =
   process.env.TOMCAT_VSCODE_TEST_SETUP_MARKER || ${JSON.stringify(setupMarkerPath)};
@@ -2214,27 +2230,34 @@ function handleInterrupt(frame) {
     return;
   }
 
-  if (pendingInterrupt) {
-    clearTimeout(pendingInterrupt);
-    pendingInterrupt = null;
-  }
-  if (pendingPlanCompletion) {
-    clearTimeout(pendingPlanCompletion);
-    pendingPlanCompletion = null;
-  }
-
-  const session = ensureSession(sessionId);
-  if (session.busy) {
-    if (session.planState === "executing") {
-      session.planState = "pending";
-      emitPlanEvent(sessionId, "plan.pending");
+  const settleInterrupt = () => {
+    if (pendingInterrupt) {
+      clearTimeout(pendingInterrupt);
+      pendingInterrupt = null;
     }
-    recordHistoryCustom(sessionId, "agent.interrupted");
-    send({
-      sessionId,
-      type: "agent_interrupted",
-    });
-    finishTurn(sessionId, "interrupted");
+    if (pendingPlanCompletion) {
+      clearTimeout(pendingPlanCompletion);
+      pendingPlanCompletion = null;
+    }
+
+    const session = ensureSession(sessionId);
+    if (session.busy) {
+      if (session.planState === "executing") {
+        session.planState = "pending";
+        emitPlanEvent(sessionId, "plan.pending");
+      }
+      recordHistoryCustom(sessionId, "agent.interrupted");
+      send({
+        sessionId,
+        type: "agent_interrupted",
+      });
+      finishTurn(sessionId, "interrupted");
+    }
+  };
+  if (interruptDelayMs > 0) {
+    setTimeout(settleInterrupt, interruptDelayMs);
+  } else {
+    settleInterrupt();
   }
 }
 
@@ -2258,6 +2281,7 @@ function handleCommand(frame) {
                 "switch_session",
                 "list_sessions",
                 "get_state",
+                "list_checkpoints",
                 "close_session",
                 "interrupt",
                 "follow_up",
@@ -2380,6 +2404,20 @@ function handleCommand(frame) {
       });
       break;
     }
+    case "list_checkpoints": {
+      const sessionId = frame.sessionId || activeSessionId;
+      send({
+        id: frame.id,
+        payload: {
+          checkpoints: [],
+          sessionId,
+        },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
     case "get_messages": {
       const sessionId = frame.sessionId || activeSessionId;
       const session = ensureSession(sessionId);
@@ -2464,6 +2502,17 @@ function handleCommand(frame) {
       });
       break;
     case "list_models":
+      if (bootstrapListModelsFailures > 0) {
+        bootstrapListModelsFailures -= 1;
+        send({
+          error: "simulated list_models bootstrap failure",
+          id: frame.id,
+          sessionId: activeSessionId,
+          success: false,
+          type: "response",
+        });
+        break;
+      }
       send({
         id: frame.id,
         payload: {
@@ -2810,10 +2859,16 @@ export async function createHostE2eFixture(
     env: {
       ...process.env,
       TOMCAT_VSCODE_TEST_ATTACHMENT_ROOT: attachmentRootDir,
+      TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES: String(
+        options.bootstrapListModelsFailures ?? 0,
+      ),
       TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
       TOMCAT_VSCODE_TEST_EDIT_FILE: editFilePath,
       TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS: String(
         options.handshakeDelayMs ?? 0,
+      ),
+      TOMCAT_VSCODE_TEST_INTERRUPT_DELAY_MS: String(
+        options.interruptDelayMs ?? 150,
       ),
       TOMCAT_VSCODE_TEST_PATH: fakeServePath,
       TOMCAT_VSCODE_TEST_REQUIRE_INIT: options.requireInit ? "1" : "0",

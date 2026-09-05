@@ -89,6 +89,24 @@ describe("stateReconcile", () => {
     expect(reconciled).toBe(previous);
   });
 
+  it("propagates a connection-status change when both states are not ready", () => {
+    const previous: WebviewStateSnapshot = {
+      ...snapshot(),
+      connectionStatus: "reconnecting",
+      ready: false,
+    };
+    const next: WebviewStateSnapshot = {
+      ...snapshot(),
+      connectionStatus: "degraded",
+      ready: false,
+    };
+
+    const reconciled = reconcileStateSnapshot(previous, next);
+
+    expect(reconciled).not.toBe(previous);
+    expect(reconciled.connectionStatus).toBe("degraded");
+  });
+
   it("reuses unchanged timeline entries and untouched sessions", () => {
     const previous = snapshot();
     const next = snapshot();

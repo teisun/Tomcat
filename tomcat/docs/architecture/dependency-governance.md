@@ -58,11 +58,18 @@ tomcat 直接 HTTP 调用 ───┐
 远程 MCP/OAuth: rmcp ────┘
 ```
 
-项目直接依赖已从 reqwest 0.12 升至 0.13，并显式启用 `json`、`stream`、`form`、`query`、`multipart` feature。后两项在 reqwest 0.13 不再随默认 feature 提供；缺少它们会使 OAuth token 交换和扩展 HTTP 查询参数调用无法编译。
+项目直接依赖已从 reqwest 0.12 升至 0.13，并显式启用 `native-tls`、`charset`、`http2`、`system-proxy`、`json`、`stream`、`form`、`query`、`multipart`。`default-features = false` 是必须的：reqwest 0.13 的默认 TLS 后端是 rustls；只写版本号与业务 feature 会在没有任何源码改动时悄悄把 TLS 后端换掉。
 
-这消除了完整的 reqwest 0.12 / native-tls HTTP 栈，包括 `hyper-tls`、`native-tls` 和 `tokio-native-tls`。这也是一次有意的 TLS 后端切换：所有直接 HTTPS 请求现在与 rmcp 一样使用 rustls 和平台证书验证器。代理、HTTP/2、系统代理发现和 OS 根证书信任仍由 reqwest 的默认 feature 保持。
+```
+直接 HTTP / 远程 MCP OAuth
+           │
+           └── reqwest 0.13 + native-tls
+                 └── 操作系统证书库、企业代理与自定义 CA 行为保持一致
+```
 
-风险边界：企业 MITM 代理、自定义 CA 或旧式证书链必须在目标网络做真实 HTTPS 验收；不能为了回避此风险重新启用 native-tls，因为 rmcp 已经使用 rustls，那会重新制造双 TLS 栈。远程 OAuth MCP 的 `rmcp` feature 集保持不变；删掉它们是删除功能，不是去重。
+保留 native TLS 不是为了减少 crate 数，而是为了保持既有 HTTPS 行为。代理、HTTP/2、系统代理发现和 OS 根证书信任均由显式 feature 保障；OAuth token 交换和带查询参数的扩展 HTTP 调用仍依赖 `form`、`query` 与 `multipart`。`rmcp` 必须选 `reqwest-native-tls`，不能选名称相近的 `reqwest`：后者会启用 `reqwest/rustls`，Cargo feature 合并后会重新把 rustls 拉回生产图。
+
+推翻条件：若 rmcp 在未来公开版本中强制 reqwest 的 rustls feature，或真实目标网络的 HTTPS 冒烟证明 native TLS 不可用，再单独评估全栈切换及企业代理/自定义 CA 回归。不能把「少一个 C 构建边界」当成切换理由；TLS 后端是网络兼容性决定。
 
 ### 由上游版本边界决定的重复
 
@@ -79,6 +86,7 @@ tomcat 直接 HTTP 调用 ───┐
 
 - `axum` 仅由 `test-streamable-http-server` feature 的 HTTP/OAuth 测试服务器使用；生产 CLI 默认图不启用它。
 - `quinn`、`quinn-proto`、`quinn-udp` 若存在于 lockfile，是 reqwest 可选 HTTP/3 边的解析记录；不在默认生产依赖图中。
+- `rustls`、`tokio-rustls` 及其下游若仍显示在 lockfile，是上游 crate 的可选 feature 解析记录；以 `cargo tree -i rustls --locked` 和 `cargo tree -i tokio-rustls --locked` 为空作为生产图验收，而不是手工删除条目。
 
 删除这些 lockfile 条目不减少默认构建。Cargo 会在不再有解析路径时自行清理；禁止手工编辑 `Cargo.lock`。
 
@@ -97,7 +105,7 @@ cargo build --profile fast
 ## 2026-09 审计记录
 
 - `Cargo.lock` 包条目：573 → 541（-32）。
-- 默认生产图已不含 `base64 0.21`、`ron`、`rust-ini`、`json5`、`convert_case`、`yaml-rust2`、`onig`、`onig_sys` 或 `reqwest 0.12` / `native-tls` 栈；保留 `base64 0.22/0.23` 的原因见上文。
+- 默认生产图已不含 `base64 0.21`、`ron`、`rust-ini`、`json5`、`convert_case`、`yaml-rust2`、`onig`、`onig_sys` 或 `reqwest 0.12`；reqwest 0.13 的唯一生产 TLS 路径是显式的 `native-tls`。保留 `base64 0.22/0.23` 的原因见上文。
 - 配置测试：95 通过；终端渲染测试：4 通过；HTTP OAuth 连接器测试：2 通过；`cargo machete` 无未使用的直接依赖。
 - 配置/高亮瘦身后的 `cargo build --release` 成功，耗时 10m58s；reqwest 统一后的 release 构建也成功，耗时 9m31s。两次构建缓存状态不同，不能将它们当作性能对比。
 - `fast` 是独立产物图，首次冷编仍需 12m27s；依赖变更后的重建为 7m53s，无改动热构建为 1.91s。不能把热构建当作“改一行”的基准；应在下一次真实源码编辑后记录增量耗时。

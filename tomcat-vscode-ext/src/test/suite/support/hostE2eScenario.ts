@@ -1798,6 +1798,78 @@ export async function assertWebviewStreamingFlow(
   });
 }
 
+export async function assertWebviewBootstrapDegradedFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  await waitForWebviewState(
+    api,
+    (state) => state.connectionStatus === "degraded" ? state : undefined,
+    20_000,
+  );
+  const degraded = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.html.includes(
+        "Connected, but initialization failed. Choose Retry in the notification.",
+      )
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    !degraded.html.includes("tc-conn-light--connected"),
+    "a degraded bootstrap must not leave the connection indicator green",
+  );
+  const failurePrompt = await waitForWebviewState(
+    api,
+    () => {
+      const prompt = api.__testing
+        .getPromptHistory()
+        .find((entry) => entry.message.includes("Tomcat 已连接，但初始化数据加载失败。"));
+      return prompt?.actions.includes("Retry") && prompt.actions.includes("View Logs")
+        ? prompt
+        : undefined;
+    },
+    20_000,
+  );
+  assert.equal(failurePrompt.severity, "warning");
+}
+
+export async function assertWebviewBootstrapRetryRecoveryFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  await waitForWebviewState(
+    api,
+    (state) => state.connectionStatus === "ready" ? state : undefined,
+    20_000,
+  );
+  const prompt = await waitForWebviewState(
+    api,
+    () => {
+      const record = api.__testing
+        .getPromptHistory()
+        .find((entry) => entry.message.includes("Tomcat 已连接，但初始化数据加载失败。"));
+      return record?.actions.includes("Retry") ? record : undefined;
+    },
+    20_000,
+  );
+  assert.equal(prompt.severity, "warning");
+  const recovered = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.html.includes("tc-conn-light--connected") ? snapshot : undefined,
+    20_000,
+  );
+  assert.ok(
+    !recovered.html.includes("Connected, but initialization failed."),
+    "successful Retry must replace the degraded banner",
+  );
+}
+
 export async function assertWebviewInterruptFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -1845,13 +1917,22 @@ export async function assertWebviewInterruptFlow(
     20_000,
   );
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { sessionId },
-      messageId: "webview-interrupt-stop",
-      type: "interrupt",
-    }),
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "stop-button",
+  });
+  const stopping = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="stop-button"') &&
+      snapshot.html.includes("Stopping…") &&
+      snapshot.html.includes("disabled")
+        ? snapshot
+        : undefined,
+    5_000,
   );
+  void stopping;
   await waitForEvent(api, { type: "agent_interrupted" });
   await waitForEvent(api, {
     textIncludes: "interrupted",
