@@ -20,7 +20,8 @@ use crate::api::chat::commands::{
     checkpoint_kind_label, compact_session, restore_core, RestoreCoreReport,
 };
 use crate::core::connector::mcp::config::{
-    upsert_global_server, upsert_project_server, McpOAuthConfig, McpServerConfig, ToolFilter,
+    global_mcp_path, project_mcp_path, upsert_global_server, upsert_project_server,
+    McpConfigSource, McpOAuthConfig, McpServerConfig, ToolFilter,
 };
 use crate::core::connector::mcp::manager::ServerState;
 use crate::core::llm::{
@@ -1328,6 +1329,14 @@ pub(crate) async fn handle_command(
                 .into_iter()
                 .map(|status| {
                     let configured = connector.mcp_manager().configured_server(&status.name);
+                    let config_path = match status.source {
+                        McpConfigSource::Global => global_mcp_path(&state.cfg)
+                            .unwrap_or_else(|_| std::path::PathBuf::from("~/.tomcat/mcp.json")),
+                        McpConfigSource::Project => {
+                            project_mcp_path(connector.mcp_manager().workspace_root())
+                        }
+                    };
+                    let config_path_display = crate::infra::platform::format_home_path(&config_path);
                     json!({
                         "name": status.name,
                         "source": status.source.as_str(),
@@ -1338,6 +1347,8 @@ pub(crate) async fn handle_command(
                         "transport": if configured.as_ref().is_some_and(|server| server.config.url.is_some()) { "http" } else { "stdio" },
                         "url": configured.as_ref().and_then(|server| server.config.url.clone()),
                         "command": configured.as_ref().map(|server| server.config.command.clone()),
+                        "configPath": config_path_display,
+                        "configPathRaw": config_path.to_string_lossy().to_string(),
                         "oauthConfigured": configured.as_ref().is_some_and(|server| {
                             server.config.oauth.is_some()
                                 || server.config.auth.as_deref() == Some("oauth")

@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-05 10:27 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-08 11:40 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0] 连接器设置改为默认全局并暴露真实配置文件**：`McpConfigSource::Global` 对外标签从 `User` 改为 `Global`；新增连接器默认写入 `~/.tomcat/mcp.json`，设置页可打开该文件或工作区 `.tomcat/mcp.json`。全局连接器由用户自己维护，普通改配置保持信任，只有显式 Deny 才继续拦截；内置 Playwright 默认带 `trusted: true`。`list_connectors` 回传 `configPath` / `configPathRaw`，设置宿主新增 `openConnectorConfig`。验证：serve `control_test` 路径字段、trust 单测（全局编辑仍可信 / Deny 跨编辑仍封锁）、GUI 连接器页与协议归一化单测。CLI `0.1.46 → 0.1.47`、扩展 `0.1.60 → 0.1.61`、bundled CLI 同步；Cov% 未跑，仍为 —。@2026-09-08
 - [✓] **[P0] Connecting 卡死与启动家务活增量化已完成**：历史回放的每条 `agent.interrupted` 以 transcript 行 id 生成独立时间线 id；实时事件继续使用会话内生成 id。timeline 唯一性断言移到写入边界，历史重建先验证候选时间线再替换，因此错误会在肇事 mutation 处抛出，而 `snapshot/view` 仍可把 degraded 状态、Output 错误与 Retry 动作送达界面。附件根目录在首个 webview ready 时若触发文档重载，旧文档的 bootstrap 会被 generation 丢弃，避免一次失败被重载后的成功状态掩盖。serve 启动家务活在握手 2 秒后运行；派生 `.housekeeping.json` 以 `(len, mtime)` 缓存 transcript blob 引用与 sidecar 期限，未变会话不重读、未到期侧车不重写、账本损坏则安全退化为全量重建。VSIX staging 额外排除 macOS `.DS_Store`。验证：扩展 `npm run lint`、`test:unit`（397 core + 569 GUI）、degraded host E2E；Rust `cargo test --locked --lib`（2777 passed, 1 ignored）、Clippy `-D warnings`、release build；纯插件 VSIX（216 files / 1.53 MB）不含 CLI、源码、测试或 macOS 元数据。CLI `0.1.46`、扩展 `0.1.60`、bundled CLI 同步；Cov% 未跑，仍为 —。@2026-09-05
 - [✓] **[P0] 第三版回归复核与补齐已完成**：补齐 render-budget、interrupt fast-path FIFO、sidecar 写入/压实/删除、degraded→Retry 恢复、GC 坏行跳过、3×5 transcript 单次扫描和 `input_image_ref` 物化等 P0/P1 回归；`gap` 行现在带结构化 `skippedLines`，UI 对截断或不能复原的 diff 给出「打开文件」而非伪造左右对比。迁移会删除 `resume-index`，备份不会嵌套旧 `.pre-migrate-*`，并明确提示下一次 serve 启动后的异步清扫。真实样本的活动记录从 `240,895,381B` 降至 `93,642,924B`（99 张图片、2,900 个 display）；含 blob 的活动目录为约 `145.3MiB`，首次迁移保留的回滚备份约 `245.9MiB`，所以暂时占用约 `391MiB` 是预期的安全代价。`analyze_transcript_storage.py` 证明剩余主记录 `93,612,610B` 的 41.35% 是 assistant 正文，32.09% 是 `read/search_files/bash` 工具结果——这不是 inline display 遗留，**30MB 目标不成立**，后续若要继续缩小应另立「历史保留策略」议题。用最终 locked release 对同一历史会话实测 before→after：`initialize 3178.0→2186.7ms`、`switch_session 972.5→363.7ms`、`get_messages 35.0→42.2ms`、普通读取积压后的 `interrupt 0.3→0.3ms`；另外三轮热态 `get_messages` 为 before `35.5/38.0/35.9ms`、after `46.7/44.5/62.2ms`，均低于 200ms，`interrupt` 均远低于 500ms。`cargo test --locked --lib` 通过（2772 passed, 1 ignored），focused GUI 55、Provider 61、degraded Retry host E2E 1 均通过，`npm run lint` / `check:wire` / `cargo build --locked --release` / `git diff --check` 通过。`cargo tree -i rustls` 与 `tokio-rustls` 均为空；Cargo.lock 仍记录上游可选特性元数据，不能靠手删 lock 条目冒充依赖裁剪。@2026-09-04
 - [✓] **[P0]** 近期回归整改（第三版）已完成：transcript 的大型 diff 改为有上下文上限的形状并移入 `*.tool_display.jsonl`，已发送图片改存 CAS 引用；迁移脚本可幂等地转换旧记录。附件启动清理由全量重扫改为标记—清扫并在握手回包后异步执行；`interrupt` 绕过普通命令队列，且 `task_output(block=true)` 被取消时统一落盘 `[interrupted]`，不留下未闭合的工具对。Webview 新增 `degraded`，区分「已连上服务但 bootstrap 失败」；Stop 点击立即显示 `Stopping…`。`reqwest 0.13` 统一为 native-tls，测试 TLS 也改用静态 PKCS#12 夹具，避免 rustls/AWS-LC 双栈。版本统一升为 CLI `0.1.45`、扩展 `0.1.59`、bundled CLI `0.1.45`。验证覆盖迁移语义、附件 GC、异步中断、schema/tool catalog fixture、降级提示与 Stop E2E；默认 Nextest 运行发现的 fixture 漂移均已重生成并通过复验，`cargo fmt --check`、Clippy `-D warnings`、`cargo build --locked --release`、提示词预算、版本一致性和 diff 空白检查通过。真 LLM 用例由 Nextest profile 单列，未纳入默认门禁。Cov% 未跑，仍为 —。@2026-09-04
@@ -86,7 +87,8 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
-- 发布版本：CLI `0.1.46`、扩展 `0.1.60`、`bundledCliVersion=0.1.46`。
+- 发布版本：CLI `0.1.47`、扩展 `0.1.61`、`bundledCliVersion=0.1.47`。
+- Connector：`McpConfigSource::Global` 对外标签改为 `Global`（读侧仍兼容旧 `User`）；`list_connectors` 新增 `configPath` / `configPathRaw`；设置协议新增 `openConnectorConfig`。全局连接器与 `trusted: true` 的配置在普通编辑后保持信任，显式 Deny 跨编辑仍封锁。
 - 构建：新增 Cargo `[profile.fast]`，不影响 `[profile.release]`。
 - HTTP：直接依赖统一为 `reqwest 0.13`（`default-features=false`），显式启用 native-tls；不再编译 rustls、AWS-LC 或其 CMake 工具链。
 - 依赖治理结论见 `docs/architecture/dependency-governance.md`。
@@ -183,6 +185,7 @@
 | 部分 real-LLM CLI 用例偶发 | `cli_tests::test_user_background_bash_multiple_timeout_slices_real_llm_cli` 在 HEAD 与本轮均可能因模型行为少一次 `task_output` 而失败；provider 抖动时 plan real-LLM e2e 可能撞超时预算。 | 非本轮回归；单独重跑 plan real-LLM e2e 可通过 |
 
 ### 集成说明
+- 最新补充（2026-09-08 11:40）：连接器设置默认全局、打开真实 mcp.json，以及全局信任策略收口。CLI `0.1.47` / 扩展 `0.1.61` / bundled CLI `0.1.47`。Cov% 未跑，仍为 —。
 - 最新补充（2026-09-03 22:09）：依赖去重与 `[profile.fast]` 合入。`Cargo.lock` 573→541；CLI `0.1.44` / 扩展 `0.1.58` / bundled CLI `0.1.44`。验证：fmt、clippy `-D warnings`、`cargo check --all-targets`、`release-version check`、`git diff --check` 全绿。Cov% 未跑，仍为 —。
 - 最新补充（2026-08-30 20:10）：CLI `0.1.39` / 扩展 `0.1.51` / bundled CLI `0.1.39`；`package:vsix` 增加 yauzl 解压门禁。验证：`release-version check`、VSIX 解压单测、完整打包流程；本机纯插件 `tomcat-vscode-ext-0.1.51.vsix` SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`。Cov% 未跑，仍为 —。
 - 最新补充（2026-08-29 15:42）：完成态计划不再渲染 Composer 待办 widget，Tomcat Box 右侧留白已移除；截图 E2E 的根节点宽度现在无论成功或超时都会恢复。Plan Preview 自定义编辑器 E2E 的正文引用源行由唯一 token 推导，并把引用计数断言改为相对当前操作，修复错误 `:0` 行号造成的等待超时。`npm run test:e2e:vscode-devhost` 33 passing、`npm run lint:extension`、`git diff --check` 与 `npm run package:vsix` 均通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 为 1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`，包内不含源码、测试、E2E harness、node_modules 或 CLI 二进制。Cov% 未跑，仍为 —。

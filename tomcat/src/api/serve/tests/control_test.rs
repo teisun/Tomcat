@@ -219,6 +219,19 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         .expect("list response");
     let summary = &listed["payload"]["connectors"][0];
     assert_eq!(summary["name"], "fake");
+    assert_eq!(summary["source"], "Workspace");
+    assert!(
+        summary["configPathRaw"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(".tomcat/mcp.json")),
+        "connector summaries must expose the real configuration path to the host",
+    );
+    assert!(
+        summary["configPath"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(".tomcat/mcp.json")),
+        "connector summaries must identify the configuration file",
+    );
     assert_eq!(summary["state"], "connected");
     assert_eq!(summary["trust"]["state"], "trusted");
     assert_eq!(summary["toolCount"], 2);

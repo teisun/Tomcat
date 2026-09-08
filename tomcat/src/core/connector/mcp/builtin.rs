@@ -22,6 +22,7 @@ pub fn materialize_default_mcp_json(cfg: &AppConfig) -> Result<PathBuf, AppError
                     "PLAYWRIGHT_BROWSERS_PATH": browser_path,
                 },
                 "startupTimeoutMs": 60_000,
+                "trusted": true,
             }
         }
     }))
@@ -52,6 +53,7 @@ mod tests {
             .as_str()
             .expect("pinned package")
             .starts_with("@playwright/mcp@"));
+        assert_eq!(parsed["mcpServers"]["playwright"]["trusted"], true);
         let expected_browser_path = temp
             .path()
             .join("work")

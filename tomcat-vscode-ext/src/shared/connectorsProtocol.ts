@@ -9,7 +9,7 @@ export type ConnectorState =
   | "needs_authorization"
   | "blocked"
   | "failed";
-export type ConnectorSource = "User" | "Workspace" | "Unknown";
+export type ConnectorSource = "Global" | "Workspace" | "Unknown";
 
 export interface ConnectorView {
   name: string;
@@ -24,6 +24,8 @@ export interface ConnectorView {
   resourceCount: number;
   url?: string | null;
   command?: string | null;
+  configPath?: string | null;
+  configPathRaw?: string | null;
   error?: string | null;
   toolFilter?: ConnectorToolFilter;
 }
@@ -73,7 +75,11 @@ export function normalizeConnectorView(value: unknown): ConnectorView | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
   const state = typeof raw.state === "string" ? raw.state : "failed";
-  const source = raw.source === "User" || raw.source === "Workspace" ? raw.source : "Unknown";
+  const source = raw.source === "Workspace"
+    ? "Workspace"
+    : raw.source === "Global" || raw.source === "User"
+      ? "Global"
+      : "Unknown";
   const transport = typeof raw.url === "string" ? "http" : "stdio";
   if (typeof raw.name !== "string") return null;
   return {
@@ -89,6 +95,14 @@ export function normalizeConnectorView(value: unknown): ConnectorView | null {
     resourceCount: typeof raw.resourceCount === "number" ? raw.resourceCount : 0,
     url: typeof raw.url === "string" ? raw.url : null,
     command: typeof raw.command === "string" ? raw.command : null,
+    configPath: typeof raw.configPath === "string"
+      ? raw.configPath
+      : source === "Global"
+        ? "~/.tomcat/mcp.json"
+        : source === "Workspace"
+          ? ".tomcat/mcp.json"
+          : null,
+    configPathRaw: typeof raw.configPathRaw === "string" ? raw.configPathRaw : null,
     error: typeof raw.error === "string" ? raw.error : null,
     toolFilter: isRecord(raw.toolFilter) ? {
       include: Array.isArray(raw.toolFilter.include) ? raw.toolFilter.include.filter((value): value is string => typeof value === "string") : [],

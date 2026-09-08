@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import * as os from "node:os";
 import path from "node:path";
 
 import * as vscode from "vscode";
@@ -488,8 +489,11 @@ export class SettingsPanel implements vscode.Disposable {
       case "denyConnector":
         await this.handleConnectorAction(intent.type, intent.data.name);
         return;
+      case "openConnectorConfig":
+        await this.openConnectorConfig(intent.data.name, intent.data.scope);
+        return;
       case "setConnectorToolFilter": {
-        const connectorScope = this.state.connectors?.find((connector) => connector.name === intent.data.name)?.source === "User"
+        const connectorScope = this.state.connectors?.find((connector) => connector.name === intent.data.name)?.source === "Global"
           ? "user"
           : "workspace";
         const response = await this.deps.messenger.sendSetConnectorToolFilter(
@@ -504,6 +508,52 @@ export class SettingsPanel implements vscode.Disposable {
         );
         return;
       }
+    }
+  }
+
+  private async openConnectorConfig(
+    name?: string,
+    scope?: "user" | "workspace",
+  ): Promise<void> {
+    const connector = name
+      ? this.state.connectors?.find((entry) => entry.name === name)
+      : undefined;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const rawConfigPath = connector?.configPathRaw;
+    const configPath =
+      rawConfigPath && rawConfigPath.startsWith("~")
+        ? path.join(os.homedir(), rawConfigPath.slice(2))
+        : rawConfigPath ??
+          (connector?.source === "Global" || scope === "user"
+            ? path.join(os.homedir(), ".tomcat", "mcp.json")
+            : connector?.source === "Workspace" || scope === "workspace"
+              ? workspaceRoot
+                ? path.join(workspaceRoot, ".tomcat", "mcp.json")
+                : undefined
+              : undefined);
+    if (!configPath) {
+      await this.refreshState("The connector configuration file is not available to open.");
+      return;
+    }
+    try {
+      if (!fs.existsSync(configPath)) {
+        fs.mkdirSync(path.dirname(configPath), { recursive: true });
+        try {
+          fs.writeFileSync(
+            configPath,
+            '{\n  "mcpServers": {}\n}\n',
+            { encoding: "utf8", flag: "wx" },
+          );
+        } catch (error) {
+          if (!(isRecord(error) && error.code === "EEXIST")) {
+            throw error;
+          }
+        }
+      }
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(configPath));
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      await this.refreshState(`Unable to open connector configuration: ${String(error)}`);
     }
   }
 

@@ -1062,8 +1062,8 @@ span.tc-attachment-strip__file-chip {
 }
 
 .tc-button--primary {
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
 }
 
 .tc-button--secondary {
@@ -4826,8 +4826,10 @@ span.tc-attachment-strip__file-chip {
 }
 
 .tc-modal {
-  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
-  border: 1px solid var(--vscode-panel-border);
+  background: var(
+    --vscode-editorWidget-background,
+    var(--vscode-sideBar-background, #fff)
+  );  border: 1px solid var(--vscode-panel-border);
   border-radius: 12px;
   box-shadow: 0 18px 60px rgb(0 0 0 / 45%);
   max-height: calc(100vh - 48px);
@@ -4877,3 +4879,193 @@ span.tc-attachment-strip__file-chip {
 .tc-connector-tool:last-child { border-bottom: 0; }
 .tc-connector-tool:hover { background: var(--vscode-list-hoverBackground); }
 .tc-button--danger { color: var(--vscode-testing-iconFailed, #f14c4c); }
+.tc-connector-detail-section {
+  border-top: 1px solid var(--vscode-panel-border);
+  padding-top: 14px;
+}
+
+.tc-connector-detail-section:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.tc-connector-detail-section__heading {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.tc-connector-detail-section__heading h3,
+.tc-connector-detail-section p {
+  margin: 0;
+}
+
+.tc-connector-detail-section__description,
+.tc-connector-tool__description {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.tc-connector-config-file,
+.tc-connector-connection-target {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px !important;
+}
+
+.tc-connector-config-file code,
+.tc-connector-connection-target code {
+  color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
+  overflow-wrap: anywhere;
+}
+
+.tc-connector-tool__indicator {
+  border: 1px solid var(--vscode-descriptionForeground, #6b7280);  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+  height: 10px;
+  width: 10px;
+}
+
+.tc-connector-tool__indicator--enabled {
+  background: var(--vscode-testing-iconPassed, #73c991);
+  border-color: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.tc-connector-modal__footer {
+  justify-content: space-between;
+}
+
+.tc-connector-modal__footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-left: auto;
+}
+.tc-connector-facts {
+  display: grid;
+  gap: 0;
+  margin: 16px 0 0;
+}
+
+.tc-connector-facts > div,
+.tc-connector-form-row {
+  align-items: baseline;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(108px, 0.3fr) minmax(0, 1fr);
+  min-height: 38px;
+  padding: 9px 0;
+}
+
+.tc-connector-facts dt,
+.tc-connector-form-row > span {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tc-connector-facts dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.tc-connector-facts code,
+.tc-connector-form-row code {
+  overflow-wrap: anywhere;
+}
+
+.tc-connector-config-link {
+  background: transparent;
+  border: 0;
+  color: var(--vscode-textLink-foreground, #3794ff);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tc-connector-config-link:hover {
+  color: var(--vscode-textLink-activeForeground, #4daafc);
+}
+
+.tc-connector-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 14px 0 4px;
+}
+
+.tc-connector-flat-section {
+  border-top: 1px solid var(--vscode-panel-border);
+  margin-top: 16px;
+  padding-top: 14px;
+}
+
+.tc-connector-tools-heading {
+  align-items: baseline;
+  display: flex;
+  flex: 1;
+  gap: 16px;
+  min-width: 0;
+}
+
+.tc-connector-tools-heading h3,
+.tc-connector-tools-heading p {
+  margin: 0;
+}
+
+.tc-connector-tools-heading p {
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .tc-connector-tools-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .tc-connector-tools-heading p {
+    white-space: normal;
+  }
+}
+
+
+.tc-connector-flat-section h3,
+.tc-connector-flat-section p {
+  margin: 0;
+}
+
+.tc-connector-flat-section .tc-connector-tools {
+  margin-top: 10px;
+}
+
+.tc-connector-form-row input,
+.tc-connector-form-row select,
+.tc-connector-form-row textarea {
+  min-width: 0;
+  width: 100%;
+}
+
+.tc-connector-form-row small,
+.tc-connector-form-help {
+  color: var(--vscode-descriptionForeground);
+  display: block;
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 4px 0 0;
+}
+
+.tc-connector-form-row .tc-connector-radio-row {
+  margin: 0;
+}
+
+.tc-connector-modal > h2 {
+  margin-bottom: 0;
+}

@@ -164,8 +164,12 @@ export type SettingsIntent =
       messageId: string;
       type: "setConnectorToolFilter";
       data: { name: string; filter: ConnectorToolFilter };
+    }
+  | {
+      messageId: string;
+      type: "openConnectorConfig";
+      data: { name?: string; scope?: "user" | "workspace" };
     };
-
 
 export interface VsCodeApiLike<TMessage = unknown> {
   postMessage(message: TMessage): void;
@@ -282,6 +286,13 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
       return isRecord(value.data) && isRecord(value.data.connector) && typeof value.data.connector.name === "string";
     case "setConnectorToolFilter":
       return isRecord(value.data) && typeof value.data.name === "string" && isRecord(value.data.filter);
+    case "openConnectorConfig":
+      return (
+        isRecord(value.data) &&
+        (typeof value.data.name === "string" ||
+          value.data.scope === "user" ||
+          value.data.scope === "workspace")
+      );
 
     default:
       return false;

@@ -116,10 +116,14 @@ impl TrustStore {
         let command_args_cwd_fingerprint = command_args_cwd_fingerprint(server);
         let state = self.state.lock();
         match state.servers.get(&server.name) {
-            Some(record) if record.command_fingerprint == fingerprint && record.denied => {
-                Ok(TrustStatus::Blocked)
-            }
+            Some(record) if record.denied => Ok(TrustStatus::Blocked),
             Some(record) if record.command_fingerprint == fingerprint => Ok(TrustStatus::Trusted),
+            // A global connector is configured by this user, not by the opened
+            // workspace. Keep it trusted after ordinary edits only until the user
+            // explicitly denies it; that denial remains authoritative across edits.
+            Some(_) if server.source == McpConfigSource::Global || server.config.trusted => {
+                Ok(TrustStatus::Trusted)
+            }
             Some(record) => Ok(TrustStatus::NeedsConfirmation {
                 reason: TrustConfirmationReason::LaunchChanged,
                 previous: record.launch_snapshot.clone(),
@@ -360,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn global_config_is_auto_trusted_but_command_change_requires_confirmation() {
+    fn global_config_stays_trusted_after_edits_unless_explicitly_denied() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
@@ -371,15 +375,23 @@ mod tests {
             store.decide(&configured).expect("auto trust"),
             TrustDecision::Allowed
         );
+        let changed = server(McpConfigSource::Global, "node");
         assert_eq!(
-            store.decide(&configured).expect("remembered trust"),
+            store.decide(&changed).expect("global edits remain trusted"),
             TrustDecision::Allowed
         );
+
+        store.deny(&changed).expect("explicit deny");
+        assert_eq!(
+            store.decide(&changed).expect("deny remains authoritative"),
+            TrustDecision::Blocked
+        );
+        let changed_again = server(McpConfigSource::Global, "bun");
         assert_eq!(
             store
-                .decide(&server(McpConfigSource::Global, "node"))
-                .expect("changed command"),
-            TrustDecision::NeedsConfirmation
+                .decide(&changed_again)
+                .expect("deny survives config edits"),
+            TrustDecision::Blocked
         );
     }
 
@@ -422,8 +434,8 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
         let store = TrustStore::open(&cfg).expect("open trust store");
-        let configured = server(McpConfigSource::Global, "npx");
-        store.decide(&configured).expect("record global trust");
+        let configured = server(McpConfigSource::Project, "npx");
+        store.approve(&configured).expect("record project trust");
         let mut changed = configured.clone();
         changed.config.command = "node".to_string();
         changed
@@ -452,12 +464,12 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
         let store = TrustStore::open(&cfg).expect("open trust store");
-        let mut configured = server(McpConfigSource::Global, "npx");
+        let mut configured = server(McpConfigSource::Project, "npx");
         configured
             .config
             .env
             .insert("MCP_TOKEN".to_string(), "old-secret".to_string());
-        store.decide(&configured).expect("record global trust");
+        store.approve(&configured).expect("record project trust");
         configured
             .config
             .env
